@@ -259,13 +259,18 @@ fn move_aside(path: &Path, seconds: u64) -> io::Result<PathBuf> {
   ))
 }
 
-/// `error` with its sources, for a one-line message.
+/// `error` with its sources, for a one-line message. A source whose text the
+/// message already ends with, as for errors that display their source, is
+/// not repeated.
 fn error_chain(error: &dyn std::error::Error) -> String {
   let mut text = error.to_string();
   let mut source = error.source();
   while let Some(cause) = source {
-    text.push_str(": ");
-    text.push_str(&cause.to_string());
+    let cause_text = cause.to_string();
+    if !text.ends_with(&cause_text) {
+      text.push_str(": ");
+      text.push_str(&cause_text);
+    }
     source = cause.source();
   }
   text
@@ -657,6 +662,23 @@ mod tests {
     store.save(&Shingle::new()).unwrap();
     assert!(store.load().unwrap().is_some());
     fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[test]
+  fn corrupt_session_messages_name_each_cause_once() {
+    let json = SessionSnapshot::from_json("{ x").unwrap_err();
+    let parse = std::error::Error::source(&json).unwrap().to_string();
+    assert_eq!(json.to_string(), parse, "the core error shows its source");
+    let error = SessionError::from(json);
+    assert_eq!(error_chain(&error), parse);
+    let error = SessionError::from(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "stream did not contain valid UTF-8",
+    ));
+    assert_eq!(
+      error_chain(&error),
+      "failed to access session state: stream did not contain valid UTF-8"
+    );
   }
 
   #[test]
