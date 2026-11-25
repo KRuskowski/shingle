@@ -2694,6 +2694,17 @@ impl Compositor {
     self.state.default_cursor = enabled;
   }
 
+  /// Tells the compositor that the backend's input devices apply natural
+  /// scrolling themselves, as the native backend has libinput do per
+  /// device (`mouse_natural_scroll` for mice, `natural_scroll` for
+  /// touchpads, as in Wayfire). The compositor then no longer inverts axis
+  /// values for `mouse_natural_scroll`. Like
+  /// [`Compositor::set_default_cursor`] it is a property of the backend,
+  /// so config reloads keep it.
+  pub fn set_device_natural_scroll(&mut self, enabled: bool) {
+    self.state.input.device_natural_scroll = enabled;
+  }
+
   /// Returns the description of the output clients currently see.
   pub fn output_info(&self) -> &OutputInfo {
     &self.state.output_info

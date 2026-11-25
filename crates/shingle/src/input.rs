@@ -137,6 +137,10 @@ pub(crate) struct InputState {
   repeat_delay: i32,
   scroll_speed: f64,
   natural_scroll: bool,
+  /// Whether the backend's input devices already apply natural scrolling,
+  /// as libinput does on the native backend, so the compositor must not
+  /// invert again.
+  pub(crate) device_natural_scroll: bool,
   pub(crate) devices: crate::input_device::InputDevices,
 }
 
@@ -174,6 +178,7 @@ impl InputState {
       repeat_delay: 400,
       scroll_speed: 1.0,
       natural_scroll: false,
+      device_natural_scroll: false,
       devices: Default::default(),
     })
   }
@@ -1102,7 +1107,8 @@ pub(crate) fn pointer_axis_detailed(state: &mut CompositorState, axis: Axis) {
     return;
   }
   let speed = state.input.scroll_speed;
-  let direction = if state.input.natural_scroll { -1 } else { 1 };
+  let invert = state.input.natural_scroll && !state.input.device_natural_scroll;
+  let direction = if invert { -1 } else { 1 };
   let horizontal = horizontal * speed * f64::from(direction);
   let vertical = vertical * speed * f64::from(direction);
   let (horizontal_steps, vertical_steps) = if speed == 0.0 {
@@ -1916,6 +1922,54 @@ mod tests {
         vec![wl_pointer::Axis::VerticalScroll]
       )
     );
+  }
+
+  #[test]
+  fn natural_scroll_is_left_to_devices_that_apply_it() {
+    use wayland_client::protocol::{wl_pointer, wl_seat::WlSeat};
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let device = compositor.add_input_device(crate::InputDeviceInfo {
+      name: "test pointer".into(),
+      vendor: None,
+      product: None,
+      kind: crate::InputDeviceKind::Pointer,
+    });
+    let mut client =
+      crate::test_client::TestClient::connect(&mut compositor, &path);
+    let seat = client.bind::<WlSeat>(8);
+    let _pointer = seat.get_pointer(&client.handle, ());
+    let toplevel = client.toplevel(&mut compositor, "scrolled");
+    client.attach_buffer(&mut compositor, &toplevel.surface, 64, 64);
+    compositor.pointer_motion(device, 10.0, 10.0);
+    client.roundtrip(&mut compositor);
+    set_scroll(&mut compositor.state, 1.0, true);
+    let mut vertical = |compositor: &mut crate::Compositor| {
+      client.events.pointer.clear();
+      compositor.pointer_axis_detailed(
+        device,
+        Axis {
+          vertical: 15.0,
+          vertical_steps: 1,
+          ..Axis::default()
+        },
+      );
+      client.roundtrip(compositor);
+      client
+        .events
+        .pointer
+        .iter()
+        .find_map(|event| match event {
+          wl_pointer::Event::Axis { value, .. } => Some(*value),
+          _ => None,
+        })
+        .expect("an axis event")
+    };
+    assert_eq!(vertical(&mut compositor), -15.0);
+    compositor.set_device_natural_scroll(true);
+    assert_eq!(vertical(&mut compositor), 15.0);
+    // A reload keeps the backend's choice.
+    set_scroll(&mut compositor.state, 1.0, true);
+    assert_eq!(vertical(&mut compositor), 15.0);
   }
 
   #[test]
