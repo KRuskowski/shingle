@@ -17,16 +17,25 @@ user namespaces:
 
   cargo build -p shingle-bin
   cargo build -p shingle-xwayland --example xw_probe
+  cargo build -p shingle --example wl_probe
   tools/xwayland_test/run.py [--binary target/debug/shingle]
-      [--probe target/debug/examples/xw_probe] [--keep]
-      [--only lazy|disabled|eager|running|idle|windows|probe ...]
+      [--probe target/debug/examples/xw_probe]
+      [--wl-probe target/debug/examples/wl_probe] [--keep]
+      [--only lazy|disabled|eager|running|idle|windows|probe|behaviour|
+              session|nested ...]
 
 It prints one line per check and exits 0 when all pass. Every signal it
 sends goes to its own children or, through `kill_xwayland`, to a
 checked Xwayland PID inside the PID namespace. The pure helpers are
 tested by `python3 -m unittest` in this directory (test_run.py). The work
 directory under `target/` is removed afterwards unless `--keep` is given.
-The checks are XW-2's and XW-3's in docs/design/xwayland.md, section 7.
+The checks are XW-2's, XW-3's and XW-4's in docs/design/xwayland.md,
+section 7. Input comes only from STIPC. The `session` group runs Shingle
+as uid 1000 in a nested user namespace, like the X clients, so that the
+xterm it restores can start. The `nested` group runs nested Shingle on
+lavapipe (no GPU: `/dev/dri` is empty) as a client of a headless one,
+both inside the namespace, and checks pixels in wlr-screencopy captures
+of the headless output, which show the frames nested drew.
 """
 
 import argparse
@@ -180,6 +189,46 @@ def parse_xwininfo(text):
         return None
   return geometry if len(geometry) == 4 else None
 
+KEY_NAMES = {' ': 'KEY_SPACE', '\n': 'KEY_ENTER', '-': 'KEY_MINUS',
+             '.': 'KEY_DOT', '/': 'KEY_SLASH'}
+
+def parse_children(text):
+  """The window ids `xwininfo -root -children` lists, in its order, which
+  is XQueryTree's: bottom to top."""
+  ids = []
+  for line in text.splitlines():
+    line = line.strip()
+    if line.startswith('0x'):
+      try:
+        ids.append(int(line.split()[0], 16))
+      except ValueError:
+        pass
+  # xwininfo prints children top to bottom; return bottom to top.
+  return list(reversed(ids))
+
+def xcursor_image(path, size):
+  """(width, height, xhot, yhot) of the image in the Xcursor file `path`
+  whose nominal size is nearest `size`, the first on a tie, as the xcursor
+  crate picks it; None if the file cannot be read."""
+  try:
+    with open(path, 'rb') as file:
+      data = file.read()
+  except OSError:
+    return None
+  if data[:4] != b'Xcur':
+    return None
+  (count,) = struct.unpack_from('<I', data, 12)
+  best = None
+  for index in range(count):
+    kind, nominal, position = struct.unpack_from('<III', data, 16 + 12 * index)
+    if kind != 0xfffd0002:
+      continue
+    width, height, xhot, yhot = struct.unpack_from('<IIII', data, position + 16)
+    distance = abs(nominal - size)
+    if best is None or distance < best[0]:
+      best = (distance, (width, height, xhot, yhot))
+  return best[1] if best else None
+
 def parse_window_list(value):
   """The window ids in an xprop `window id # 0x1, 0x2` value."""
   if '#' not in value:
@@ -300,7 +349,8 @@ class Ipc:
 class Shingle:
   """One headless Shingle run in the work directory."""
 
-  def __init__(self, binary, work, name, config, spawn=None, session=None):
+  def __init__(self, binary, work, name, config, spawn=None, session=None,
+               backend=('--headless',), prefix=(), extra_environment=None):
     self.work = work
     # The private /tmp keeps socket paths short enough for sun_path.
     self.directory = os.path.join('/tmp', name)
@@ -333,7 +383,8 @@ class Shingle:
         'XDG_STATE_HOME': os.path.join(self.directory, 'state'),
         'HOME': os.path.join(self.directory, 'home'),
     })
-    arguments = [binary, '--headless', '--config', self.config_path,
+    environment.update(extra_environment or {})
+    arguments = [*prefix, binary, *backend, '--config', self.config_path,
                  '--ipc', self.ipc_path]
     if spawn:
       arguments += ['--spawn'] + spawn
@@ -360,6 +411,80 @@ class Shingle:
   def call(self, method, data=None):
     """One IPC request on the main connection."""
     return self.ipc.call(method, data)
+
+  def wayland_display(self):
+    """The `WAYLAND_DISPLAY` Shingle printed, as an absolute path."""
+    name = wait_for(lambda: next(
+        (line.split('=', 1)[1] for line in self.log_text().splitlines()
+         if line.startswith('WAYLAND_DISPLAY=')), None))
+    return os.path.join(self.runtime, name) if name else None
+
+  def wayland_environment(self):
+    """The environment for a Wayland client of this Shingle."""
+    return {
+        'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+        'HOME': os.path.join(self.directory, 'home'),
+        'XDG_RUNTIME_DIR': self.runtime,
+        'WAYLAND_DISPLAY': self.wayland_display(),
+        NAMESPACE_VARIABLE: '1',
+    }
+
+  def press(self, key, pressed):
+    """`stipc/feed_key` for one evdev key name."""
+    return self.call('stipc/feed_key', {'key': key, 'state': pressed})
+
+  def type_text(self, text):
+    """Types lowercase letters, digits, spaces and newlines through STIPC."""
+    for character in text:
+      key = KEY_NAMES.get(character, f'KEY_{character.upper()}')
+      self.press(key, True)
+      self.press(key, False)
+
+  def click(self, x, y, button='BTN_LEFT'):
+    """Moves the STIPC pointer to (x, y) and clicks `button` there."""
+    self.call('stipc/move_cursor', {'x': x, 'y': y})
+    return self.call('stipc/feed_button', {'combo': button, 'mode': 'full'})
+
+  def focused_view(self):
+    """`window-rules/get-focused-view`'s view, or None."""
+    info = self.call('window-rules/get-focused-view').get('info')
+    return info or None
+
+  def focus_view(self, view_id):
+    """`window-rules/focus-view`."""
+    return self.call('window-rules/focus-view', {'id': view_id})
+
+  def view_by_id(self, view_id):
+    """The listed view with `view_id`, or None."""
+    return next((view for view in self.views() if view['id'] == view_id),
+                None)
+
+  def root_property(self, name, display):
+    """The text of a root window property, as `xprop -root` prints it."""
+    _, output = self.x_client(['xprop', '-root', name], display)
+    return parse_xprop(output).get(name, '')
+
+  def window_property(self, window, name, display):
+    """The text of a window property, as `xprop -id` prints it."""
+    _, output = self.x_client(['xprop', '-id', hex(window), name], display)
+    return parse_xprop(output).get(name, '')
+
+  def active_window(self, display):
+    """`_NET_ACTIVE_WINDOW` as a window id; 0 for None."""
+    ids = parse_window_list(self.root_property('_NET_ACTIVE_WINDOW', display))
+    return ids[0] if ids else 0
+
+  def x_tree(self, display):
+    """The root's children, bottom to top, as `xwininfo -root -children`
+    lists them: [(id, override_redirect, viewable, geometry)]."""
+    _, output = self.x_client(['xwininfo', '-root', '-children'], display)
+    children = []
+    for window in parse_children(output):
+      _, info = self.x_client(['xwininfo', '-id', hex(window)], display)
+      children.append((window, 'Override Redirect State: yes' in info,
+                       'Map State: IsViewable' in info,
+                       parse_xwininfo(info)))
+    return children
 
   def xwayland_pid(self):
     """`stipc/get_xwayland_pid`."""
@@ -476,6 +601,7 @@ class XClient:
 
   def wait_event(self, name, timeout=10.0, after=0):
     """Waits for the first `name` event at index `after` or later."""
+
     def find():
       events = self.events()[after:]
       return next((event for event in events if event.get('event') == name),
@@ -1057,9 +1183,976 @@ def probe_checks(results, binary, work, probe):
   results.check('probe: SIGTERM exits with status 0', shingle.stop() == 0)
   return shingle.log_text()
 
-GROUPS = ('lazy', 'disabled', 'eager', 'running', 'idle', 'windows', 'probe')
+def probe_window(client):
+  """The X window id the probe reported, or None."""
+  event = client.wait_event('window')
+  return int(event['id']) if event else None
 
-def inner(binary, probe, work, groups):
+def has_event(client, name, after=0, timeout=1.0):
+  """Whether the client reports `name` at index `after` or later within
+  `timeout` seconds."""
+  return client.wait_event(name, timeout=timeout, after=after) is not None
+
+def last_event(client, name):
+  """The client's latest `name` event, or None."""
+  events = [event for event in client.events() if event.get('event') == name]
+  return events[-1] if events else None
+
+def probe_query(client, command, name, timeout=5.0):
+  """Sends `command` and returns the `name` event it reports."""
+  count = len(client.events())
+  client.send(command)
+  return client.wait_event(name, timeout=timeout, after=count)
+
+def centre(geometry):
+  """The centre of an {x, y, width, height} rectangle."""
+  return (geometry['x'] + geometry['width'] // 2,
+          geometry['y'] + geometry['height'] // 2)
+
+def start_probe(shingle, probe, display, app_id, *options):
+  """Starts the probe with class `app_id`, waits for its view, and returns
+  (client, X window, view)."""
+  client = XClient(shingle, [probe, '--class', f'{app_id.lower()},{app_id}',
+                             '--title', app_id, *options], display, 'xw_probe')
+  window = probe_window(client)
+  view = wait_for(lambda: (shingle.view(app_id) or {}).get('mapped')
+                  and shingle.view(app_id))
+  return client, window, view
+
+def focused_id(shingle):
+  """The ID of the focused view, or None."""
+  return (shingle.focused_view() or {}).get('id')
+
+class WaylandClient(XClient):
+  """The Wayland probe client, with its stdout read as JSON lines."""
+
+  def __init__(self, shingle, wl_probe, app_id):
+    # pylint: disable=super-init-not-called
+    self.program = 'wl_probe'
+    self.process = subprocess.Popen(
+        [wl_probe, app_id], env=shingle.wayland_environment(),
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True)
+    self.lines = []
+    self.lock = threading.Lock()
+    self.reader = threading.Thread(target=self._read, daemon=True)
+    self.reader.start()
+
+def behaviour_checks(results, binary, work, probe, wl_probe):
+  """XW-4: focus, input models, menus, states, dialogs, stacking, rules
+  and the root cursor, with STIPC input."""
+  del work
+  config = {
+      'xwayland': {'mode': True},
+      'window_rules': ['on created if app_id is "XTerm" then set alpha 0.5'],
+      'input': {'cursor_theme': 'Adwaita', 'cursor_size': 24},
+  }
+  shingle = Shingle(binary, None, 'behaviour', config)
+  shingle.wait_pid(lambda value: value > 0)
+  results.check('behaviour: Xwayland is ready',
+                wait_for(lambda: 'Xwayland ready' in shingle.log_text()))
+  display = ':0'
+  _, root = shingle.x_client(['xwininfo', '-root'], display)
+  results.check('behaviour: the X root window is the output\'s size',
+                same_geometry(parse_xwininfo(root) or {}, WORKAREA),
+                json.dumps(parse_xwininfo(root)))
+  clients = []
+  try:
+    _behaviour_xterm(results, shingle, display, clients)
+    focus_probe = _behaviour_focus(results, shingle, display, clients, probe,
+                                   wl_probe)
+    _behaviour_models(results, shingle, display, clients, probe)
+    _behaviour_dialogs(results, shingle, display, clients, probe)
+    _behaviour_states(results, shingle, display, clients, probe)
+    _behaviour_stacking(results, shingle, display)
+    _behaviour_menus(results, shingle, display)
+    _behaviour_override_redirect(results, shingle, display, clients, probe)
+    if focus_probe:
+      _behaviour_cursor(results, shingle, focus_probe)
+  finally:
+    for client in clients:
+      client.stop()
+  results.check('behaviour: SIGTERM exits with status 0', shingle.stop() == 0)
+  return shingle.log_text()
+
+def _behaviour_xterm(results, shingle, display, clients):
+  """Typed text reaches the focused xterm; the XTerm rule applies."""
+  typed = os.path.join(shingle.directory, 'typed')
+  script = f'read line; echo "$line" > {typed}; exec sleep 600'
+  client, view = start_mapped(
+      shingle, AS_USER + ['xterm', '-e', 'sh', '-c', script], display,
+      'xterm', 'XTerm')
+  clients.append(client)
+  results.check('behaviour: xterm maps', bool(view))
+  if not view:
+    return
+  alpha = shingle.call('wf/alpha/get-view-alpha', {'id': view['id']})
+  results.check('behaviour: an app_id is "XTerm" window rule applies',
+                alpha.get('alpha') == 0.5, json.dumps(alpha))
+  results.check('behaviour: the new xterm has the keyboard focus',
+                wait_for(lambda: focused_id(shingle) == view['id']))
+  window = wait_for(lambda: shingle.active_window(display))
+  results.check('behaviour: _NET_ACTIVE_WINDOW names the xterm',
+                window and shingle.x_windows(display).get(window) == 'XTerm',
+                hex(window or 0))
+  # xterm sets up its pty and shell after it maps.
+  time.sleep(1)
+  shingle.type_text('hello shingle\n')
+
+  def read_typed():
+    try:
+      with open(typed) as file:
+        return file.read()
+    except FileNotFoundError:
+      return None
+  text = wait_for(read_typed, timeout=5)
+  results.check('behaviour: STIPC keys reach the focused xterm',
+                text == 'hello shingle\n', repr(text))
+
+def _behaviour_focus(results, shingle, display, clients, probe, wl_probe):
+  """Keyboard focus moves cleanly between an X and a Wayland window."""
+  xprobe, window, view = start_probe(shingle, probe, display, 'FocusProbe')
+  clients.append(xprobe)
+  results.check('focus: the probe maps and gets FocusIn',
+                view and has_event(xprobe, 'focus_in', timeout=5))
+  if not view:
+    return None
+  results.check('focus: _NET_ACTIVE_WINDOW names the probe',
+                wait_for(lambda: shingle.active_window(display) == window),
+                hex(shingle.active_window(display)))
+  state = wait_for(lambda: '_NET_WM_STATE_FOCUSED' in shingle.window_property(
+      window, '_NET_WM_STATE', display))
+  xterm = next((w for w, c in shingle.x_windows(display).items()
+                if c == 'XTerm'), 0)
+  xterm_state = shingle.window_property(xterm, '_NET_WM_STATE', display)
+  results.check('focus: only the probe has _NET_WM_STATE_FOCUSED',
+                state and '_NET_WM_STATE_FOCUSED' not in xterm_state,
+                xterm_state)
+  focus = probe_query(xprobe, 'focus', 'focus')
+  results.check('focus: the X focus is the probe window',
+                focus and focus['own'], json.dumps(focus))
+  count = len(xprobe.events())
+  wayland = WaylandClient(shingle, wl_probe, 'wl-probe')
+  clients.append(wayland)
+  wl_view = wait_for(lambda: (shingle.view('wl-probe') or {}).get('mapped')
+                     and shingle.view('wl-probe'))
+  results.check('focus: the Wayland probe maps and gets wl_keyboard.enter',
+                wl_view and wayland.wait_event('enter', timeout=5),
+                ' | '.join(wayland.lines[-3:]))
+  results.check('focus: the X probe gets FocusOut',
+                has_event(xprobe, 'focus_out', after=count, timeout=5))
+  results.check('focus: _NET_ACTIVE_WINDOW is None for a Wayland window',
+                wait_for(lambda: shingle.active_window(display) == 0),
+                hex(shingle.active_window(display)))
+  focus = probe_query(xprobe, 'focus', 'focus')
+  results.check('focus: no X window has the X focus then',
+                focus and not focus['own'] and focus['window'] in (0, 1),
+                json.dumps(focus))
+  # Back to X with a click.
+  count = len(xprobe.events())
+  wl_count = len(wayland.events())
+  view = shingle.view('FocusProbe')
+  x, y = centre(view['geometry'])
+  shingle.click(x, y)
+  pointer = probe_query(xprobe, 'pointer', 'pointer') or {}
+  results.check('focus: X sees the pointer where Shingle put it',
+                (pointer.get('x'), pointer.get('y')) == (x, y)
+                and pointer.get('own'), json.dumps(pointer))
+  results.check('focus: a click moves the focus back to the X probe',
+                wait_for(lambda: focused_id(shingle) == view['id'])
+                and has_event(xprobe, 'focus_in', after=count, timeout=5)
+                and has_event(wayland, 'leave', after=wl_count, timeout=5))
+  results.check('focus: _NET_ACTIVE_WINDOW names the probe again',
+                wait_for(lambda: shingle.active_window(display) == window))
+  # And to Wayland with focus-view.
+  wl_count = len(wayland.events())
+  count = len(xprobe.events())
+  shingle.focus_view(wl_view['id'])
+  results.check('focus: focus-view moves it to the Wayland probe',
+                has_event(wayland, 'enter', after=wl_count, timeout=5)
+                and has_event(xprobe, 'focus_out', after=count, timeout=5))
+  wayland.stop()
+  clients.remove(wayland)
+  wait_for(lambda: shingle.view('wl-probe') is None)
+  return xprobe
+
+def _behaviour_models(results, shingle, display, clients, probe):
+  """Probe windows with each ICCCM input model, and the FocusIn guard."""
+  local, _, local_view = start_probe(shingle, probe, display, 'Local',
+                                     '--take-focus')
+  clients.append(local)
+  results.check('models: a locally active window is focused on map and '
+                'gets WM_TAKE_FOCUS and FocusIn',
+                local_view and wait_for(lambda: focused_id(shingle)
+                                        == local_view['id'])
+                and has_event(local, 'take_focus', timeout=5)
+                and has_event(local, 'focus_in', timeout=5))
+  focus = probe_query(local, 'focus', 'focus')
+  results.check('models: the locally active window has the X focus',
+                focus and focus['own'], json.dumps(focus))
+  before = focused_id(shingle)
+  glob, _, glob_view = start_probe(shingle, probe, display, 'Global',
+                                   '--no-input', '--take-focus',
+                                   '--type', 'normal')
+  clients.append(glob)
+  time.sleep(1)
+  results.check('models: a globally active NORMAL window is offered the '
+                'focus (WM_TAKE_FOCUS) but not focused on map',
+                glob_view and has_event(glob, 'take_focus', timeout=5)
+                and focused_id(shingle) == before
+                and not has_event(glob, 'focus_in', timeout=0.5),
+                json.dumps(shingle.focused_view()))
+  none, _, none_view = start_probe(shingle, probe, display, 'NoInput',
+                                   '--no-input')
+  clients.append(none)
+  time.sleep(1)
+  results.check('models: a no-input window is not focused on map and gets '
+                'neither WM_TAKE_FOCUS nor FocusIn',
+                none_view and focused_id(shingle) == before
+                and not has_event(none, 'take_focus', timeout=0.5)
+                and not has_event(none, 'focus_in', timeout=0.5))
+  if not (glob_view and none_view and local_view):
+    return
+  # Clicks focus them in Shingle, as Wayfire's X toplevels always are.
+  count = len(glob.events())
+  shingle.click(*centre(shingle.view('Global')['geometry']))
+  focused = wait_for(lambda: focused_id(shingle) == glob_view['id'])
+  took = has_event(glob, 'take_focus', after=count, timeout=5)
+  focus = probe_query(glob, 'focus', 'focus') or {}
+  results.check('models: a click focuses the globally active window, which '
+                'gets WM_TAKE_FOCUS but no SetInputFocus',
+                focused and took and not focus.get('own'), json.dumps(focus))
+  shingle.click(*centre(shingle.view('NoInput')['geometry']))
+  focused = wait_for(lambda: focused_id(shingle) == none_view['id'])
+  focus = probe_query(none, 'focus', 'focus') or {}
+  results.check('models: a click focuses the no-input window in Shingle, and '
+                'the X focus goes to None', focused and not focus.get('own')
+                and focus.get('window') in (0, 1), json.dumps(focus))
+  # The FocusIn guard: another client cannot take the X focus.
+  shingle.focus_view(local_view['id'])
+  wait_for(lambda: (probe_query(local, 'focus', 'focus') or {}).get('own'))
+  count = len(none.events())
+  none.send('grab_focus')
+  has_event(none, 'focus_in', after=count, timeout=3)
+  time.sleep(0.5)
+  focus = probe_query(local, 'focus', 'focus') or {}
+  results.check('models: an X client that sets the focus to itself gets it '
+                'taken back (FocusIn guard)',
+                focus.get('own') and has_event(none, 'focus_out', after=count,
+                                               timeout=3),
+                json.dumps(focus))
+  for client in (glob, none):
+    client.send('destroy')
+    client.exited(5)
+
+def _behaviour_dialogs(results, shingle, display, clients, probe):
+  """A transient dialog and a fixed-size dialog float as in Wayfire."""
+  parent_window = next(w for w, c in shingle.x_windows(display).items()
+                       if c == 'FocusProbe')
+  dialog, window, view = start_probe(
+      shingle, probe, display, 'Dialog', '--transient-for',
+      hex(parent_window), '--size', '300x200')
+  clients.append(dialog)
+  parent = shingle.view('FocusProbe')
+  results.check('dialogs: a transient window is a child of its parent',
+                view and view['parent'] == parent['id'], json.dumps(view))
+  if not view:
+    return
+  geometry = view['geometry']
+  pg = parent['geometry']
+  expected_x = pg['x'] + (pg['width'] - 300) // 2
+  expected_y = pg['y'] + (pg['height'] - 200) // 2
+  results.check('dialogs: the transient floats centred on its parent',
+                view['tiled-edges'] == 0 and geometry['width'] == 300
+                and geometry['height'] == 200
+                and abs(geometry['x'] - expected_x) <= 1
+                and abs(geometry['y'] - expected_y) <= 1,
+                f'{json.dumps(geometry)} parent {json.dumps(pg)}')
+  results.check('dialogs: the transient is focused',
+                focused_id(shingle) == view['id'])
+  results.check('dialogs: xwininfo matches the dialog view',
+                wait_for(lambda: same_geometry(
+                    shingle.x_geometry(window, display) or {},
+                    shingle.view('Dialog')['geometry']), timeout=5),
+                json.dumps(shingle.x_geometry(window, display)))
+  dialog.send('destroy')
+  dialog.exited(5)
+  fixed, window, view = start_probe(shingle, probe, display, 'Fixed',
+                                    '--size', '300x200', '--min', '300x200',
+                                    '--max', '300x200', '--type', 'dialog')
+  clients.append(fixed)
+  results.check('dialogs: a fixed-size dialog floats at its size',
+                view and view['tiled-edges'] == 0
+                and view['geometry']['width'] == 300
+                and view['geometry']['height'] == 200
+                and view['min-size'] == {'width': 300, 'height': 200},
+                json.dumps(view))
+  if view:
+    g = view['geometry']
+    results.check('dialogs: it is placed in the centre of the workarea',
+                  abs(g['x'] - (WORKAREA['width'] - 300) // 2) <= 1
+                  and abs(g['y'] - (WORKAREA['height'] - 200) // 2) <= 1,
+                  json.dumps(g))
+  fixed.send('destroy')
+  fixed.exited(5)
+
+def _net_wm_state(shingle, window, display):
+  """The `_NET_WM_STATE` atoms of `window`."""
+  value = shingle.window_property(window, '_NET_WM_STATE', display)
+  return [atom.strip() for atom in value.split(',') if atom.strip()]
+
+def _behaviour_states(results, shingle, display, clients, probe):
+  """Fullscreen, maximize and minimize from the client and from IPC."""
+  client, window, view = start_probe(shingle, probe, display, 'States')
+  clients.append(client)
+  if not view:
+    results.check('states: the probe maps', False)
+    return
+  view_id = view['id']
+
+  def view_state(key):
+    return (shingle.view_by_id(view_id) or {}).get(key)
+
+  def configured_fullscreen():
+    event = last_event(client, 'configure') or {}
+    return same_geometry(event, WORKAREA)
+
+  def state_has(name, present=True):
+    return wait_for(lambda: (f'_NET_WM_STATE_{name}' in _net_wm_state(
+        shingle, window, display)) == present, timeout=5)
+
+  def wm_state_after(count, value):
+    return wait_for(lambda: any(
+        event.get('event') == 'wm_state' and event['value'] == value
+        for event in client.events()[count:]), timeout=5)
+  # From the client.
+  client.send('state add fullscreen')
+  results.check('states: _NET_WM_STATE add fullscreen from the client '
+                'fullscreens the view and the X window',
+                wait_for(lambda: view_state('fullscreen'), timeout=5)
+                and wait_for(configured_fullscreen, timeout=5)
+                and state_has('FULLSCREEN'))
+  client.send('state remove fullscreen')
+  results.check('states: remove fullscreen from the client restores it',
+                wait_for(lambda: view_state('fullscreen') is False, timeout=5)
+                and state_has('FULLSCREEN', False))
+  client.send('state add maximized')
+  results.check('states: add maximized (both directions) from the client',
+                state_has('MAXIMIZED_VERT') and state_has('MAXIMIZED_HORZ'))
+  client.send('state remove maximized')
+  results.check('states: remove maximized from the client',
+                state_has('MAXIMIZED_VERT', False))
+  count = len(client.events())
+  client.send('iconify')
+  results.check('states: WM_CHANGE_STATE Iconic from the client minimizes, '
+                'with WM_STATE Iconic',
+                wait_for(lambda: view_state('minimized'), timeout=5)
+                and state_has('HIDDEN') and wm_state_after(count, 3))
+  count = len(client.events())
+  shingle.call('wm-actions/set-minimized', {'view_id': view_id,
+                                            'state': False})
+  results.check('states: set-minimized false over IPC restores it, with '
+                'WM_STATE Normal',
+                wait_for(lambda: view_state('minimized') is False, timeout=5)
+                and state_has('HIDDEN', False) and wm_state_after(count, 1))
+  # From IPC.
+  shingle.call('wm-actions/set-fullscreen', {'view_id': view_id,
+                                             'state': True})
+  results.check('states: set-fullscreen over IPC reaches _NET_WM_STATE and '
+                'the X geometry',
+                state_has('FULLSCREEN') and wait_for(configured_fullscreen,
+                                                     timeout=5))
+  shingle.call('wm-actions/set-fullscreen', {'view_id': view_id,
+                                             'state': False})
+  state_has('FULLSCREEN', False)
+  shingle.call('wm-actions/toggle_maximize', {'view_id': view_id})
+  results.check('states: toggle_maximize over IPC reaches _NET_WM_STATE',
+                state_has('MAXIMIZED_VERT') and state_has('MAXIMIZED_HORZ'))
+  shingle.call('wm-actions/toggle_maximize', {'view_id': view_id})
+  state_has('MAXIMIZED_VERT', False)
+  shingle.call('wm-actions/set-minimized', {'view_id': view_id,
+                                            'state': True})
+  results.check('states: set-minimized over IPC reaches _NET_WM_STATE_HIDDEN',
+                state_has('HIDDEN'))
+  client.send('state remove hidden')
+  results.check('states: removing hidden from the client restores it',
+                wait_for(lambda: view_state('minimized') is False, timeout=5))
+  # Initial state, set before the map.
+  initial, _, initial_view = start_probe(shingle, probe, display, 'Initial',
+                                         '--state', 'fullscreen')
+  clients.append(initial)
+  results.check('states: an initial _NET_WM_STATE fullscreen applies on map',
+                initial_view and initial_view['fullscreen'],
+                json.dumps(initial_view))
+  initial.send('destroy')
+  initial.exited(5)
+  # _NET_ACTIVE_WINDOW and _NET_CLOSE_WINDOW.
+  xterm = shingle.view('XTerm')
+  shingle.focus_view(xterm['id'])
+  wait_for(lambda: focused_id(shingle) == xterm['id'])
+  client.send('activate')
+  results.check('states: _NET_ACTIVE_WINDOW from the client focuses it',
+                wait_for(lambda: focused_id(shingle) == view_id, timeout=5))
+  client.send('close')
+  results.check('states: _NET_CLOSE_WINDOW closes it like close-view '
+                '(WM_DELETE_WINDOW)',
+                client.wait_event('delete', timeout=5) is not None
+                and wait_for(lambda: shingle.view_by_id(view_id) is None))
+
+def _behaviour_stacking(results, shingle, display):
+  """X stacking and _NET_CLIENT_LIST_STACKING follow Shingle's."""
+
+  def stacking():
+    return parse_window_list(shingle.root_property(
+        '_NET_CLIENT_LIST_STACKING', display))
+  windows = shingle.x_windows(display)
+  by_class = {app_id: window for window, app_id in windows.items()}
+  for app_id in ('XTerm', 'FocusProbe', 'Local'):
+    view = shingle.view(app_id)
+    if not view or app_id not in by_class:
+      results.check(f'stacking: {app_id} is listed', False)
+      return
+    shingle.focus_view(view['id'])
+    top = wait_for(lambda: stacking() and stacking()[-1] == by_class[app_id],
+                   timeout=5)
+    tree = [window for window, _, viewable, _ in shingle.x_tree(display)
+            if viewable and window in by_class.values()]
+    results.check(f'stacking: focusing {app_id} raises it in '
+                  '_NET_CLIENT_LIST_STACKING and in X',
+                  top and tree and tree[-1] == by_class[app_id],
+                  f'stacking {[hex(w) for w in stacking()]}, '
+                  f'X {[hex(w) for w in tree]}')
+  results.check('stacking: _NET_CLIENT_LIST_STACKING has the same windows as '
+                '_NET_CLIENT_LIST',
+                sorted(stacking()) == sorted(windows))
+
+def _behaviour_menus(results, shingle, display):
+  """xterm's Ctrl+button menu: override-redirect, at the pointer, no
+  keyboard focus, gone on release."""
+  view = shingle.view('XTerm')
+  shingle.focus_view(view['id'])
+  wait_for(lambda: focused_id(shingle) == view['id'])
+  geometry = view['geometry']
+  x, y = centre(geometry)
+  xterm = next(w for w, c in shingle.x_windows(display).items()
+               if c == 'XTerm')
+  views_before = len(shingle.views())
+  shingle.call('stipc/move_cursor', {'x': x, 'y': y})
+  shingle.press('KEY_LEFTCTRL', True)
+  shingle.call('stipc/feed_button', {'combo': 'BTN_LEFT', 'mode': 'press'})
+
+  def menu():
+    return next(((window, g) for window, override, viewable, g
+                 in shingle.x_tree(display) if override and viewable), None)
+  found = wait_for(menu, timeout=5)
+  results.check('menus: Ctrl+button maps an override-redirect menu',
+                found is not None)
+  if found:
+    window, menu_geometry = found
+    kind = shingle.window_property(window, '_NET_WM_WINDOW_TYPE', display)
+    inside = (menu_geometry['x'] - 2 <= x
+              <= menu_geometry['x'] + menu_geometry['width'] + 2
+              and menu_geometry['y'] - 2 <= y
+              <= menu_geometry['y'] + menu_geometry['height'] + 2)
+    results.check('menus: the menu appears at the pointer', inside,
+                  f'menu {json.dumps(menu_geometry)}, pointer {x},{y}, '
+                  f'type {kind or "none"}')
+    tree = [w for w, _, viewable, _ in shingle.x_tree(display) if viewable]
+    results.check('menus: the menu is above the xterm in X',
+                  window in tree and xterm in tree
+                  and tree.index(window) > tree.index(xterm))
+    results.check('menus: the menu is not a view',
+                  len(shingle.views()) == views_before)
+    # Long enough for the menu's first buffer, when it is focused.
+    time.sleep(1)
+    hints = shingle.window_property(window, 'WM_HINTS', display)
+    results.check('menus: the X focus and _NET_ACTIVE_WINDOW stay on the '
+                  'xterm', shingle.active_window(display) == xterm,
+                  hex(shingle.active_window(display)))
+    # Wayfire's rule for override-redirect windows: without a menu or
+    # tooltip type, and with input (no WM_HINTS), it takes the keyboard.
+    results.check('menus: the untyped menu has the Wayland keyboard, as '
+                  'Wayfire gives it', focused_id(shingle) is None,
+                  f'focused view {focused_id(shingle)}, menu type '
+                  f'{kind or "none"}, WM_HINTS {hints or "none"}')
+  # Off the menu first, so that the release selects nothing.
+  shingle.call('stipc/move_cursor', {'x': geometry['x'] + 2,
+                                     'y': geometry['y'] + 2})
+  shingle.call('stipc/feed_button', {'combo': 'BTN_LEFT', 'mode': 'release'})
+  shingle.press('KEY_LEFTCTRL', False)
+  results.check('menus: the menu disappears on release',
+                wait_for(lambda: menu() is None, timeout=5))
+  results.check('menus: the keyboard returns to the xterm',
+                wait_for(lambda: focused_id(shingle) == view['id'],
+                         timeout=5))
+
+def _behaviour_override_redirect(results, shingle, display, clients, probe):
+  """Override-redirect probe windows: a typed menu takes the pointer but
+  not the keyboard; an untyped one takes the keyboard while X focus stays."""
+  focused = focused_id(shingle)
+  active = shingle.active_window(display)
+  views = len(shingle.views())
+  menu = XClient(shingle, [probe, '--class', 'menu,Menu', '--override-redirect',
+                           '--type', 'popup_menu', '--position', '300,200',
+                           '--size', '120x80', '--color', '00ff00'],
+                 display, 'xw_probe')
+  clients.append(menu)
+  window = probe_window(menu)
+  results.check('override-redirect: a popup menu maps where it asked',
+                menu.wait_event('mapped') is not None and wait_for(
+                    lambda: same_geometry(
+                        shingle.x_geometry(window, display) or {},
+                        {'x': 300, 'y': 200, 'width': 120, 'height': 80})))
+  time.sleep(1)
+  results.check('override-redirect: it is no view and takes no focus',
+                len(shingle.views()) == views
+                and focused_id(shingle) == focused
+                and shingle.active_window(display) == active)
+  shingle.call('stipc/move_cursor', {'x': 360, 'y': 240})
+  pointer = wait_for(lambda: (probe_query(menu, 'pointer', 'pointer') or {})
+                     .get('own') and probe_query(menu, 'pointer', 'pointer'),
+                     timeout=5)
+  results.check('override-redirect: the pointer reaches it',
+                bool(pointer), json.dumps(pointer))
+  menu.send('destroy')
+  menu.exited(5)
+  popup = XClient(shingle, [probe, '--class', 'popup,Popup',
+                            '--override-redirect', '--position', '500,300',
+                            '--size', '120x80'], display, 'xw_probe')
+  clients.append(popup)
+  popup.wait_event('mapped')
+  results.check('override-redirect: an untyped one takes the keyboard, the '
+                'X focus staying where it was',
+                wait_for(lambda: focused_id(shingle) is None, timeout=5)
+                and shingle.active_window(display) == active,
+                f'focused {focused_id(shingle)}, '
+                f'active {hex(shingle.active_window(display))}')
+  popup.send('destroy')
+  popup.exited(5)
+  results.check('override-redirect: when it goes, the keyboard returns',
+                wait_for(lambda: focused_id(shingle) == focused, timeout=5))
+
+def _behaviour_cursor(results, shingle, client):
+  """An X window without a cursor of its own shows the root cursor, which
+  is the theme's default arrow."""
+  view = shingle.view('FocusProbe')
+  if not view:
+    results.check('cursor: the probe is listed', False)
+    return
+  expected = xcursor_image('/usr/share/icons/Adwaita/cursors/default', 24)
+  x, y = centre(view['geometry'])
+  shingle.call('stipc/move_cursor', {'x': x, 'y': y})
+  time.sleep(0.5)
+  cursor = probe_query(client, 'cursor', 'cursor') or {}
+  seen = (cursor.get('width'), cursor.get('height'), cursor.get('xhot'),
+          cursor.get('yhot'))
+  results.check('cursor: the root cursor is the theme\'s default arrow',
+                expected is not None and seen == expected,
+                f'seen {seen}, theme {expected}')
+def session_checks(results, binary, work, probe):
+  """A session saved with xlogo and xterm open restores both into their
+  slots. Shingle runs as uid 1000 here, like the X clients, so that the
+  xterm it relaunches can set up its pty."""
+  del work, probe
+  config = {'xwayland': {'mode': True}}
+  display = ':0'
+  first = Shingle(binary, None, 'session1', config, prefix=AS_USER)
+  first.wait_pid(lambda value: value > 0)
+  results.check('session: Xwayland is ready',
+                wait_for(lambda: 'Xwayland ready' in first.log_text()))
+  clients = []
+  saved = None
+  try:
+    # xterm first, on the left: on restore xlogo maps first, and would
+    # take the left tile without the placeholders.
+    xterm, xterm_view = start_mapped(
+        first, AS_USER + ['xterm', '-e', 'sleep', '600'], display, 'xterm',
+        'XTerm')
+    clients.append(xterm)
+    logo, logo_view = start_mapped(first, ['xlogo'], display, 'xlogo',
+                                   'XLogo')
+    clients.append(logo)
+    results.check('session: xlogo and xterm map', logo_view and xterm_view)
+    time.sleep(0.5)
+    before = {view['app-id']: view for view in first.views()}
+  finally:
+    status = first.stop()
+    for client in clients:
+      client.stop()
+  results.check('session: the first run exits with status 0', status == 0,
+                f'{status}')
+  path = os.path.join(first.directory, 'state', 'session.json')
+  try:
+    with open(path) as file:
+      saved = json.load(file)
+  except (OSError, ValueError) as error:
+    results.check('session: the session was saved', False, str(error))
+    return first.log_text()
+  identities = {window['identity']['app_id']: window
+                for window in saved.get('windows', [])}
+  xterm_identity = identities.get('XTerm', {}).get('identity', {})
+  results.check('session: the saved xterm has its X client\'s command',
+                xterm_identity.get('command', [])[:1] == ['xterm']
+                and 'XLogo' in identities,
+                json.dumps(xterm_identity))
+  second = Shingle(binary, None, 'session2', config, session=saved,
+                   prefix=AS_USER)
+  try:
+    placeholders = {view['app-id']: view for view in second.views()}
+    results.check('session: the restore starts with placeholders',
+                  {'XTerm', 'XLogo'} <= set(placeholders),
+                  json.dumps(sorted(placeholders)))
+    order = []
+
+    def mapped_order():
+      for view in second.views():
+        if view['mapped'] and view['app-id'] not in order:
+          order.append(view['app-id'])
+      return len(order) == 2
+    wait_for(mapped_order, timeout=20, interval=0.02)
+    restored = wait_for(lambda: all(
+        (second.view(app_id) or {}).get('mapped')
+        for app_id in ('XTerm', 'XLogo')), timeout=20)
+    after = {view['app-id']: view for view in second.views()}
+    results.check('session: the restored xterm and xlogo map', restored,
+                  f'in the order {order}')
+    for app_id in ('XTerm', 'XLogo'):
+      view = after.get(app_id, {})
+      placeholder = placeholders.get(app_id, {})
+      results.check(f'session: the restored {app_id} claims its slot',
+                    view.get('id') == placeholder.get('id')
+                    and same_geometry(view.get('geometry', {}),
+                                      before[app_id]['geometry'])
+                    and len([v for v in second.views()
+                             if v['app-id'] == app_id]) == 1,
+                    f'view {view.get("id")} at '
+                    f'{json.dumps(view.get("geometry"))}, placeholder '
+                    f'{placeholder.get("id")}, before '
+                    f'{json.dumps(before[app_id]["geometry"])}')
+    pid = after.get('XTerm', {}).get('pid')
+    results.check('session: the restored xterm is a new xterm process',
+                  isinstance(pid, int) and pid > 1
+                  and command_name(pid) == 'xterm', f'pid {pid}')
+  finally:
+    status = second.stop()
+  results.check('session: the restored run exits with status 0', status == 0,
+                f'{status}')
+  return second.log_text()
+
+LAVAPIPE = '/usr/share/vulkan/icd.d/lvp_icd.json'
+
+def parse_ppm(data):
+  """(width, height, RGB bytes) of a binary PPM, or None."""
+  parts = []
+  index = 0
+  while len(parts) < 4 and index < len(data):
+    while index < len(data) and data[index:index + 1].isspace():
+      index += 1
+    if data[index:index + 1] == b'#':
+      while index < len(data) and data[index:index + 1] != b'\n':
+        index += 1
+      continue
+    start = index
+    while index < len(data) and not data[index:index + 1].isspace():
+      index += 1
+    parts.append(data[start:index])
+  if len(parts) < 4 or parts[0] != b'P6':
+    return None
+  width, height, maximum = int(parts[1]), int(parts[2]), int(parts[3])
+  if maximum != 255:
+    return None
+  pixels = data[index + 1:index + 1 + width * height * 3]
+  if len(pixels) != width * height * 3:
+    return None
+  return width, height, pixels
+
+class Capture:
+  """A screenshot as RGB pixels."""
+
+  def __init__(self, width, height, pixels):
+    self.width = width
+    self.height = height
+    self.pixels = pixels
+
+  def pixel(self, x, y):
+    """The (r, g, b) at (x, y)."""
+    offset = (y * self.width + x) * 3
+    return tuple(self.pixels[offset:offset + 3])
+
+  def matching(self, predicate, rect=None):
+    """(count, bounding box) of the pixels for which `predicate(r, g, b)`
+    holds, inside `rect` or everywhere."""
+    x0, y0, x1, y1 = (0, 0, self.width, self.height) if rect is None else (
+        max(0, rect['x']), max(0, rect['y']),
+        min(self.width, rect['x'] + rect['width']),
+        min(self.height, rect['y'] + rect['height']))
+    count = 0
+    box = None
+    for y in range(y0, y1):
+      row = self.pixels[(y * self.width + x0) * 3:(y * self.width + x1) * 3]
+      matched = [index for index in range(0, len(row), 3)
+                 if predicate(row[index], row[index + 1], row[index + 2])]
+      if not matched:
+        continue
+      count += len(matched)
+      left, right = x0 + matched[0] // 3, x0 + matched[-1] // 3
+      box = (left, y, right, y) if box is None else (
+          min(box[0], left), box[1], max(box[2], right), y)
+    return count, box
+
+def red(r, g, b):
+  """A clearly red pixel."""
+  return r > 200 and g < 60 and b < 60
+
+def blue(r, g, b):
+  """A clearly blue pixel."""
+  return b > 200 and r < 60 and g < 60
+
+def green(r, g, b):
+  """A clearly green pixel."""
+  return g > 200 and r < 60 and b < 60
+
+def dark(r, g, b):
+  """A dark pixel, such as text."""
+  return r < 100 and g < 100 and b < 100
+
+def capture(shingle):
+  """A wlr-screencopy capture of `shingle`'s output through grim, or
+  None."""
+  try:
+    done = subprocess.run(['grim', '-t', 'ppm', '-'],
+                          env=shingle.wayland_environment(),
+                          capture_output=True, timeout=20,
+                          stdin=subprocess.DEVNULL)
+  except subprocess.TimeoutExpired:
+    return None
+  parsed = parse_ppm(done.stdout) if done.returncode == 0 else None
+  return Capture(*parsed) if parsed else None
+
+def settled_capture(shingle, predicate, timeout=10.0):
+  """Captures until `predicate(capture)` holds; returns the last capture."""
+  last = [None]
+
+  def attempt():
+    last[0] = capture(shingle)
+    return last[0] is not None and predicate(last[0])
+  wait_for(attempt, timeout=timeout, interval=0.3)
+  return last[0]
+
+def nested_checks(results, binary, work, probe):
+  """Pixels, the Unmanaged layer, Scale, Expo and the switcher with X
+  windows, in nested Shingle on lavapipe inside a headless Shingle."""
+  del work
+  outer = Shingle(binary, None, 'outer', {'xwayland': {'mode': False}})
+  inner_config = {
+      'xwayland': {'mode': True},
+      'workspaces': {'width': 2, 'height': 2},
+  }
+  inner = Shingle(binary, None, 'inner', inner_config,
+                  backend=('--backend', 'nested'),
+                  extra_environment={
+                      'WAYLAND_DISPLAY': outer.wayland_display(),
+                      'VK_ICD_FILENAMES': LAVAPIPE,
+                  })
+  inner.wait_pid(lambda value: value > 0, timeout=30)
+  ready = wait_for(lambda: 'Xwayland ready' in inner.log_text(), timeout=30)
+  results.check('nested: nested Shingle runs X inside headless Shingle',
+                ready and inner.process.poll() is None,
+                inner.log_text()[-300:])
+  display = ':0'
+  clients = []
+  try:
+    if ready:
+      _nested_pixels(results, outer, inner, display, clients, probe)
+  finally:
+    for client in clients:
+      client.stop()
+  results.check('nested: SIGTERM exits nested with status 0',
+                inner.stop() == 0)
+  results.check('nested: SIGTERM exits headless with status 0',
+                outer.stop() == 0)
+  return inner.log_text()
+
+def _nested_pixels(results, outer, inner, display, clients, probe):
+  """The checks inside nested Shingle. Captures are of the headless
+  Shingle's output, which shows the frame nested drew (nested's own
+  screencopy has the surfaces, not the overviews), and pointer and key
+  input for the overviews and the switcher comes from the headless Shingle
+  as real wl_pointer and wl_keyboard events on nested's window, which
+  covers its output at the same scale."""
+  red_client, red_window, red_view = start_probe(
+      inner, probe, display, 'Red', '--color', 'ff0000')
+  blue_client, blue_window, blue_view = start_probe(
+      inner, probe, display, 'Blue', '--color', '0000ff')
+  clients += [red_client, blue_client]
+  if not (red_view and blue_view):
+    results.check('nested: the red and blue probes map', False)
+    return
+  red_view, blue_view = inner.view('Red'), inner.view('Blue')
+
+  def tiles_drawn(shot):
+    return (red(*shot.pixel(*centre(red_view['geometry'])))
+            and blue(*shot.pixel(*centre(blue_view['geometry']))))
+  shot = settled_capture(outer, tiles_drawn)
+  results.check('nested: grim shows each X window at its view geometry',
+                shot is not None and tiles_drawn(shot),
+                f'red {json.dumps(red_view["geometry"])}, '
+                f'blue {json.dumps(blue_view["geometry"])}')
+  # The Unmanaged layer: an override-redirect window over the red tile.
+  rx, ry = centre(red_view['geometry'])
+  menu = XClient(inner, [probe, '--class', 'menu,Menu', '--override-redirect',
+                         '--type', 'popup_menu', '--position',
+                         f'{rx - 50},{ry - 40}', '--size', '100x80',
+                         '--color', '00ff00'], display, 'xw_probe')
+  clients.append(menu)
+  menu.wait_event('mapped')
+  rect = {'x': rx - 50, 'y': ry - 40, 'width': 100, 'height': 80}
+  shot = settled_capture(
+      inner, lambda shot: shot.matching(green, rect)[0] >= 100 * 80 * 0.9)
+  count = shot.matching(green, rect)[0] if shot else 0
+  results.check('nested: an override-redirect window is drawn above the '
+                'window under it, where X put it',
+                count >= 100 * 80 * 0.9, f'{count} green pixels of 8000')
+  menu.send('destroy')
+  menu.exited(5)
+  settled_capture(outer, lambda shot: shot.matching(green)[0] == 0)
+  # Scale.
+  watcher = Ipc(inner.ipc_path)
+  watcher.call('window-rules/events/watch',
+               {'events': ['plugin-activation-state-changed']})
+  inner.focus_view(blue_view['id'])
+  wait_for(lambda: inner.active_window(display) == blue_window)
+  inner.call('scale/toggle')
+  event = _receive(watcher)
+  results.check('nested: scale/toggle activates Scale',
+                event.get('plugin') == 'scale' and event.get('state') is True,
+                json.dumps(event))
+
+  def smaller(box, view):
+    return (box is not None
+            and box[2] - box[0] + 1 < view['geometry']['width'] - 20
+            and box[3] - box[1] + 1 < view['geometry']['height'] - 20)
+
+  def thumbnails(shot):
+    _, red_box = shot.matching(red)
+    _, blue_box = shot.matching(blue)
+    return smaller(red_box, red_view) and smaller(blue_box, blue_view)
+  shot = settled_capture(outer, thumbnails)
+  results.check('nested: Scale shows both X windows as thumbnails',
+                shot is not None and thumbnails(shot),
+                f'red {shot.matching(red)[1] if shot else None}, '
+                f'blue {shot.matching(blue)[1] if shot else None}')
+  if shot and thumbnails(shot):
+    _, box = shot.matching(red)
+    x, y = (box[0] + box[2]) // 2, (box[1] + box[3]) // 2
+    outer.click(x, y)
+    event = _receive(watcher)
+    results.check('nested: clicking the red thumbnail ends Scale and '
+                  'focuses that X window',
+                  event.get('state') is False
+                  and wait_for(lambda: focused_id(inner) == red_view['id'])
+                  and wait_for(lambda: inner.active_window(display)
+                               == red_window),
+                  f'{json.dumps(event)}, focused {focused_id(inner)}')
+  else:
+    inner.call('scale/toggle')
+    _receive(watcher)
+  settled_capture(outer, tiles_drawn)
+  # Expo, with blue on the workspace to the right, since Expo centres
+  # every window in its workspace's cell.
+  inner.call('vswitch/send-view', {'view-id': blue_view['id'], 'x': 1,
+                                   'y': 0})
+  inner.call('expo/toggle')
+  event = _receive(watcher)
+  results.check('nested: expo/toggle activates Expo',
+                event.get('plugin') == 'expo' and event.get('state') is True,
+                json.dumps(event))
+
+  def wall(shot):
+    red_count, red_box = shot.matching(red)
+    blue_count, blue_box = shot.matching(blue)
+    # Each fills at most its cell, a quarter of the output.
+    cell = WORKAREA['width'] * WORKAREA['height'] // 4
+    return (0 < red_count <= cell and 0 < blue_count <= cell
+            and red_box[2] < 640 and blue_box[0] >= 640
+            and red_box[3] < 360 and blue_box[3] < 360)
+  shot = settled_capture(outer, wall)
+  results.check('nested: Expo shows both X windows on their workspaces',
+                shot is not None and wall(shot),
+                f'red {shot.matching(red)[1] if shot else None}, '
+                f'blue {shot.matching(blue)[1] if shot else None}')
+  inner.call('expo/toggle')
+  _receive(watcher)
+  watcher.close()
+  inner.call('vswitch/send-view', {'view-id': blue_view['id'], 'x': 0,
+                                   'y': 0})
+  red_view, blue_view = inner.view('Red'), inner.view('Blue')
+  settled_capture(outer, tiles_drawn)
+  # The fast switcher: Alt+Escape moves the focus to the other X window.
+  inner.focus_view(blue_view['id'])
+  wait_for(lambda: inner.active_window(display) == blue_window)
+  for key, pressed in (('KEY_LEFTALT', True), ('KEY_ESC', True),
+                       ('KEY_ESC', False), ('KEY_LEFTALT', False)):
+    outer.press(key, pressed)
+    time.sleep(0.2)
+  results.check('nested: the fast switcher (Alt+Escape) moves the focus '
+                'between X windows, and the X focus follows',
+                wait_for(lambda: focused_id(inner) == red_view['id'])
+                and wait_for(lambda: inner.active_window(display)
+                             == red_window),
+                f'focused {focused_id(inner)}, '
+                f'active {hex(inner.active_window(display))}')
+  _nested_xterm_menu(results, outer, inner, display, clients)
+
+def _receive(ipc, timeout=10.0):
+  """The next IPC message, or an error description."""
+  try:
+    return ipc.receive(timeout)
+  except (TimeoutError, ConnectionError) as error:
+    return {'error': str(error)}
+
+def _nested_xterm_menu(results, outer, inner, display, clients):
+  """xterm's Ctrl+button menu is drawn above the xterm."""
+  client, view = start_mapped(inner, AS_USER + ['xterm', '-e', 'sleep', '600'],
+                              display, 'xterm', 'XTerm')
+  clients.append(client)
+  if not view:
+    results.check('nested: xterm maps', False)
+    return
+  inner.focus_view(view['id'])
+  time.sleep(1)
+  geometry = inner.view('XTerm')['geometry']
+  x, y = centre(geometry)
+  inner.call('stipc/move_cursor', {'x': x, 'y': y})
+  # The xterm drawn and its open animation over: mostly white.
+  area = geometry['width'] * geometry['height']
+  before = settled_capture(
+      outer, lambda shot: shot.matching(dark, geometry)[0] < area * 0.05)
+  inner.press('KEY_LEFTCTRL', True)
+  inner.call('stipc/feed_button', {'combo': 'BTN_LEFT', 'mode': 'press'})
+  found = wait_for(lambda: next(
+      (g for _, override, viewable, g in inner.x_tree(display)
+       if override and viewable), None), timeout=5)
+  if found:
+    shot = settled_capture(
+        inner, lambda shot: shot.matching(dark, found)[0] > 500)
+    during = shot.matching(dark, found)[0] if shot else 0
+    earlier = before.matching(dark, found)[0] if before else -1
+    results.check('nested: xterm\'s menu is drawn above the xterm',
+                  during > 500 and during > 4 * max(earlier, 1),
+                  f'menu {json.dumps(found)}: {earlier} dark pixels before, '
+                  f'{during} with the menu')
+  else:
+    results.check('nested: xterm\'s Ctrl+button menu maps', False)
+  inner.call('stipc/move_cursor', {'x': geometry['x'] + 2,
+                                   'y': geometry['y'] + 2})
+  inner.call('stipc/feed_button', {'combo': 'BTN_LEFT', 'mode': 'release'})
+  inner.press('KEY_LEFTCTRL', False)
+
+GROUPS = ('lazy', 'disabled', 'eager', 'running', 'idle', 'windows', 'probe',
+          'behaviour', 'session', 'nested')
+
+def inner(binary, probe, wl_probe, work, groups):
   """Runs the check `groups` inside the namespace; returns the status."""
   private_tmp = os.path.join(work, 'tmp')
   os.makedirs(private_tmp)
@@ -1082,9 +2175,14 @@ def inner(binary, probe, work, groups):
       'idle': idle_checks,
       'windows': windows_checks,
       'probe': probe_checks,
+      'behaviour': behaviour_checks,
+      'session': session_checks,
+      'nested': nested_checks,
   }
   for group in groups:
-    if group in ('windows', 'probe'):
+    if group == 'behaviour':
+      log = checks[group](results, binary, work, probe, wl_probe)
+    elif group in ('windows', 'probe', 'session', 'nested'):
       log = checks[group](results, binary, work, probe)
     else:
       log = checks[group](results, binary, work)
@@ -1099,6 +2197,7 @@ def main():
   parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   parser.add_argument('--binary', default='target/debug/shingle')
   parser.add_argument('--probe', default='target/debug/examples/xw_probe')
+  parser.add_argument('--wl-probe', default='target/debug/examples/wl_probe')
   parser.add_argument('--keep', action='store_true')
   parser.add_argument('--only', action='append', choices=GROUPS,
                       help='run only this group of checks (repeatable)')
@@ -1106,9 +2205,10 @@ def main():
   options = parser.parse_args()
   binary = os.path.abspath(options.binary)
   probe = os.path.abspath(options.probe)
+  wl_probe = os.path.abspath(options.wl_probe)
   groups = options.only or list(GROUPS)
   if options.inner:
-    return inner(binary, probe, options.inner, groups)
+    return inner(binary, probe, wl_probe, options.inner, groups)
   work = os.path.abspath(os.path.join(
       'target', f'xwayland_test-{os.getpid()}'))
   os.makedirs(work)
@@ -1118,7 +2218,8 @@ def main():
     command = ['unshare', '--user', '--map-root-user', '--mount', '--net',
                '--pid', '--fork', '--mount-proc', '--',
                sys.executable, os.path.abspath(__file__),
-               '--binary', binary, '--probe', probe, INNER_FLAG, work]
+               '--binary', binary, '--probe', probe, '--wl-probe', wl_probe,
+               INNER_FLAG, work]
     for group in groups:
       command += ['--only', group]
     return subprocess.run(command).returncode

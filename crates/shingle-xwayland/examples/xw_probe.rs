@@ -16,16 +16,23 @@
 //!     [--type normal|dialog|utility|menu|splash|dnd] [--transient-for ID]
 //!     [--size WxH] [--position X,Y] [--min WxH] [--max WxH]
 //!     [--no-input] [--take-focus] [--no-delete] [--override-redirect]
-//!     [--state fullscreen,maximized,hidden] [--no-background] [--no-map]
+//!     [--state fullscreen,maximized,hidden] [--color RRGGBB]
+//!     [--no-background] [--no-map]
 //! ```
 //!
 //! Commands: `map`, `unmap`, `destroy`, `exit`, `title TEXT`,
 //! `configure X Y W H`, `state add|remove|toggle NAME`, `activate`,
-//! `iconify`, `moveresize CODE`, `geometry`, `echo TEXT`.
+//! `iconify`, `moveresize CODE`, `close`, `geometry`, `focus` (reports
+//! the X input focus), `pointer` (reports where the server has the
+//! pointer, and the root child under it), `grab_focus` (sets the X focus
+//! to the window itself, as a client stealing it would), `cursor`
+//! (reports the cursor image the server shows, through XFixes),
+//! `echo TEXT`.
 //!
 //! Events: `window`, `mapped`, `unmapped`, `configure`, `focus_in`,
-//! `focus_out`, `delete`, `net_wm_state`, `wm_state`, `geometry`, `echo`,
-//! `destroyed` and `error`.
+//! `focus_out`, `delete`, `take_focus`, `net_wm_state`, `wm_state`,
+//! `geometry`, `focus`, `pointer`, `cursor`, `echo`, `destroyed` and
+//! `error`.
 
 use std::{
   io::{BufRead, Write},
@@ -38,9 +45,10 @@ use x11rb::{
   connection::Connection,
   protocol::{
     Event,
+    xfixes::ConnectionExt as _,
     xproto::{
       AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt,
-      CreateWindowAux, EventMask, PropMode, Window, WindowClass,
+      CreateWindowAux, EventMask, InputFocus, PropMode, Window, WindowClass,
     },
   },
   rust_connection::RustConnection,
@@ -67,6 +75,9 @@ struct Options {
   delete: bool,
   override_redirect: bool,
   states: Vec<String>,
+  /// The background as `0xRRGGBB` on the default TrueColor visual; white
+  /// without it.
+  color: Option<u32>,
   background: bool,
   map: bool,
 }
@@ -88,6 +99,7 @@ impl Default for Options {
       delete: true,
       override_redirect: false,
       states: Vec::new(),
+      color: None,
       background: true,
       map: true,
     }
@@ -147,6 +159,10 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         options.states =
           value()?.split(',').map(str::to_owned).collect::<Vec<_>>();
       }
+      "--color" => {
+        options.color =
+          Some(u32::from_str_radix(&value()?, 16).map_err(|_| bad("RRGGBB"))?);
+      }
       "--no-background" => options.background = false,
       "--no-map" => options.map = false,
       _ => return Err(format!("unknown option {argument}")),
@@ -201,6 +217,7 @@ struct Probe {
   window: Window,
   wm_protocols: u32,
   wm_delete_window: u32,
+  wm_take_focus: u32,
   net_wm_state: u32,
   wm_state: u32,
 }
@@ -223,7 +240,7 @@ impl Probe {
       )
       .override_redirect(u32::from(options.override_redirect));
     if options.background {
-      aux = aux.background_pixel(white);
+      aux = aux.background_pixel(options.color.unwrap_or(white));
     }
     let (x, y) = options.position.unwrap_or((0, 0));
     connection
@@ -244,6 +261,7 @@ impl Probe {
     let probe = Self {
       wm_protocols: atom(&connection, "WM_PROTOCOLS")?,
       wm_delete_window: atom(&connection, "WM_DELETE_WINDOW")?,
+      wm_take_focus: atom(&connection, "WM_TAKE_FOCUS")?,
       net_wm_state: atom(&connection, "_NET_WM_STATE")?,
       wm_state: atom(&connection, "WM_STATE")?,
       connection,
@@ -275,7 +293,7 @@ impl Probe {
       protocols.push(self.wm_delete_window);
     }
     if options.take_focus {
-      protocols.push(atom(connection, "WM_TAKE_FOCUS")?);
+      protocols.push(self.wm_take_focus);
     }
     connection
       .change_property32(
@@ -481,6 +499,66 @@ impl Probe {
           .ok_or("moveresize CODE")?;
         self.root_message("_NET_WM_MOVERESIZE", [0, 0, code, 1, 1])?;
       }
+      "close" => {
+        self.root_message("_NET_CLOSE_WINDOW", [CURRENT_TIME, 1, 0, 0, 0])?;
+      }
+      "focus" => {
+        let focus = connection
+          .get_input_focus()
+          .map_err(error)?
+          .reply()
+          .map_err(|error| error.to_string())?;
+        report(
+          "focus",
+          &[
+            ("window", focus.focus.to_string()),
+            ("own", (focus.focus == self.window).to_string()),
+          ],
+        );
+      }
+      "pointer" => {
+        let pointer = connection
+          .query_pointer(self.root)
+          .map_err(error)?
+          .reply()
+          .map_err(|error| error.to_string())?;
+        report(
+          "pointer",
+          &[
+            ("x", pointer.root_x.to_string()),
+            ("y", pointer.root_y.to_string()),
+            ("child", pointer.child.to_string()),
+            ("own", (pointer.child == self.window).to_string()),
+          ],
+        );
+      }
+      "grab_focus" => drop(
+        connection
+          .set_input_focus(InputFocus::POINTER_ROOT, self.window, CURRENT_TIME)
+          .map_err(error)?,
+      ),
+      "cursor" => {
+        connection
+          .xfixes_query_version(4, 0)
+          .map_err(error)?
+          .reply()
+          .map_err(|error| error.to_string())?;
+        let image = connection
+          .xfixes_get_cursor_image()
+          .map_err(error)?
+          .reply()
+          .map_err(|error| error.to_string())?;
+        report(
+          "cursor",
+          &[
+            ("width", image.width.to_string()),
+            ("height", image.height.to_string()),
+            ("xhot", image.xhot.to_string()),
+            ("yhot", image.yhot.to_string()),
+            ("serial", image.cursor_serial.to_string()),
+          ],
+        );
+      }
       "geometry" => {
         let geometry = connection
           .get_geometry(self.window)
@@ -538,6 +616,12 @@ impl Probe {
       {
         report("delete", &[]);
         return Ok(false);
+      }
+      Event::ClientMessage(event)
+        if event.type_ == self.wm_protocols
+          && event.data.as_data32()[0] == self.wm_take_focus =>
+      {
+        report("take_focus", &[]);
       }
       Event::PropertyNotify(event) if event.atom == self.net_wm_state => {
         let names = self.atom_names(self.net_wm_state)?;
@@ -713,8 +797,11 @@ mod tests {
       "--no-delete",
       "--state",
       "fullscreen,hidden",
+      "--color",
+      "ff0000",
     ]))
     .unwrap();
+    assert_eq!(options.color, Some(0xff0000));
     assert_eq!(options.class, "Probe");
     assert_eq!(options.instance, "probe");
     assert_eq!(options.size, (300, 200));

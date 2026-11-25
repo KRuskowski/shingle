@@ -1,8 +1,11 @@
 """Unit tests for the XWayland harness's pure helpers."""
 
 import os
+import shutil
 import signal
+import struct
 import subprocess
+import tempfile
 import unittest
 
 import run
@@ -129,6 +132,95 @@ class TilesTest(unittest.TestCase):
         {'x': 1, 'y': 2, 'width': 3, 'height': 4, 'synthetic': True},
         {'x': 1, 'y': 2, 'width': 3, 'height': 4}))
     self.assertFalse(run.same_geometry({'x': 1}, {'x': 2}))
+
+class ChildrenTest(unittest.TestCase):
+  """Parsing `xwininfo -root -children`."""
+
+  def test_children_come_bottom_to_top(self):
+    text = ('xwininfo: Window id: 0x3ef (the root window) (has no name)\n'
+            '\n  Root window id: 0x3ef (the root window) (has no name)\n'
+            '  Parent window id: 0x0 (none)\n'
+            '     3 children:\n'
+            '     0x40002c (has no name): ()  218x446+104+270  +104+270\n'
+            '     0x40000c "sh": ("xterm" "XTerm")  426x720+0+0  +0+0\n'
+            '     0x200001 (has no name): ()  10x10+0+0  +0+0\n')
+    self.assertEqual(run.parse_children(text),
+                     [0x200001, 0x40000c, 0x40002c])
+
+class XcursorTest(unittest.TestCase):
+  """Reading Xcursor files."""
+
+  def write(self, images):
+    """An Xcursor file with (nominal, width, height, xhot, yhot) images."""
+    header = struct.pack('<4sIII', b'Xcur', 16, 0x10000, len(images))
+    position = 16 + 12 * len(images)
+    toc = b''
+    chunks = b''
+    for nominal, width, height, xhot, yhot in images:
+      toc += struct.pack('<III', 0xfffd0002, nominal, position)
+      chunk = struct.pack('<IIIIIIIII', 36, 0xfffd0002, nominal, 1, width,
+                          height, xhot, yhot, 0)
+      chunk += b'\0' * (width * height * 4)
+      chunks += chunk
+      position += len(chunk)
+    path = os.path.join(self.directory, 'cursor')
+    with open(path, 'wb') as file:
+      file.write(header + toc + chunks)
+    return path
+
+  def setUp(self):
+    self.directory = tempfile.mkdtemp()
+
+  def tearDown(self):
+    shutil.rmtree(self.directory)
+
+  def test_the_nearest_size_wins(self):
+    path = self.write([(16, 16, 16, 1, 1), (24, 24, 24, 3, 1),
+                       (32, 32, 32, 4, 2)])
+    self.assertEqual(run.xcursor_image(path, 24), (24, 24, 3, 1))
+    self.assertEqual(run.xcursor_image(path, 30), (32, 32, 4, 2))
+    # The first of two equally near sizes, as the xcursor crate picks.
+    self.assertEqual(run.xcursor_image(path, 20), (16, 16, 1, 1))
+
+  def test_bad_files_give_none(self):
+    path = os.path.join(self.directory, 'bad')
+    with open(path, 'wb') as file:
+      file.write(b'nope')
+    self.assertIsNone(run.xcursor_image(path, 24))
+    self.assertIsNone(run.xcursor_image(path + '-missing', 24))
+
+class CaptureTest(unittest.TestCase):
+  """PPM screenshots."""
+
+  def test_ppm_parses_and_pixels_match(self):
+    pixels = bytes([255, 0, 0, 0, 0, 255, 255, 0, 0,
+                    10, 10, 10, 255, 0, 0, 0, 0, 255])
+    parsed = run.parse_ppm(b'P6\n# grim\n3 2\n255\n' + pixels)
+    self.assertEqual(parsed, (3, 2, pixels))
+    shot = run.Capture(*parsed)
+    self.assertEqual(shot.pixel(1, 0), (0, 0, 255))
+    self.assertEqual(shot.matching(run.red), (3, (0, 0, 2, 1)))
+    self.assertEqual(shot.matching(run.blue), (2, (1, 0, 2, 1)))
+    rect = {'x': 0, 'y': 1, 'width': 2, 'height': 1}
+    self.assertEqual(shot.matching(run.red, rect), (1, (1, 1, 1, 1)))
+    self.assertEqual(shot.matching(run.green), (0, None))
+
+  def test_bad_ppm_gives_none(self):
+    self.assertIsNone(run.parse_ppm(b'P5\n1 1\n255\n\0'))
+    self.assertIsNone(run.parse_ppm(b'P6\n2 2\n255\n\0\0\0'))
+
+class KeysTest(unittest.TestCase):
+  """Typing through STIPC."""
+
+  def test_text_becomes_evdev_names(self):
+    sent = []
+    shingle = run.Shingle.__new__(run.Shingle)
+    shingle.press = lambda key, pressed: sent.append((key, pressed))
+    shingle.type_text('a b\n')
+    self.assertEqual(sent, [
+        ('KEY_A', True), ('KEY_A', False), ('KEY_SPACE', True),
+        ('KEY_SPACE', False), ('KEY_B', True), ('KEY_B', False),
+        ('KEY_ENTER', True), ('KEY_ENTER', False)])
 
 if __name__ == '__main__':
   unittest.main()
