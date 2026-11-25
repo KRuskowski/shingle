@@ -44,8 +44,6 @@ Complete output lifecycle, focus, workspaces, sessions and rendering across outp
 Continue the missing plugins and configuration options, using Wayfire's source as the behavioural reference.
 
 - `stipc/feed_key` fires only bindings registered over IPC. Wayfire feeds STIPC keys through a headless keyboard into the normal input path (`plugins/ipc/stipc.cpp`), so configured key bindings fire too.
-- A view blocked in `view-pre-map` already holds its tile: the toplevel enters the tiling tree before its first map, so `simple-tile/get-layout` lists it and its neighbours shrink around an empty, unrendered slot until `unblock-map` (seen with real clients on 2026-11-25). Wayfire's tile plugin only attaches a view on `view-mapped` (`plugins/tile/tile-plugin.cpp`). Restored session placeholders rely on holding their slot, so the fix must keep that for them.
-- Clients receive the configured keymap as written, as `include` statements (for example `pc+us+de:2+inet(evdev)`), not compiled. libxkbcommon resolves them against the client's own XKB data, which works when that matches the host's. wlroots-based compositors, Wayfire included, send the compiled keymap from `xkb_keymap_get_as_string`, which needs no XKB data on the client side; `input::set_keymap` (crates/shingle/src/input.rs:154) already compiles it once to read the layout names.
 
 ## 8. Soak tests and measurements
 

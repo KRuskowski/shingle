@@ -56,6 +56,7 @@ The socket path is exported as `WAYFIRE_SOCKET` to every spawned process, so exi
 
 - `wayfire/get-config-option` returns a live `value` and its `default` as strings. `list-config-options` groups the 18 supported core, output, input, simple-tile and workaround options by section. Unknown options return errors.
 - `wayfire/set-config-options` applies validated live updates with atomic rollback. Workspace-grid dimensions are writable; shrinking moves out-of-range windows to the nearest valid workspace, clamps the current workspace, and preserves geometry and tiling state. Live updates are not written back to the YAML file.
+- Clients receive the compiled keymap (`xkb_keymap_get_as_string`), as from wlroots compositors, so they need no XKB data of their own. This covers `wl_keyboard`, input-method keyboard grabs, keymaps uploaded by virtual keyboards and config reloads.
 - `wayfire/get-keyboard-state` reports the layout names in the active XKB keymap. `set-keyboard-state` selects any valid layout index and sends the normal modifier notification. Comma-separated layouts and per-layout variants become distinct XKB groups.
 
 ## Runtime bindings
@@ -99,6 +100,8 @@ Each device tracks the keys, buttons and touch points it holds. Disabling or rem
 Explicitly subscribing to `view-pre-map` delays each new view's first buffer map and sends its metadata. Every subscriber must release the view with `window-rules/unblock-map`; the last release emits `view-mapped`, shows the view and applies normal focus. A subscriber disconnecting releases its blocks.
 
 While blocked, a view answers geometry and state methods but is not rendered, focused, shown in Scale or reported as mapped. A catch-all watch does not subscribe to `view-pre-map`, matching Wayfire.
+
+A blocked new view takes no tile until it is released, as Wayfire's tile plugin only attaches a view on `view-mapped`: `simple-tile/get-layout` leaves it out, its neighbours keep their size, and `set-layout` leaves it alone. On release it joins the end of its workspace's root split, after any views that mapped meanwhile. Until then it is configured to the output size, or floats if `tile_by_default` does not match it. A client claiming a restored session placeholder is different: the placeholder keeps its saved slot while blocked.
 
 ## STIPC test input
 

@@ -11,7 +11,8 @@ Rust/wgpu Wayland compositor built around Wayfire's tiling behaviour, compatible
 
 ## Pointers
 
-- IPC method inventory: crates/shingle/src/ipc.rs:380 (`SUPPORTED_METHODS`); dispatch: crates/shingle/src/ipc.rs:2541 (`respond`).
+- IPC method inventory: crates/shingle/src/ipc.rs:380 (`SUPPORTED_METHODS`); dispatch: crates/shingle/src/ipc.rs:2544 (`respond`).
+- Map blocking (`view-pre-map`): crates/shingle/src/shell.rs:422 (`request_map`), crates/shingle/src/shell.rs:381 (`finish_map`); held views stay out of the layout via crates/shingle-core/src/core.rs:898 (`release_held`). Compiled client keymap: crates/shingle/src/input.rs:194 (`compile_keymap`).
 - Seat input device registry and gating: crates/shingle/src/input_device.rs:1; registration API: crates/shingle/src/lib.rs:644 (`add_input_device`); nested's devices: crates/shingle-nested/src/main.rs:177 (`SeatDevices`); nested host-input gating: crates/shingle-nested/src/main.rs:4751 (`window_event_device`); nested IPC fixture tests: crates/shingle-nested/src/main.rs:4879 (`IpcFixture`).
 - Backend host API (NB-2): `frame_presented` crates/shingle/src/lib.rs:763, `shutdown_requested` lib.rs:903, `set_session_active` lib.rs:1172, `set_input_time` lib.rs:1186, `set_output_info` lib.rs:1937, `impl AsFd` lib.rs:2098, `with_socket_path` lib.rs:541. In-process Wayland client for protocol tests: crates/shingle/src/test_client.rs:1.
 - Tilefire migration fallbacks: crates/shingle-config/src/lib.rs:1560, crates/shingle-session/src/lib.rs:34, crates/shingle-auth/src/lib.rs:46, crates/shingle-nested/src/main.rs:731.
