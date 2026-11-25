@@ -11,7 +11,8 @@ Usage: shingle [OPTION]... [--spawn PROGRAM [ARG]...]
 Shingle, a tiling Wayland compositor compatible with Wayfire.
 
 Options:
-  --backend BACKEND  run on BACKEND: nested, native or headless
+  --backend BACKEND  run on BACKEND: nested, native, headless or
+                     offscreen
   --headless         same as --backend headless
   --config PATH      read configuration from PATH instead of
                      $XDG_CONFIG_HOME/shingle/shingle.yaml
@@ -29,7 +30,8 @@ Options:
 Without --backend or --headless the backend is SHINGLE_BACKEND if set,
 otherwise nested (a window in the host session) when WAYLAND_DISPLAY,
 WAYLAND_SOCKET or DISPLAY is set, otherwise native (libseat and libinput
-from a VT login; it draws offscreen until KMS output is built).
+from a VT login). headless draws nothing; offscreen draws with the GPU
+into an offscreen target that only screencopy shows.
 ";
 
 /// What the command line asks for.
@@ -277,6 +279,22 @@ mod tests {
   }
 
   #[test]
+  fn offscreen_is_a_backend() {
+    assert_eq!(
+      options(&["--backend", "offscreen", "--spawn", "vkcube"]).backend,
+      Some(Backend::Offscreen)
+    );
+    assert_eq!(
+      parsed(&["--headless", "--backend=offscreen"]),
+      Err(UsageError::ConflictingBackends(
+        Backend::Headless,
+        Backend::Offscreen
+      ))
+    );
+    assert!(HELP.contains("headless or\n                     offscreen"));
+  }
+
+  #[test]
   fn conflicting_backends_are_rejected() {
     assert_eq!(
       parsed(&["--headless", "--backend", "nested"]),
@@ -299,7 +317,8 @@ mod tests {
     let error = parsed(&["--backend", "drm"]).unwrap_err();
     assert_eq!(
       error.to_string(),
-      "--backend: unknown backend 'drm' (expected nested, native or headless)"
+      "--backend: unknown backend 'drm' \
+       (expected nested, native, headless or offscreen)"
     );
   }
 

@@ -112,7 +112,7 @@ fn run_with_frames(compositor: &mut Compositor) -> Result<(), shingle::Error> {
 
 /// The time between frames at `refresh_mhz` (millihertz); 60 Hz when it
 /// is not known.
-fn frame_interval(refresh_mhz: u32) -> Duration {
+pub(crate) fn frame_interval(refresh_mhz: u32) -> Duration {
   let refresh_mhz = if refresh_mhz == 0 {
     60_000
   } else {
@@ -124,8 +124,10 @@ fn frame_interval(refresh_mhz: u32) -> Duration {
 /// Registers a keyboard, a pointer and a touch device for STIPC input
 /// (`stipc/feed_key`, `feed_button`, `move_cursor`, `touch`), which
 /// Wayfire's stipc plugin creates as headless input devices on any
-/// backend. Headless has no other devices.
-fn register_stipc_devices(compositor: &mut Compositor) -> Vec<InputDeviceId> {
+/// backend. Headless and offscreen have no other devices.
+pub(crate) fn register_stipc_devices(
+  compositor: &mut Compositor,
+) -> Vec<InputDeviceId> {
   [
     ("Shingle headless keyboard", InputDeviceKind::Keyboard),
     ("Shingle headless pointer", InputDeviceKind::Pointer),

@@ -37,11 +37,14 @@ pub enum Backend {
   Native,
   /// No display or input devices; clients and IPC only.
   Headless,
+  /// Headless, but drawing with the GPU into an offscreen target, for
+  /// GPU clients and the GPU harness.
+  Offscreen,
 }
 
 impl Backend {
   /// The names `--backend` and `SHINGLE_BACKEND` accept.
-  pub const NAMES: &str = "nested, native or headless";
+  pub const NAMES: &str = "nested, native, headless or offscreen";
 
   /// The name of the backend, as `--backend` takes it.
   pub fn name(self) -> &'static str {
@@ -49,6 +52,7 @@ impl Backend {
       Self::Nested => "nested",
       Self::Native => "native",
       Self::Headless => "headless",
+      Self::Offscreen => "offscreen",
     }
   }
 }
@@ -84,6 +88,7 @@ impl FromStr for Backend {
       "nested" => Ok(Self::Nested),
       "native" => Ok(Self::Native),
       "headless" => Ok(Self::Headless),
+      "offscreen" => Ok(Self::Offscreen),
       _ => Err(UnknownBackend(name.to_owned())),
     }
   }
@@ -189,6 +194,13 @@ mod tests {
 
   use super::*;
 
+  const ALL: [Backend; 4] = [
+    Backend::Nested,
+    Backend::Native,
+    Backend::Headless,
+    Backend::Offscreen,
+  ];
+
   /// An environment lookup over `pairs`.
   fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
     let map: HashMap<String, OsString> = pairs
@@ -268,7 +280,7 @@ mod tests {
       ("WAYLAND_DISPLAY", "wayland-1"),
       (BACKEND_VARIABLE, "nested"),
     ];
-    for backend in [Backend::Nested, Backend::Native, Backend::Headless] {
+    for backend in ALL {
       assert_eq!(
         selected(Some(backend), &host),
         Selection {
@@ -304,6 +316,21 @@ mod tests {
   }
 
   #[test]
+  fn offscreen_is_never_selected_automatically() {
+    for pairs in [
+      &[("WAYLAND_DISPLAY", "wayland-1")][..],
+      &[("DISPLAY", ":0")][..],
+      &[][..],
+    ] {
+      assert_ne!(selected(None, pairs).backend, Backend::Offscreen);
+    }
+    assert_eq!(
+      selected(None, &[(BACKEND_VARIABLE, "offscreen")]).backend,
+      Backend::Offscreen
+    );
+  }
+
+  #[test]
   fn empty_variable_is_ignored() {
     let host = [("DISPLAY", ":1"), (BACKEND_VARIABLE, "")];
     assert_eq!(selected(None, &host).backend, Backend::Nested);
@@ -317,7 +344,7 @@ mod tests {
     assert_eq!(
       error.to_string(),
       "SHINGLE_BACKEND: unknown backend 'drm' \
-       (expected nested, native or headless)"
+       (expected nested, native, headless or offscreen)"
     );
   }
 
@@ -334,7 +361,7 @@ mod tests {
 
   #[test]
   fn names_round_trip() {
-    for backend in [Backend::Nested, Backend::Native, Backend::Headless] {
+    for backend in ALL {
       assert_eq!(backend.name().parse(), Ok(backend));
       assert_eq!(backend.to_string(), backend.name());
     }

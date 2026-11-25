@@ -3165,11 +3165,15 @@ dependencies = [
 name = "shingle-bin"
 version = "0.1.0"
 dependencies = [
+ "pollster 0.4.0",
  "shingle",
  "shingle-config",
+ "shingle-frontend",
  "shingle-native",
  "shingle-nested",
+ "shingle-render",
  "shingle-session",
+ "wgpu 30.0.2",
 ]
 
 [[package]]

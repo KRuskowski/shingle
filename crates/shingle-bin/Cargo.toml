@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The shingle binary: argument parsing and backend selection"
+description = "The shingle binary: argument parsing, backend selection and the headless and offscreen backends"
 
 # The binary is named after the compositor. It lives in its own package
 # because the `shingle` library must not depend on the backends (winit in
@@ -18,10 +18,14 @@ doc = false
 
 [dependencies]
 shingle = { path = "../shingle" }
+pollster.workspace = true
 shingle-config = { path = "../shingle-config" }
+shingle-frontend = { path = "../shingle-frontend" }
 shingle-native = { path = "../shingle-native" }
 shingle-nested = { path = "../shingle-nested" }
+shingle-render = { path = "../shingle-render" }
 shingle-session = { path = "../shingle-session" }
+wgpu.workspace = true
 
 [lints]
 workspace = true

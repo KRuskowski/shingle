@@ -3,12 +3,13 @@
 //! One binary for every backend. It parses the command line
 //! ([`cli::parse`]), selects the backend from it and the environment
 //! ([`backend::select`]) and runs that backend: nested in a window
-//! (`shingle-nested`), headless ([`headless`]) or native on libseat and
-//! libinput (`shingle-native`).
+//! (`shingle-nested`), headless ([`headless`]), offscreen on the GPU
+//! ([`offscreen`]) or native on libseat and libinput (`shingle-native`).
 
 mod backend;
 mod cli;
 mod headless;
+mod offscreen;
 
 use std::{error::Error, ffi::OsString, process::ExitCode};
 
@@ -97,6 +98,12 @@ fn start(
     Backend::Headless => {
       headless::run(config, options.ipc.as_deref(), options.spawn)
     }
+    Backend::Offscreen => offscreen::run(
+      config,
+      options.config,
+      options.ipc.as_deref(),
+      options.spawn,
+    ),
     Backend::Native => shingle_native::run(
       config,
       options.config,
@@ -193,6 +200,15 @@ mod tests {
   }
 
   #[test]
+  fn offscreen_runs_offscreen_inside_a_session() {
+    let (backend, _) = started(planned(
+      &["--backend", "offscreen"],
+      &[("WAYLAND_DISPLAY", "wayland-1"), ("SSH_CONNECTION", "x")],
+    ));
+    assert_eq!(backend, Backend::Offscreen);
+  }
+
+  #[test]
   fn headless_runs_headless_inside_a_session() {
     let (backend, _) = started(planned(
       &["--headless"],
@@ -283,7 +299,7 @@ mod tests {
       planned(&[], &[("SHINGLE_BACKEND", "x11")]),
       Plan::Fail(
         "shingle: SHINGLE_BACKEND: unknown backend 'x11' \
-         (expected nested, native or headless)\n"
+         (expected nested, native, headless or offscreen)\n"
           .into(),
         USAGE_STATUS
       )
