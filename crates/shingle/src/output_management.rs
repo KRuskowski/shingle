@@ -670,7 +670,9 @@ fn requested_mode(
 }
 
 /// Tests or applies a configuration without the backend: the placement,
-/// and a custom mode as the new output size and refresh rate.
+/// and a custom mode as the new physical size and refresh rate. As in
+/// Wayfire, the physical size stays across scale and transform changes,
+/// and the logical size follows from it.
 fn apply_locally(
   state: &mut CompositorState,
   resource: &ZwlrOutputConfigurationV1,
@@ -678,22 +680,10 @@ fn apply_locally(
   mode: Option<ModeChoice>,
   test: bool,
 ) {
-  let mut output = state.output;
-  output.x = placement.x;
-  output.y = placement.y;
-  if crate::output_transform::is_quarter_turn(state.output_transform)
-    != crate::output_transform::is_quarter_turn(placement.transform)
-  {
-    std::mem::swap(&mut output.width, &mut output.height);
-  }
+  let mut physical = crate::output::physical_size(state);
   let mut refresh = None;
   if let Some(ModeChoice::Custom(width, height, refresh_mhz)) = mode {
-    (output.width, output.height) = crate::output_transform::logical_size(
-      width,
-      height,
-      placement.scale,
-      placement.transform,
-    );
+    physical = (width, height);
     refresh = (refresh_mhz > 0).then_some(refresh_mhz);
   }
   if test {
@@ -703,11 +693,7 @@ fn apply_locally(
   if let Some(refresh_mhz) = refresh {
     state.output_info.refresh_mhz = refresh_mhz;
   }
-  state.set_output_transform(placement.transform);
-  match state
-    .set_output_scale(placement.scale)
-    .and_then(|()| state.set_output(output))
-  {
+  match crate::output::place(state, placement, physical) {
     Ok(()) => resource.succeeded(),
     Err(_) => resource.failed(),
   }
