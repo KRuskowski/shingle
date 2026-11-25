@@ -20,10 +20,10 @@ In short, the interactive frontend moves out of `shingle-nested` into a shared `
 6. NB-6 `shingle-native-session`: built and unit-tested through fakes: `shingle-native` runs the frontend with libseat, libinput and VT switching and draws offscreen, and `shingle` runs it from a VT login and refuses SSH logins ([status.md](status.md#native-backend-seat-and-input)). Open: steps 1 to 8 of [native-testing.md](native-testing.md) on the test machine.
 7. NB-7 `shingle-native-kms`: built and unit-tested through a fake card: one output driven with atomic KMS and copy scanout, page-flip pacing with presentation feedback from the flips, DPMS, pause and resume with a fresh modeset, and the failure handling ([status.md](status.md#native-backend-kms-display)). Open: steps 9 to 15 of [native-testing.md](native-testing.md) on the test machine.
 8. NB-8 `shingle-native-zero-copy`: GBM scanout with modifier negotiation, on the Vulkan setup of DMA-BUF's DB-1 ([design/dmabuf.md](design/dmabuf.md#7-scanout-in_formats-and-nb-8)).
-9. NB-9 `shingle-native-outputs`: hotplug and Wayfire-compatible mode configuration.
+9. NB-9 `shingle-native-outputs`: built and unit-tested through a fake card and a fake udev monitor: DRM hotplug, the next output lit when one is unplugged and none while every monitor is gone, Wayfire's per-output `mode` with its heuristics, EDID make, model and serial, the core output renamed and the `wl_output` global replaced with the connector, and wlr-output-management mode changes with `TEST_ONLY` first ([status.md](status.md#native-backend-outputs)); the parts without a card were checked with `wlr-randr` in headless and nested Shingle. Open: steps 16 to 22 of [native-testing.md](native-testing.md) on the test machine.
 10. NB-10 `shingle-native-planes`: cursor plane, VRR, tearing and fences.
 
-NB-1 to NB-5 are done, and so is the single `shingle` binary of decision 4 ([status.md](status.md#the-shingle-binary)). NB-6 and NB-7 are built and wait for their hardware checks; NB-8 and NB-9 are next and, like everything after them, need the test machine to be verified. The operator's decisions are recorded in the design's [Decisions](design/native-backend.md#decisions) section.
+NB-1 to NB-5 are done, and so is the single `shingle` binary of decision 4 ([status.md](status.md#the-shingle-binary)). NB-6, NB-7 and NB-9 are built and wait for their hardware checks; NB-8 is next and, like everything after it, needs the test machine to be verified. The operator's decisions are recorded in the design's [Decisions](design/native-backend.md#decisions) section.
 
 ## 3. DMA-BUF
 
@@ -68,7 +68,7 @@ XW-6 is next, when drag and drop between X and Wayland is wanted; XW-7 waits for
 
 Complete output lifecycle, focus, workspaces, sessions and rendering across outputs, including headless outputs over IPC where Wayfire offers them.
 
-The Wayfire import must keep one output configuration per `[output:NAME]` section: today every section writes into the single `OutputConfig`, so with several sections the last one wins (crates/shingle-config/src/wayfire.rs, `parse`). Found while documenting the crates and left for this item.
+The configuration already keeps one entry per `[output:NAME]` section (NB-9, `ShingleConfig::outputs`), and the native backend's output model is per connector; what remains is in `shingle` and `shingle-core`: more than one output rectangle, per-output `wl_output` globals and frame callbacks, and lighting more than one connector.
 
 ## 6. Remaining Wayfire compatibility
 

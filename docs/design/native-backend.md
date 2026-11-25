@@ -2,7 +2,7 @@
 
 Status: accepted with the operator's [decisions](#decisions), 2026-11-25. Roadmap item "Native backend" ([roadmap.md](../roadmap.md#2-native-backend)).
 
-Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit) or headless. This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1 to NB-5 and the single `shingle` binary are implemented (see [The `shingle` binary](#the-shingle-binary), [`shingle-render` without winit](#shingle-render-without-winit) and the entries for [NB-2](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor), [NB-3](#nb-3-shingle-frontend-extract-create-the-shared-crate-with-the-pure-modules), [NB-4](#nb-4-shingle-frontend-host-move-app-into-frontend) and [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)), each with notes on where the code differs from this design. NB-6 and NB-7 are built and unit-tested through fakes ([NB-6 as built](#nb-6-as-built), [NB-7 as built](#nb-7-as-built)); their hardware checks wait for the test machine ([native-testing.md](../native-testing.md)). The rest is not built.
+Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit) or headless. This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1 to NB-5 and the single `shingle` binary are implemented (see [The `shingle` binary](#the-shingle-binary), [`shingle-render` without winit](#shingle-render-without-winit) and the entries for [NB-2](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor), [NB-3](#nb-3-shingle-frontend-extract-create-the-shared-crate-with-the-pure-modules), [NB-4](#nb-4-shingle-frontend-host-move-app-into-frontend) and [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)), each with notes on where the code differs from this design. NB-6, NB-7 and NB-9 are built and unit-tested through fakes ([NB-6 as built](#nb-6-as-built), [NB-7 as built](#nb-7-as-built), [NB-9 as built](#nb-9-as-built)); their hardware checks wait for the test machine ([native-testing.md](../native-testing.md)). The rest is not built.
 
 Line numbers refer to branch `shingle-native-design` at `d2568d2`. Crate versions and dates were read from crates.io and GitHub on 2026-11-25; crate APIs were read from the crate sources (wgpu, drm, calloop and xkbcommon from `~/.cargo/registry`, the others from their published `.crate` files).
 
@@ -370,7 +370,7 @@ All `time_usec` values are passed through, so clients see libinput timestamps in
 
 - The output is the first connected connector in `resource_handles()` order, preferring internal panels (eDP, LVDS, DSI). A config entry whose output name matches wins.
 - The mode follows Wayfire's `find_matching_mode` and default heuristic (wayfire/src/core/output-layout.cpp:150-191 and 455-520). `auto` or no config means the preferred mode. `WxH@R` means an exact match, otherwise the closest refresh at that size. `highres` and `highrr` behave as in Wayfire, and `off` disables the output.
-- Today the Wayfire importer drops the `@refresh` part and stores only `width`/`height` (crates/shingle-config/src/wayfire.rs:594-604, `OutputConfig` lib.rs:524). NB-9 adds `name`, `refresh_mhz`, `mode` (`auto`/`off`/`highres`/`highrr`/explicit) and `vrr` to `OutputConfig`. A single `[output]` section stays valid.
+- Today the Wayfire importer drops the `@refresh` part and stores only `width`/`height` (crates/shingle-config/src/wayfire.rs:594-604, `OutputConfig` lib.rs:524). NB-9 adds `name`, `refresh_mhz`, `mode` (`auto`/`off`/`highres`/`highrr`/explicit) and `vrr` to `OutputConfig`. A single `[output]` section stays valid. (As built, the refresh rate is part of the explicit `mode` rather than a field of its own; see [NB-9 as built](#nb-9-as-built).)
 - Mode selection is a pure function in `kms/modes.rs`, unit-tested with mode lists.
 
 **Compositor output description.**
@@ -386,7 +386,7 @@ All `time_usec` values are passed through, so clients see libinput timestamps in
 - A `udev::MonitorBuilder` on subsystem `drm` delivers `change` events with `HOTPLUG=1` for the card. The native crate re-reads connectors and diffs them against `kms::Outputs`.
 - If the enabled output disconnects, the next connected one is enabled and moded, and the compositor gets `set_output_info` and `set_output`. Windows keep their tiling trees because the core output is renamed, not recreated.
 - If nothing is connected, Shingle keeps running with the last output size, stops scheduling frames and waits. Wayfire behaves the same way, keeping its views without a physical output.
-- wlr-output-management `apply` requests (output_management.rs) that change mode or turn the output off are validated with `TEST_ONLY` before they are applied.
+- wlr-output-management `apply` requests (output_management.rs) that change mode or turn the output off are validated with `TEST_ONLY` before they are applied. (As built, turning the only output off is refused, as DPMS covers it; see [NB-9 as built](#nb-9-as-built).)
 
 **Room for multi-output (roadmap item "Multi-output").**
 
@@ -953,6 +953,76 @@ Acceptance:
 - On the test machine, unplugging and replugging a monitor triggers a re-probe and a new mode.
 - Disconnecting all outputs keeps Shingle and its clients alive, and reconnecting restores the picture with the tiling tree intact.
 - `wlr-randr` (or an equivalent client) can change the mode.
+
+#### NB-9 as built
+
+Done on branch `shingle-native-outputs`: built, clippy-checked and unit-tested on this host through the fake card and a fake hotplug monitor; nothing in it has received a udev event or read a real EDID yet. The device-specific acceptance items are steps 16 to 22 of [native-testing.md](../native-testing.md); the parts that are not device-specific were checked with `wlr-randr` in headless and nested Shingle ([status.md](../status.md#with-real-clients)). The API:
+
+```rust
+// shingle-config: output.rs
+pub enum OutputMode { Auto, Off, HighRes, HighRr,
+  Explicit { width: u32, height: u32, refresh_mhz: u32 } }
+pub struct OutputConfig { pub name: Option<String>, pub mode: OutputMode,
+  pub x, pub y, pub width, pub height, pub scale, pub transform,
+  pub vrr: bool }
+ShingleConfig::outputs: Vec<OutputConfig>; // one per [output:NAME]
+ShingleConfig::output_config(&self, name: &str) -> &OutputConfig;
+
+// shingle-core
+Shingle::rename_output(&mut self, output: &OutputId, to: OutputId);
+
+// shingle: output.rs
+pub struct OutputModeInfo { pub width, pub height, pub refresh_mhz,
+  pub preferred: bool }
+OutputInfo::modes: Vec<OutputModeInfo>; OutputInfo::current_mode;
+pub struct OutputPlacement { x, y, width, height, scale, transform,
+  refresh_mhz }
+Config::output_placements: BTreeMap<String, OutputPlacement>;
+Config::output_refresh_mhz: u32;
+pub enum RequestedMode { Listed(usize),
+  Custom { width, height, refresh_mhz } }
+pub struct OutputRequest { pub id: OutputRequestId,
+  pub mode: RequestedMode, pub test_only: bool }
+Compositor::take_output_requests(&mut self) -> Vec<OutputRequest>;
+Compositor::finish_output_request(&mut self, OutputRequestId, ok: bool);
+
+// shingle-frontend
+Frontend::take_reloaded_config(&mut self) -> Option<ShingleConfig>;
+
+// shingle-native
+pub trait DeviceMonitor { fn dispatch(&mut self) -> Vec<DrmEvent>;
+  fn poll_fd(&self) -> Option<BorrowedFd<'_>>; }    // hotplug.rs
+pub struct UdevMonitor;                             // the real one
+pub fn classify(action, sysname, card, hotplug, connector)
+  -> Option<DrmEvent>;
+pub struct OutputPolicy;                            // outputs.rs
+pub fn choose(card, policy, keep) -> Option<&ConnectorInfo>;
+pub fn diff(before, after) -> Vec<ConnectorChange>;
+pub fn requested_mode(modes, RequestedMode) -> Option<Mode>;
+pub struct Edid { make, model, serial }             // kms/edid.rs
+Display::prepare(device, policy: OutputPolicy);
+Display::hotplug(&mut self) -> Resumed;
+Display::set_policy(&mut self, OutputPolicy) -> Resumed;
+Display::test_mode / set_mode(&mut self, RequestedMode);
+Backend::set_device_monitor(&mut self, Box<dyn DeviceMonitor>);
+```
+
+Where the code differs from the plan, and why:
+
+- **No `kms::Outputs` map.** [Section 5](#5-outputs) planned a map of every connector keyed by name with an `enabled` list. NB-7 built `Display` with one lit output (`Lit`) instead, and NB-9 keeps that: the display remembers every connector's name, connection and modes from the last probe (`outputs::ConnectorState`) only to diff them, and probes the card again whenever something changes. A per-connector map pays off when more than one output is lit, which is the multi-output item's work; until then it would hold state that a probe refreshes anyway.
+- **Choosing the output.** The output that is lit stays while it is connected and not configured `off`. Otherwise the first connected connector named in `outputs` (in config order) wins, then an internal panel, then the first connected connector, skipping any configured `off`. Keeping the lit output avoids switching screens when a second monitor is plugged in, since only one is lit.
+- **Mode configuration.** `OutputConfig` has `mode` (parsed exactly as wf-config parses Wayfire's option: `auto` or `default`, `off`, `highres`, `highrr`, `WxH` and `WxH@R` with `R` in hertz below 1000 and in millihertz otherwise, and nothing after the refresh) instead of a separate `refresh_mhz`. `ShingleConfig::output` is the default for every output, and the new `outputs` list holds one entry per `[output:NAME]` section, which fixes the importer bug the roadmap's multi-output item noted (every section wrote into one `OutputConfig`). Wayfire's `mirror` imports as `off`, since Shingle lights one output. The i3 importer reads sway's `output NAME mode WxH@RHz` with decimal hertz, `disable` and `adaptive_sync`. `vrr` is read and stored; NB-10 applies it.
+- **Wayfire's heuristics.** `kms/modes.rs` from NB-7 already followed Wayfire's `select_default_mode` and `find_matching_mode` (wayfire/src/core/output-layout.cpp, checked again against `b36615a7`): `auto` the first preferred mode, `highres` the first mode of the largest area, `highrr` the first largest mode among those of the highest refresh, else the last mode; an explicit mode of a size the card does not list falls back to `auto`, as Wayfire's `is_mode_supported` does for DRM. NB-9 feeds it the configured mode.
+- **wlr-output-management.** Heads list every mode of the connector, with the preferred one marked and the current one as `current_mode`; a new mode list finishes the old mode objects and announces new ones. With a mode list, a mode change becomes an `OutputRequest` that the native backend tests with a `TEST_ONLY` modeset (with fresh buffers and blob) and, for `apply`, sets with a blocking modeset after another test; the client gets `succeeded` or `failed` only then. Position, scale and transform are the compositor's and are applied when the backend reports success. A mode change waits while a page flip is pending, because the kernel refuses a modeset then; a test does not wait. A custom mode must match a listed mode (with no refresh, the preferred or fastest one of that size): Wayfire would try a custom mode, which wlroots turns into a generated CVT mode, but Shingle does not generate modes. `disable_head` on the only output fails, as before; DPMS turns the display off.
+- **Renaming the output.** `set_output_info` with a new name renames the core output (`Shingle::rename_output`), so windows keep their tiling trees and workspaces and sessions are saved under the connector name, and replaces the `wl_output` global: clients see `global_remove` and a new global, every surface gets `leave` for the old output, foreign toplevels `output_leave`, and xdg-outputs, power controls (`failed`), gamma controls (`failed`), output-management heads (`finished`) and workspace groups (rebuilt with new ids) of the old output end. The old global stays bindable for 5 s, as wlroots' `wlr_global_destroy_safe` keeps it, and an output bound from it is described once but not tracked, so a client racing the removal gets no protocol error. The configured placement for the new name (position, scale, transform from `Config::output_placements`) is applied around the mode's size.
+- **Sessions across names.** A session restored with outputs of other names, such as a native session restored in nested, has those outputs merged into the compositor's one output when it starts, so no window is lost on an output that is not shown. `rename_output` merges the same way when the new name exists already.
+- **Hotplug.** `UdevMonitor` follows wlroots' session (backend/session/session.c, `handle_udev_event`): a `change` event of the card with `HOTPLUG=1` means probe again (the `CONNECTOR` id is read but not used to narrow the probe), and `remove` is logged. Hotplugs and reloaded output modes wait for a pending flip like mode changes; a flip that never completes times out within a second. While the seat is disabled, events are read and dropped, since the resume probes anyway. A monitor that cannot be created is a warning, not a refusal; outputs are then probed only on resume, as in NB-7.
+- **No output.** With every monitor unplugged, the display lights nothing and draws nothing; the compositor keeps the last output description and size, so windows keep their places and clients run (they get no frame callbacks). When a monitor returns, it is lit and described, which renames the output if it is another connector.
+- **EDID.** `kms/edid.rs` reads make, model and serial as libdisplay-info does for wlroots (`di_info_get_make`, `_model`, `_serial`): the PNP id named through hwdata's `pnp.ids`, which libdisplay-info compiles in and Shingle reads at runtime (falling back to the id), the product name descriptor or the product code as `0x%04X`, and the serial descriptor or a non-zero serial number as `0x%08X`. Without an EDID the output stays `Unknown`, as in wlroots.
+- **Config reload.** `Frontend::take_reloaded_config` hands the reloaded config to the host; native applies its output modes (`Display::set_policy`), relighting only when the lit output's mode, or the output, changes. `apply_config` keeps the size of a backend that lists modes and places it as configured; nested sizes its output from its window again after a reload.
+- **Nested and headless.** Where it makes sense without a card: an explicit configured mode (physical pixels, divided by the scale) sizes the headless output and opens the nested window, and its refresh rate is the one clients are told; a named `HEADLESS-1` entry replaces the default; wlr-output-management custom modes resize the output and set the refresh rate, `--dryrun` tests change nothing, and scale and transform changes keep the physical size, as in Wayfire (they used to keep the logical size). `Frontend::set_output_size` keeps the output's position, which it used to reset to 0,0.
+
+Unit tests cover: the mode parser against wf-config's rules, printing modes back, sway modes, YAML round trips of named outputs and their validation, and the Wayfire and i3 importers keeping each output apart (crates/shingle-config/src/output.rs); renaming and merging outputs in the core; in `shingle` with the in-process client (crates/shingle/src/output/tests.rs), the old global removed and a new one announced, the old head finished and a new one named, the window's tree and location under the new name, the new global naming the connector, an inert late bind and the retired global's removal after 5 s, the placement of a new name and its reload, headless sizes and refresh rates from the config, the mode list with its preferred and current modes and its replacement, the rectangle mode without a list, mode changes waiting for the backend (a refused test, an applied change answered after it, custom modes), local custom modes, refusing `disable_head` and a restored session joining the one output; EDID parsing; the policy, connector choice, diffing and requested modes (crates/shingle-native/src/outputs.rs); udev event classification; the display on the fake card (configured, `off` and `highres` modes, a hotplug that changes nothing and makes no commit, unplugging the lit output lighting the next one and replugging keeping it, every output unplugged and back with a stale flip ignored, a replugged monitor with other modes, hotplugs while paused, a reloaded policy, mode requests tested before they are made and a rejected one keeping the old mode, the EDID and mode list in the output description); and, in crates/shingle-native/src/host/tests.rs, a monitor plugged in later lit without a VT switch with the client seeing the connector after rebinding, unplugging the lit monitor moving to the next with the tiling tree intact, every monitor unplugged with clients alive and the picture and frame callbacks back on replug, a hotplug during a pending flip waiting for it, and wlr-output-management mode changes tested and set through the backend with `TEST_ONLY` first. What only hardware can show is listed in [status.md](../status.md#native-backend-outputs).
 
 ### NB-10 `shingle-native-planes`: cursor plane, VRR, tearing and fences
 

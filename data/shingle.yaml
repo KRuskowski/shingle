@@ -1,10 +1,19 @@
 output:
+  mode: auto
   x: 0
   y: 0
   width: 1280
   height: 720
   scale: 1.0
   transform: normal
+  vrr: false
+
+# One entry per connector, like Wayfire's [output:NAME] sections. Modes
+# are auto, off, highres, highrr, WIDTHxHEIGHT or WIDTHxHEIGHT@HZ.
+outputs: []
+#  - name: DP-1
+#    mode: 2560x1440@144
+#    scale: 1.25
 
 background_color: [0.1, 0.1, 0.1, 1.0]
 

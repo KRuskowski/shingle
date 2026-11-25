@@ -9,7 +9,7 @@
 | `shingle-render` | wgpu rendering without a windowing dependency: shared `GpuContext`, per-output `RenderState`, the `draw` pass, and window and offscreen targets. |
 | `shingle-frontend` | The interactive frontend shared by the nested and native hosts, without winit: `Frontend` with Scale, Expo, the switchers, drags, animations, effects, the scene build, binding dispatch, key repeat and session handling, behind the `Host` trait and `InputEvent`. |
 | `shingle-bin` | The `shingle` binary: argument parsing, backend selection and the headless backend. Its own package because the `shingle` library must not depend on the backends that depend on it. |
-| `shingle-native` | Native backend library: libseat session and VT switching, libinput devices with udev hotplug, atomic KMS with copy scanout and page-flip pacing, the Vulkan renderer for it, and the event loop that runs `Frontend` on a seat, each device interaction behind a trait (`Session`, `InputSource`, `KmsDevice`, `FrameRenderer`) with fakes in the tests. Entry point `shingle_native::run`. |
+| `shingle-native` | Native backend library: libseat session and VT switching, libinput devices with udev hotplug, atomic KMS with copy scanout and page-flip pacing, DRM hotplug and the configured choice of output and mode, the Vulkan renderer for it, and the event loop that runs `Frontend` on a seat, each device interaction behind a trait (`Session`, `InputSource`, `KmsDevice`, `DeviceMonitor`, `FrameRenderer`) with fakes in the tests. Entry point `shingle_native::run`. |
 | `shingle-nested` | Nested backend library, a thin winit host for `Frontend`: the window and renderer, winit-to-`InputEvent` translation, host focus handling and button emulation. Entry point `shingle_nested::run`. |
 | `shingle-xwayland` | XWayland without `wayland-server`: X display sockets and lock, the supervised Xwayland process with its restart rule, and the X window manager (x11rb) behind an `XConnection` trait: property parsers, classification, `Pairing` of windows and surfaces by serial, the `ConfigureRequest` policy, ICCCM focus and the `FocusIn` guard, client messages, restacking and the root cursor, the clipboard and primary selection bridge with its MIME mapping and non-blocking transfers, and the `xw_probe` test client (examples/). |
 | `shingle-config` | Validated YAML model, Wayfire INI and i3 imports, XKB keymap generation. |
@@ -62,11 +62,17 @@
 | Hotplugged input devices and their seat devices | `crates/shingle-native/src/udev.rs` |
 | KMS device trait, property cache, `IN_FORMATS`, mode selection, atomic requests, connector and plane choice | `crates/shingle-native/src/kms.rs`, `kms/` (`drm.rs` is the real card, `fake.rs` the tests' card) |
 | The lit output: startup test, flips, presentation, DPMS, pause and resume, failures | `crates/shingle-native/src/display.rs`; tests in `display/tests.rs` |
+| DRM hotplug monitor (`DeviceMonitor`, udev) | `crates/shingle-native/src/hotplug.rs` |
+| Configured output modes, output choice, connector diffing, requested modes | `crates/shingle-native/src/outputs.rs` |
+| EDID make, model and serial | `crates/shingle-native/src/kms/edid.rs` |
 | Copy scanout into dumb buffers | `crates/shingle-native/src/scanout.rs`, `scanout/copy.rs` |
 | Page-flip state machine | `crates/shingle-native/src/pacing.rs` |
 | Card selection, adapter matching, GPU renderer and its failure rules | `crates/shingle-native/src/gpu.rs` |
 | Native event loop, pause and resume, `Host` | `crates/shingle-native/src/host.rs`; tests in `host/tests.rs` |
 | Native test plan and tools (test machine only) | `docs/native-testing.md`, `tools/native_test/` |
+| Output description, renaming, mode requests, configured placement | `crates/shingle/src/output.rs`, `output_management.rs`; tests in `output/tests.rs` |
+| Output configuration and Wayfire's mode syntax | `crates/shingle-config/src/output.rs` |
+| Real-client output-management checks (headless and nested) | `tools/output_test/run.py` |
 | Host keyboard focus changes | `crates/shingle-nested/src/host_keyboard.rs` |
 | xkb keyboard state, key names, keysyms, modifier masks | `crates/shingle-frontend/src/keyboard.rs` |
 | Key repeat timer | `crates/shingle-frontend/src/keyboard/repeat.rs` |

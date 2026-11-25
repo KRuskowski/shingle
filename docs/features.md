@@ -173,6 +173,10 @@ The `security_context.privileged_protocols` comma-separated list is imported fro
 
 `wp_alpha_modifier_v1` applies client-requested alpha multipliers on surface commit, including cached synchronized-subsurface commits. The multiplier ranges from zero (transparent) to `UINT32_MAX` (opaque) and is combined with Shingle's window-opacity setting. Destroying the modifier schedules a return to full alpha.
 
+### Output configuration
+
+Each Wayfire `[output:NAME]` section, i3 `output NAME` line or YAML `outputs` entry configures the output with that connector name: `mode` (`auto`, `off`, `highres`, `highrr`, `WxH` or `WxH@R`, as Wayfire reads it), position, scale, transform and `vrr`; `output` is the default. The native backend lights the configured mode and follows monitors being plugged in and out. wlr-output-management clients such as `wlr-randr` see every mode of the output and can change it, test a configuration without applying it, and set position, scale and transform; on a native output a mode change passes a KMS `TEST_ONLY` commit first. Turning the only output off is refused; wlr-output-power-management (DPMS) does that. When the output is replaced by another connector, clients see the old `wl_output` removed and a new one announced, and windows stay on their workspaces.
+
 ### Presentation timing
 
 `wp_tearing_control_v1` applies asynchronous or vertical-sync hints on surface commit. When any visible surface requests asynchronous presentation, the nested wgpu frontend selects Immediate mode if the host supports it. Otherwise it keeps FIFO presentation. Destroying the control schedules a return to vertical sync.

@@ -344,12 +344,94 @@ Acceptance: "Every row of the failure table that can be produced on the test mac
 
 1. **No DRM device, or `SHINGLE_DRM_DEVICE` invalid.** Run `SHINGLE_DRM_DEVICE=/dev/dri/card9 shingle --config ~/.config/shingle/test.yaml; echo "status=$?"`. Expected: `shingle: no DRM device: tried /dev/dri/card9 (...)` with libseat's error, `status=1`, no socket and tty1 still a text console. Then `SHINGLE_DRM_DEVICE=/dev/dri/cardN` with the real card starts normally.
 2. **No Vulkan adapter.** Run `VK_ICD_FILENAMES=/nonexistent.json shingle --config ~/.config/shingle/test.yaml; echo "status=$?"`. Expected: `shingle: no Vulkan adapter: ...`, `status=1`, no socket, text console back.
-3. **No connected output at startup.** Unplug the monitor, log in on tty1 blind and start Shingle with `foot`. Over SSH: the log says `no connected output; nothing is shown until one is`, `ipc window-rules/list-views` lists the foot window and SIGTERM is not needed yet. Plug the monitor in, then `sudo chvt 2; sleep 1; sudo chvt 1`: the log names the output and the picture appears (hotplug without a VT switch is NB-9). Record whether the monitor shows the console or stays dark while unplugged-then-plugged before the switch.
+3. **No connected output at startup.** Unplug the monitor, log in on tty1 blind and start Shingle with `foot`. Over SSH: the log says `no connected output; nothing is shown until one is`, `ipc window-rules/list-views` lists the foot window and SIGTERM is not needed yet. Plug the monitor in, then `sudo chvt 2; sleep 1; sudo chvt 1`: the log names the output and the picture appears. Since NB-9 the picture appears as soon as the monitor is plugged in; that is step 17. Record whether the monitor shows the console or stays dark while unplugged-then-plugged before the switch.
 4. **Output unplugged.** With Shingle running and lit, `sudo chvt 2`, unplug the monitor, `sudo chvt 1`: the log says `no connected output`, Shingle and foot keep running (IPC answers). Plug it in, `sudo chvt 2; sudo chvt 1`: the picture is back with the window in place.
 5. **GPU device lost or hung.** Only where the driver offers a reset trigger: on i915, `echo 1 | sudo tee /sys/kernel/debug/dri/N/i915_wedged`; on amdgpu, `sudo cat /sys/kernel/debug/dri/N/amdgpu_gpu_recover`, with N the card's minor. Expected: the log says `the GPU device was lost (...)` or `the GPU did not finish a frame within 100 ms` three times, then `recreating the GPU context`, and the picture continues with every window's content. Triggering it three times within 60 s ends Shingle with `the GPU failed 3 times within 60 s; saving the session and exiting`, `exit=2` and a fresh `session.json`. If the driver has no such trigger, record that the row was not producible.
 6. **Panic and SIGKILL.** SIGKILL is step 14. A panic cannot be produced from outside; it is covered by the panic hook's log and the same kernel and seat cleanup as SIGKILL.
 
 The other rows cannot be produced on a healthy machine and are unit-tested only: no atomic support (every current KMS driver has it), another DRM master (libseat grants master only to the active session), every mode rejected by `TEST_ONLY` (no real monitor rejects all its modes; the fallback order is unit-tested), and a page flip that never completes (would need a broken driver; the timeout, the recovery modeset and the exit after three are unit-tested).
+
+## NB-9: hotplug and output configuration
+
+From NB-9 on, a udev monitor for the card reports DRM hotplug, so plugging and unplugging monitors takes effect without a VT switch. Shingle still lights one output: the one it lit while that stays connected, else a connector named in the configuration, else an internal panel, else the first connected one, never one whose mode is `off`. The mode comes from the output's `mode` option, chosen as Wayfire chooses it. Unit tests through the fake card and a fake monitor cover the logic ([design, NB-9 as built](design/native-backend.md#nb-9-as-built)); these steps check that real connectors, EDIDs, udev events and drivers behave the way the fakes assume.
+
+### Step 16: prepare the test machine for NB-9
+
+1. In addition to steps 0 and 9, install `wlr-randr`, `edid-decode` and `udev` (for `udevadm`), and have two monitors at hand, A and B, ideally with different preferred modes (for example a 1920x1080 and a 2560x1440 monitor), both connectable to the boot VGA card. Note their connector names from `ls /sys/class/drm/` once both are plugged in, as `CONN_A` and `CONN_B` below (such as `HDMI-A-1` and `DP-1`).
+2. Write the NB-9 test configs:
+
+   ```sh
+   cd ~/.config/shingle
+   printf 'session: {restore: false}\nxwayland: {mode: false}\n' > nb9.yaml
+   cp nb9.yaml nb9-explicit.yaml
+   printf 'outputs:\n  - {name: CONN_A, mode: "1280x720@60"}\n' \
+     >> nb9-explicit.yaml
+   ```
+
+   replacing `CONN_A` with monitor A's connector name and `1280x720@60` with a mode monitor A lists but does not prefer (`edid-decode /sys/class/drm/card*-CONN_A/edid` lists them).
+3. In the NB-9 steps, "start Shingle on tty1 with CONFIG" means step 9's command with `--config ~/.config/shingle/CONFIG` and `--spawn foot`. Over SSH, also watch the udev events next to Shingle's log:
+
+   ```sh
+   udevadm monitor --udev --subsystem-match=drm &
+   tail -f ~/.local/state/shingle/native.log | grep -v 'page flip' &
+   ```
+
+### Step 17: a monitor plugged in later is lit at once, with its EDID
+
+Closes NB-7's open point that a monitor plugged in after the start was only seen after a VT switch (step 15.3).
+
+1. Unplug both monitors, log in on tty1 blind and start Shingle with `nb9.yaml`. Over SSH: the log has `no connected output; nothing is shown until one is` and no line about a hotplug monitor (a line `no DRM hotplug monitor (...)` fails this step), and `ipc window-rules/list-views` lists the foot window.
+2. Plug in monitor A. Expected within a second, without any VT switch: udevadm shows a `change` event for `/devices/.../drm/cardN` (with `HOTPLUG=1` in `udevadm info`), the log says `CONN_A connected` and `output CONN_A: WxH at R Hz, copy scanout` with A's preferred mode, and the screen shows foot tiled over the whole output.
+3. Over SSH:
+
+   ```sh
+   wlr-randr
+   edid-decode /sys/class/drm/card*-CONN_A/edid | \
+     grep -E 'Manufacturer|Display Product (Name|Serial)|Serial Number'
+   ipc window-rules/list-outputs
+   ```
+
+   Expected: `wlr-randr` lists one head `CONN_A`, whose `Make` is the manufacturer's name from hwdata's `pnp.ids` (for example `Dell Inc.` for `DEL`) or the three-letter id if hwdata is not installed, `Model` the display product name (or `0xPPPP`), `Serial` the product serial (or `0xSSSSSSSS`), and the description `MAKE MODEL SERIAL (CONN_A)`, matching edid-decode. Its modes are exactly the ones edid-decode and `/sys/class/drm/card*-CONN_A/modes` list, with the preferred mode marked `preferred, current`. `list-outputs` names `CONN_A`, and the foot window's `output-name` in `list-views` is `CONN_A`: the core output was renamed.
+
+### Step 18: unplugging and replugging re-probes and picks a new mode
+
+Acceptance: "On the test machine, unplugging and replugging a monitor triggers a re-probe and a new mode."
+
+1. With Shingle running from step 17 on monitor A, note `ipc window-rules/list-views`. Unplug A. Expected: a udev `change` event, `CONN_A disconnected` and `no connected output; nothing is shown until one is` in the log, Shingle and foot keep running (IPC answers, `kill -0` on foot's PID succeeds), and `list-views` still has foot with the same geometry.
+2. Plug monitor B into the same connector (or, with one monitor, plug A back in). Expected: `CONN_A connected` (or `offers other modes` if the connector stayed connected across the swap), `output CONN_A: ...` with B's preferred mode, the picture back on B at that mode, and `wlr-randr` showing B's EDID and modes. foot is resized to the new output, and `list-views` shows it filling the new size.
+3. Repeat the unplug and replug ten times quickly (within a second each). Shingle keeps running, the last state is lit, and the log has no `modeset failed`.
+
+### Step 19: with every monitor unplugged, clients live and the picture returns with the tiling tree intact
+
+Acceptance: "Disconnecting all outputs keeps Shingle and its clients alive, and reconnecting restores the picture with the tiling tree intact."
+
+1. Start Shingle on tty1 with `nb9.yaml` and monitor A, open two more windows (`ipc stipc/run '{"cmd": "foot"}'` twice) and move one to another workspace with its keybinding, so the tree has a split and two workspaces. Save `ipc simple-tile/get-layout '{"wset-index": 1, "workspace": {"x": 0, "y": 0}}'` and `ipc window-rules/list-views` to files.
+2. Unplug A. For a minute: foot windows keep running (type into one over SSH with `ipc stipc/feed_key` and check it echoes nothing to the screen but keeps its process), `list-views` and `get-layout` are unchanged, and the log shows no frame drawn (`grep -c 'page flip'` stops growing).
+3. Plug A in again. Expected: the picture returns within a second at A's mode, `get-layout` and `list-views` are byte for byte the files of 1 (the same mode gives the same geometry), and typing reaches the focused foot.
+4. With A and B connected and A lit, unplug A: B is lit (`output CONN_B: ...`), every window keeps its workspace and tile order (`get-layout` lists the same windows in the same order, scaled to B's size), and `wlr-randr` and `wayland-info` list only `CONN_B`: clients saw the old output's global go and a new one appear.
+
+### Step 20: the configured mode follows Wayfire
+
+Acceptance: "Mode-selection tests cover Wayfire's heuristics" is unit-tested; this step checks the configuration end to end.
+
+1. Start Shingle on tty1 with `nb9-explicit.yaml` and monitor A. Expected: `output CONN_A: 1280x720 at 60.000 Hz` (the configured mode, not the preferred one) and `wlr-randr` marks it `current`.
+2. With Shingle running, edit `nb9-explicit.yaml` to each of the values below in turn (the config reloads by itself) and check the log and `wlr-randr` after each: `highres` lights the largest mode, `highrr` the largest among the fastest, a size A does not offer (`mode: "1234x567"`) lights the preferred mode as Wayfire falls back to `auto`, a size with an unlisted refresh lights the listed refresh closest to it, and `off` turns A off (`no connected output`), leaving B lit if it is connected.
+3. Repeat 1 with the same option in a Wayfire file, `printf '[core]\nxwayland = false\n[output:CONN_A]\nmode = 1280x720@60\n[output:CONN_B]\nmode = off\n' > ~/.config/shingle/nb9.ini`, started with `--config ~/.config/shingle/nb9.ini`: the same mode is lit and B stays dark, which shows each `[output:NAME]` section kept apart.
+
+### Step 21: wlr-randr changes the mode, with `TEST_ONLY` first
+
+Acceptance: "`wlr-randr` (or an equivalent client) can change the mode."
+
+1. Start Shingle on tty1 with `nb9.yaml` and monitor A, with `present_probe 100000` as the client so that a flip is pending at almost any moment.
+2. Over SSH, pick a non-current mode from `wlr-randr` and run `wlr-randr --output CONN_A --mode WxH@R --dryrun; echo "status=$?"`. Expected: `status=0`, nothing changes on the screen and the log has no `output CONN_A:` line.
+3. `wlr-randr --output CONN_A --mode WxH@R; echo "status=$?"`. Expected: `status=0`, the monitor switches to that mode within a second, the log says `output CONN_A: WxH at R Hz, copy scanout`, `wlr-randr` marks it `current`, the probe's window fills the new size and present_check.py on the probe's output (step 11) still finds every presentation time equal to a flip time.
+4. `wlr-randr --output CONN_A --custom-mode 1234x567; echo "status=$?"`: a mode the monitor does not list fails (`status` non-zero, `failed to apply configuration`), the log says `output mode Custom { ... }: the output does not offer that mode`, and the mode is unchanged. `wlr-randr --output CONN_A --off` also fails, since Shingle does not turn its only output off (use wlopm, step 12).
+5. Switch VT away and back (`sudo chvt 2; sudo chvt 1`): the mode set in 3 is kept.
+
+### Step 22: hotplug while away and during a VT switch
+
+1. With Shingle lit on A, `sudo chvt 2`, unplug A, plug in B, `sudo chvt 1`. Expected: hotplug events while away are dropped (no `connected` line until the resume), the resume lights B, and `wlr-randr` lists `CONN_B`.
+2. While on tty1, plug and unplug B during a busy `present_probe` run: no `modeset failed` or `page flip failed` lines, since a hotplug waits for the pending flip.
 
 ## Results
 
