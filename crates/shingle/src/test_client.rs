@@ -63,6 +63,10 @@ pub(crate) struct Events {
   pub(crate) grab_keymaps: Vec<String>,
   /// `xdg_toplevel.configure` sizes, with the toplevel they were sent to.
   pub(crate) configures: Vec<(ObjectId, i32, i32)>,
+  /// Every `xdg_toplevel.configure`, in order, with its state list.
+  pub(crate) configure_states: Vec<(ObjectId, i32, i32, Vec<u32>)>,
+  /// Toplevels that received `xdg_toplevel.close`, in order.
+  pub(crate) closes: Vec<ObjectId>,
   synced: bool,
 }
 
@@ -351,8 +355,25 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for Events {
     _: &Connection,
     _: &QueueHandle<Self>,
   ) {
-    if let xdg_toplevel::Event::Configure { width, height, .. } = event {
-      events.configures.push((toplevel.id(), width, height));
+    match event {
+      xdg_toplevel::Event::Configure {
+        width,
+        height,
+        states,
+      } => {
+        events.configures.push((toplevel.id(), width, height));
+        let states = states
+          .as_chunks::<4>()
+          .0
+          .iter()
+          .map(|bytes| u32::from_ne_bytes(*bytes))
+          .collect();
+        events
+          .configure_states
+          .push((toplevel.id(), width, height, states));
+      }
+      xdg_toplevel::Event::Close => events.closes.push(toplevel.id()),
+      _ => {}
     }
   }
 }

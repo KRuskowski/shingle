@@ -89,6 +89,8 @@ mod toplevel_icon;
 mod viewport;
 mod virtual_keyboard;
 mod virtual_pointer;
+#[cfg(test)]
+mod wayland_pins;
 mod window_rules;
 mod xdg_output;
 
