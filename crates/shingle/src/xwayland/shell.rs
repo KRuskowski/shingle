@@ -36,6 +36,22 @@ pub(crate) struct XwaylandRole {
   pub(crate) window: Option<Window>,
   /// The toplevel of a managed window, from the moment it can map.
   pub(crate) toplevel: Option<Box<ToplevelRole>>,
+  /// An unmanaged window's drawing and focus, while its X window is
+  /// mapped.
+  pub(crate) unmanaged: Option<UnmanagedRole>,
+}
+
+/// An unmanaged X window (override-redirect, or a parented popup), drawn
+/// in the Unmanaged layer above Top and below Overlay, at its X position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UnmanagedRole {
+  /// It may take keyboard focus
+  /// ([`shingle_xwayland::WindowInfo::unmanaged_accepts_keyboard`]).
+  pub(crate) keyboard: bool,
+  /// It takes the keyboard focus once it has a buffer.
+  pub(crate) focus_pending: bool,
+  /// When it was mapped, for stacking: later windows are drawn on top.
+  pub(crate) sequence: u64,
 }
 
 impl XwaylandRole {
@@ -47,9 +63,16 @@ impl XwaylandRole {
 
   /// Whether the surface may take keyboard focus: a managed window always
   /// may, whatever its input model, since Wayfire's X toplevels are
-  /// always focusable.
+  /// always focusable; an unmanaged one if it wants focus.
   pub(crate) fn accepts_keyboard(&self) -> bool {
     self.toplevel.is_some()
+      || self.unmanaged.is_some_and(|unmanaged| unmanaged.keyboard)
+  }
+
+  /// Whether the surface takes pointer input: every managed or unmanaged
+  /// window does.
+  pub(crate) fn accepts_pointer(&self) -> bool {
+    self.toplevel.is_some() || self.unmanaged.is_some()
   }
 }
 
@@ -120,6 +143,7 @@ impl Dispatch<XwaylandShellV1, ()> for CompositorState {
           serial: None,
           window: None,
           toplevel: None,
+          unmanaged: None,
         }));
       }
       xwayland_shell_v1::Request::Destroy => {}

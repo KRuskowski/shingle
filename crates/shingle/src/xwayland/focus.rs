@@ -17,18 +17,34 @@ use crate::{
   state::CompositorState,
 };
 
-/// The X focus for Shingle's keyboard focus: the managed X window that
-/// has it, or no X window at all (`None`) when the keyboard is on a
-/// Wayland surface or nowhere.
-pub(crate) fn target(state: &CompositorState) -> Option<Window> {
-  let surface = state
+/// What the X focus should be.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Target {
+  /// This managed X window, or no X window at all (`None`) when the
+  /// keyboard is on a Wayland surface or nowhere.
+  Window(Option<Window>),
+  /// Whatever it is: the keyboard is on an unmanaged X window, such as a
+  /// menu, and the X toplevel that had the focus keeps it, as a Wayfire
+  /// toplevel stays activated while one of its menus has the keyboard.
+  Keep,
+}
+
+/// The X focus for Shingle's keyboard focus.
+pub(crate) fn target(state: &CompositorState) -> Target {
+  let Some(surface) = state
     .input
     .keyboard_focus
     .as_ref()
-    .and_then(|object| state.surfaces.get(object))?;
+    .and_then(|object| state.surfaces.get(object))
+  else {
+    return Target::Window(None);
+  };
   match &surface.role {
-    Role::Xwayland(role) if role.toplevel.is_some() => role.window,
-    _ => None,
+    Role::Xwayland(role) if role.toplevel.is_some() => {
+      Target::Window(role.window)
+    }
+    Role::Xwayland(role) if role.unmanaged.is_some() => Target::Keep,
+    _ => Target::Window(None),
   }
 }
 

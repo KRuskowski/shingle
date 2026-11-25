@@ -563,6 +563,24 @@ pub(crate) fn focus_window(
   focus_object(state, object)
 }
 
+/// Gives the keyboard focus to a surface that is not a window's, such as
+/// an unmanaged X window that wants focus when it maps. The pointer focus
+/// stays where the pointer is, as Wayfire's `focus_request` leaves it:
+/// moving it would end the pointer grab of the X client whose menu this
+/// is.
+pub(crate) fn focus_surface(state: &mut CompositorState, object: ObjectId) {
+  if state.idle.lock_state() != LockState::Unlocked
+    || state.show_desktop
+    || !input_allowed(state, &object)
+  {
+    return;
+  }
+  set_keyboard_focus(state, Some(object));
+  state
+    .events
+    .push(crate::Event::FocusChanged { window: None });
+}
+
 fn focus_object(
   state: &mut CompositorState,
   mut object: ObjectId,
@@ -1080,7 +1098,7 @@ pub(crate) fn pointer_axis_detailed(state: &mut CompositorState, axis: Axis) {
   let Some(target) = state.input.pointer_focus.clone() else {
     return;
   };
-  if !input_allowed(state, &target) {
+  if !pointer_allowed(state, &target) {
     return;
   }
   let speed = state.input.scroll_speed;
@@ -1147,7 +1165,7 @@ pub(crate) fn pointer_axis_virtual(
   let Some(target) = state.input.pointer_focus.clone() else {
     return;
   };
-  if !input_allowed(state, &target) {
+  if !pointer_allowed(state, &target) {
     return;
   }
   let time = timestamp(state);
@@ -1446,7 +1464,7 @@ fn set_keyboard_focus(state: &mut CompositorState, target: Option<ObjectId>) {
 fn set_pointer_focus(state: &mut CompositorState, target: Option<ObjectId>) {
   if target
     .as_ref()
-    .is_some_and(|object| !input_allowed(state, object))
+    .is_some_and(|object| !pointer_allowed(state, object))
   {
     return;
   }
@@ -1545,6 +1563,16 @@ fn role_accepts_keyboard(role: &Role) -> bool {
     Role::Xwayland(role) => role.accepts_keyboard(),
     _ => false,
   }
+}
+
+/// Whether a surface takes pointer input: one that may take the keyboard,
+/// and also an unmanaged X window that may not, such as a menu.
+fn pointer_allowed(state: &CompositorState, object: &ObjectId) -> bool {
+  input_allowed(state, object)
+    || (state.idle.lock_state() == LockState::Unlocked
+      && state.surfaces.get(object).is_some_and(|surface| {
+        matches!(&surface.role, Role::Xwayland(role) if role.accepts_pointer())
+      }))
 }
 
 fn input_allowed(state: &CompositorState, object: &ObjectId) -> bool {

@@ -487,6 +487,11 @@ pub enum SurfaceRole {
   Cursor,
   /// An `ext_session_lock_surface_v1`, covering the whole output.
   SessionLock,
+  /// An unmanaged X window, such as an override-redirect menu or
+  /// tooltip, drawn above the Top layer at the position the X client
+  /// chose. It has no [`WindowId`]; its snapshot carries the X class as
+  /// `app_id`.
+  Unmanaged,
 }
 
 /// A copy of a surface's committed shared-memory buffer.

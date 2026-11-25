@@ -1,7 +1,7 @@
-//! XW-4 behaviour of X windows in the compositor: focus and input models,
-//! client requests, transients and dialogs, stacking, rules and Scale,
-//! with window manager events applied directly (docs/design/xwayland.md,
-//! section 7, layer 1).
+//! XW-4 behaviour of X windows in the compositor: unmanaged windows,
+//! focus and input models, client requests, transients and dialogs,
+//! stacking, rules and Scale, with window manager events applied
+//! directly (docs/design/xwayland.md, section 7, layer 1).
 
 use serde_json::json;
 use shingle_core::WindowId;
@@ -11,9 +11,14 @@ use shingle_xwayland::{
 };
 use wayland_server::backend::ObjectId;
 
-use super::{fixture::*, focus, windows::XRequest};
-use crate::{Event, test_client::TestClient};
+use super::{
+  fixture::*,
+  focus::{self, Target},
+  windows::XRequest,
+};
+use crate::{Event, SurfaceRole, shell, test_client::TestClient};
 
+const MENU: Window = 0x400100;
 const DIALOG: Window = 0x400200;
 
 /// The surface object of an X window.
@@ -28,18 +33,176 @@ fn window_of(fixture: &mut Fixture, window: Window) -> WindowId {
   super::windows::shingle_window(fixture.state(), window).unwrap()
 }
 
+/// An override-redirect window with `types` at `geometry`.
+fn override_redirect(
+  types: &[WindowType],
+  geometry: Geometry,
+) -> Box<WindowInfo> {
+  let mut info = info("XTerm", "");
+  info.override_redirect = true;
+  info.types = types.to_vec();
+  info.geometry = geometry;
+  info
+}
+
+/// The snapshots drawn, without cursors.
+fn drawn(fixture: &Fixture) -> Vec<crate::SurfaceSnapshot> {
+  fixture
+    .compositor
+    .visible_surfaces()
+    .into_iter()
+    .filter(|snapshot| snapshot.role != SurfaceRole::Cursor)
+    .collect()
+}
+
+#[test]
+fn override_redirect_windows_are_drawn_unmanaged_where_x_puts_them() {
+  let mut fixture = Fixture::new();
+  map(&mut fixture, XTERM, "XTerm", 5);
+  let geometry = Geometry::new(100, 50, 80, 60);
+  map_info(
+    &mut fixture,
+    MENU,
+    override_redirect(&[WindowType::Menu], geometry),
+    6,
+  );
+  let top = drawn(&fixture).pop().unwrap();
+  assert_eq!(top.role, SurfaceRole::Unmanaged);
+  assert_eq!(top.geometry, shingle_core::Rect::new(100, 50, 80, 60));
+  assert_eq!(top.window, None);
+  assert_eq!(top.app_id.as_deref(), Some("XTerm"));
+  // Not a view.
+  let views = fixture.call("window-rules/list-views", json!({}));
+  assert_eq!(views.as_array().unwrap().len(), 1);
+  // It follows its X position.
+  let mut moved = override_redirect(&[WindowType::Menu], geometry);
+  moved.geometry.x = 300;
+  fixture.apply(XwmEvent::Changed {
+    window: MENU,
+    info: moved,
+  });
+  assert_eq!(drawn(&fixture).pop().unwrap().geometry.x, 300);
+  // And goes away when it unmaps.
+  fixture.apply(XwmEvent::Unmapped { window: MENU });
+  assert!(
+    drawn(&fixture)
+      .iter()
+      .all(|snapshot| snapshot.role != SurfaceRole::Unmanaged)
+  );
+}
+
+#[test]
+fn unmanaged_windows_stay_above_a_fullscreen_window() {
+  let mut fixture = Fixture::new();
+  map(&mut fixture, XTERM, "XTerm", 5);
+  let window = window_of(&mut fixture, XTERM);
+  shell::set_fullscreen(fixture.state(), window, true).unwrap();
+  map_info(
+    &mut fixture,
+    MENU,
+    override_redirect(&[], Geometry::new(10, 10, 50, 50)),
+    6,
+  );
+  let roles = drawn(&fixture)
+    .iter()
+    .map(|snapshot| snapshot.role)
+    .collect::<Vec<_>>();
+  assert_eq!(roles, [SurfaceRole::Toplevel, SurfaceRole::Unmanaged]);
+}
+
+#[test]
+fn a_menu_takes_the_pointer_but_not_the_keyboard() {
+  let mut fixture = Fixture::new();
+  map(&mut fixture, XTERM, "XTerm", 5);
+  let xterm = object_of(&mut fixture, XTERM);
+  map_info(
+    &mut fixture,
+    MENU,
+    override_redirect(&[WindowType::Menu], Geometry::new(100, 50, 80, 60)),
+    6,
+  );
+  let menu = object_of(&mut fixture, MENU);
+  let state = fixture.state();
+  assert_eq!(state.input.keyboard_focus.as_ref(), Some(&xterm));
+  crate::input::pointer_motion(state, 120.0, 70.0);
+  assert_eq!(state.input.pointer_focus.as_ref(), Some(&menu));
+  // A click on it does not move the keyboard either.
+  crate::input::pointer_button(state, 0x110, true);
+  crate::input::pointer_button(state, 0x110, false);
+  assert_eq!(state.input.keyboard_focus.as_ref(), Some(&xterm));
+  assert_eq!(focus::target(state), Target::Window(Some(XTERM)));
+}
+
+#[test]
+fn an_untyped_override_redirect_window_takes_the_keyboard_and_returns_it() {
+  let mut fixture = Fixture::new();
+  map(&mut fixture, XTERM, "XTerm", 5);
+  let xterm = object_of(&mut fixture, XTERM);
+  let pointer = fixture.state().input.pointer_focus.clone();
+  map_info(
+    &mut fixture,
+    MENU,
+    override_redirect(&[], Geometry::new(100, 50, 80, 60)),
+    6,
+  );
+  let popup = object_of(&mut fixture, MENU);
+  let state = fixture.state();
+  assert_eq!(state.input.keyboard_focus.as_ref(), Some(&popup));
+  // The pointer stays where it is: moving it would end the X client's
+  // pointer grab, and its menu with it.
+  assert_eq!(state.input.pointer_focus, pointer);
+  // The X toplevel keeps the X focus, and stays activated.
+  assert_eq!(focus::target(state), Target::Keep);
+  assert!(state.xwayland.requests.iter().all(|request| !matches!(
+    request,
+    XRequest::State { window: XTERM, state } if !state.focused
+  )));
+  fixture.apply(XwmEvent::Unmapped { window: MENU });
+  let state = fixture.state();
+  assert_eq!(state.input.keyboard_focus.as_ref(), Some(&xterm));
+  assert_eq!(focus::target(state), Target::Window(Some(XTERM)));
+}
+
+#[test]
+fn an_unmanaged_window_is_focused_on_its_first_buffer() {
+  // Xwayland commits the serial before the window has drawn anything.
+  let mut fixture = Fixture::new();
+  map(&mut fixture, XTERM, "XTerm", 5);
+  let xterm = object_of(&mut fixture, XTERM);
+  let (surface, _role) = fixture.surface(6);
+  surface.commit();
+  fixture.client.roundtrip(&mut fixture.compositor);
+  fixture.apply(XwmEvent::Mapped {
+    window: MENU,
+    info: override_redirect(&[], Geometry::new(100, 50, 80, 60)),
+  });
+  fixture.apply(XwmEvent::Serial {
+    window: MENU,
+    serial: 6,
+  });
+  assert_eq!(fixture.state().input.keyboard_focus.as_ref(), Some(&xterm));
+  fixture.commit_buffer(&surface);
+  let popup = object_of(&mut fixture, MENU);
+  assert_eq!(fixture.state().input.keyboard_focus.as_ref(), Some(&popup));
+  assert!(
+    drawn(&fixture)
+      .iter()
+      .any(|snapshot| snapshot.role == SurfaceRole::Unmanaged)
+  );
+}
+
 #[test]
 fn x_focus_follows_the_keyboard_between_x_and_wayland_windows() {
   let mut fixture = Fixture::new();
   map(&mut fixture, XTERM, "XTerm", 5);
   let xterm = window_of(&mut fixture, XTERM);
-  assert_eq!(focus::target(fixture.state()), Some(XTERM));
+  assert_eq!(focus::target(fixture.state()), Target::Window(Some(XTERM)));
   let mut wayland = TestClient::connect(&mut fixture.compositor, &fixture.path);
   let toplevel = wayland.toplevel(&mut fixture.compositor, "foot");
   wayland.attach_buffer(&mut fixture.compositor, &toplevel.surface, 64, 64);
-  assert_eq!(focus::target(fixture.state()), None);
+  assert_eq!(focus::target(fixture.state()), Target::Window(None));
   crate::input::focus_window(fixture.state(), xterm);
-  assert_eq!(focus::target(fixture.state()), Some(XTERM));
+  assert_eq!(focus::target(fixture.state()), Target::Window(Some(XTERM)));
 }
 
 /// A plain window with the given input hint and `WM_TAKE_FOCUS`.
@@ -297,6 +460,12 @@ fn an_app_id_rule_applies_to_x_windows() {
 fn scale_and_expo_surfaces_include_x_windows() {
   let mut fixture = Fixture::new();
   map(&mut fixture, XTERM, "XTerm", 5);
+  map_info(
+    &mut fixture,
+    MENU,
+    override_redirect(&[], Geometry::new(10, 10, 50, 50)),
+    6,
+  );
   let xterm = window_of(&mut fixture, XTERM);
   for all_workspaces in [false, true] {
     let surfaces = fixture.compositor.scale_surfaces(all_workspaces, false);

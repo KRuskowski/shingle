@@ -19,6 +19,7 @@ pub(crate) mod fixture;
 pub(crate) mod focus;
 pub(crate) mod requests;
 pub(crate) mod shell;
+pub(crate) mod unmanaged;
 pub(crate) mod windows;
 
 use std::{
@@ -106,6 +107,8 @@ pub(crate) struct Status {
   pub(crate) windows: HashMap<Window, XWindowState>,
   /// Requests for the window manager's next flush.
   pub(crate) requests: Vec<XRequest>,
+  /// The last map sequence number given to an unmanaged window.
+  pub(crate) sequence: u64,
 }
 
 impl Status {
@@ -267,7 +270,10 @@ impl Xwayland {
       }
     }
     let result = result
-      .and_then(|()| xwm.set_focus(focus))
+      .and_then(|()| match focus {
+        focus::Target::Window(window) => xwm.set_focus(window),
+        focus::Target::Keep => Ok(()),
+      })
       .and_then(|()| xwm.restack(&stacking));
     if let Err(error) = result.and_then(|()| xwm.flush()) {
       eprintln!("shingle: X window manager lost its connection: {error}");

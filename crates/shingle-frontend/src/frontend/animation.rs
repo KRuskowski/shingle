@@ -29,6 +29,8 @@ impl Frontend {
       SurfaceRole::Popup => "popup",
       SurfaceRole::LayerShell => "overlay",
       SurfaceRole::Cursor => "cursor",
+      // Wayfire's name for override-redirect X views.
+      SurfaceRole::Unmanaged => "x-or",
       _ => "other",
     };
     let mut view = ViewProperties {

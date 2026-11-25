@@ -132,7 +132,8 @@ pub(crate) fn apply(state: &mut CompositorState, event: XwmEvent) {
 }
 
 /// Applies a surface's pending serial on commit, before the commit is
-/// handled as a toplevel's.
+/// handled as a toplevel's, and focuses an unmanaged window whose first
+/// buffer this is, if it wants focus.
 pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
   let Some(surface) = state.surfaces.get_mut(object) else {
     return;
@@ -149,6 +150,7 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
       associate(state, window, id, true);
     }
   }
+  super::unmanaged::committed(state, object);
 }
 
 /// Forgets a destroyed surface. Its toplevel, if any, is detached by
@@ -209,7 +211,8 @@ fn associate(
 
 /// Gives a paired, mapped, managed window its toplevel role and, when the
 /// surface already has a buffer, maps it. During a commit the commit
-/// itself maps it next.
+/// itself maps it next. A paired, mapped, unmanaged window is drawn from
+/// then on.
 fn try_map(state: &mut CompositorState, window: Window, from_commit: bool) {
   let Some(entry) = state.xwayland.windows.get(&window) else {
     return;
@@ -226,9 +229,12 @@ fn try_map(state: &mut CompositorState, window: Window, from_commit: bool) {
   };
   match entry.info.kind() {
     Kind::Managed { .. } => {}
-    // Unmanaged windows are tracked but not drawn yet; drag icons come
-    // with drag and drop (XW-6).
-    Kind::Unmanaged | Kind::DragIcon => return,
+    Kind::Unmanaged => {
+      super::unmanaged::map(state, window, &object, from_commit);
+      return;
+    }
+    // Drag icons come with drag and drop (XW-6).
+    Kind::DragIcon => return,
   }
   let toplevel = new_toplevel(state, window, entry);
   let Some(surface) = state.surfaces.get_mut(&object) else {
@@ -316,9 +322,10 @@ pub(super) fn shingle_window(
   state.surfaces.get(&object)?.role.toplevel()?.window()
 }
 
-/// Removes the toplevel role of `object`'s X window, and its Shingle
-/// window with it, keeping the pairing.
+/// Removes the toplevel or unmanaged role of `object`'s X window, and its
+/// Shingle window with it, keeping the pairing.
 fn drop_toplevel(state: &mut CompositorState, object: &ObjectId) {
+  super::unmanaged::unmap(state, object);
   let Some(surface) = state.surfaces.get(object) else {
     return;
   };
@@ -381,6 +388,10 @@ fn changed(state: &mut CompositorState, window: Window, info: WindowInfo) {
   if old.kind() != info.kind() {
     drop_toplevel(state, &object);
     try_map(state, window, false);
+    return;
+  }
+  if info.kind() == Kind::Unmanaged {
+    super::unmanaged::changed(state, window);
     return;
   }
   if state

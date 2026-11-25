@@ -738,12 +738,20 @@ impl CompositorState {
         }
       }
     }
+    // Unmanaged X windows (menus, tooltips) are above Top and below
+    // Overlay, where Wayfire's UNMANAGED layer is, and above a fullscreen
+    // window, whose menus they may be.
     if let Some(object) = fullscreen {
       self.append_surface_and_popups(&object, &mut snapshots);
-      self.append_layers(&mut snapshots, &[Layer::Overlay]);
     } else {
-      self.append_layers(&mut snapshots, &[Layer::Top, Layer::Overlay]);
+      self.append_layers(&mut snapshots, &[Layer::Top]);
     }
+    for object in crate::xwayland::unmanaged::drawn(self) {
+      if let Some(snapshot) = self.snapshot(&object) {
+        snapshots.push(snapshot);
+      }
+    }
+    self.append_layers(&mut snapshots, &[Layer::Overlay]);
     if let Some(snapshot) = crate::cursor_shape::default_snapshot(self) {
       snapshots.push(snapshot);
     } else if let Some(object) = &self.input.cursor_surface

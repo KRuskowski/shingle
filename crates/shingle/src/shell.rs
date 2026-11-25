@@ -279,6 +279,14 @@ pub(crate) fn snapshot_metadata(
     Role::SessionLock { .. } => {
       (SurfaceRole::SessionLock, None, None, None, None)
     }
+    Role::Xwayland(role) => {
+      match crate::xwayland::unmanaged::names(state, role) {
+        Some((class, title)) => {
+          (SurfaceRole::Unmanaged, None, None, Some(class), Some(title))
+        }
+        None => (SurfaceRole::Unassigned, None, None, None, None),
+      }
+    }
     _ => (SurfaceRole::Unassigned, None, None, None, None),
   }
 }
@@ -348,6 +356,7 @@ pub(crate) fn surface_geometry(
     };
   }
   match &surface.role {
+    Role::Xwayland(role) => crate::xwayland::unmanaged::geometry(state, role),
     Role::Xdg {
       kind: Some(XdgKind::Popup(popup)),
       ..
@@ -844,6 +853,12 @@ pub(crate) fn set_toplevel_parent(
 fn activated_window(state: &CompositorState) -> Option<WindowId> {
   if let Some(window) = crate::input::focused_window(state) {
     return Some(window);
+  }
+  // A Wayfire toplevel stays activated while one of its X menus has the
+  // keyboard.
+  if crate::xwayland::unmanaged::has_keyboard_focus(state) {
+    let workspace = state.core.current_workspace(&state.output_id).ok()?;
+    return state.core.tree(&state.output_id, workspace).ok()?.focused();
   }
   if !state.keep_last_toplevel_activated {
     return None;
