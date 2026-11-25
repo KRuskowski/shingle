@@ -186,6 +186,10 @@ pub(crate) struct ToplevelRole {
   pub(crate) max_size: (i32, i32),
   pub(crate) configured_geometry: Option<Rect>,
   pub(crate) created_rules_pending: Option<bool>,
+  /// A null buffer unmapped the toplevel, so its next commit without a
+  /// buffer is a new initial commit, which xdg-shell answers with a
+  /// configure.
+  pub(crate) unmapped: bool,
 }
 
 impl ToplevelRole {
@@ -595,8 +599,8 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
   }
   if has_buffer {
     request_map(state, object);
-  } else {
-    unmap_toplevel(state, object);
+  } else if !unmap_toplevel(state, object) {
+    reconfigure_remapping(state, object);
   }
   let pending = state.surfaces.get_mut(object).and_then(|surface| {
     surface.buffer.as_ref()?;
@@ -677,25 +681,26 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
 /// to map, as xdg-shell defines it: the window leaves the model as if it had
 /// been destroyed, emitting [`Event::WindowDestroyed`] if it was mapped,
 /// and the xdg_surface returns to its unconfigured state, so a remap starts
-/// with an initial commit and maps as a new window. Wayfire likewise
+/// with an initial commit and maps as a new window. Returns whether it
+/// unmapped. Wayfire likewise
 /// detaches an unmapped view from its tiling tree and attaches it again on
 /// the next map (plugins/tile/tile-plugin.cpp, `on_view_unmapped` and
 /// `on_view_mapped`).
-fn unmap_toplevel(state: &mut CompositorState, object: &ObjectId) {
+fn unmap_toplevel(state: &mut CompositorState, object: &ObjectId) -> bool {
   let Some((id, role, window)) =
     state.surfaces.get(object).and_then(|surface| {
       let window = surface.role.toplevel()?.window()?;
       Some((surface.id, surface.role.clone(), window))
     })
   else {
-    return;
+    return false;
   };
   let mapped = state
     .core
     .window_info(window)
     .is_ok_and(|info| info.presence == WindowPresence::Mapped);
   if !mapped && !state.pending_maps.contains_key(&window) {
-    return;
+    return false;
   }
   if let Some(surface) = state.surfaces.get_mut(object)
     && let Role::Xdg {
@@ -709,11 +714,26 @@ fn unmap_toplevel(state: &mut CompositorState, object: &ObjectId) {
     toplevel.tiled = true;
     toplevel.configured_geometry = None;
     toplevel.created_rules_pending = None;
+    toplevel.unmapped = true;
     serials.clear();
     *initial_acked = false;
   }
   remove_window(state, id, &role);
   crate::input::sync_focus(state);
+  true
+}
+
+/// Answers the initial commit of a toplevel that a null buffer unmapped with
+/// a configure, as wlroots does for a reset xdg_surface.
+fn reconfigure_remapping(state: &mut CompositorState, object: &ObjectId) {
+  let remapping = state
+    .surfaces
+    .get_mut(object)
+    .and_then(|surface| surface.role.toplevel_mut())
+    .is_some_and(|toplevel| std::mem::take(&mut toplevel.unmapped));
+  if remapping {
+    reconfigure_all(state);
+  }
 }
 
 pub(crate) fn destroy_role(state: &mut CompositorState, surface: &Surface) {
@@ -1926,6 +1946,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
               max_size: (0, 0),
               configured_geometry: None,
               created_rules_pending: None,
+              unmapped: false,
             }))),
             serials: BTreeSet::new(),
             initial_acked: false,
@@ -2795,9 +2816,18 @@ mod tests {
       Some(stays_id)
     );
 
-    // Remapping starts over: an initial commit, then a buffer.
+    // Remapping starts over: an initial commit, answered with a configure,
+    // then a buffer.
+    let configures = client.events.configures.len();
     hides.surface.commit();
     client.roundtrip(&mut compositor);
+    assert!(
+      client.events.configures[configures..]
+        .iter()
+        .any(|(toplevel, ..)| *toplevel
+          == wayland_client::Proxy::id(&hides.toplevel)),
+      "the initial commit after the unmap gets a configure"
+    );
     client.attach_buffer(&mut compositor, &hides.surface, 64, 64);
     let remapped = windows_with(&compositor.state, "hides");
     assert_eq!(remapped.len(), 1);
