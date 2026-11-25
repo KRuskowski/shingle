@@ -697,6 +697,10 @@ fn stipc_keys_are_dropped_while_the_session_is_inactive() {
 struct RecordingTarget {
   renderer: OffscreenRenderer,
   frames: Vec<Vec<(RenderRect, bool)>>,
+  /// The alpha of every tile of every frame.
+  alphas: Vec<Vec<f32>>,
+  /// How long each frame takes to draw, to simulate a slow GPU.
+  delay: Duration,
 }
 
 impl RenderTarget for RecordingTarget {
@@ -756,6 +760,10 @@ impl RenderTarget for RecordingTarget {
         .map(|tile| (tile.geometry, tile.texture.is_some()))
         .collect(),
     );
+    self
+      .alphas
+      .push(tiles.iter().map(|tile| tile.color[3]).collect());
+    thread::sleep(self.delay);
     RenderTarget::render(&mut self.renderer, tiles, clear)
   }
 }
@@ -766,6 +774,8 @@ fn recording_target() -> Option<RecordingTarget> {
     Ok(renderer) => Some(RecordingTarget {
       renderer,
       frames: Vec::new(),
+      alphas: Vec::new(),
+      delay: Duration::ZERO,
     }),
     Err(RenderError::RequestAdapter(error)) => {
       eprintln!("skipping scene test, no GPU adapter: {error}");
@@ -844,4 +854,90 @@ fn the_scene_draws_tiles_and_then_scale_thumbnails_with_titles() {
       "a title is inside a thumbnail: {frame:?}"
     );
   }
+}
+
+/// Draws frames the way a host does, for as long as the frontend asks for
+/// them.
+fn render_until_idle(fixture: &mut Fixture, target: &mut RecordingTarget) {
+  for _ in 0..20 {
+    let redraws = fixture.host.redraws;
+    fixture
+      .frontend
+      .render(&mut fixture.host, target)
+      .expect("the frame renders");
+    if fixture.host.redraws == redraws {
+      return;
+    }
+  }
+  panic!("the frontend keeps asking for frames");
+}
+
+/// A frame that takes longer than the rest of an animation must not be
+/// its last: the settled state is drawn after it.
+#[test]
+fn a_slow_frame_does_not_end_the_open_animation_early() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut config = ShingleConfig::default();
+  config.animate.open_animation = "zoom".into();
+  config.animate.duration_ms = 300;
+  let mut fixture = Fixture::new(config);
+  fixture.window("alpha");
+  let alpha = fixture.tiles()[0];
+  let geometry = fixture
+    .frontend
+    .compositor()
+    .core()
+    .window_layout(alpha)
+    .expect("tiled")
+    .geometry;
+  let settled = RenderRect {
+    x: geometry.x,
+    y: geometry.y,
+    width: geometry.width,
+    height: geometry.height,
+  };
+  target.delay = Duration::from_millis(400);
+  render_until_idle(&mut fixture, &mut target);
+  assert_eq!(
+    target.frames.last().expect("a frame"),
+    &[(settled, true)],
+    "the last frame shows the window at its full size: {:?}",
+    target.frames
+  );
+  assert_eq!(target.alphas.last().expect("a frame"), &[1.0]);
+  assert!(fixture.frontend.open_animations.is_empty());
+}
+
+#[test]
+fn a_slow_frame_does_not_end_the_workspace_slide_early() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut config = ShingleConfig::default();
+  config.animate.open_animation = "none".into();
+  config.vswitch.duration_ms = 300;
+  let mut fixture = Fixture::new(config);
+  fixture.window("alpha");
+  render_until_idle(&mut fixture, &mut target);
+  fixture.tap(KEY_2, &[KEY_LEFTMETA]);
+  assert!(fixture.frontend.workspace_transition.is_some());
+  target.frames.clear();
+  target.delay = Duration::from_millis(400);
+  render_until_idle(&mut fixture, &mut target);
+  assert!(fixture.frontend.workspace_transition.is_none());
+  // At the end of the slide the old workspace is entirely off screen.
+  let output = fixture.frontend.compositor().output();
+  let last = target.frames.last().expect("a frame");
+  assert!(
+    last.iter().all(|(rect, _)| {
+      rect.x >= output.x + output.width as i32
+        || rect.x + rect.width as i32 <= output.x
+        || rect.y >= output.y + output.height as i32
+        || rect.y + rect.height as i32 <= output.y
+    }),
+    "the last frame shows the settled workspace: {:?}",
+    target.frames
+  );
 }

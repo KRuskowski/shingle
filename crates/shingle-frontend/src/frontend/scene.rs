@@ -33,13 +33,13 @@ impl Frontend {
   pub(super) fn append_closing_surfaces<'a>(
     animations: &'a HashMap<SurfaceId, ClosingAnimation>,
     textures: &'a HashMap<SurfaceId, GpuTexture>,
+    now: Instant,
     config: &shingle_config::AnimateConfig,
     effect: &str,
     tiles: &mut Vec<RenderTile<'a>>,
   ) {
     let mut surfaces = animations.keys().copied().collect::<Vec<_>>();
     surfaces.sort_unstable();
-    let now = Instant::now();
     for surface in surfaces {
       let animation = &animations[&surface];
       let Some(texture) = textures.get(&surface) else {
@@ -77,11 +77,12 @@ impl Frontend {
     renderer: &dyn RenderTarget,
     cache: &'a mut HashMap<TileWindowId, GpuTexture>,
     state: &ScaleState,
+    now: Instant,
     duration: Duration,
     icons: &HashMap<TileWindowId, shingle::ToplevelIcon>,
     tiles: &mut Vec<RenderTile<'a>>,
   ) -> Result<(), Box<dyn Error>> {
-    let geometry = scale_geometry_at(state, Instant::now(), duration);
+    let geometry = scale_geometry_at(state, now, duration);
     for window in &state.windows {
       if cache.contains_key(window) {
         continue;
@@ -126,11 +127,14 @@ impl Frontend {
     Ok(())
   }
 
-  /// Appends cached title textures above active Scale thumbnails.
+  /// Appends cached title textures above active Scale thumbnails, placed
+  /// where the thumbnails are at frame time `now`.
+  #[allow(clippy::too_many_arguments)]
   pub(super) fn append_scale_titles<'a>(
     renderer: &dyn RenderTarget,
     cache: &'a mut HashMap<TileWindowId, ScaleTitle>,
     state: &ScaleState,
+    now: Instant,
     config: &shingle_config::ScaleConfig,
     titles: &HashMap<TileWindowId, String>,
     pointer: (f64, f64),
@@ -139,11 +143,8 @@ impl Frontend {
     if config.title_overlay == "never" {
       return Ok(());
     }
-    let geometry = scale_geometry_at(
-      state,
-      Instant::now(),
-      Duration::from_millis(config.duration_ms),
-    );
+    let geometry =
+      scale_geometry_at(state, now, Duration::from_millis(config.duration_ms));
     for window in &state.windows {
       let (Some(title), Some(target), Some(current)) = (
         titles.get(window),
@@ -286,15 +287,21 @@ impl Frontend {
     result
   }
 
+  /// Draws one frame. Every animation is drawn and then continued or
+  /// ended at one time, `now`, taken before drawing. An animation that
+  /// was drawn short of its end therefore always gets another frame, even
+  /// if drawing took longer than what was left of it, and ends only after
+  /// a frame has shown its final state, as Wayfire's `duration_t` does.
   pub(super) fn render_frame(
     &mut self,
     target: &mut dyn RenderTarget,
   ) -> Result<(), Box<dyn Error>> {
     self.update_expo_layout();
+    let now = Instant::now();
     if let Some((started, start)) = self.zoom_animation {
       let progress = animation_progress(
         started,
-        Instant::now(),
+        now,
         Duration::from_millis(self.zoom.smoothing_ms),
       );
       self.zoom_factor =
@@ -375,7 +382,6 @@ impl Frontend {
             .update_texture(&self.textures[&snapshot.id], &buffer.rgba)?;
         }
       }
-      let now = Instant::now();
       for snapshot in &snapshots {
         if snapshot.buffer.is_none() {
           continue;
@@ -628,7 +634,6 @@ impl Frontend {
       tiles
     };
     if let Some(state) = self.expo.as_ref().or(self.expo_exit.as_ref()) {
-      let now = Instant::now();
       let duration = Duration::from_millis(self.expo_config.duration_ms);
       let transition =
         Duration::from_millis(self.expo_config.transition_length_ms);
@@ -671,6 +676,7 @@ impl Frontend {
         &*target,
         &mut self.scale_icons,
         state,
+        now,
         Duration::from_millis(self.scale_config.duration_ms),
         &icons,
         &mut tiles,
@@ -679,6 +685,7 @@ impl Frontend {
         &*target,
         &mut self.scale_titles,
         state,
+        now,
         &self.scale_config,
         &titles,
         (self.pointer_x, self.pointer_y),
@@ -698,6 +705,7 @@ impl Frontend {
     Self::append_closing_surfaces(
       &self.closing_animations,
       &self.textures,
+      now,
       &self.animate,
       &self.animate.close_animation,
       &mut tiles,
@@ -705,6 +713,7 @@ impl Frontend {
     Self::append_closing_surfaces(
       &self.minimize_animations,
       &self.textures,
+      now,
       &self.animate,
       &self.animate.minimize_animation,
       &mut tiles,
@@ -721,7 +730,8 @@ impl Frontend {
     if renderer.render(&tiles, background)? {
       self.compositor.frame();
     }
-    let now = Instant::now();
+    // Decide with the time this frame was drawn at, not the time drawing
+    // finished: a slow frame must not skip an animation's final state.
     self.animations.retain(|_, animation| {
       animation_progress(animation.started, now, self.animation_duration) < 1.0
     });
