@@ -403,12 +403,14 @@ Acceptance (test machine): a full-screen `vkcube` is scanned out directly (`ZERO
 
 DB-1, DB-2 and DB-3 do not depend on each other. DB-4 needs all three, and DB-5 needs DB-4. DB-6 needs DB-3. NB-8 needs NB-7 and DB-1, and DB-7 comes last. Everything but NB-8 and DB-7 can be verified on this host, so DB-1 to DB-6 can proceed while the native workspaces wait for the test machine.
 
-## Open questions
+## Decisions
 
-1. **The offscreen backend.** Is `--backend offscreen` the right shape, or should it be `--headless --render`, or should `--headless` render whenever a GPU is present, as wlroots' headless backend does (the CPU-only mode would then need its own switch for the existing tests and harnesses)?
-2. **Installing clients.** May the operator install `weston` (14.0.2, only for its demo clients) and `mpv` (0.40.0) with `sudo apt-get install weston mpv`? DB-4's acceptance lists them as conditional until then.
-3. **NVIDIA device nodes in the namespace.** The harness exposes `renderD128`, `nvidia0`, `nvidiactl`, `nvidia-uvm` and `nvidia-uvm-tools`, but not `nvidia-modeset` or `card0`. If NVIDIA's userspace refuses to render without `nvidia-modeset`, may it be added (it controls display configuration, though nothing in the namespace would call it), or should those clients be recorded as not testable here?
-4. **Explicit sync beyond Wayfire.** Wayfire offers no `linux-drm-syncobj-v1`. Shingle would, because this host's NVIDIA clients otherwise block on `glFinish` before every commit. Agreed?
-5. **linux-dmabuf version.** Version 5, as wlroots and Wayfire, rather than smithay's 6? Version 6 only helps multi-GPU setups.
-6. **Screencopy from rendered frames.** Captures will then show effects (inversion, Scale, Expo, animations) as Wayfire's do, and earlier byte-identical references taken with the CPU composite no longer apply. Agreed?
-7. **Order against the native backend.** DB-1 to DB-6 can be verified on this host now, while NB-6 to NB-8 wait for the test machine. Should DMA-BUF start before NB-8 and NB-9, even though the roadmap lists the native backend first?
+The operator asked for the work to continue without stopping for questions, so these were decided on the operator's behalf on 2026-11-25 with the defaults below. Any of them can be revisited; each is cheap to change before the workspace that depends on it lands.
+
+1. **The offscreen backend** is a separate `--backend offscreen`. `--headless` stays CPU-only, so its existing tests and harnesses are unchanged.
+2. **Installing clients.** `weston` and `mpv` are installed with `sudo apt-get install weston mpv`; the operator allowed installing dev and test packages.
+3. **NVIDIA device nodes.** The harness may expose `/dev/nvidia-modeset` if NVIDIA's userspace needs it. Every NVIDIA GL client on the operator's desktop opens it already, and it grants no modeset control without a DRM master. `card0` stays hidden.
+4. **Explicit sync.** Shingle offers `linux-drm-syncobj-v1`, beyond Wayfire, because NVIDIA clients otherwise stall before every commit.
+5. **linux-dmabuf version 5**, as wlroots and Wayfire.
+6. **Screencopy from rendered frames** is accepted, with effects visible in captures as in Wayfire. References that depended on the CPU composite are re-recorded in the workspace that changes it.
+7. **Order.** DB-1 to DB-6 start now, because they can be verified on this host, while NB-8 and NB-10 wait for the test machine.
