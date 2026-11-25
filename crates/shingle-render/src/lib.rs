@@ -76,6 +76,10 @@ pub enum RenderError {
   /// wgpu's description of the failure.
   #[error("GPU readback failed: {0}")]
   Readback(String),
+  /// The GPU did not finish the frame within the time
+  /// [`OffscreenTarget::read_rgba_within`] allowed.
+  #[error("the GPU did not finish within {0:?}")]
+  Timeout(Duration),
   /// No enumerated adapter matched the [`AdapterFilter`] given in
   /// [`GpuOptions`] and, if a surface was given, could present to it.
   #[error("no GPU adapter matched the adapter filter")]

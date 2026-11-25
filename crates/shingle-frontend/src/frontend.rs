@@ -791,6 +791,22 @@ impl Frontend {
     self.flush(host);
   }
 
+  /// Forgets every GPU texture: surface textures, geometry animations'
+  /// old frames, Scale titles, icons and the filter text. The native host
+  /// calls it before drawing with a new GPU context after the old device
+  /// was lost; the next frame uploads everything again from the
+  /// compositor's surface snapshots, which keep their pixels. Closing
+  /// animations whose texture is gone are not drawn.
+  pub fn drop_gpu_resources(&mut self) {
+    self.textures.clear();
+    self.previous_surfaces.clear();
+    self.animations.clear();
+    self.scale_titles.clear();
+    self.scale_icons.clear();
+    self.scale_filter_texture = None;
+    self.request_redraw();
+  }
+
   /// The keyboard LEDs the shared keyboard state lights, after adopting
   /// locks and the layout that IPC may have changed. The native host
   /// passes them to every libinput keyboard.

@@ -213,6 +213,18 @@ impl OffscreenTarget {
   /// Copies the target to the CPU as tightly packed RGBA8 rows, waiting
   /// for all submitted work first.
   pub fn read_rgba(&self, gpu: &GpuContext) -> Result<Vec<u8>, RenderError> {
+    self.read_rgba_within(gpu, None)
+  }
+
+  /// [`OffscreenTarget::read_rgba`], waiting at most `timeout` for the
+  /// GPU, or without limit for `None`. Running out of time is
+  /// [`RenderError::Timeout`]; the KMS copy path treats repeated timeouts
+  /// as a hung GPU.
+  pub fn read_rgba_within(
+    &self,
+    gpu: &GpuContext,
+    timeout: Option<std::time::Duration>,
+  ) -> Result<Vec<u8>, RenderError> {
     let row_bytes = self.width as usize * 4;
     let padded_row_bytes = padded_row_bytes(self.width);
     let readback = gpu.device().create_buffer(&wgpu::BufferDescriptor {
@@ -255,10 +267,19 @@ impl OffscreenTarget {
       .map_async(wgpu::MapMode::Read, .., move |result| {
         let _ = sender.send(result);
       });
+    let wait = wgpu::PollType::Wait {
+      submission_index: None,
+      timeout,
+    };
     gpu
       .device()
-      .poll(wgpu::PollType::wait_indefinitely())
-      .map_err(|error| RenderError::Readback(error.to_string()))?;
+      .poll(wait)
+      .map_err(|error| match (error, timeout) {
+        (wgpu::PollError::Timeout, Some(timeout)) => {
+          RenderError::Timeout(timeout)
+        }
+        (error, _) => RenderError::Readback(error.to_string()),
+      })?;
     receiver
       .recv()
       .map_err(|error| RenderError::Readback(error.to_string()))?

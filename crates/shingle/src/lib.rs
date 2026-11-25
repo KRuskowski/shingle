@@ -1506,6 +1506,13 @@ impl Compositor {
     self.state.process_idle_commands(commands);
   }
 
+  /// Whether the output should be on, after idle timeouts, activity,
+  /// [`Compositor::set_dpms`] and wlr-output-power-management. The native
+  /// backend follows it with the CRTC's `ACTIVE`.
+  pub fn dpms_state(&self) -> DpmsState {
+    self.state.idle.dpms_state()
+  }
+
   /// Records user activity for the idle timers: resets them, turns DPMS back
   /// on and ends an idle period. Seat input does this by itself; a frontend
   /// calls it for input the compositor never sees.
@@ -3343,6 +3350,16 @@ pub(crate) mod tests {
     assert_eq!(dpms_events(&mut compositor), []);
     compositor.activity();
     assert_eq!(dpms_events(&mut compositor), [DpmsState::On]);
+  }
+
+  #[test]
+  fn the_dpms_state_follows_set_dpms_and_activity() {
+    let (mut compositor, _) = test_compositor();
+    assert_eq!(compositor.dpms_state(), DpmsState::On);
+    compositor.set_dpms(DpmsState::Off);
+    assert_eq!(compositor.dpms_state(), DpmsState::Off);
+    compositor.activity();
+    assert_eq!(compositor.dpms_state(), DpmsState::On);
   }
 
   /// Dispatches the compositor until `done` holds or a second has passed.
