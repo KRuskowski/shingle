@@ -11,6 +11,7 @@
 //!
 //! [`shell`] is the `xwayland_shell_v1` protocol and [`windows`] turns
 //! managed X windows into Shingle toplevels (sections 3 and 4).
+//! [`selection`] bridges the clipboard and primary selection (section 5).
 
 #[cfg(test)]
 mod behaviour_tests;
@@ -18,6 +19,7 @@ mod behaviour_tests;
 pub(crate) mod fixture;
 pub(crate) mod focus;
 pub(crate) mod requests;
+pub(crate) mod selection;
 pub(crate) mod shell;
 pub(crate) mod unmanaged;
 pub(crate) mod windows;
@@ -25,7 +27,7 @@ pub(crate) mod windows;
 use std::{
   collections::HashMap,
   ffi::OsString,
-  os::fd::{AsRawFd, BorrowedFd},
+  os::fd::{AsRawFd, BorrowedFd, OwnedFd},
   path::PathBuf,
   sync::Arc,
   time::Duration,
@@ -38,7 +40,7 @@ use calloop::{
 use serde_json::json;
 use shingle_config::XwaylandMode;
 use shingle_xwayland::{
-  DisplaySockets, Pairing, Readiness, Restart, StartMode, Window,
+  DisplaySockets, Pairing, Readiness, Restart, Selection, StartMode, Window,
   X11Connection, XwaylandServer, Xwm, server,
 };
 use wayland_server::DisplayHandle;
@@ -109,6 +111,9 @@ pub(crate) struct Status {
   pub(crate) requests: Vec<XRequest>,
   /// The last map sequence number given to an unmanaged window.
   pub(crate) sequence: u64,
+  /// Wayland clients' requests for an X client's selection, as MIME type
+  /// and descriptor, for the window manager's next flush.
+  pub(crate) selection_receives: Vec<(Selection, String, OwnedFd)>,
 }
 
 impl Status {
@@ -138,6 +143,8 @@ pub(crate) struct Xwayland {
   exit_source: Option<RegistrationToken>,
   readiness_source: Option<RegistrationToken>,
   xwm_source: Option<RegistrationToken>,
+  /// The selection bridge's glue for the current window manager.
+  bridge: selection::Bridge,
 }
 
 /// The start mode of an enabled [`XwaylandMode`].
@@ -176,6 +183,7 @@ impl Xwayland {
       exit_source: None,
       readiness_source: None,
       xwm_source: None,
+      bridge: selection::Bridge::default(),
     })
   }
 
@@ -235,6 +243,7 @@ impl Xwayland {
     // leaves the socket unreadable, so read them every turn.
     state.xwayland.xwm_pending = false;
     self.dispatch_xwm(state, handle);
+    self.pump_selections(state, handle);
     if std::mem::take(&mut state.xwayland.exit_pending) {
       self.reap(state, display, handle);
     }
@@ -270,12 +279,34 @@ impl Xwayland {
       }
     }
     let result = result
+      .and_then(|()| self.bridge.sync(state, xwm))
       .and_then(|()| match focus {
         focus::Target::Window(window) => xwm.set_focus(window),
         focus::Target::Keep => Ok(()),
       })
       .and_then(|()| xwm.restack(&stacking));
     if let Err(error) = result.and_then(|()| xwm.flush()) {
+      eprintln!("shingle: X window manager lost its connection: {error}");
+      self.drop_xwm(state, handle);
+      return;
+    }
+    self.bridge.watch(xwm, handle);
+  }
+
+  /// Passes X clients' requests for Wayland selections to their sources
+  /// and moves data on every selection transfer.
+  fn pump_selections(
+    &mut self,
+    state: &mut CompositorState,
+    handle: &LoopHandle<'static, CompositorState>,
+  ) {
+    let Some(xwm) = &mut self.xwm else {
+      return;
+    };
+    for send in xwm.take_selection_sends() {
+      selection::send(state, send);
+    }
+    if let Err(error) = xwm.pump_transfers().and_then(|()| xwm.flush()) {
       eprintln!("shingle: X window manager lost its connection: {error}");
       self.drop_xwm(state, handle);
     }
@@ -374,7 +405,14 @@ impl Xwayland {
         if format!(":{number}") != name {
           eprintln!("shingle: Xwayland reports display :{number}, not {name}");
         }
-        match X11Connection::connect(stream).and_then(Xwm::start) {
+        let bridged = selection::bridged(state);
+        let started = X11Connection::connect(stream)
+          .and_then(Xwm::start)
+          .and_then(|mut xwm| {
+            xwm.bridge_selections(bridged)?;
+            Ok(xwm)
+          });
+        match started {
           Ok(mut xwm) => {
             if let Some(cursor) = crate::cursor_shape::default_x_cursor(state)
               && let Err(error) = xwm.set_cursor(&cursor)
@@ -506,8 +544,10 @@ impl Xwayland {
     handle: &LoopHandle<'static, CompositorState>,
   ) {
     remove(handle, &mut self.xwm_source);
+    self.bridge.clear(handle);
     if self.xwm.take().is_some() {
       windows::forget_all(state);
+      selection::forget_x11(state);
     }
   }
 

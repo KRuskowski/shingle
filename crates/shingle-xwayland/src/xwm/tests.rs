@@ -38,6 +38,14 @@ enum Request {
   SetInputFocus(Window),
   StackAbove(Window, Option<Window>),
   RootCursor(u16, u16),
+  DestroyWindow(Window),
+  SelectSelection(Window, u32),
+  /// Requestor, selection, target, property.
+  Convert(Window, u32, u32, u32),
+  TakeProperty(Window, u32),
+  AtomNames(Vec<u32>),
+  /// Requestor, selection, target, property.
+  SelectionNotify(Window, u32, u32, u32),
   Flush,
 }
 
@@ -58,7 +66,12 @@ struct Recording {
   pids: HashMap<Window, u32>,
   /// The sequence number of the next request that reports one.
   sequence: u16,
+  /// Atoms interned beyond [`ATOM_NAMES`], from 5000 on.
+  interned: Vec<String>,
 }
+
+/// The fake's first atom beyond [`ATOM_NAMES`].
+const FIRST_EXTRA_ATOM: u32 = 5000;
 
 impl XConnection for Recording {
   fn root(&self) -> Window {
@@ -89,7 +102,7 @@ impl XConnection for Recording {
 
   fn intern_atoms(&mut self, names: &[&str]) -> Result<Vec<u32>, XwmError> {
     self.requests.push(Request::InternAtoms(names.len()));
-    Ok((0..names.len() as u32).map(|index| 1000 + index).collect())
+    Ok(names.iter().map(|name| self.intern(name)).collect())
   }
 
   fn redirect_subwindows(&mut self, window: Window) -> Result<(), XwmError> {
@@ -256,6 +269,67 @@ impl XConnection for Recording {
     Ok(())
   }
 
+  fn destroy_window(&mut self, window: Window) -> Result<(), XwmError> {
+    self.requests.push(Request::DestroyWindow(window));
+    Ok(())
+  }
+
+  fn select_selection_input(
+    &mut self,
+    window: Window,
+    selection: u32,
+  ) -> Result<(), XwmError> {
+    self
+      .requests
+      .push(Request::SelectSelection(window, selection));
+    Ok(())
+  }
+
+  fn convert_selection(
+    &mut self,
+    requestor: Window,
+    selection: u32,
+    target: u32,
+    property: u32,
+    _time: u32,
+  ) -> Result<(), XwmError> {
+    self
+      .requests
+      .push(Request::Convert(requestor, selection, target, property));
+    Ok(())
+  }
+
+  fn take_property(
+    &mut self,
+    window: Window,
+    property: u32,
+  ) -> Result<Option<Property>, XwmError> {
+    self.requests.push(Request::TakeProperty(window, property));
+    Ok(self.properties.remove(&(window, property)))
+  }
+
+  fn atom_names(
+    &mut self,
+    atoms: &[u32],
+  ) -> Result<Vec<Option<String>>, XwmError> {
+    self.requests.push(Request::AtomNames(atoms.to_vec()));
+    Ok(atoms.iter().map(|atom| self.name(*atom)).collect())
+  }
+
+  fn send_selection_notify(
+    &mut self,
+    requestor: Window,
+    selection: u32,
+    target: u32,
+    property: u32,
+    _time: u32,
+  ) -> Result<(), XwmError> {
+    self.requests.push(Request::SelectionNotify(
+      requestor, selection, target, property,
+    ));
+    Ok(())
+  }
+
   fn flush(&mut self) -> Result<(), XwmError> {
     self.requests.push(Request::Flush);
     Ok(())
@@ -266,10 +340,46 @@ impl XConnection for Recording {
   }
 }
 
+impl Recording {
+  /// The fake's atom for `name`: the predefined `STRING`, `1000 + i` for
+  /// the `i`th of [`ATOM_NAMES`], else one from [`FIRST_EXTRA_ATOM`] on.
+  fn intern(&mut self, name: &str) -> u32 {
+    if name == "STRING" {
+      return connection::STRING_ATOM;
+    }
+    if let Some(index) = ATOM_NAMES.iter().position(|known| *known == name) {
+      return 1000 + index as u32;
+    }
+    let index = match self.interned.iter().position(|known| known == name) {
+      Some(index) => index,
+      None => {
+        self.interned.push(name.to_owned());
+        self.interned.len() - 1
+      }
+    };
+    FIRST_EXTRA_ATOM + index as u32
+  }
+
+  /// The name of one of the fake's atoms.
+  fn name(&self, atom: u32) -> Option<String> {
+    if atom == connection::STRING_ATOM {
+      return Some("STRING".to_owned());
+    }
+    if (1000..1000 + ATOM_NAMES.len() as u32).contains(&atom) {
+      return Some(ATOM_NAMES[(atom - 1000) as usize].to_owned());
+    }
+    atom
+      .checked_sub(FIRST_EXTRA_ATOM)
+      .and_then(|index| self.interned.get(index as usize).cloned())
+  }
+}
+
 /// The fake's value for `name`.
 fn atom(name: AtomName) -> u32 {
   1000 + name as u32
 }
+
+mod selection;
 
 #[test]
 fn bring_up_follows_wlroots() {

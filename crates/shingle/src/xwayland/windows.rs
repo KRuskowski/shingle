@@ -128,6 +128,13 @@ pub(crate) fn apply(state: &mut CompositorState, event: XwmEvent) {
     XwmEvent::CloseRequest { window } => {
       super::requests::close(state, window);
     }
+    XwmEvent::SelectionOffered {
+      selection,
+      mime_types,
+    } => super::selection::offered(state, selection, mime_types),
+    XwmEvent::SelectionCleared { selection } => {
+      super::selection::cleared(state, selection);
+    }
   }
 }
 

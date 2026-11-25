@@ -11,7 +11,10 @@ use wayland_server::{
   backend::{ClientId, ObjectId},
 };
 
-use crate::{data_device, state::CompositorState};
+use crate::{
+  data_device::{self, SourceKey},
+  state::CompositorState,
+};
 
 struct Source {
   resource: ZwlrDataControlSourceV1,
@@ -23,16 +26,16 @@ struct Source {
 struct Device {
   resource: ZwlrDataControlDeviceV1,
   client: Client,
-  selection: Option<ObjectId>,
-  primary_selection: Option<ObjectId>,
+  selection: Option<SourceKey>,
+  primary_selection: Option<SourceKey>,
 }
 
 #[derive(Default)]
 pub(crate) struct DataControl {
   sources: HashMap<ObjectId, Source>,
   devices: HashMap<ObjectId, Device>,
-  offers: HashMap<ObjectId, ObjectId>,
-  primary_offers: HashMap<ObjectId, ObjectId>,
+  offers: HashMap<ObjectId, SourceKey>,
+  primary_offers: HashMap<ObjectId, SourceKey>,
   offer_clients: HashMap<ObjectId, ClientId>,
 }
 
@@ -235,7 +238,7 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for CompositorState {
     resource: &ZwlrDataControlDeviceV1,
     request: zwlr_data_control_device_v1::Request,
     _data: &(),
-    dhandle: &DisplayHandle,
+    _dhandle: &DisplayHandle,
     _data_init: &mut DataInit<'_, Self>,
   ) {
     match request {
@@ -255,9 +258,8 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for CompositorState {
           control.used = true;
           let control_resource = control.resource.clone();
           let mime_types = control.mime_types.clone();
-          let _ = data_device::set_control_selection(
+          data_device::set_control_selection(
             state,
-            dhandle,
             client,
             control_resource,
             mime_types,
@@ -282,9 +284,8 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for CompositorState {
           control.used = true;
           let control_resource = control.resource.clone();
           let mime_types = control.mime_types.clone();
-          let _ = crate::primary_selection::set_control_selection(
+          crate::primary_selection::set_control_selection(
             state,
-            dhandle,
             client,
             control_resource,
             mime_types,

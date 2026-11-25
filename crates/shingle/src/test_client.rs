@@ -41,10 +41,18 @@ use wayland_protocols_misc::{
     zwp_virtual_keyboard_manager_v1, zwp_virtual_keyboard_v1,
   },
 };
-use wayland_protocols_wlr::output_management::v1::client::{
-  zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
-  zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
-  zwlr_output_mode_v1::{self, ZwlrOutputModeV1},
+use wayland_protocols_wlr::{
+  data_control::v1::client::{
+    zwlr_data_control_device_v1::{self, ZwlrDataControlDeviceV1},
+    zwlr_data_control_manager_v1::ZwlrDataControlManagerV1,
+    zwlr_data_control_offer_v1::{self, ZwlrDataControlOfferV1},
+    zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
+  },
+  output_management::v1::client::{
+    zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
+    zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
+    zwlr_output_mode_v1::{self, ZwlrOutputModeV1},
+  },
 };
 
 use crate::Compositor;
@@ -73,6 +81,16 @@ pub(crate) struct Events {
   pub(crate) pointer: Vec<wl_pointer::Event>,
   /// Every `wl_touch` event, in order.
   pub(crate) touch: Vec<wl_touch::Event>,
+  /// wlr-data-control `selection` events, in order.
+  pub(crate) control_selections: Vec<Option<ZwlrDataControlOfferV1>>,
+  /// wlr-data-control `primary_selection` events, in order.
+  pub(crate) control_primary: Vec<Option<ZwlrDataControlOfferV1>>,
+  /// The MIME types each wlr-data-control offer announced.
+  pub(crate) offer_types: std::collections::HashMap<ObjectId, Vec<String>>,
+  /// wlr-data-control sources' `send` events: MIME type and descriptor.
+  pub(crate) control_sends: Vec<(String, OwnedFd)>,
+  /// wlr-data-control sources that were cancelled.
+  pub(crate) control_cancelled: Vec<ObjectId>,
   synced: bool,
 }
 
@@ -576,6 +594,72 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for Events {
   }
 }
 
+impl Dispatch<ZwlrDataControlDeviceV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ZwlrDataControlDeviceV1,
+    event: zwlr_data_control_device_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      zwlr_data_control_device_v1::Event::Selection { id } => {
+        events.control_selections.push(id);
+      }
+      zwlr_data_control_device_v1::Event::PrimarySelection { id } => {
+        events.control_primary.push(id);
+      }
+      _ => {}
+    }
+  }
+
+  wayland_client::event_created_child!(Events, ZwlrDataControlDeviceV1, [
+    zwlr_data_control_device_v1::EVT_DATA_OFFER_OPCODE =>
+      (ZwlrDataControlOfferV1, ()),
+  ]);
+}
+
+impl Dispatch<ZwlrDataControlOfferV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    offer: &ZwlrDataControlOfferV1,
+    event: zwlr_data_control_offer_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let zwlr_data_control_offer_v1::Event::Offer { mime_type } = event {
+      events
+        .offer_types
+        .entry(offer.id())
+        .or_default()
+        .push(mime_type);
+    }
+  }
+}
+
+impl Dispatch<ZwlrDataControlSourceV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    source: &ZwlrDataControlSourceV1,
+    event: zwlr_data_control_source_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      zwlr_data_control_source_v1::Event::Send { mime_type, fd } => {
+        events.control_sends.push((mime_type, fd));
+      }
+      zwlr_data_control_source_v1::Event::Cancelled => {
+        events.control_cancelled.push(source.id());
+      }
+      _ => {}
+    }
+  }
+}
+
 /// Implements `Dispatch` for objects whose events the tests ignore.
 macro_rules! ignore_events {
   ($($interface:ty),* $(,)?) => {
@@ -616,4 +700,5 @@ ignore_events!(
   wp_commit_timer_v1::WpCommitTimerV1,
   xwayland_shell_v1::XwaylandShellV1,
   xwayland_surface_v1::XwaylandSurfaceV1,
+  ZwlrDataControlManagerV1,
 );

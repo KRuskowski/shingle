@@ -1,4 +1,15 @@
-use std::{collections::HashMap, os::fd::AsFd};
+//! `wl_data_device`: the clipboard and drag and drop.
+//!
+//! A selection's source is a [`Source`] with a [`SourceOrigin`]: a
+//! client's `wl_data_source`, a wlr-data-control source
+//! (crates/shingle/src/data_control.rs) or an X client through the
+//! XWayland selection bridge (crates/shingle/src/xwayland/selection.rs),
+//! which has no Wayland object. Sources are keyed by [`SourceKey`].
+
+use std::{
+  collections::HashMap,
+  os::fd::{AsFd, OwnedFd},
+};
 
 use wayland_protocols_wlr::data_control::v1::server as wlr_data_control;
 use wayland_server::{
@@ -20,17 +31,65 @@ pub(crate) struct SourceData;
 struct DeviceData;
 struct OfferData;
 
+/// Identifies a selection source: by its Wayland object, or by a number
+/// for an X11 source, which has none.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum SourceKey {
+  /// A `wl_data_source`, a `zwp_primary_selection_source_v1` or a
+  /// `zwlr_data_control_source_v1`.
+  Object(ObjectId),
+  /// An X client's selection, numbered in installation order.
+  X11(u64),
+}
+
+impl SourceKey {
+  /// Whether the source is an X client's.
+  pub(crate) fn is_x11(&self) -> bool {
+    matches!(self, Self::X11(_))
+  }
+}
+
+/// Who offers a selection.
+#[derive(Clone, Debug)]
+enum SourceOrigin {
+  /// A client's `wl_data_source`.
+  Client(WlDataSource),
+  /// A wlr-data-control client's source.
+  Control(ZwlrDataControlSourceV1),
+  /// An X client, through the window manager.
+  X11,
+}
+
 struct Source {
-  resource: WlDataSource,
-  client: ClientId,
+  origin: SourceOrigin,
+  /// The Wayland client behind it; `None` for an X11 source.
+  client: Option<ClientId>,
   mime_types: Vec<String>,
   used: bool,
   actions: wl_data_device_manager::DndAction,
-  control_source: Option<ZwlrDataControlSourceV1>,
+}
+
+impl Source {
+  /// Tells the source it is no longer the selection.
+  fn cancel(&self) {
+    match &self.origin {
+      SourceOrigin::Client(resource) => resource.cancelled(),
+      SourceOrigin::Control(control) => control.cancelled(),
+      SourceOrigin::X11 => {}
+    }
+  }
+
+  /// The `wl_data_source`, for drags.
+  fn resource(&self) -> Option<&WlDataSource> {
+    match &self.origin {
+      SourceOrigin::Client(resource) => Some(resource),
+      _ => None,
+    }
+  }
 }
 
 struct Drag {
-  source: ObjectId,
+  source: SourceKey,
   current: Option<ObjectId>,
   offer: Option<ObjectId>,
   accepted: Option<String>,
@@ -43,23 +102,28 @@ struct Device {
   resource: WlDataDevice,
   client: Client,
   focused: Option<ClientId>,
-  selection: Option<ObjectId>,
+  selection: Option<SourceKey>,
 }
 
 #[derive(Default)]
 pub(crate) struct DataDevices {
-  sources: HashMap<ObjectId, Source>,
+  sources: HashMap<SourceKey, Source>,
   devices: HashMap<ObjectId, Device>,
-  offers: HashMap<ObjectId, ObjectId>,
-  selection: Option<ObjectId>,
+  offers: HashMap<ObjectId, SourceKey>,
+  selection: Option<SourceKey>,
   drag: Option<Drag>,
+  /// The number of the last X11 source.
+  x11_sources: u64,
 }
 
 impl DataDevices {
   pub(crate) fn cleanup_clients(&mut self, clients: &[ClientId]) {
-    self
-      .sources
-      .retain(|_, source| !clients.contains(&source.client));
+    self.sources.retain(|_, source| {
+      source
+        .client
+        .as_ref()
+        .is_none_or(|client| !clients.contains(client))
+    });
     self
       .devices
       .retain(|_, device| !clients.contains(&device.client.id()));
@@ -74,11 +138,37 @@ impl DataDevices {
       self.selection = None;
     }
   }
+
+  /// Makes `key` the selection, cancelling the previous source unless it
+  /// is the same. A replaced X11 source is forgotten, since no Wayland
+  /// object keeps it.
+  fn replace_selection(&mut self, key: Option<SourceKey>) {
+    if self.selection == key {
+      return;
+    }
+    if let Some(previous) = std::mem::replace(&mut self.selection, key) {
+      if let Some(source) = self.sources.get(&previous) {
+        source.cancel();
+      }
+      if previous.is_x11() {
+        self.forget(&previous);
+      }
+    }
+  }
+
+  /// Removes a source and the offers of it.
+  fn forget(&mut self, key: &SourceKey) {
+    self.sources.remove(key);
+    self.offers.retain(|_, source| source != key);
+    if self.selection.as_ref() == Some(key) {
+      self.selection = None;
+    }
+  }
 }
 
 pub(crate) fn selection(
   state: &CompositorState,
-) -> Option<(ObjectId, Vec<String>)> {
+) -> Option<(SourceKey, Vec<String>)> {
   let id = state.data_devices.selection.clone()?;
   let source = state.data_devices.sources.get(&id)?;
   Some((id, source.mime_types.clone()))
@@ -86,55 +176,82 @@ pub(crate) fn selection(
 
 pub(crate) fn set_control_selection(
   state: &mut CompositorState,
-  handle: &DisplayHandle,
   client: &Client,
   control_source: ZwlrDataControlSourceV1,
   mime_types: Vec<String>,
-) -> Result<(), ()> {
-  let resource = client
-    .create_resource::<WlDataSource, SourceData, CompositorState>(
-      handle, 1, SourceData,
-    )
-    .map_err(|_| ())?;
-  let id = resource.id();
+) {
+  let key = SourceKey::Object(control_source.id());
   state.data_devices.sources.insert(
-    id.clone(),
+    key.clone(),
     Source {
-      resource,
-      client: client.id(),
+      origin: SourceOrigin::Control(control_source),
+      client: Some(client.id()),
       mime_types,
       used: true,
       actions: wl_data_device_manager::DndAction::Copy,
-      control_source: Some(control_source),
     },
   );
-  if let Some(previous) = state.data_devices.selection.replace(id)
-    && let Some(previous) = state.data_devices.sources.get(&previous)
-  {
-    previous.resource.cancelled();
-    if let Some(control) = &previous.control_source {
-      control.cancelled();
-    }
-  }
-  Ok(())
+  state.data_devices.replace_selection(Some(key));
 }
 
+/// Installs an X client's selection with `mime_types` as the Wayland
+/// selection, replacing whatever was there, and returns its key.
+pub(crate) fn set_x11_selection(
+  state: &mut CompositorState,
+  mime_types: Vec<String>,
+) -> SourceKey {
+  let data = &mut state.data_devices;
+  data.x11_sources += 1;
+  let key = SourceKey::X11(data.x11_sources);
+  data.sources.insert(
+    key.clone(),
+    Source {
+      origin: SourceOrigin::X11,
+      client: None,
+      mime_types,
+      used: true,
+      actions: wl_data_device_manager::DndAction::Copy,
+    },
+  );
+  data.replace_selection(Some(key.clone()));
+  key
+}
+
+/// Clears the selection if an X client's source holds it.
+pub(crate) fn clear_x11_selection(state: &mut CompositorState) {
+  if state
+    .data_devices
+    .selection
+    .as_ref()
+    .is_some_and(SourceKey::is_x11)
+  {
+    state.data_devices.replace_selection(None);
+  }
+}
+
+/// Asks `source` for `mime_type` in `fd`. An X11 source's request goes to
+/// the window manager on its next flush. Nothing is sent for a type the
+/// source does not offer; dropping `fd` ends the reader's transfer.
 pub(crate) fn receive_from(
-  state: &CompositorState,
-  source: &ObjectId,
+  state: &mut CompositorState,
+  source: &SourceKey,
   mime_type: String,
-  fd: std::os::fd::OwnedFd,
+  fd: OwnedFd,
 ) {
-  let Some(source) = state.data_devices.sources.get(source) else {
+  let Some(found) = state.data_devices.sources.get(source) else {
     return;
   };
-  if !source.mime_types.contains(&mime_type) {
+  if !found.mime_types.contains(&mime_type) {
     return;
   }
-  if let Some(control) = &source.control_source {
-    control.send(mime_type, fd.as_fd());
-  } else {
-    source.resource.send(mime_type, fd.as_fd());
+  match &found.origin {
+    SourceOrigin::Client(resource) => resource.send(mime_type, fd.as_fd()),
+    SourceOrigin::Control(control) => control.send(mime_type, fd.as_fd()),
+    SourceOrigin::X11 => state.xwayland.selection_receives.push((
+      shingle_xwayland::Selection::Clipboard,
+      mime_type,
+      fd,
+    )),
   }
 }
 
@@ -142,34 +259,19 @@ pub(crate) fn remove_control_source(
   state: &mut CompositorState,
   control: &ObjectId,
 ) {
-  let removed = state
+  let key = SourceKey::Object(control.clone());
+  if state
     .data_devices
     .sources
-    .iter()
-    .filter_map(|(id, source)| {
-      (source.control_source.as_ref().map(Resource::id).as_ref()
-        == Some(control))
-      .then_some(id.clone())
-    })
-    .collect::<Vec<_>>();
-  for id in removed {
-    state.data_devices.sources.remove(&id);
-    state.data_devices.offers.retain(|_, source| source != &id);
-    if state.data_devices.selection.as_ref() == Some(&id) {
-      state.data_devices.selection = None;
-    }
+    .get(&key)
+    .is_some_and(|source| matches!(source.origin, SourceOrigin::Control(_)))
+  {
+    state.data_devices.forget(&key);
   }
 }
 
 pub(crate) fn clear_selection(state: &mut CompositorState) {
-  if let Some(previous) = state.data_devices.selection.take()
-    && let Some(previous) = state.data_devices.sources.get(&previous)
-  {
-    previous.resource.cancelled();
-    if let Some(control) = &previous.control_source {
-      control.cancelled();
-    }
-  }
+  state.data_devices.replace_selection(None);
 }
 
 pub(crate) fn create_global(handle: &DisplayHandle) {
@@ -338,7 +440,15 @@ pub(crate) fn drop_drag(state: &mut CompositorState) {
     return;
   }
   drag.dropped = true;
-  let source = state.data_devices.sources[&drag.source].resource.clone();
+  let Some(source) = state
+    .data_devices
+    .sources
+    .get(&drag.source)
+    .and_then(Source::resource)
+    .cloned()
+  else {
+    return;
+  };
   let accepted = drag.accepted.is_some()
     && drag.action != wl_data_device_manager::DndAction::empty();
   if let Some(target) = &drag.current
@@ -407,14 +517,13 @@ impl Dispatch<WlDataDeviceManager, ()> for CompositorState {
       wl_data_device_manager::Request::CreateDataSource { id } => {
         let source = data_init.init(id, SourceData);
         state.data_devices.sources.insert(
-          source.id(),
+          SourceKey::Object(source.id()),
           Source {
-            resource: source,
-            client: client.id(),
+            origin: SourceOrigin::Client(source),
+            client: Some(client.id()),
             mime_types: Vec::new(),
             used: false,
             actions: wl_data_device_manager::DndAction::Copy,
-            control_source: None,
           },
         );
       }
@@ -448,7 +557,8 @@ impl Dispatch<WlDataSource, SourceData> for CompositorState {
   ) {
     match request {
       wl_data_source::Request::Offer { mime_type } => {
-        if let Some(source) = state.data_devices.sources.get_mut(&resource.id())
+        let key = SourceKey::Object(resource.id());
+        if let Some(source) = state.data_devices.sources.get_mut(&key)
           && !source.mime_types.contains(&mime_type)
         {
           source.mime_types.push(mime_type);
@@ -456,8 +566,10 @@ impl Dispatch<WlDataSource, SourceData> for CompositorState {
       }
       wl_data_source::Request::SetActions { dnd_actions } => {
         if let WEnum::Value(actions) = dnd_actions
-          && let Some(source) =
-            state.data_devices.sources.get_mut(&resource.id())
+          && let Some(source) = state
+            .data_devices
+            .sources
+            .get_mut(&SourceKey::Object(resource.id()))
         {
           source.actions = actions;
         }
@@ -473,12 +585,8 @@ impl Dispatch<WlDataSource, SourceData> for CompositorState {
     resource: &WlDataSource,
     _data: &SourceData,
   ) {
-    let id = resource.id();
-    state.data_devices.sources.remove(&id);
-    state.data_devices.offers.retain(|_, source| source != &id);
-    if state.data_devices.selection == Some(id.clone()) {
-      state.data_devices.selection = None;
-    }
+    let id = SourceKey::Object(resource.id());
+    state.data_devices.forget(&id);
     if state
       .data_devices
       .drag
@@ -505,12 +613,15 @@ impl Dispatch<WlDataDevice, DeviceData> for CompositorState {
       ..
     } = request
     {
-      let source_id = source.id();
+      let source_id = SourceKey::Object(source.id());
       let Some(source) = state.data_devices.sources.get_mut(&source_id) else {
         return;
       };
+      let Some(resource) = source.resource().cloned() else {
+        return;
+      };
       if source.used {
-        source.resource.post_error(
+        resource.post_error(
           wl_data_device::Error::UsedSource,
           "data source has already been used",
         );
@@ -528,33 +639,24 @@ impl Dispatch<WlDataDevice, DeviceData> for CompositorState {
       return;
     }
     if let wl_data_device::Request::SetSelection { source, .. } = request {
-      let source_id = source.as_ref().map(Resource::id);
+      let source_id =
+        source.as_ref().map(|source| SourceKey::Object(source.id()));
       if let Some(source_id) = &source_id {
-        let Some(source) = state.data_devices.sources.get_mut(source_id) else {
+        let Some(found) = state.data_devices.sources.get_mut(source_id) else {
           return;
         };
-        if source.used {
-          source.resource.post_error(
-            wl_data_device::Error::UsedSource,
-            "data source has already been used",
-          );
+        if found.used {
+          if let Some(source) = &source {
+            source.post_error(
+              wl_data_device::Error::UsedSource,
+              "data source has already been used",
+            );
+          }
           return;
         }
-        source.used = true;
+        found.used = true;
       }
-      if state.data_devices.selection != source_id {
-        if let Some(previous) =
-          std::mem::replace(&mut state.data_devices.selection, source_id)
-          && let Some(previous) = state.data_devices.sources.get(&previous)
-        {
-          previous.resource.cancelled();
-          if let Some(control) = &previous.control_source {
-            control.cancelled();
-          }
-        }
-      } else {
-        state.data_devices.selection = source_id;
-      }
+      state.data_devices.replace_selection(source_id);
     }
   }
 
@@ -584,8 +686,13 @@ impl Dispatch<WlDataOffer, OfferData> for CompositorState {
           && drag.offer.as_ref() == Some(&resource.id())
         {
           drag.accepted = mime_type.clone();
-          if let Some(source) = state.data_devices.sources.get(&drag.source) {
-            source.resource.target(mime_type);
+          if let Some(source) = state
+            .data_devices
+            .sources
+            .get(&drag.source)
+            .and_then(Source::resource)
+          {
+            source.target(mime_type);
           }
         }
       }
@@ -604,7 +711,9 @@ impl Dispatch<WlDataOffer, OfferData> for CompositorState {
           let source = &state.data_devices.sources[&drag.source];
           drag.action = select_action(source, supported, preferred);
           resource.action(drag.action);
-          source.resource.action(drag.action);
+          if let Some(source) = source.resource() {
+            source.action(drag.action);
+          }
         }
       }
       wl_data_offer::Request::Finish => {
@@ -613,9 +722,13 @@ impl Dispatch<WlDataOffer, OfferData> for CompositorState {
           && drag.dropped
           && drag.accepted.is_some()
           && drag.action != wl_data_device_manager::DndAction::empty()
-          && let Some(source) = state.data_devices.sources.get(&drag.source)
+          && let Some(source) = state
+            .data_devices
+            .sources
+            .get(&drag.source)
+            .and_then(Source::resource)
         {
-          source.resource.dnd_finished();
+          source.dnd_finished();
         }
       }
       wl_data_offer::Request::Receive { mime_type, fd } => {

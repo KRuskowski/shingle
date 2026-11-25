@@ -17,12 +17,13 @@ use x11rb::{
     composite::{self, ConnectionExt as _, Redirect},
     render::{ConnectionExt as _, CreatePictureAux, PictType, Pictforminfo},
     res::{ClientIdMask, ClientIdSpec, ConnectionExt as _},
-    xfixes::{ClientDisconnectFlags, ConnectionExt as _},
+    xfixes::{ClientDisconnectFlags, ConnectionExt as _, SelectionEventMask},
     xproto::{
       CONFIGURE_NOTIFY_EVENT, ChangeWindowAttributesAux, ClientMessageEvent,
       ConfigureNotifyEvent, ConfigureWindowAux, ConnectionExt as _,
       CreateGCAux, CreateWindowAux, EventMask, ImageFormat, InputFocus,
-      PropMode, StackMode, Window, WindowClass,
+      PropMode, SELECTION_NOTIFY_EVENT, SelectionNotifyEvent, StackMode,
+      Window, WindowClass,
     },
   },
   rust_connection::{DefaultStream, RustConnection},
@@ -33,6 +34,10 @@ use super::{cursor::CursorImage, props::Property, window::Geometry};
 
 /// How many 32-bit items of a property are read at most: 256 KiB.
 const PROPERTY_LIMIT: u32 = 1 << 16;
+
+/// How many 32-bit items of a selection property are read at most, as
+/// wlroots reads them: all of it.
+const SELECTION_PROPERTY_LIMIT: u32 = 0x1fff_ffff;
 
 /// Why the window manager could not talk to the X server.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -290,6 +295,78 @@ pub trait XConnection {
   ///
   /// When the server has no ARGB32 picture format, or a request fails.
   fn set_root_cursor(&mut self, image: &CursorImage) -> Result<(), XwmError>;
+
+  /// Destroys a window the window manager created.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn destroy_window(&mut self, window: Window) -> Result<(), XwmError>;
+
+  /// XFixes `SelectSelectionInput` on `window` for `selection`: owner
+  /// changes, and the owner's window or client going away.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn select_selection_input(
+    &mut self,
+    window: Window,
+    selection: u32,
+  ) -> Result<(), XwmError>;
+
+  /// `ConvertSelection`: asks the owner of `selection` to store it as
+  /// `target` in `property` of `requestor`.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn convert_selection(
+    &mut self,
+    requestor: Window,
+    selection: u32,
+    target: u32,
+    property: u32,
+    time: u32,
+  ) -> Result<(), XwmError>;
+
+  /// Reads `property` of `window` whole and deletes it, as a selection
+  /// requestor does. `None` when it is not set or the window is gone.
+  ///
+  /// # Errors
+  ///
+  /// When the connection fails.
+  fn take_property(
+    &mut self,
+    window: Window,
+    property: u32,
+  ) -> Result<Option<Property>, XwmError>;
+
+  /// The names of `atoms`, in one pipelined batch; `None` for an atom the
+  /// server does not know.
+  ///
+  /// # Errors
+  ///
+  /// When the connection fails.
+  fn atom_names(
+    &mut self,
+    atoms: &[u32],
+  ) -> Result<Vec<Option<String>>, XwmError>;
+
+  /// Sends `requestor` a `SelectionNotify`: `property` holds the
+  /// converted `target`, or is `None` (0) when the conversion failed.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn send_selection_notify(
+    &mut self,
+    requestor: Window,
+    selection: u32,
+    target: u32,
+    property: u32,
+    time: u32,
+  ) -> Result<(), XwmError>;
 
   /// Sends every queued request.
   ///
@@ -726,6 +803,117 @@ impl XConnection for X11Connection {
     Ok(())
   }
 
+  fn destroy_window(&mut self, window: Window) -> Result<(), XwmError> {
+    self
+      .connection
+      .destroy_window(window)
+      .map(drop)
+      .map_err(connection_error)
+  }
+
+  fn select_selection_input(
+    &mut self,
+    window: Window,
+    selection: u32,
+  ) -> Result<(), XwmError> {
+    let mask = SelectionEventMask::SET_SELECTION_OWNER
+      | SelectionEventMask::SELECTION_WINDOW_DESTROY
+      | SelectionEventMask::SELECTION_CLIENT_CLOSE;
+    self
+      .connection
+      .xfixes_select_selection_input(window, selection, mask)
+      .map(drop)
+      .map_err(connection_error)
+  }
+
+  fn convert_selection(
+    &mut self,
+    requestor: Window,
+    selection: u32,
+    target: u32,
+    property: u32,
+    time: u32,
+  ) -> Result<(), XwmError> {
+    self
+      .connection
+      .convert_selection(requestor, selection, target, property, time)
+      .map(drop)
+      .map_err(connection_error)
+  }
+
+  fn take_property(
+    &mut self,
+    window: Window,
+    property: u32,
+  ) -> Result<Option<Property>, XwmError> {
+    let cookie = self
+      .connection
+      .get_property(
+        true,
+        window,
+        property,
+        x11rb::protocol::xproto::AtomEnum::ANY,
+        0,
+        SELECTION_PROPERTY_LIMIT,
+      )
+      .map_err(connection_error)?;
+    match cookie.reply() {
+      Ok(reply) if reply.type_ != NONE => Ok(Some(Property {
+        kind: reply.type_,
+        format: reply.format,
+        value: reply.value,
+      })),
+      Ok(_) | Err(x11rb::errors::ReplyError::X11Error(_)) => Ok(None),
+      Err(error) => Err(connection_error(error)),
+    }
+  }
+
+  fn atom_names(
+    &mut self,
+    atoms: &[u32],
+  ) -> Result<Vec<Option<String>>, XwmError> {
+    let cookies = atoms
+      .iter()
+      .map(|atom| self.connection.get_atom_name(*atom))
+      .collect::<Result<Vec<_>, _>>()
+      .map_err(connection_error)?;
+    let mut names = Vec::with_capacity(cookies.len());
+    for cookie in cookies {
+      match cookie.reply() {
+        Ok(reply) => {
+          names.push(Some(String::from_utf8_lossy(&reply.name).into_owned()));
+        }
+        Err(x11rb::errors::ReplyError::X11Error(_)) => names.push(None),
+        Err(error) => return Err(connection_error(error)),
+      }
+    }
+    Ok(names)
+  }
+
+  fn send_selection_notify(
+    &mut self,
+    requestor: Window,
+    selection: u32,
+    target: u32,
+    property: u32,
+    time: u32,
+  ) -> Result<(), XwmError> {
+    let event = SelectionNotifyEvent {
+      response_type: SELECTION_NOTIFY_EVENT,
+      sequence: 0,
+      time,
+      requestor,
+      selection,
+      target,
+      property,
+    };
+    self
+      .connection
+      .send_event(false, requestor, EventMask::NO_EVENT, event)
+      .map(drop)
+      .map_err(connection_error)
+  }
+
   fn flush(&mut self) -> Result<(), XwmError> {
     self.connection.flush().map_err(connection_error)
   }
@@ -768,3 +956,9 @@ pub const WINDOW_TYPE: u32 = 33;
 
 /// `AtomEnum::ATOM`, the type of atom-valued properties.
 pub const ATOM_TYPE: u32 = 4;
+
+/// `AtomEnum::INTEGER`, the type of `TIMESTAMP` replies.
+pub const INTEGER_TYPE: u32 = 19;
+
+/// `AtomEnum::STRING`, a predefined atom and the Latin-1 text target.
+pub const STRING_ATOM: u32 = 31;

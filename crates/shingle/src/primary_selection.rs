@@ -1,4 +1,10 @@
-use std::{collections::HashMap, os::fd::AsFd};
+//! The primary selection protocol, with sources of the same three origins
+//! as `wl_data_device`'s clipboard (crates/shingle/src/data_device.rs).
+
+use std::{
+  collections::HashMap,
+  os::fd::{AsFd, OwnedFd},
+};
 
 use wayland_protocols::wp::primary_selection::zv1::server::{
   zwp_primary_selection_device_manager_v1::{
@@ -15,39 +21,66 @@ use wayland_server::{
 };
 use wlr_data_control::zwlr_data_control_source_v1::ZwlrDataControlSourceV1;
 
-use crate::state::CompositorState;
+use crate::{data_device::SourceKey, state::CompositorState};
 
 pub(crate) struct SourceData;
 struct DeviceData;
 struct OfferData;
 
+/// Who offers the primary selection.
+#[derive(Clone, Debug)]
+enum SourceOrigin {
+  /// A client's `zwp_primary_selection_source_v1`.
+  Client(ZwpPrimarySelectionSourceV1),
+  /// A wlr-data-control client's source.
+  Control(ZwlrDataControlSourceV1),
+  /// An X client, through the window manager.
+  X11,
+}
+
 struct Source {
-  resource: ZwpPrimarySelectionSourceV1,
-  client: ClientId,
+  origin: SourceOrigin,
+  /// The Wayland client behind it; `None` for an X11 source.
+  client: Option<ClientId>,
   mime_types: Vec<String>,
-  control_source: Option<ZwlrDataControlSourceV1>,
+}
+
+impl Source {
+  /// Tells the source it is no longer the selection.
+  fn cancel(&self) {
+    match &self.origin {
+      SourceOrigin::Client(resource) => resource.cancelled(),
+      SourceOrigin::Control(control) => control.cancelled(),
+      SourceOrigin::X11 => {}
+    }
+  }
 }
 
 struct Device {
   resource: ZwpPrimarySelectionDeviceV1,
   client: Client,
   focused: Option<ClientId>,
-  selection: Option<ObjectId>,
+  selection: Option<SourceKey>,
 }
 
 #[derive(Default)]
 pub(crate) struct PrimarySelection {
-  sources: HashMap<ObjectId, Source>,
+  sources: HashMap<SourceKey, Source>,
   devices: HashMap<ObjectId, Device>,
-  offers: HashMap<ObjectId, ObjectId>,
-  selection: Option<ObjectId>,
+  offers: HashMap<ObjectId, SourceKey>,
+  selection: Option<SourceKey>,
+  /// The number of the last X11 source.
+  x11_sources: u64,
 }
 
 impl PrimarySelection {
   pub(crate) fn cleanup_clients(&mut self, clients: &[ClientId]) {
-    self
-      .sources
-      .retain(|_, source| !clients.contains(&source.client));
+    self.sources.retain(|_, source| {
+      source
+        .client
+        .as_ref()
+        .is_none_or(|client| !clients.contains(client))
+    });
     self
       .devices
       .retain(|_, device| !clients.contains(&device.client.id()));
@@ -62,11 +95,36 @@ impl PrimarySelection {
       self.selection = None;
     }
   }
+
+  /// Makes `key` the selection, cancelling the previous source unless it
+  /// is the same. A replaced X11 source is forgotten.
+  fn replace_selection(&mut self, key: Option<SourceKey>) {
+    if self.selection == key {
+      return;
+    }
+    if let Some(previous) = std::mem::replace(&mut self.selection, key) {
+      if let Some(source) = self.sources.get(&previous) {
+        source.cancel();
+      }
+      if previous.is_x11() {
+        self.forget(&previous);
+      }
+    }
+  }
+
+  /// Removes a source and the offers of it.
+  fn forget(&mut self, key: &SourceKey) {
+    self.sources.remove(key);
+    self.offers.retain(|_, source| source != key);
+    if self.selection.as_ref() == Some(key) {
+      self.selection = None;
+    }
+  }
 }
 
 pub(crate) fn selection(
   state: &CompositorState,
-) -> Option<(ObjectId, Vec<String>)> {
+) -> Option<(SourceKey, Vec<String>)> {
   let id = state.primary_selection.selection.clone()?;
   let source = state.primary_selection.sources.get(&id)?;
   Some((id, source.mime_types.clone()))
@@ -74,51 +132,77 @@ pub(crate) fn selection(
 
 pub(crate) fn set_control_selection(
   state: &mut CompositorState,
-  handle: &DisplayHandle,
   client: &Client,
   control_source: ZwlrDataControlSourceV1,
   mime_types: Vec<String>,
-) -> Result<(), ()> {
-  let resource: ZwpPrimarySelectionSourceV1 = client
-    .create_resource::<_, SourceData, CompositorState>(handle, 1, SourceData)
-    .map_err(|_| ())?;
-  let id = resource.id();
+) {
+  let key = SourceKey::Object(control_source.id());
   state.primary_selection.sources.insert(
-    id.clone(),
+    key.clone(),
     Source {
-      resource,
-      client: client.id(),
+      origin: SourceOrigin::Control(control_source),
+      client: Some(client.id()),
       mime_types,
-      control_source: Some(control_source),
     },
   );
-  if let Some(previous) = state.primary_selection.selection.replace(id)
-    && let Some(previous) = state.primary_selection.sources.get(&previous)
-  {
-    previous.resource.cancelled();
-    if let Some(control) = &previous.control_source {
-      control.cancelled();
-    }
-  }
-  Ok(())
+  state.primary_selection.replace_selection(Some(key));
 }
 
+/// Installs an X client's primary selection with `mime_types`, replacing
+/// whatever was there, and returns its key.
+pub(crate) fn set_x11_selection(
+  state: &mut CompositorState,
+  mime_types: Vec<String>,
+) -> SourceKey {
+  let data = &mut state.primary_selection;
+  data.x11_sources += 1;
+  let key = SourceKey::X11(data.x11_sources);
+  data.sources.insert(
+    key.clone(),
+    Source {
+      origin: SourceOrigin::X11,
+      client: None,
+      mime_types,
+    },
+  );
+  data.replace_selection(Some(key.clone()));
+  key
+}
+
+/// Clears the primary selection if an X client's source holds it.
+pub(crate) fn clear_x11_selection(state: &mut CompositorState) {
+  if state
+    .primary_selection
+    .selection
+    .as_ref()
+    .is_some_and(SourceKey::is_x11)
+  {
+    state.primary_selection.replace_selection(None);
+  }
+}
+
+/// Asks `source` for `mime_type` in `fd`; see
+/// [`crate::data_device::receive_from`].
 pub(crate) fn receive_from(
-  state: &CompositorState,
-  source: &ObjectId,
+  state: &mut CompositorState,
+  source: &SourceKey,
   mime_type: String,
-  fd: std::os::fd::OwnedFd,
+  fd: OwnedFd,
 ) {
-  let Some(source) = state.primary_selection.sources.get(source) else {
+  let Some(found) = state.primary_selection.sources.get(source) else {
     return;
   };
-  if !source.mime_types.contains(&mime_type) {
+  if !found.mime_types.contains(&mime_type) {
     return;
   }
-  if let Some(control) = &source.control_source {
-    control.send(mime_type, fd.as_fd());
-  } else {
-    source.resource.send(mime_type, fd.as_fd());
+  match &found.origin {
+    SourceOrigin::Client(resource) => resource.send(mime_type, fd.as_fd()),
+    SourceOrigin::Control(control) => control.send(mime_type, fd.as_fd()),
+    SourceOrigin::X11 => state.xwayland.selection_receives.push((
+      shingle_xwayland::Selection::Primary,
+      mime_type,
+      fd,
+    )),
   }
 }
 
@@ -126,37 +210,19 @@ pub(crate) fn remove_control_source(
   state: &mut CompositorState,
   control: &ObjectId,
 ) {
-  let removed = state
+  let key = SourceKey::Object(control.clone());
+  if state
     .primary_selection
     .sources
-    .iter()
-    .filter_map(|(id, source)| {
-      (source.control_source.as_ref().map(Resource::id).as_ref()
-        == Some(control))
-      .then_some(id.clone())
-    })
-    .collect::<Vec<_>>();
-  for id in removed {
-    state.primary_selection.sources.remove(&id);
-    state
-      .primary_selection
-      .offers
-      .retain(|_, source| source != &id);
-    if state.primary_selection.selection.as_ref() == Some(&id) {
-      state.primary_selection.selection = None;
-    }
+    .get(&key)
+    .is_some_and(|source| matches!(source.origin, SourceOrigin::Control(_)))
+  {
+    state.primary_selection.forget(&key);
   }
 }
 
 pub(crate) fn clear_selection(state: &mut CompositorState) {
-  if let Some(previous) = state.primary_selection.selection.take()
-    && let Some(previous) = state.primary_selection.sources.get(&previous)
-  {
-    previous.resource.cancelled();
-    if let Some(control) = &previous.control_source {
-      control.cancelled();
-    }
-  }
+  state.primary_selection.replace_selection(None);
 }
 
 pub(crate) fn create_global(handle: &DisplayHandle) {
@@ -251,12 +317,11 @@ impl Dispatch<ZwpPrimarySelectionDeviceManagerV1, ()> for CompositorState {
       zwp_primary_selection_device_manager_v1::Request::CreateSource { id } => {
         let source = data_init.init(id, SourceData);
         state.primary_selection.sources.insert(
-          source.id(),
+          SourceKey::Object(source.id()),
           Source {
-            resource: source,
-            client: client.id(),
+            origin: SourceOrigin::Client(source),
+            client: Some(client.id()),
             mime_types: Vec::new(),
-            control_source: None,
           },
         );
       }
@@ -293,8 +358,10 @@ impl Dispatch<ZwpPrimarySelectionSourceV1, SourceData> for CompositorState {
   ) {
     if let zwp_primary_selection_source_v1::Request::Offer { mime_type } =
       request
-      && let Some(source) =
-        state.primary_selection.sources.get_mut(&resource.id())
+      && let Some(source) = state
+        .primary_selection
+        .sources
+        .get_mut(&SourceKey::Object(resource.id()))
       && !source.mime_types.contains(&mime_type)
     {
       source.mime_types.push(mime_type);
@@ -307,15 +374,8 @@ impl Dispatch<ZwpPrimarySelectionSourceV1, SourceData> for CompositorState {
     resource: &ZwpPrimarySelectionSourceV1,
     _data: &SourceData,
   ) {
-    let id = resource.id();
-    state.primary_selection.sources.remove(&id);
-    state
-      .primary_selection
-      .offers
-      .retain(|_, source| source != &id);
-    if state.primary_selection.selection == Some(id) {
-      state.primary_selection.selection = None;
-    }
+    let id = SourceKey::Object(resource.id());
+    state.primary_selection.forget(&id);
   }
 }
 
@@ -334,26 +394,15 @@ impl Dispatch<ZwpPrimarySelectionDeviceV1, DeviceData> for CompositorState {
       ..
     } = request
     {
-      let source_id = source.as_ref().map(Resource::id);
+      let source_id =
+        source.as_ref().map(|source| SourceKey::Object(source.id()));
       if source_id
         .as_ref()
         .is_some_and(|id| !state.primary_selection.sources.contains_key(id))
       {
         return;
       }
-      if state.primary_selection.selection != source_id {
-        if let Some(previous) =
-          std::mem::replace(&mut state.primary_selection.selection, source_id)
-          && let Some(previous) = state.primary_selection.sources.get(&previous)
-        {
-          previous.resource.cancelled();
-          if let Some(control) = &previous.control_source {
-            control.cancelled();
-          }
-        }
-      } else {
-        state.primary_selection.selection = source_id;
-      }
+      state.primary_selection.replace_selection(source_id);
     }
   }
 

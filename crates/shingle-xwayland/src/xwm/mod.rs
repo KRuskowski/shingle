@@ -11,14 +11,22 @@
 //! [`Xwm::set_state`], [`Xwm::close`], [`Xwm::set_focus`] (with the ICCCM
 //! input models and the `FocusIn` guard), [`Xwm::restack`] and
 //! [`Xwm::set_cursor`].
+//!
+//! It also bridges the clipboard and primary selection between X and
+//! Wayland ([`selection`]): [`Xwm::bridge_selections`],
+//! [`Xwm::set_selection`], [`Xwm::receive_selection`],
+//! [`Xwm::take_selection_sends`], [`Xwm::pump_transfers`] and
+//! [`Xwm::transfer_watches`].
 
 mod atoms;
 mod connection;
 pub mod cursor;
 pub mod messages;
+pub mod mime;
 pub mod pairing;
 pub mod policy;
 pub mod props;
+pub mod selection;
 pub mod window;
 
 use std::collections::HashMap;
@@ -33,6 +41,7 @@ pub use messages::{MoveResize, StateChange};
 pub use pairing::{Paired, Pairing};
 pub use policy::{Placement, configure_reply};
 pub use props::Property;
+pub use selection::{INCR_CHUNK_SIZE, Selection, SelectionSend, TransferWatch};
 pub use window::{
   Geometry, InputModel, Kind, NetWmState, Protocols, WindowInfo, WindowType,
 };
@@ -47,6 +56,7 @@ use x11rb::protocol::{
 };
 
 use props::{SizeHints, WmHints};
+use selection::Selections;
 
 /// The name the window manager gives itself in `_NET_WM_NAME` on its check
 /// window.
@@ -139,6 +149,20 @@ pub enum XwmEvent {
     /// The X window.
     window: Window,
   },
+  /// An X client took a bridged selection and offers these MIME types;
+  /// the compositor makes it the Wayland selection.
+  SelectionOffered {
+    /// The selection.
+    selection: Selection,
+    /// The MIME types, from the owner's `TARGETS`.
+    mime_types: Vec<String>,
+  },
+  /// The X client that owned a bridged selection gave it up or went away;
+  /// the compositor clears the Wayland selection if it still comes from X.
+  SelectionCleared {
+    /// The selection.
+    selection: Selection,
+  },
 }
 
 /// What the window manager keeps per child of the root.
@@ -204,6 +228,8 @@ pub struct Xwm<C: XConnection> {
   /// The sequence number of the last `SetInputFocus`.
   focus_sequence: u16,
   warned_surface_id: bool,
+  /// The clipboard and primary selection bridge.
+  selections: Selections,
 }
 
 impl<C: XConnection> Xwm<C> {
@@ -219,7 +245,8 @@ impl<C: XConnection> Xwm<C> {
   ///    `_NET_ACTIVE_WINDOW` and empty client lists on the root.
   ///
   /// Then it flushes. The compositor sets the root cursor with
-  /// [`Xwm::set_cursor`]; the selection bridge (XW-5) is not set up yet.
+  /// [`Xwm::set_cursor`] and sets up the selection bridge with
+  /// [`Xwm::bridge_selections`].
   ///
   /// # Errors
   ///
@@ -304,6 +331,7 @@ impl<C: XConnection> Xwm<C> {
       active: None,
       focus_sequence: 0,
       warned_surface_id: false,
+      selections: Selections::default(),
     })
   }
 
@@ -333,14 +361,21 @@ impl<C: XConnection> Xwm<C> {
         // A request for a window that has been destroyed since, such as
         // WM_STATE on the UnmapNotify that precedes its DestroyNotify, is
         // expected to fail; wlroots ignores those too.
-        let gone = error.error_kind == x11rb::protocol::ErrorKind::Window
-          && !self.windows.contains_key(&error.bad_value);
+        let bad_window = error.error_kind == x11rb::protocol::ErrorKind::Window;
+        if bad_window {
+          // A selection requestor that went away mid-transfer.
+          self.selections.window_gone(error.bad_value);
+        }
+        let gone = bad_window && !self.windows.contains_key(&error.bad_value);
         if !gone {
           events.push(XwmEvent::RequestFailed(format!("{error:?}")));
         }
       }
       Event::CreateNotify(event) => {
-        if event.window == self.check_window || event.parent != self.root {
+        if event.window == self.check_window
+          || event.parent != self.root
+          || self.selections.owns_window(event.window)
+        {
           return Ok(());
         }
         let geometry = Geometry::new(
@@ -456,6 +491,11 @@ impl<C: XConnection> Xwm<C> {
       }
       Event::FocusIn(event) => self.focus_in(&event)?,
       Event::PropertyNotify(event) => {
+        self.selections.property_notify(
+          &mut self.connection,
+          &self.atoms,
+          &event,
+        )?;
         let window = event.window;
         if !self.windows.contains_key(&window)
           || !self.property_atoms().contains(&event.atom)
@@ -480,6 +520,43 @@ impl<C: XConnection> Xwm<C> {
         }
       }
       Event::ClientMessage(event) => self.client_message(&event, events)?,
+      Event::XfixesSelectionNotify(event) => {
+        if let Some(event) = self.selections.owner_changed(
+          &mut self.connection,
+          &self.atoms,
+          &event,
+        )? {
+          events.push(event);
+        }
+      }
+      Event::SelectionNotify(event) => {
+        let (_, event) = self.selections.selection_notify(
+          &mut self.connection,
+          &self.atoms,
+          &event,
+        )?;
+        events.extend(event);
+        self.selections.pump(&mut self.connection, &self.atoms)?;
+      }
+      Event::SelectionRequest(event) => {
+        let windows = &self.windows;
+        let tracked = |window: Window| windows.contains_key(&window);
+        if !self.selections.selection_request(
+          &mut self.connection,
+          &self.atoms,
+          &event,
+          &tracked,
+        )? {
+          // Not a selection the bridge owns: refuse, as ICCCM asks.
+          self.connection.send_selection_notify(
+            event.requestor,
+            event.selection,
+            event.target,
+            x11rb::NONE,
+            event.time,
+          )?;
+        }
+      }
       _ => {}
     }
     Ok(())
@@ -1094,6 +1171,104 @@ impl<C: XConnection> Xwm<C> {
     } else {
       self.connection.kill_client(window)
     }
+  }
+
+  /// Bridges `selections` between X and Wayland: creates a selection
+  /// window for each and selects XFixes owner events for it, bring-up
+  /// step 7. The compositor leaves `PRIMARY` out when
+  /// `disable_primary_selection` is set.
+  ///
+  /// # Errors
+  ///
+  /// When the requests cannot be queued.
+  pub fn bridge_selections(
+    &mut self,
+    selections: &[Selection],
+  ) -> Result<(), XwmError> {
+    self
+      .selections
+      .bridge(&mut self.connection, &self.atoms, selections)
+  }
+
+  /// The selections bridged.
+  pub fn bridged_selections(&self) -> Vec<Selection> {
+    self.selections.bridged()
+  }
+
+  /// The window that owns `selection` in X for Wayland, if it is bridged.
+  pub fn selection_window(&self, selection: Selection) -> Option<Window> {
+    self.selections.window(selection)
+  }
+
+  /// Reports the Wayland side of `selection`: the MIME types of a Wayland
+  /// source, which the window manager then offers X clients by taking the
+  /// X selection, or `None` when there is no selection or it comes from X,
+  /// in which case an ownership of the window manager's own is given up.
+  ///
+  /// # Errors
+  ///
+  /// When the requests cannot be queued.
+  pub fn set_selection(
+    &mut self,
+    selection: Selection,
+    mime_types: Option<Vec<String>>,
+  ) -> Result<(), XwmError> {
+    self.selections.set_selection(
+      &mut self.connection,
+      &self.atoms,
+      selection,
+      mime_types,
+    )
+  }
+
+  /// A Wayland client wants the X owner's `selection` as `mime_type`,
+  /// written to `fd`, which is closed when the transfer ends, or at once
+  /// when the owner does not offer the type.
+  ///
+  /// # Errors
+  ///
+  /// When the requests cannot be queued.
+  pub fn receive_selection(
+    &mut self,
+    selection: Selection,
+    mime_type: &str,
+    fd: std::os::fd::OwnedFd,
+  ) -> Result<(), XwmError> {
+    self.selections.receive(
+      &mut self.connection,
+      &self.atoms,
+      selection,
+      mime_type,
+      fd,
+    )
+  }
+
+  /// The data requests X clients made for Wayland sources since the last
+  /// call; the compositor passes each descriptor to its source's `send`.
+  pub fn take_selection_sends(&mut self) -> Vec<SelectionSend> {
+    self.selections.take_sends()
+  }
+
+  /// Moves data on every selection transfer as far as it can without
+  /// blocking. The compositor calls it each turn, after
+  /// [`Xwm::dispatch`].
+  ///
+  /// # Errors
+  ///
+  /// When the requests cannot be queued.
+  pub fn pump_transfers(&mut self) -> Result<(), XwmError> {
+    self.selections.pump(&mut self.connection, &self.atoms)
+  }
+
+  /// The descriptors the compositor watches so that the next turn comes
+  /// when a transfer can make progress.
+  pub fn transfer_watches(&self) -> Vec<TransferWatch<'_>> {
+    self.selections.watches()
+  }
+
+  /// How many selection transfers run: to X, and from X.
+  pub fn transfers(&self) -> (usize, usize) {
+    self.selections.transfers()
   }
 
   /// What the window manager knows about `window`.

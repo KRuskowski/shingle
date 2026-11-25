@@ -109,6 +109,14 @@ impl Atoms {
     self.values[name as usize]
   }
 
+  /// The value of the atom called `name`, if it is one of [`NAMES`].
+  pub fn by_name(&self, name: &str) -> Option<u32> {
+    NAMES
+      .iter()
+      .position(|candidate| *candidate == name)
+      .map(|index| self.values[index])
+  }
+
   /// The name of an interned value, if it is one of [`NAMES`].
   pub fn name_of(&self, value: u32) -> Option<&'static str> {
     self
@@ -162,6 +170,8 @@ mod tests {
     assert_eq!(atoms.get(Name::WM_PROTOCOLS), 100);
     assert_eq!(atoms.name_of(101), Some("WM_HINTS"));
     assert_eq!(atoms.name_of(5), None);
+    assert_eq!(atoms.by_name("WM_HINTS"), Some(101));
+    assert_eq!(atoms.by_name("text/plain"), None);
     assert!(Atoms::from_values(vec![1, 2]).is_none());
   }
 }
