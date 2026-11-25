@@ -1,348 +1,337 @@
 use std::collections::HashMap;
 
 use wayland_protocols_wlr::data_control::v1::server::{
-    zwlr_data_control_device_v1::{self, ZwlrDataControlDeviceV1},
-    zwlr_data_control_manager_v1::{self, ZwlrDataControlManagerV1},
-    zwlr_data_control_offer_v1::{self, ZwlrDataControlOfferV1},
-    zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
+  zwlr_data_control_device_v1::{self, ZwlrDataControlDeviceV1},
+  zwlr_data_control_manager_v1::{self, ZwlrDataControlManagerV1},
+  zwlr_data_control_offer_v1::{self, ZwlrDataControlOfferV1},
+  zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
 };
 use wayland_server::{
-    Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
-    backend::{ClientId, ObjectId},
+  Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
+  backend::{ClientId, ObjectId},
 };
 
 use crate::{data_device, state::CompositorState};
 
 struct Source {
-    resource: ZwlrDataControlSourceV1,
-    client: ClientId,
-    mime_types: Vec<String>,
-    used: bool,
+  resource: ZwlrDataControlSourceV1,
+  client: ClientId,
+  mime_types: Vec<String>,
+  used: bool,
 }
 
 struct Device {
-    resource: ZwlrDataControlDeviceV1,
-    client: Client,
-    selection: Option<ObjectId>,
-    primary_selection: Option<ObjectId>,
+  resource: ZwlrDataControlDeviceV1,
+  client: Client,
+  selection: Option<ObjectId>,
+  primary_selection: Option<ObjectId>,
 }
 
 #[derive(Default)]
 pub(crate) struct DataControl {
-    sources: HashMap<ObjectId, Source>,
-    devices: HashMap<ObjectId, Device>,
-    offers: HashMap<ObjectId, ObjectId>,
-    primary_offers: HashMap<ObjectId, ObjectId>,
-    offer_clients: HashMap<ObjectId, ClientId>,
+  sources: HashMap<ObjectId, Source>,
+  devices: HashMap<ObjectId, Device>,
+  offers: HashMap<ObjectId, ObjectId>,
+  primary_offers: HashMap<ObjectId, ObjectId>,
+  offer_clients: HashMap<ObjectId, ClientId>,
 }
 
 pub(crate) fn cleanup_clients(
-    state: &mut CompositorState,
-    clients: &[ClientId],
+  state: &mut CompositorState,
+  clients: &[ClientId],
 ) {
-    let sources = state
-        .data_control
-        .sources
-        .iter()
-        .filter(|(_, source)| clients.contains(&source.client))
-        .map(|(id, _)| id.clone())
-        .collect::<Vec<_>>();
-    for source in sources {
-        state.data_control.sources.remove(&source);
-        data_device::remove_control_source(state, &source);
-        crate::primary_selection::remove_control_source(state, &source);
-    }
+  let sources = state
+    .data_control
+    .sources
+    .iter()
+    .filter(|(_, source)| clients.contains(&source.client))
+    .map(|(id, _)| id.clone())
+    .collect::<Vec<_>>();
+  for source in sources {
+    state.data_control.sources.remove(&source);
+    data_device::remove_control_source(state, &source);
+    crate::primary_selection::remove_control_source(state, &source);
+  }
+  state
+    .data_control
+    .devices
+    .retain(|_, device| !clients.contains(&device.client.id()));
+  state.data_control.offers.retain(|offer, _| {
     state
-        .data_control
-        .devices
-        .retain(|_, device| !clients.contains(&device.client.id()));
-    state.data_control.offers.retain(|offer, _| {
-        state
-            .data_control
-            .offer_clients
-            .get(offer)
-            .is_some_and(|client| !clients.contains(client))
-    });
-    state.data_control.primary_offers.retain(|offer, _| {
-        state
-            .data_control
-            .offer_clients
-            .get(offer)
-            .is_some_and(|client| !clients.contains(client))
-    });
+      .data_control
+      .offer_clients
+      .get(offer)
+      .is_some_and(|client| !clients.contains(client))
+  });
+  state.data_control.primary_offers.retain(|offer, _| {
     state
-        .data_control
-        .offer_clients
-        .retain(|_, client| !clients.contains(client));
+      .data_control
+      .offer_clients
+      .get(offer)
+      .is_some_and(|client| !clients.contains(client))
+  });
+  state
+    .data_control
+    .offer_clients
+    .retain(|_, client| !clients.contains(client));
 }
 
 pub(crate) fn create_global(handle: &DisplayHandle) {
-    handle
-        .create_global::<CompositorState, ZwlrDataControlManagerV1, ()>(2, ());
+  handle.create_global::<CompositorState, ZwlrDataControlManagerV1, ()>(2, ());
 }
 
 pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {
-    let current = data_device::selection(state);
-    let primary = crate::primary_selection::selection(state);
-    for device in state.data_control.devices.values_mut() {
-        if device.selection != current.as_ref().map(|(id, _)| id.clone()) {
-            device.selection = current.as_ref().map(|(id, _)| id.clone());
-            if let Some((source, mime_types)) = &current {
-                if let Ok(offer) = device
-                    .client
-                    .create_resource::<ZwlrDataControlOfferV1, (), CompositorState>(handle, 1, ())
-                {
-                    device.resource.data_offer(&offer);
-                    for mime_type in mime_types {
-                        offer.offer(mime_type.clone());
-                    }
-                    device.resource.selection(Some(&offer));
-                    state.data_control.offers.insert(offer.id(), source.clone());
-                    state
-                        .data_control
-                        .offer_clients
-                        .insert(offer.id(), device.client.id());
-                }
-            } else {
-                device.resource.selection(None);
-            }
-        }
-        if device.primary_selection
-            != primary.as_ref().map(|(id, _)| id.clone())
+  let current = data_device::selection(state);
+  let primary = crate::primary_selection::selection(state);
+  for device in state.data_control.devices.values_mut() {
+    if device.selection != current.as_ref().map(|(id, _)| id.clone()) {
+      device.selection = current.as_ref().map(|(id, _)| id.clone());
+      if let Some((source, mime_types)) = &current {
+        if let Ok(offer) = device
+          .client
+          .create_resource::<ZwlrDataControlOfferV1, (), CompositorState>(
+            handle,
+            1,
+            (),
+          )
         {
-            device.primary_selection =
-                primary.as_ref().map(|(id, _)| id.clone());
-            if let Some((source, mime_types)) = &primary {
-                if let Ok(offer) = device
-                    .client
-                    .create_resource::<ZwlrDataControlOfferV1, (), CompositorState>(handle, 1, ())
-                {
-                    device.resource.data_offer(&offer);
-                    for mime_type in mime_types {
-                        offer.offer(mime_type.clone());
-                    }
-                    device.resource.primary_selection(Some(&offer));
-                    state
-                        .data_control
-                        .primary_offers
-                        .insert(offer.id(), source.clone());
-                    state
-                        .data_control
-                        .offer_clients
-                        .insert(offer.id(), device.client.id());
-                }
-            } else if device.resource.version() >= 2 {
-                device.resource.primary_selection(None);
-            }
+          device.resource.data_offer(&offer);
+          for mime_type in mime_types {
+            offer.offer(mime_type.clone());
+          }
+          device.resource.selection(Some(&offer));
+          state.data_control.offers.insert(offer.id(), source.clone());
+          state
+            .data_control
+            .offer_clients
+            .insert(offer.id(), device.client.id());
         }
+      } else {
+        device.resource.selection(None);
+      }
     }
+    if device.primary_selection != primary.as_ref().map(|(id, _)| id.clone()) {
+      device.primary_selection = primary.as_ref().map(|(id, _)| id.clone());
+      if let Some((source, mime_types)) = &primary {
+        if let Ok(offer) = device
+          .client
+          .create_resource::<ZwlrDataControlOfferV1, (), CompositorState>(
+            handle,
+            1,
+            (),
+          )
+        {
+          device.resource.data_offer(&offer);
+          for mime_type in mime_types {
+            offer.offer(mime_type.clone());
+          }
+          device.resource.primary_selection(Some(&offer));
+          state
+            .data_control
+            .primary_offers
+            .insert(offer.id(), source.clone());
+          state
+            .data_control
+            .offer_clients
+            .insert(offer.id(), device.client.id());
+        }
+      } else if device.resource.version() >= 2 {
+        device.resource.primary_selection(None);
+      }
+    }
+  }
 }
 
 impl GlobalDispatch<ZwlrDataControlManagerV1, ()> for CompositorState {
-    fn bind(
-        _state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
-        resource: New<ZwlrDataControlManagerV1>,
-        _global_data: &(),
-        data_init: &mut DataInit<'_, Self>,
-    ) {
-        data_init.init(resource, ());
-    }
+  fn bind(
+    _state: &mut Self,
+    _handle: &DisplayHandle,
+    _client: &Client,
+    resource: New<ZwlrDataControlManagerV1>,
+    _global_data: &(),
+    data_init: &mut DataInit<'_, Self>,
+  ) {
+    data_init.init(resource, ());
+  }
 
-    fn can_view(client: Client, _: &()) -> bool {
-        crate::security_context::can_view(
-            client,
-            "zwlr_data_control_manager_v1",
-        )
-    }
+  fn can_view(client: Client, _: &()) -> bool {
+    crate::security_context::can_view(client, "zwlr_data_control_manager_v1")
+  }
 }
 
 impl Dispatch<ZwlrDataControlManagerV1, ()> for CompositorState {
-    fn request(
-        state: &mut Self,
-        client: &Client,
-        _resource: &ZwlrDataControlManagerV1,
-        request: zwlr_data_control_manager_v1::Request,
-        _data: &(),
-        _dhandle: &DisplayHandle,
-        data_init: &mut DataInit<'_, Self>,
-    ) {
-        match request {
-            zwlr_data_control_manager_v1::Request::CreateDataSource { id } => {
-                let source = data_init.init(id, ());
-                state.data_control.sources.insert(
-                    source.id(),
-                    Source {
-                        resource: source,
-                        client: client.id(),
-                        mime_types: Vec::new(),
-                        used: false,
-                    },
-                );
-            }
-            zwlr_data_control_manager_v1::Request::GetDataDevice {
-                id, ..
-            } => {
-                let device = data_init.init(id, ());
-                state.data_control.devices.insert(
-                    device.id(),
-                    Device {
-                        resource: device,
-                        client: client.clone(),
-                        selection: None,
-                        primary_selection: None,
-                    },
-                );
-            }
-            zwlr_data_control_manager_v1::Request::Destroy => {}
-            _ => {}
-        }
+  fn request(
+    state: &mut Self,
+    client: &Client,
+    _resource: &ZwlrDataControlManagerV1,
+    request: zwlr_data_control_manager_v1::Request,
+    _data: &(),
+    _dhandle: &DisplayHandle,
+    data_init: &mut DataInit<'_, Self>,
+  ) {
+    match request {
+      zwlr_data_control_manager_v1::Request::CreateDataSource { id } => {
+        let source = data_init.init(id, ());
+        state.data_control.sources.insert(
+          source.id(),
+          Source {
+            resource: source,
+            client: client.id(),
+            mime_types: Vec::new(),
+            used: false,
+          },
+        );
+      }
+      zwlr_data_control_manager_v1::Request::GetDataDevice { id, .. } => {
+        let device = data_init.init(id, ());
+        state.data_control.devices.insert(
+          device.id(),
+          Device {
+            resource: device,
+            client: client.clone(),
+            selection: None,
+            primary_selection: None,
+          },
+        );
+      }
+      zwlr_data_control_manager_v1::Request::Destroy => {}
+      _ => {}
     }
+  }
 }
 
 impl Dispatch<ZwlrDataControlSourceV1, ()> for CompositorState {
-    fn request(
-        state: &mut Self,
-        _client: &Client,
-        resource: &ZwlrDataControlSourceV1,
-        request: zwlr_data_control_source_v1::Request,
-        _data: &(),
-        _dhandle: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
-    ) {
-        match request {
-            zwlr_data_control_source_v1::Request::Offer { mime_type } => {
-                if let Some(source) =
-                    state.data_control.sources.get_mut(&resource.id())
-                    && !source.mime_types.contains(&mime_type)
-                {
-                    source.mime_types.push(mime_type);
-                }
-            }
-            zwlr_data_control_source_v1::Request::Destroy => {
-                state.data_control.sources.remove(&resource.id());
-                data_device::remove_control_source(state, &resource.id());
-                crate::primary_selection::remove_control_source(
-                    state,
-                    &resource.id(),
-                );
-            }
-            _ => {}
+  fn request(
+    state: &mut Self,
+    _client: &Client,
+    resource: &ZwlrDataControlSourceV1,
+    request: zwlr_data_control_source_v1::Request,
+    _data: &(),
+    _dhandle: &DisplayHandle,
+    _data_init: &mut DataInit<'_, Self>,
+  ) {
+    match request {
+      zwlr_data_control_source_v1::Request::Offer { mime_type } => {
+        if let Some(source) = state.data_control.sources.get_mut(&resource.id())
+          && !source.mime_types.contains(&mime_type)
+        {
+          source.mime_types.push(mime_type);
         }
+      }
+      zwlr_data_control_source_v1::Request::Destroy => {
+        state.data_control.sources.remove(&resource.id());
+        data_device::remove_control_source(state, &resource.id());
+        crate::primary_selection::remove_control_source(state, &resource.id());
+      }
+      _ => {}
     }
+  }
 }
 
 impl Dispatch<ZwlrDataControlDeviceV1, ()> for CompositorState {
-    fn request(
-        state: &mut Self,
-        client: &Client,
-        resource: &ZwlrDataControlDeviceV1,
-        request: zwlr_data_control_device_v1::Request,
-        _data: &(),
-        dhandle: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
-    ) {
-        match request {
-            zwlr_data_control_device_v1::Request::SetSelection { source } => {
-                if let Some(source) = source {
-                    let Some(control) =
-                        state.data_control.sources.get_mut(&source.id())
-                    else {
-                        return;
-                    };
-                    if control.used {
-                        resource.post_error(
-                            zwlr_data_control_device_v1::Error::UsedSource,
-                            "data source has already been used",
-                        );
-                        return;
-                    }
-                    control.used = true;
-                    let control_resource = control.resource.clone();
-                    let mime_types = control.mime_types.clone();
-                    let _ = data_device::set_control_selection(
-                        state,
-                        dhandle,
-                        client,
-                        control_resource,
-                        mime_types,
-                    );
-                } else {
-                    data_device::clear_selection(state);
-                }
-            }
-            zwlr_data_control_device_v1::Request::SetPrimarySelection {
-                source,
-            } => {
-                if let Some(source) = source {
-                    let Some(control) =
-                        state.data_control.sources.get_mut(&source.id())
-                    else {
-                        return;
-                    };
-                    if control.used {
-                        resource.post_error(
-                            zwlr_data_control_device_v1::Error::UsedSource,
-                            "data source has already been used",
-                        );
-                        return;
-                    }
-                    control.used = true;
-                    let control_resource = control.resource.clone();
-                    let mime_types = control.mime_types.clone();
-                    let _ = crate::primary_selection::set_control_selection(
-                        state,
-                        dhandle,
-                        client,
-                        control_resource,
-                        mime_types,
-                    );
-                } else {
-                    crate::primary_selection::clear_selection(state);
-                }
-            }
-            zwlr_data_control_device_v1::Request::Destroy => {
-                state.data_control.devices.remove(&resource.id());
-            }
-            _ => {}
+  fn request(
+    state: &mut Self,
+    client: &Client,
+    resource: &ZwlrDataControlDeviceV1,
+    request: zwlr_data_control_device_v1::Request,
+    _data: &(),
+    dhandle: &DisplayHandle,
+    _data_init: &mut DataInit<'_, Self>,
+  ) {
+    match request {
+      zwlr_data_control_device_v1::Request::SetSelection { source } => {
+        if let Some(source) = source {
+          let Some(control) = state.data_control.sources.get_mut(&source.id())
+          else {
+            return;
+          };
+          if control.used {
+            resource.post_error(
+              zwlr_data_control_device_v1::Error::UsedSource,
+              "data source has already been used",
+            );
+            return;
+          }
+          control.used = true;
+          let control_resource = control.resource.clone();
+          let mime_types = control.mime_types.clone();
+          let _ = data_device::set_control_selection(
+            state,
+            dhandle,
+            client,
+            control_resource,
+            mime_types,
+          );
+        } else {
+          data_device::clear_selection(state);
         }
+      }
+      zwlr_data_control_device_v1::Request::SetPrimarySelection { source } => {
+        if let Some(source) = source {
+          let Some(control) = state.data_control.sources.get_mut(&source.id())
+          else {
+            return;
+          };
+          if control.used {
+            resource.post_error(
+              zwlr_data_control_device_v1::Error::UsedSource,
+              "data source has already been used",
+            );
+            return;
+          }
+          control.used = true;
+          let control_resource = control.resource.clone();
+          let mime_types = control.mime_types.clone();
+          let _ = crate::primary_selection::set_control_selection(
+            state,
+            dhandle,
+            client,
+            control_resource,
+            mime_types,
+          );
+        } else {
+          crate::primary_selection::clear_selection(state);
+        }
+      }
+      zwlr_data_control_device_v1::Request::Destroy => {
+        state.data_control.devices.remove(&resource.id());
+      }
+      _ => {}
     }
+  }
 }
 
 impl Dispatch<ZwlrDataControlOfferV1, ()> for CompositorState {
-    fn request(
-        state: &mut Self,
-        _client: &Client,
-        resource: &ZwlrDataControlOfferV1,
-        request: zwlr_data_control_offer_v1::Request,
-        _data: &(),
-        _dhandle: &DisplayHandle,
-        _data_init: &mut DataInit<'_, Self>,
-    ) {
-        match request {
-            zwlr_data_control_offer_v1::Request::Receive { mime_type, fd } => {
-                if let Some(source) =
-                    state.data_control.offers.get(&resource.id()).cloned()
-                {
-                    data_device::receive_from(state, &source, mime_type, fd);
-                } else if let Some(source) = state
-                    .data_control
-                    .primary_offers
-                    .get(&resource.id())
-                    .cloned()
-                {
-                    crate::primary_selection::receive_from(
-                        state, &source, mime_type, fd,
-                    );
-                }
-            }
-            zwlr_data_control_offer_v1::Request::Destroy => {
-                state.data_control.offers.remove(&resource.id());
-                state.data_control.primary_offers.remove(&resource.id());
-                state.data_control.offer_clients.remove(&resource.id());
-            }
-            _ => {}
+  fn request(
+    state: &mut Self,
+    _client: &Client,
+    resource: &ZwlrDataControlOfferV1,
+    request: zwlr_data_control_offer_v1::Request,
+    _data: &(),
+    _dhandle: &DisplayHandle,
+    _data_init: &mut DataInit<'_, Self>,
+  ) {
+    match request {
+      zwlr_data_control_offer_v1::Request::Receive { mime_type, fd } => {
+        if let Some(source) =
+          state.data_control.offers.get(&resource.id()).cloned()
+        {
+          data_device::receive_from(state, &source, mime_type, fd);
+        } else if let Some(source) = state
+          .data_control
+          .primary_offers
+          .get(&resource.id())
+          .cloned()
+        {
+          crate::primary_selection::receive_from(state, &source, mime_type, fd);
         }
+      }
+      zwlr_data_control_offer_v1::Request::Destroy => {
+        state.data_control.offers.remove(&resource.id());
+        state.data_control.primary_offers.remove(&resource.id());
+        state.data_control.offer_clients.remove(&resource.id());
+      }
+      _ => {}
     }
+  }
 }
