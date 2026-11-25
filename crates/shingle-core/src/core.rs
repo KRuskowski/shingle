@@ -278,6 +278,73 @@ impl Shingle {
     self.outputs.keys()
   }
 
+  /// Gives `output` the id `to`, keeping its workspaces, tiling trees and
+  /// windows, whose locations follow. A backend calls this when the
+  /// physical output behind the same layout changes name, such as a
+  /// native output that is described for the first time or replaced by
+  /// another connector.
+  ///
+  /// If `to` exists already, as when a restored session saved it, the two
+  /// are merged into `to`: it takes `output`'s workarea, and each of
+  /// `output`'s workspaces either replaces an empty workspace of `to`, tree
+  /// and all, or has its windows appended to the non-empty one. `to` keeps
+  /// its current workspace if it holds any window, else takes `output`'s.
+  /// Renaming an output to itself does nothing.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::InvalidOutputId`] for an empty `to`, or
+  /// [`ShingleError::OutputNotFound`] for an unknown `output`.
+  pub fn rename_output(
+    &mut self,
+    output: &OutputId,
+    to: OutputId,
+  ) -> Result<()> {
+    if to.0.is_empty() {
+      return Err(ShingleError::InvalidOutputId);
+    }
+    self.output(output)?;
+    if *output == to {
+      return Ok(());
+    }
+    let source = self
+      .outputs
+      .remove(output)
+      .ok_or_else(|| ShingleError::OutputNotFound(output.0.clone()))?;
+    for record in self.windows.values_mut() {
+      if record.location.output == *output {
+        record.location.output = to.clone();
+      }
+    }
+    let Some(mut target) = self.outputs.remove(&to) else {
+      self.outputs.insert(to, source);
+      return Ok(());
+    };
+    let target_used = target.workspaces.values().any(|tree| !tree.is_empty());
+    if !target_used {
+      target.current_workspace = source.current_workspace;
+    }
+    target.workarea = source.workarea;
+    for tree in target.workspaces.values_mut() {
+      tree.set_workarea(source.workarea)?;
+    }
+    for (workspace, mut tree) in source.workspaces {
+      match target.workspaces.get_mut(&workspace) {
+        Some(existing) if !existing.is_empty() => {
+          for window in tree.windows() {
+            let state = tree.detach(window)?;
+            existing.attach_with_state(window, state)?;
+          }
+        }
+        _ => {
+          target.workspaces.insert(workspace, tree);
+        }
+      }
+    }
+    self.outputs.insert(to, target);
+    Ok(())
+  }
+
   /// Returns the output's workarea.
   pub fn output_workarea(&self, output: &OutputId) -> Result<Rect> {
     Ok(self.output(output)?.workarea)
@@ -1515,5 +1582,67 @@ mod tests {
     assert!(shingle.window_layout(missing).is_err());
     assert!(shingle.reconcile_unmapped(missing).is_err());
     assert!(shingle.forget_placeholder(missing).is_err());
+  }
+
+  #[test]
+  fn renaming_an_output_keeps_its_trees() {
+    let mut shingle = shingle();
+    let first = attach(&mut shingle, "first");
+    let second = attach(&mut shingle, "second");
+    shingle.set_current_workspace(&output(), SECOND).unwrap();
+    let third = attach(&mut shingle, "third");
+    let before = shingle
+      .tree(&output(), WorkspaceId::ORIGIN)
+      .unwrap()
+      .clone();
+    let hdmi = OutputId::from("HDMI-A-1");
+    shingle.rename_output(&output(), hdmi.clone()).unwrap();
+    assert_eq!(shingle.outputs().collect::<Vec<_>>(), vec![&hdmi]);
+    let after = shingle.tree(&hdmi, WorkspaceId::ORIGIN).unwrap();
+    assert_eq!(after.windows(), before.windows());
+    assert_eq!(after.layout(), before.layout());
+    assert_eq!(shingle.current_workspace(&hdmi).unwrap(), SECOND);
+    for window in [first, second, third] {
+      assert_eq!(shingle.window_location(window).unwrap().output, hdmi);
+    }
+    shingle.rename_output(&hdmi, hdmi.clone()).unwrap();
+    assert!(matches!(
+      shingle.rename_output(&output(), "x".into()),
+      Err(ShingleError::OutputNotFound(_))
+    ));
+    assert!(matches!(
+      shingle.rename_output(&hdmi, OutputId::new("")),
+      Err(ShingleError::InvalidOutputId)
+    ));
+  }
+
+  #[test]
+  fn renaming_onto_an_existing_output_merges_them() {
+    let mut shingle = shingle();
+    let saved = attach(&mut shingle, "saved");
+    let headless = OutputId::from("HEADLESS-1");
+    let live = Rect::new(0, 0, 1920, 1080);
+    shingle.add_output(headless.clone(), live).unwrap();
+    // The empty live output merges into the saved one, which keeps its
+    // windows and current workspace and takes the live workarea.
+    shingle.set_current_workspace(&output(), SECOND).unwrap();
+    shingle.rename_output(&headless, output()).unwrap();
+    assert_eq!(shingle.outputs().collect::<Vec<_>>(), vec![&output()]);
+    assert_eq!(order(&shingle, WorkspaceId::ORIGIN), vec![saved]);
+    assert_eq!(shingle.current_workspace(&output()).unwrap(), SECOND);
+    assert_eq!(shingle.output_workarea(&output()).unwrap(), live);
+    assert_eq!(
+      shingle.tree(&output(), SECOND).unwrap().workarea(),
+      live,
+      "every workspace is laid out in the new workarea"
+    );
+    // Windows on both sides of a workspace end up together.
+    shingle.add_output(headless.clone(), live).unwrap();
+    let other = shingle
+      .attach_window(&headless, LaunchIdentity::new("other"))
+      .unwrap();
+    shingle.rename_output(&headless, output()).unwrap();
+    assert_eq!(order(&shingle, WorkspaceId::ORIGIN), vec![saved, other]);
+    assert_eq!(shingle.window_location(other).unwrap().output, output());
   }
 }
