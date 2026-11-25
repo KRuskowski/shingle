@@ -4,13 +4,19 @@
 //! harness can check focus moving between X and Wayland windows
 //! (docs/design/xwayland.md, section 7).
 //!
-//! It runs only inside tools/xwayland_test/run.py's namespace, which sets
-//! `SHINGLE_XWAYLAND_TEST_NAMESPACE=1`, so that it never opens a window
-//! on the host's Wayland session.
+//! It runs only inside tools/xwayland_test/run.py's or
+//! tools/gpu_test/run.py's namespace, which set
+//! `SHINGLE_XWAYLAND_TEST_NAMESPACE=1` or `SHINGLE_GPU_TEST_NAMESPACE=1`,
+//! so that it never opens a window on the host's Wayland session.
 //!
 //! ```text
-//! wl_probe [APP_ID] [--copy TEXT] [--delay-ms N]
+//! wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern]
 //! ```
+//!
+//! With `--pattern` the buffer is not white but four quadrants: red top
+//! left, green top right, blue bottom left and white bottom right, so
+//! that a capture shows where and which way up the buffer was drawn
+//! (docs/design/dmabuf.md, DB-2).
 //!
 //! With `--copy`, the probe also makes a `wl_data_source` offering
 //! `text/plain;charset=utf-8` the clipboard, and answers each `send` with
@@ -39,8 +45,11 @@ use wayland_protocols::xdg::shell::client::{
   xdg_surface, xdg_toplevel, xdg_wm_base,
 };
 
-/// The variable the test harness sets inside its namespace.
-const NAMESPACE_VARIABLE: &str = "SHINGLE_XWAYLAND_TEST_NAMESPACE";
+/// The variables the test harnesses set inside their namespaces.
+const NAMESPACE_VARIABLES: [&str; 2] = [
+  "SHINGLE_XWAYLAND_TEST_NAMESPACE",
+  "SHINGLE_GPU_TEST_NAMESPACE",
+];
 
 /// The size drawn before the first configure that names one.
 const DEFAULT_SIZE: (i32, i32) = (320, 240);
@@ -56,6 +65,32 @@ struct Options {
   copy: Option<String>,
   /// How long each `send` waits before writing.
   delay_ms: u64,
+  /// Draws the quadrant pattern instead of white.
+  pattern: bool,
+}
+
+/// The XRGB8888 bytes (B, G, R, X) of pixel (`x`, `y`) of a `width` by
+/// `height` quadrant pattern.
+fn pattern_pixel(x: i32, y: i32, width: i32, height: i32) -> [u8; 4] {
+  match (x < width / 2, y < height / 2) {
+    (true, true) => [0, 0, 0xff, 0xff],
+    (false, true) => [0, 0xff, 0, 0xff],
+    (true, false) => [0xff, 0, 0, 0xff],
+    (false, false) => [0xff; 4],
+  }
+}
+
+/// The bytes of a `width` by `height` XRGB8888 buffer: white, or the
+/// quadrant pattern.
+fn buffer_bytes(width: i32, height: i32, pattern: bool) -> Vec<u8> {
+  if !pattern {
+    return vec![0xff; (width * height * 4) as usize];
+  }
+  (0..height)
+    .flat_map(|y| {
+      (0..width).flat_map(move |x| pattern_pixel(x, y, width, height))
+    })
+    .collect()
 }
 
 /// Parses `wl_probe [APP_ID] [--copy TEXT] [--delay-ms N]`.
@@ -74,6 +109,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
           .parse()
           .map_err(|_| format!("bad --delay-ms {value:?}"))?;
       }
+      "--pattern" => options.pattern = true,
       other if other.starts_with("--") => {
         return Err(format!("unknown option {other}"));
       }
@@ -110,6 +146,8 @@ struct Probe {
   keyboard: Option<wl_keyboard::WlKeyboard>,
   /// The text the selection offers and how long each send waits.
   copy: Option<(String, u64)>,
+  /// Whether buffers show the quadrant pattern.
+  pattern: bool,
   surface: Option<wl_surface::WlSurface>,
   /// The size of the pending configure.
   pending: (i32, i32),
@@ -119,7 +157,8 @@ struct Probe {
 }
 
 impl Probe {
-  /// Attaches and commits a white buffer of `width` by `height`.
+  /// Attaches and commits a white or patterned buffer of `width` by
+  /// `height`.
   fn draw(&self, handle: &QueueHandle<Self>, width: i32, height: i32) {
     let (Some(shm), Some(surface)) = (&self.shm, &self.surface) else {
       return;
@@ -135,7 +174,7 @@ impl Probe {
     };
     let fd: OwnedFd = fd;
     let mut file = std::fs::File::from(fd);
-    let _ = file.write_all(&vec![0xff; size as usize]);
+    let _ = file.write_all(&buffer_bytes(width, height, self.pattern));
     let pool = shm.create_pool(file.as_fd(), size, handle, ());
     let buffer = pool.create_buffer(
       0,
@@ -390,6 +429,7 @@ fn run(options: &Options) -> Result<(), String> {
   connection.display().get_registry(&handle, ());
   let mut probe = Probe {
     copy: options.copy.clone().map(|text| (text, options.delay_ms)),
+    pattern: options.pattern,
     ..Probe::default()
   };
   queue
@@ -432,10 +472,14 @@ fn run(options: &Options) -> Result<(), String> {
 }
 
 fn main() {
-  if std::env::var_os(NAMESPACE_VARIABLE).is_none_or(|value| value != "1") {
+  let inside = NAMESPACE_VARIABLES
+    .iter()
+    .any(|name| std::env::var_os(name).is_some_and(|value| value == "1"));
+  if !inside {
     eprintln!(
-      "wl_probe: refusing to run outside tools/xwayland_test/run.py \
-       ({NAMESPACE_VARIABLE}=1 is not set)"
+      "wl_probe: refusing to run outside a test harness's namespace \
+       (neither {} nor {} is 1)",
+      NAMESPACE_VARIABLES[0], NAMESPACE_VARIABLES[1]
     );
     std::process::exit(2);
   }
@@ -471,11 +515,28 @@ mod tests {
         app_id: Some("slow".into()),
         copy: Some("hi".into()),
         delay_ms: 1500,
+        pattern: false,
       }
     );
     assert!(parse(&arguments(&["--copy"])).is_err());
     assert!(parse(&arguments(&["--delay-ms", "soon"])).is_err());
     assert!(parse(&arguments(&["--paste"])).is_err());
+    assert!(parse(&arguments(&["--pattern"])).unwrap().pattern);
     assert!(parse(&arguments(&["a", "b"])).is_err());
+  }
+
+  #[test]
+  fn the_pattern_has_four_quadrants() {
+    let red = [0, 0, 0xff, 0xff];
+    assert_eq!(pattern_pixel(0, 0, 4, 2), red);
+    assert_eq!(pattern_pixel(1, 0, 4, 2), red);
+    assert_eq!(pattern_pixel(2, 0, 4, 2), [0, 0xff, 0, 0xff]);
+    assert_eq!(pattern_pixel(0, 1, 4, 2), [0xff, 0, 0, 0xff]);
+    assert_eq!(pattern_pixel(3, 1, 4, 2), [0xff; 4]);
+    let bytes = buffer_bytes(4, 2, true);
+    assert_eq!(bytes.len(), 32);
+    assert_eq!(bytes[..4], red);
+    assert_eq!(bytes[28..], [0xff; 4]);
+    assert_eq!(buffer_bytes(2, 1, false), [0xff; 8]);
   }
 }
