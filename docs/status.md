@@ -1,6 +1,6 @@
 # Status
 
-Last updated 2026-11-25, after the input-device IPC methods were finished.
+Last updated 2026-11-25, after `shingle-core` gained unit tests and API documentation.
 
 ## Readiness
 
@@ -57,11 +57,15 @@ Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are pla
 
 ### Automated
 
-`cargo test --workspace` runs 80 unit tests (2026-11-25). Coverage is uneven: `shingle-core`, which holds the tiling tree and session model, has **no** unit tests.
+`cargo test --workspace` runs 168 unit tests (2026-11-25), 88 of them in `shingle-core`. Coverage of the other crates is uneven.
 
 `cargo clippy --workspace --all-targets -- -D warnings` passes (2026-11-25).
 
 The input-device unit tests (`crates/shingle/src/input_device.rs`, `crates/shingle/src/ipc.rs`, `crates/shingle-nested/src/main.rs`) cover IPC dispatch, the 77-method inventory, field validation and error text, gating of keys, modifiers, motion, buttons, gestures and touch, release of held input on disable, STIPC binding dispatch and host-event classification. They run without a Wayland client, so they check compositor state, not delivered protocol events.
+
+The `shingle-core` unit tests (`crates/shingle-core/src/tree.rs`, `core.rs`, `session.rs`, `geometry.rs`) pin exact tile order and slot geometry through insertion, drops, swaps and removal; split weights through resizing, minimum extents and floating or minimized windows; focus fallback, directional focus and stacking; floating, snapping, maximized and gap geometry; and placeholder reconciliation by launch identity. Session tests round-trip a two-output model with nested, unevenly weighted splits and every persisted flag through JSON and atomic file saves, and require tile order, sizes, state, focus and stacking to come back exactly, after repeated cycles and after reconciliation. They also cover version, unknown-field and malformed-snapshot errors. They exercise the model only; full frontend/session cycles with real clients are still needed.
+
+Writing these tests found three layout bugs, now fixed: splitting a tile across the axis reset its size to an even share; resizing treated floating and minimized siblings as occupying space, so the moved edge and amount were wrong; and directional focus ranked by centre distance, so focus-down from a top-right tile could jump to a full-height left tile. Directional focus now picks the tile across the crossed edge's midpoint, as Wayfire's tile plugin does.
 
 ### With real clients
 

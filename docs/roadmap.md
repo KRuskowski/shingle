@@ -12,10 +12,9 @@ Run the nested smoke test and the IPC fixtures again under the Shingle names, in
 
 Also exercise input-device gating with real host keyboard, pointer and touch input, including the nested switcher and drag clean-up on disable; the 2026-11-25 real-client run covered STIPC input only (see [status.md](status.md#with-real-clients)). In that run `shingle-nested` ignored SIGTERM and SIGINT. The likely cause: `Compositor::with_core` blocks both signals in a calloop `Signals` source that only sets an internal `shutdown` flag (crates/shingle/src/lib.rs:496-502), and nested never reads it. The native design fixes this in NB-2 ([design/native-backend.md](design/native-backend.md#6-failure-handling)).
 
-## 3. Documentation and tests for the core
+## 3. Documentation for the other crates
 
-- Add unit tests to `shingle-core` for tree operations, split weights, focus and session round-trips.
-- Add doc comments to public APIs. Most public items lack them. Priority areas are state-machine transitions, session invariants, map blocking, focus rules, output transforms and non-obvious protocol behaviour.
+`shingle-core` is documented and enforces `#![warn(missing_docs)]`. Add doc comments to the public APIs of the other crates, where most public items still lack them. Priority areas are compositor state-machine transitions, map blocking, focus rules, output transforms and non-obvious protocol behaviour. Enable `missing_docs` in each crate as it is finished.
 
 ## 4. Native backend
 
