@@ -45,7 +45,7 @@ pub fn run(
   let mut session_children = snapshot
     .as_ref()
     .map(|snapshot| {
-      let report = launch_saved(snapshot, Some(&environment), discard_output);
+      let report = launch_saved(snapshot, &environment, discard_output);
       for error in &report.failed {
         eprintln!("shingle: session restore launch failed: {error}");
       }

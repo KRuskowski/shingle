@@ -207,24 +207,6 @@ impl SessionStore {
     );
     Ok(None)
   }
-
-  /// [`Self::load`] followed by [`RestoreReport::launch`].
-  ///
-  /// The relaunched clients connect to the `WAYLAND_DISPLAY` of the calling
-  /// process, which inside a nested compositor is the host session, not
-  /// Shingle. The frontend therefore calls [`Self::load`] and
-  /// [`launch_saved`] with the compositor's own socket instead.
-  ///
-  /// # Errors
-  ///
-  /// As for [`Self::load`]. Launch failures do not fail the call; they are
-  /// collected in [`RestoreReport::failed`].
-  pub fn restore(&self) -> Result<Option<RestoreReport>, SessionError> {
-    let Some((session, snapshot)) = self.load()? else {
-      return Ok(None);
-    };
-    Ok(Some(RestoreReport::launch(session, &snapshot)))
-  }
 }
 
 /// Moves `path` to `PATH.corrupt-SECONDS`, or `PATH.corrupt-SECONDS.N` for
@@ -270,31 +252,6 @@ fn error_chain(error: &dyn std::error::Error) -> String {
     source = cause.source();
   }
   text
-}
-
-/// A loaded session and the clients started for it.
-pub struct RestoreReport {
-  /// The restored model, with every saved window waiting for its client.
-  pub session: Shingle,
-  /// Processes that were spawned. Their windows have not mapped yet.
-  pub launched: Vec<LaunchedWindow>,
-  /// [`SessionError::Launch`] for each launch group that failed to spawn.
-  pub failed: Vec<SessionError>,
-}
-
-impl RestoreReport {
-  /// Runs [`launch_saved`] for `snapshot` in this process's own
-  /// environment, `WAYLAND_DISPLAY` included, discarding the clients'
-  /// output. See [`SessionStore::restore`] for why that is rarely the right
-  /// display.
-  pub fn launch(session: Shingle, snapshot: &SessionSnapshot) -> Self {
-    let report = launch_saved(snapshot, None, true);
-    Self {
-      session,
-      launched: report.launched,
-      failed: report.failed,
-    }
-  }
 }
 
 /// The result of [`launch_saved`].
@@ -416,15 +373,14 @@ fn was_restored(command: &str, snapshot: &SessionSnapshot) -> bool {
 /// that created them) are launched once, for the first window in tile
 /// order. Each child gets the saved arguments without a shell, the saved
 /// working directory, a null stdin, `SHINGLE_LAUNCH_ID` (empty if the saved
-/// window has none) and, when `environment` is given, that environment;
-/// otherwise the calling process's own. Launch IDs are only filled in by
-/// [`SessionStore::load`].
+/// window has none) and `environment`, the compositor's client
+/// environment. Launch IDs are only filled in by [`SessionStore::load`].
 ///
 /// Spawn failures are collected, not returned early, so one missing program
 /// does not stop the rest of the session.
 pub fn launch_saved(
   snapshot: &SessionSnapshot,
-  environment: Option<&ClientEnvironment>,
+  environment: &ClientEnvironment,
   discard_output: bool,
 ) -> LaunchReport {
   let identities = snapshot
@@ -498,7 +454,7 @@ fn collect_order(node: &NodeSnapshot, order: &mut Vec<WindowId>) {
 fn launch_window(
   id: WindowId,
   identity: &LaunchIdentity,
-  environment: Option<&ClientEnvironment>,
+  environment: &ClientEnvironment,
   discard_output: bool,
 ) -> Result<Child, SessionError> {
   let Some((program, args)) = identity.command.split_first() else {
@@ -515,9 +471,7 @@ fn launch_window(
     "SHINGLE_LAUNCH_ID",
     identity.launch_id.as_deref().unwrap_or(""),
   );
-  if let Some(environment) = environment {
-    environment.apply(&mut command);
-  }
+  environment.apply(&mut command);
   if let Some(directory) = &identity.working_directory {
     command.current_dir(directory);
   }
@@ -631,7 +585,7 @@ mod tests {
     identity.command = vec!["/bin/sh".into(), "-c".into(), dump_to(&saved)];
     identity.launch_id = Some("restore-1".into());
     core.attach_window(&output, identity).unwrap();
-    let report = launch_saved(&core.snapshot(), Some(&environment()), true);
+    let report = launch_saved(&core.snapshot(), &environment(), true);
     assert!(report.failed.is_empty());
     let child = report.launched.into_iter().next().unwrap().child;
     assert_eq!(

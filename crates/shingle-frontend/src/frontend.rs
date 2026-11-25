@@ -187,7 +187,7 @@ impl Frontend {
         }
         let report = launch_saved(
           &snapshot,
-          Some(&compositor.client_environment()),
+          &compositor.client_environment(),
           discard_output,
         );
         for error in &report.failed {
