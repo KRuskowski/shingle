@@ -2,7 +2,7 @@
 
 Status: accepted with the operator's [decisions](#decisions), 2026-11-25. Roadmap item "Native backend" ([roadmap.md](../roadmap.md#2-native-backend)).
 
-Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit) or headless. This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1 to NB-5 and the single `shingle` binary are implemented (see [The `shingle` binary](#the-shingle-binary), [`shingle-render` without winit](#shingle-render-without-winit) and the entries for [NB-2](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor), [NB-3](#nb-3-shingle-frontend-extract-create-the-shared-crate-with-the-pure-modules), [NB-4](#nb-4-shingle-frontend-host-move-app-into-frontend) and [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)), each with notes on where the code differs from this design. NB-6 is built and unit-tested through fakes ([NB-6 as built](#nb-6-as-built)); its hardware checks wait for the test machine ([native-testing.md](../native-testing.md)). The rest is not built.
+Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit) or headless. This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1 to NB-5 and the single `shingle` binary are implemented (see [The `shingle` binary](#the-shingle-binary), [`shingle-render` without winit](#shingle-render-without-winit) and the entries for [NB-2](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor), [NB-3](#nb-3-shingle-frontend-extract-create-the-shared-crate-with-the-pure-modules), [NB-4](#nb-4-shingle-frontend-host-move-app-into-frontend) and [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)), each with notes on where the code differs from this design. NB-6 and NB-7 are built and unit-tested through fakes ([NB-6 as built](#nb-6-as-built), [NB-7 as built](#nb-7-as-built)); their hardware checks wait for the test machine ([native-testing.md](../native-testing.md)). The rest is not built.
 
 Line numbers refer to branch `shingle-native-design` at `d2568d2`. Crate versions and dates were read from crates.io and GitHub on 2026-11-25; crate APIs were read from the crate sources (wgpu, drm, calloop and xkbcommon from `~/.cargo/registry`, the others from their published `.crate` files).
 
@@ -202,7 +202,7 @@ Shingle drives KMS itself with atomic modesetting through `drm` 0.15, and wgpu o
 
 The native crate first tries zero-copy. It falls back to copy if the feature is missing, the intersection is empty, the GBM allocation fails or the first `TEST_ONLY` commit fails. `SHINGLE_SCANOUT=copy` forces the fallback.
 
-**GPU selection.** udev enumerates `drm` `card*` devices and picks the one with `boot_vga=1`, or the first one, unless `SHINGLE_DRM_DEVICE=/dev/dri/cardN` is set (like `WLR_DRM_DEVICES`). The wgpu adapter is the one whose `AdapterInfo::device_pci_bus_id` matches the card's PCI slot. The copy path may use any adapter, so virtio-gpu (no PCI match for lavapipe) works.
+**GPU selection.** udev enumerates `drm` `card*` devices and picks the one with `boot_vga=1`, or the first one, unless `SHINGLE_DRM_DEVICE=/dev/dri/cardN` is set (like `WLR_DRM_DEVICES`). The wgpu adapter is the one whose `AdapterInfo::device_pci_bus_id` matches the card's PCI slot. The copy path may use any adapter, so a card without a matching Vulkan adapter (a display-only card, or lavapipe as the only Vulkan driver) still works.
 
 **Synchronisation.** After `queue.submit`, wait for completion with `device.poll(PollType::Wait { submission_index, timeout: Some(100 ms) })`, then commit. wgpu cannot export a sync_file for `IN_FENCE_FD`, and Vulkan does not attach implicit fences to non-WSI dma-bufs, so an explicit wait is the only correct option today. With Shingle's simple composition the wait is short. Exporting a semaphore as a sync_file through raw Vulkan is left as a later optimisation (NB-10).
 
@@ -442,7 +442,7 @@ A deliberate design point: no code path in Shingle puts the VT into graphics mod
 
 ## 7. Testing
 
-The operator's Wayfire session on this host must never be stopped or disturbed. This host has one GPU (NVIDIA GA106, RTX 3060) running that session, and no `/dev/dri` is visible inside the Claude sandbox. So no native test ever runs on this host: not on another VT, not with a second seat on the same GPU. Native code runs only in VMs or on separate hardware.
+The operator's Wayfire session on this host must never be stopped or disturbed. This host has one GPU (NVIDIA GA106, RTX 3060) running that session, and no `/dev/dri` is visible inside the Claude sandbox. So no native test ever runs on this host: not on another VT, not with a second seat on the same GPU. Native code runs only on the dedicated test machine.
 
 ### Layer 1: host unit tests, no devices
 
@@ -480,7 +480,7 @@ What the test machine covers:
 
 A test client that records `wl_keyboard`/`wl_pointer` events checks what clients receive, and pixel checks use Shingle's own wlr-screencopy (crates/shingle/src/screencopy.rs) with `grim`. Test harnesses are Python scripts under `tools/native_test/`, run on the test machine over SSH. Once the machine exists it should be registered as a takt target so workspaces can claim it exclusively.
 
-The steps for NB-6 are in [native-testing.md](../native-testing.md), with `wev` as the recording client and tools/native_test/uinput.py (virtual keyboard, mouse and touchscreen through `python3-evdev`, refusing to run without the test machine's marker file) and tools/native_test/ipc.py for IPC.
+The steps for NB-6 are in [native-testing.md](../native-testing.md), with `wev` as the recording client and tools/native_test/uinput.py (virtual keyboard, mouse and touchscreen through `python3-evdev`, refusing to run without the test machine's marker file) and tools/native_test/ipc.py for IPC. The NB-7 steps follow them there, with `grim`, `wlopm`, the presentation probe (crates/shingle-native/examples/present_probe.rs) and tools/native_test/present_check.py, which compares the probe's feedback with the page flips Shingle logs under `SHINGLE_TRACE_FLIPS=1`.
 
 ### Rejected test strategies
 
@@ -811,13 +811,125 @@ Add `kms/` (`KmsDevice` trait, property cache, `in_formats`, `modes`, atomic bui
 
 Acceptance (test machine):
 
-- A client is visible on the virtio-gpu display, checked with `grim` through screencopy.
+- A client is visible on the test machine's display, checked with `grim` through screencopy.
 - `wp_presentation` timestamps match page-flip times within 1 ms.
 - Frames are paced by flips: no frame callback before the previous flip completes.
 - DPMS off and on works through `wlr-output-power-management`.
 - A VT switch away and back resumes with a fresh modeset.
 - `kill -9` leaves a usable tty1.
 - Every row of the failure table that can be produced on the test machine is exercised and recorded.
+
+This list first said "virtio-gpu display", from when VMs were planned for testing; the operator decided on real hardware instead ([Decisions](#decisions)), so the test machine's own monitor is the display.
+
+#### NB-7 as built
+
+Done on branch `shingle-native-kms`: built, clippy-checked and unit-tested on this host through a fake card (`kms::fake::FakeKms`), the fake seat and a fake renderer; nothing in it has opened a DRM device yet. The acceptance items are steps 10 to 15 of [native-testing.md](../native-testing.md). The API (crates/shingle-native/src):
+
+```rust
+// kms.rs: plain ids (ConnectorId, CrtcId, PlaneId, PropertyId, BlobId,
+// FramebufferId, BufferId), Mode, ConnectorInfo, CrtcInfo, PlaneInfo,
+// Property, DumbFramebuffer, PageFlip, CommitFlags
+pub trait KmsDevice {
+  fn enable_atomic(&mut self) -> io::Result<()>;
+  fn monotonic_timestamps(&mut self) -> bool;
+  fn resources(&mut self) -> io::Result<Resources>;
+  fn connector(&mut self, id: ConnectorId) -> io::Result<ConnectorInfo>;
+  fn crtc(&mut self, id: CrtcId) -> io::Result<CrtcInfo>;
+  fn plane(&mut self, id: PlaneId) -> io::Result<PlaneInfo>;
+  fn properties(&mut self, object: Object) -> io::Result<Vec<Property>>;
+  fn blob(&mut self, id: u64) -> io::Result<Vec<u8>>;
+  fn create_mode_blob(&mut self, mode: &Mode) -> io::Result<BlobId>;
+  fn destroy_blob(&mut self, blob: BlobId) -> io::Result<()>;
+  fn commit(&mut self, request: &AtomicRequest, flags: CommitFlags)
+    -> io::Result<()>;
+  fn create_dumb_framebuffer(&mut self, width: u32, height: u32)
+    -> io::Result<DumbFramebuffer>;
+  fn write_dumb_framebuffer(&mut self, buffer: &DumbFramebuffer,
+    write: &mut dyn FnMut(&mut [u8])) -> io::Result<()>;
+  fn destroy_dumb_framebuffer(&mut self, buffer: &DumbFramebuffer)
+    -> io::Result<()>;
+  fn read_events(&mut self) -> io::Result<Vec<PageFlip>>;
+  fn poll_fd(&self) -> Option<BorrowedFd<'_>>;
+}
+pub struct DrmDevice; // kms/drm.rs, the real one over drm 0.15
+// kms/props.rs: PropertyTable, ConnectorProps, CrtcProps, PlaneProps
+// kms/in_formats.rs: parse(blob) -> Result<InFormats, InFormatsError>
+// kms/modes.rs: ModeChoice, select_default_mode, find_matching_mode,
+//   candidates(modes, choice, current) -> Vec<Mode>
+// kms/atomic.rs: AtomicRequest, modeset, flip, set_active
+// kms/output.rs: probe(device) -> Card, Card::choose_connector,
+//   Card::output -> Output { props, teardown, current_mode, in_formats }
+
+// scanout.rs, scanout/copy.rs
+pub struct Frame { pub width: u32, pub height: u32, pub rgba: Vec<u8> }
+pub trait Scanout {
+  fn size(&self) -> (u32, u32);
+  fn current(&self) -> FramebufferId;
+  fn prepare(&mut self, device: &mut dyn KmsDevice, frame: &Frame)
+    -> io::Result<FramebufferId>;
+  fn presented(&mut self);
+  fn zero_copy(&self) -> bool;
+  fn destroy(&mut self, device: &mut dyn KmsDevice);
+}
+pub struct CopyScanout;
+
+// pacing.rs
+pub enum State { Idle, Rendering, FlipPending { since: Instant }, Paused }
+pub struct FrameScheduler; // begin_frame, committed, abandon, page_flip,
+                           // pause, resume, deadline, check_timeout
+
+// gpu.rs
+pub fn enumerate_cards(root: &Path) -> io::Result<Vec<Card>>;
+pub fn card_order(cards: &[Card], forced: Option<&OsStr>) -> Vec<Card>;
+pub fn adapter_matches(bus_id: &str, slot: &str) -> bool;
+pub trait FrameRenderer {
+  fn draw(&mut self, frontend: &mut Frontend, host: &mut dyn Host)
+    -> Result<Frame, RenderFailure>;
+  fn resize(&mut self, size: (u32, u32)) -> Result<(), RenderFailure>;
+}
+pub struct GpuRenderer; // the real one
+pub struct GpuHealth;   // Skip, Recreate or GiveUp after a failure
+
+// display.rs
+pub struct Display; // prepare, start, begin_frame, present, dispatch,
+                    // check_timeout, pause, resume, set_dpms, output_info
+pub enum StartError; // exit status 1, before the socket
+pub struct Fatal(pub String); // exit status 2, after saving
+
+// host.rs
+pub struct Rendering { pub renderer: Box<dyn FrameRenderer>,
+  pub factory: RendererFactory }
+Backend::new(frontend, session, input, config, display: Display,
+  rendering: Rendering) -> Result<Self, Box<dyn Error>>;
+
+// lib.rs
+pub fn open_display(session: &mut dyn Session, cards: &[Card],
+  open: &mut dyn FnMut(OwnedFd) -> io::Result<Box<dyn KmsDevice>>)
+  -> Result<Prepared, StartError>;
+pub fn startup(display, rendering, frontend) -> Result<..>;
+```
+
+Elsewhere: `Compositor::dpms_state` (crates/shingle/src/lib.rs), `Frontend::drop_gpu_resources` (crates/shingle-frontend/src/frontend.rs), `OffscreenTarget::read_rgba_within` and `RenderError::Timeout` (crates/shingle-render), exit status 2 for `Fatal` in crates/shingle-bin/src/main.rs, `SHINGLE_TRACE_FLIPS`, the presentation probe (crates/shingle-native/examples/present_probe.rs) and tools/native_test/present_check.py.
+
+Where the code differs from the plan, and why:
+
+- **Startup order.** `shingle_native::run` opens the seat, then `startup` runs three steps in order: the display (`open_display`: open the card through the seat, `enable_atomic`, probe, choose the output and pass a `TEST_ONLY` modeset), the renderer, and only then libinput and `Frontend::new`, which creates the socket and starts clients. `Backend::new` then describes the output with `set_output_info` before the first dispatch and makes the real modeset. A unit test checks that nothing but the passed test was committed when the frontend step runs, and that a failing display or renderer never reaches it.
+- **Cards come from sysfs, not udev.** `gpu::enumerate_cards` reads `cardN` entries, `device/boot_vga` and `PCI_SLOT_NAME` from `device/uevent` under `/sys/class/drm`. That is the data udev's enumeration would return, without a libudev context, and the reader is unit-tested on a temporary directory tree. The DRM hotplug monitor of NB-9 still uses udev. When the seat refuses a card, the next one in order is tried; `SHINGLE_DRM_DEVICE` names the only card tried.
+- **No `acquire_master_lock`.** libseat hands out the card already as DRM master. "No DRM master" is detected where it would show: `EACCES` or `EBUSY` from the first `TEST_ONLY` commit stops the mode search at once with "cannot become DRM master". After startup, a flip refused with `EACCES` or `EPERM` pauses the display until the seat's next resume.
+- **Mode choice.** NB-7 always uses `ModeChoice::Auto`. `OutputConfig`'s `width` and `height` are nested's window size and default to 1280x720, so taking them as a mode would be wrong; reading `[output:NAME] mode` is NB-9's. `kms/modes.rs` already implements `highres`, `highrr` and `WxH@R` as Wayfire does and is tested with mode lists. The fallback order is the chosen mode, the preferred mode, every mode by area (faster first at equal size), then the CRTC's current mode.
+- **The modeset turns off the rest.** Other connectors on a CRTC get `CRTC_ID=0`, other active CRTCs `ACTIVE=0` and `MODE_ID=0`, and every plane on a CRTC other than ours, including our CRTC's cursor and overlay planes, `FB_ID=0` and `CRTC_ID=0`. `VRR_ENABLED` is set to 0 where the CRTC has it, so a VRR left on by another session does not stay on; NB-10 sets it from the configuration.
+- **Copy path details.** The renderer draws into the existing RGBA `OffscreenTarget` and reads it back with `read_rgba_within(100 ms)`; the copy into the XRGB8888 dumb buffer swaps red and blue, so no BGRA target was added. Dumb buffers are mapped for each copy instead of staying mapped, since `drm`'s mapping borrows the buffer. `Scanout::prepare` takes a CPU `Frame`; NB-8's zero-copy path renders into the buffer itself and will change that method.
+- **Frames.** A frame starts when the frontend asked for one and the scheduler is idle, so there is no fixed interval any more: the next frame waits for the flip. A commit is a flip that sets only the primary plane's `FB_ID`, with `NONBLOCK | PAGE_FLIP_EVENT`. The frontend's `RenderTarget::render` returns false for the KMS target, so the frontend does not call `Compositor::frame`; the page-flip event calls `frame_presented` with the flip's time, its vblank counter extended to 64 bits, the mode's refresh and `VSYNC | HW_CLOCK | HW_COMPLETION`. The compositor sends every pending callback of a visible surface on a flip, also for content committed after the frame was drawn; it waits only for the flip. If the driver's timestamps are not `CLOCK_MONOTONIC`, the compositor's clock is used and `HW_CLOCK` dropped.
+- **DPMS.** The backend follows `Compositor::dpms_state` (new; it covers wlr-output-power-management, the idle timeouts and activity) rather than `Event::DpmsChanged`, which the frontend consumes and which is reported twice. Off is a commit of only `ACTIVE=0`, keeping mode and planes; on is a full modeset with `ACTIVE=1`. Both are tested with `TEST_ONLY` first and wait until a pending flip completed; a change while paused is applied by the resume's modeset.
+- **Page-flip timeout.** After 1 s the pending flip is dropped and a `TEST_ONLY` plus blocking `ALLOW_MODESET` commit shows the current buffer again; a failed recovery lets the next frame try a flip. The third timeout without a completed flip in between ends the loop with `Fatal`.
+- **GPU loss.** `GpuHealth` skips a frame that missed the 100 ms wait (and draws it again), treats three in a row or a lost device (wgpu's device-lost callback, or a readback error after it fired) as a loss, and gives up at the third loss within 60 s. A loss drops the renderer, calls `Frontend::drop_gpu_resources` (surface textures, geometry animations' old frames, Scale titles and icons) and creates a new renderer from the factory; the copy scanout's dumb buffers belong to the card, not to the Vulkan device, so they are kept. A renderer that cannot be created counts as another loss at the next frame.
+- **No connected output.** The display starts without a lit output, nothing is committed and nothing is drawn; the compositor keeps the default `HEADLESS-1` at 1280x720 and clients run, but get no frame callbacks. NB-7 has no DRM hotplug monitor, so an output is picked up by the next resume's probe, after a VT switch; the monitor is NB-9's.
+- **Resume.** The card is probed again. The lit connector stays if it is still connected and still offers the mode, with its properties and the teardown read afresh; otherwise the output is chosen again with new buffers and blob, and the frontend, renderer and input mapping get the new size. A different output gets `set_output_info`, which clients that bound the old `wl_output` do not see until NB-9 recreates the globals.
+- **Output description.** The connector name, physical size, subpixel layout and the mode's refresh. Make and model are `Unknown`, as wlroots reports without EDID; EDID parsing is NB-9's.
+- **Exit statuses.** `StartError` (no card, no atomic, no master, probe error, no usable CRTC or plane, every mode rejected, no Vulkan adapter) is status 1 before the socket. `Fatal` (three flip timeouts, three GPU losses in 60 s) is status 2, after the loop saved the session; `shingle-bin` maps it.
+- **Tracing.** `SHINGLE_TRACE_FLIPS=1` logs every presented flip, so the test machine can compare presentation feedback with the flips (step 11 of the test plan).
+
+Unit tests cover the atomic request contents for modeset (with and without VRR, with teardown, display off), flip and DPMS; the `IN_FORMATS` parser on kernel-layout blobs, including bad ones; Wayfire's mode heuristics and the fallback order; the choice of connector, CRTC and primary plane, refused planes and connectors, and teardown; the copy into padded XRGB8888 rows and the double buffering; the scheduler's states, timeouts and their count; card enumeration on a temporary sysfs tree, the boot VGA order and `SHINGLE_DRM_DEVICE`; adapter matching; the GPU health rules; the display on a fake card (`TEST_ONLY` before anything real, mode fallback, every mode rejected, `EACCES` and `EBUSY` as no master, no atomic, no connector, the blocking first modeset, flips to the back buffer with exact `PresentInfo`, sequence wrap, timeout recovery and the exit after three, a flip refused for lack of master, a pause with a flip pending and the fresh modeset on resume, teardown on resume, an output unplugged and plugged while away, a new mode list, DPMS off and on, DPMS waiting for a flip and DPMS changed while paused); and, in crates/shingle-native/src/host/tests.rs, the backend with a real frontend, compositor and Wayland client: the startup commit sequence, the connector as the client's `wl_output` name, frame callbacks and `wp_presentation` feedback with the flip's time, sequence, refresh and flags only after the flip, frames waiting for the previous flip, wlr-output-power-management turning the CRTC off and on, a VT switch with a flip pending, a lost GPU replaced, repeated GPU timeouts, the exit after a third loss with the session saved, and no output at startup with the output lit after a resume. What only hardware can show is listed in [status.md](../status.md#native-backend-kms-display).
 
 ### NB-8 `shingle-native-zero-copy`: GBM scanout
 

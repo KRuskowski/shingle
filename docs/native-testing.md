@@ -1,6 +1,6 @@
 # Native backend test plan
 
-The steps here verify the parts of the native backend that need a seat, real input devices or a VT. They run only on the dedicated test machine ([design, Layer 2](design/native-backend.md#layer-2-dedicated-test-machine)), never on a host whose display, input or VTs belong to someone's session: starting `shingle` from a VT login takes that VT, and the uinput tool injects input into whatever session is active. Unit tests through fakes cover the logic behind every step ([status.md](status.md#automated)); this plan checks that the real libseat and libinput behave the way the fakes assume.
+The steps here verify the parts of the native backend that need a seat, real input devices, a VT or a display. They run only on the dedicated test machine ([design, Layer 2](design/native-backend.md#layer-2-dedicated-test-machine)), never on a host whose display, input or VTs belong to someone's session: starting `shingle` from a VT login takes that VT, and the uinput tool injects input into whatever session is active. Unit tests through fakes cover the logic behind every step ([status.md](status.md#automated)); this plan checks that the real libseat and libinput behave the way the fakes assume.
 
 Record each result in [status.md](status.md#with-real-clients), with the date, the commit, the libseat backend and the devices used, separately from the unit tests.
 
@@ -220,6 +220,136 @@ Not an acceptance item, but the refusal is only unit-tested.
 
 1. As root on tty1 with seatd stopped: `LIBSEAT_BACKEND=builtin shingle --config ~/.config/shingle/test.yaml`. Expected: `shingle: the libseat builtin backend cannot switch VT, so there would be no way back to a text console; start seatd or log in on a VT, or pass --allow-builtin-seat to use it anyway`, status 1, and tty1 still a text console. (If Debian's libseat is built without the builtin backend, libseat fails instead, with `no seat: libseat could not open one (...)`.)
 2. With `--allow-builtin-seat` it starts; end it with SIGTERM over SSH.
+
+## NB-7: KMS display with copy scanout
+
+From NB-7 on, Shingle lights the monitor: it opens the boot GPU's card through the seat, sets the monitor's preferred mode with atomic KMS and shows every frame by copying it into a dumb buffer. The screen therefore shows Shingle while it runs on tty1, and the steps below look at the screen as well as at the log over SSH. Steps 1 to 8 still apply unchanged, except that `ls -l /proc/PID/fd` now also lists one `/dev/dri/cardN` node.
+
+Unit tests through a fake card cover the logic behind every step ([design, NB-7 as built](design/native-backend.md#nb-7-as-built)); these steps check that real drivers behave the way the fake assumes.
+
+### Step 9: prepare the test machine for NB-7
+
+1. In addition to step 0, install `foot`, `grim`, `wlopm` and `wayland-utils`, and connect one monitor to the GPU that drives the boot console (the one whose `/sys/class/drm/cardN/device/boot_vga` is `1`).
+2. Build and install the presentation probe next to `shingle`:
+
+   ```sh
+   cargo build --manifest-path ~/shingle/Cargo.toml -p shingle-native \
+     --example present_probe
+   sudo install -m 755 ~/shingle/target/debug/examples/present_probe \
+     /usr/local/bin/present_probe
+   ```
+
+3. In the NB-7 steps, "start Shingle on tty1 with CLIENT" means: log in on tty1 as the test user and run
+
+   ```sh
+   rm -f ~/.local/state/shingle/native.log /tmp/shingle-exit
+   SHINGLE_TRACE_FLIPS=1 shingle --config ~/.config/shingle/test.yaml \
+     --ipc "$XDG_RUNTIME_DIR/shingle-ipc" --spawn CLIENT \
+     > /tmp/shingle-stdout 2> /tmp/shingle-stderr
+   echo "exit=$?" > /tmp/shingle-exit
+   ```
+
+   and continue over SSH with the variables of step 0, plus
+
+   ```sh
+   export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+   export WAYLAND_DISPLAY="$(sed -n 's/^WAYLAND_DISPLAY=//p' /tmp/shingle-stdout)"
+   ```
+
+   `SHINGLE_TRACE_FLIPS=1` adds a `page flip seq=S at SEC.NSEC s` line to the log for every frame shown.
+
+### Step 10: a client is visible on the display
+
+Acceptance: "A client is visible on the test machine's display, checked with `grim` through screencopy."
+
+1. Start Shingle on tty1 with `foot`.
+2. Over SSH:
+
+   ```sh
+   grep -v 'page flip' ~/.local/state/shingle/native.log
+   ls -l /proc/$(pgrep -n -u "$USER" -x shingle)/fd | grep dri
+   grim /tmp/shot.png && file /tmp/shot.png
+   wayland-info | grep -A4 "interface: 'wl_output'"
+   ```
+
+   Expected: the log has `using /dev/dri/cardN` (the boot VGA card), `output NAME: WxH at R Hz, copy scanout` with the monitor's connector name (such as `HDMI-A-1` or `DP-1`) and preferred mode, and `rendering on ADAPTER; zero-copy scanout is not built yet, so frames are copied`, where ADAPTER is the GPU on that card's PCI slot. The descriptors include that `/dev/dri/cardN`. `grim` writes a PNG of the mode's size showing the foot window, tiled over the whole output. `wayland-info` reports the output with the connector name, the mode's size and refresh rate, and the monitor's physical size.
+3. On the physical screen: the same foot window, sharp, at the monitor's native resolution, and its cursor follows typing on the test machine's keyboard. The mouse pointer is drawn and moves.
+4. If a second monitor is connected, it is dark (Shingle lights one output in NB-7) and the log names only the first.
+5. End Shingle with `kill -TERM`; expected `exit=0` and the text console back on the screen.
+
+### Step 11: presentation times are the page-flip times, and frames are paced by flips
+
+Acceptance: "`wp_presentation` timestamps match page-flip times within 1 ms" and "Frames are paced by flips: no frame callback before the previous flip completes."
+
+1. Start Shingle on tty1 with `sh -c 'exec present_probe 600 > /tmp/probe.out'`. The probe draws a new grey shade on every frame callback, 600 frames, then exits.
+2. After 20 s, over SSH:
+
+   ```sh
+   python3 ~/shingle/tools/native_test/present_check.py \
+     ~/.local/state/shingle/native.log /tmp/probe.out; echo "status=$?"
+   ```
+
+   Expected: `status=0` and a summary with `"presented": 600`, `"discarded": 0`, `"max_difference_ns"` below 1000000 (it should be 0, since the feedback carries the flip's own timestamp) and `"median_frame_interval_ms"` equal to one refresh period rounded (16 or 17 at 60 Hz, 7 at 144 Hz). A median of two periods means the copy path did not finish each frame within one refresh; record the mode and GPU. Any `callback at ... is no flip time` or `callback before its commit` line fails the pacing item.
+3. In the same probe output, every `presented` line has `"flags": 7` (vsync, hardware clock, hardware completion) and `"refresh"` equal to `1000000000000 / refresh_mHz` for the mode in the log.
+
+### Step 12: DPMS off and on through wlr-output-power-management
+
+Acceptance: "DPMS off and on works through `wlr-output-power-management`."
+
+1. Start Shingle on tty1 with `sh -c 'exec present_probe 100000 > /tmp/probe.out'`.
+2. Over SSH:
+
+   ```sh
+   wlopm; wlopm --off '*'; sleep 3; wlopm
+   tail -n 3 ~/.local/state/shingle/native.log | grep -v 'page flip'
+   wc -l < /tmp/probe.out; sleep 2; wc -l < /tmp/probe.out
+   wlopm --on '*'; sleep 2; wlopm
+   tail -n 3 ~/.local/state/shingle/native.log | grep -v 'page flip'
+   ```
+
+   Expected: `wlopm` first lists the output as `on`, then `off`. The monitor goes dark and reports no signal or standby within a few seconds, and the log says `display off`. While it is off the probe's output does not grow (no frame callbacks without flips). After `--on` the picture returns within about a second, without a restart, the log says `display on`, `wlopm` lists `on` and the probe's output grows again.
+3. Moving the mouse or pressing a key while the display is off also turns it on, as Wayfire's idle handling does.
+
+### Step 13: a VT switch away and back resumes with a fresh modeset
+
+Acceptance: "A VT switch away and back resumes with a fresh modeset."
+
+1. Start Shingle on tty1 with `sh -c 'exec present_probe 100000 > /tmp/probe.out'`, so a frame is in flight at almost any moment (the "VT switch while rendering" row).
+2. Over SSH:
+
+   ```sh
+   sudo chvt 2; sleep 2
+   grep -v 'page flip' ~/.local/state/shingle/native.log | tail -n 2
+   wc -l < /tmp/probe.out; sleep 2; wc -l < /tmp/probe.out
+   sudo chvt 1; sleep 2
+   grep -v 'page flip' ~/.local/state/shingle/native.log | tail -n 3
+   grim /tmp/after.png
+   ```
+
+   Expected: tty2's text console appears on the monitor at its console resolution; the log says `seat disabled; paused`; the probe's output stops growing. After `chvt 1` Shingle's picture is back at the monitor's preferred mode within about a second, the log says `seat enabled; resumed` with no modeset error, the probe's output grows again and `grim` shows the probe's window.
+3. Repeat with Ctrl+Alt+F2 and Ctrl+Alt+F1 on the physical keyboard, five times in quick succession. Shingle keeps running and shows its picture after the last switch back.
+4. On tty2, change the console's mode before switching back if the machine allows it (for example `sudo fbset -g 1024 768 1024 768 32`, where fbdev permits it), then `sudo chvt 1`: Shingle's mode is restored, which shows the resume modesets rather than reusing the old state.
+
+### Step 14: SIGTERM, SIGINT and `kill -9` leave a usable tty1
+
+Acceptance: "`kill -9` leaves a usable tty1."
+
+1. Start Shingle on tty1 with `foot`. Over SSH, check `pid=$(pgrep -n -u "$USER" -x shingle)` is a single number above 1, then `kill -KILL "$pid"`.
+2. Expected: within a second the monitor shows tty1's text console again (the kernel's fbdev console takes over when the last DRM master closes the card), the shell prompt accepts `echo ok`, and Ctrl+Alt+F2 and Ctrl+Alt+F1 switch VT. `/tmp/shingle-exit` says `exit=137`.
+3. Repeat with `kill -TERM` and `kill -INT`: `exit=0`, the log ends with `native backend stopped` and the console is back as in 2.
+
+### Step 15: failure-table rows that the test machine can produce
+
+Acceptance: "Every row of the failure table that can be produced on the test machine is exercised and recorded." Each start below is from a tty1 login, with the command of step 9 unless it says otherwise; check over SSH that no `$XDG_RUNTIME_DIR/wayland-*` socket was created by a failed start.
+
+1. **No DRM device, or `SHINGLE_DRM_DEVICE` invalid.** Run `SHINGLE_DRM_DEVICE=/dev/dri/card9 shingle --config ~/.config/shingle/test.yaml; echo "status=$?"`. Expected: `shingle: no DRM device: tried /dev/dri/card9 (...)` with libseat's error, `status=1`, no socket and tty1 still a text console. Then `SHINGLE_DRM_DEVICE=/dev/dri/cardN` with the real card starts normally.
+2. **No Vulkan adapter.** Run `VK_ICD_FILENAMES=/nonexistent.json shingle --config ~/.config/shingle/test.yaml; echo "status=$?"`. Expected: `shingle: no Vulkan adapter: ...`, `status=1`, no socket, text console back.
+3. **No connected output at startup.** Unplug the monitor, log in on tty1 blind and start Shingle with `foot`. Over SSH: the log says `no connected output; nothing is shown until one is`, `ipc window-rules/list-views` lists the foot window and SIGTERM is not needed yet. Plug the monitor in, then `sudo chvt 2; sleep 1; sudo chvt 1`: the log names the output and the picture appears (hotplug without a VT switch is NB-9). Record whether the monitor shows the console or stays dark while unplugged-then-plugged before the switch.
+4. **Output unplugged.** With Shingle running and lit, `sudo chvt 2`, unplug the monitor, `sudo chvt 1`: the log says `no connected output`, Shingle and foot keep running (IPC answers). Plug it in, `sudo chvt 2; sudo chvt 1`: the picture is back with the window in place.
+5. **GPU device lost or hung.** Only where the driver offers a reset trigger: on i915, `echo 1 | sudo tee /sys/kernel/debug/dri/N/i915_wedged`; on amdgpu, `sudo cat /sys/kernel/debug/dri/N/amdgpu_gpu_recover`, with N the card's minor. Expected: the log says `the GPU device was lost (...)` or `the GPU did not finish a frame within 100 ms` three times, then `recreating the GPU context`, and the picture continues with every window's content. Triggering it three times within 60 s ends Shingle with `the GPU failed 3 times within 60 s; saving the session and exiting`, `exit=2` and a fresh `session.json`. If the driver has no such trigger, record that the row was not producible.
+6. **Panic and SIGKILL.** SIGKILL is step 14. A panic cannot be produced from outside; it is covered by the panic hook's log and the same kernel and seat cleanup as SIGKILL.
+
+The other rows cannot be produced on a healthy machine and are unit-tested only: no atomic support (every current KMS driver has it), another DRM master (libseat grants master only to the active session), every mode rejected by `TEST_ONLY` (no real monitor rejects all its modes; the fallback order is unit-tested), and a page flip that never completes (would need a broken driver; the timeout, the recovery modeset and the exit after three are unit-tested).
 
 ## Results
 

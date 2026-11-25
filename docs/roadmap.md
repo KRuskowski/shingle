@@ -18,12 +18,12 @@ In short, the interactive frontend moves out of `shingle-nested` into a shared `
 4. NB-4 `shingle-frontend-host`: done; `App` is `shingle_frontend::Frontend` behind the `Host` trait and `InputEvent`, nested is a thin winit host, and key repeat is the frontend's own timer. See [status.md](status.md#compositor-and-renderer) and [status.md](status.md#with-real-clients).
 5. NB-5 `shingle-input-registry`: done; see [status.md](status.md#backend-host-api).
 6. NB-6 `shingle-native-session`: built and unit-tested through fakes: `shingle-native` runs the frontend with libseat, libinput and VT switching and draws offscreen, and `shingle` runs it from a VT login and refuses SSH logins ([status.md](status.md#native-backend-seat-and-input)). Open: steps 1 to 8 of [native-testing.md](native-testing.md) on the test machine.
-7. NB-7 `shingle-native-kms`: atomic KMS, copy scanout, page-flip pacing, DPMS and the failure handling (test machine).
+7. NB-7 `shingle-native-kms`: built and unit-tested through a fake card: one output driven with atomic KMS and copy scanout, page-flip pacing with presentation feedback from the flips, DPMS, pause and resume with a fresh modeset, and the failure handling ([status.md](status.md#native-backend-kms-display)). Open: steps 9 to 15 of [native-testing.md](native-testing.md) on the test machine.
 8. NB-8 `shingle-native-zero-copy`: GBM scanout with modifier negotiation.
 9. NB-9 `shingle-native-outputs`: hotplug and Wayfire-compatible mode configuration.
 10. NB-10 `shingle-native-planes`: cursor plane, VRR, tearing and fences.
 
-NB-1 to NB-5 are done, and so is the single `shingle` binary of decision 4 ([status.md](status.md#the-shingle-binary)). NB-6 is built and waits for its hardware checks; NB-7 is next and, like everything after it, needs the test machine. The operator's decisions are recorded in the design's [Decisions](design/native-backend.md#decisions) section.
+NB-1 to NB-5 are done, and so is the single `shingle` binary of decision 4 ([status.md](status.md#the-shingle-binary)). NB-6 and NB-7 are built and wait for their hardware checks; NB-8 and NB-9 are next and, like everything after them, need the test machine to be verified. The operator's decisions are recorded in the design's [Decisions](design/native-backend.md#decisions) section.
 
 ## 3. DMA-BUF
 

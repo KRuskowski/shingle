@@ -14,6 +14,8 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+To be sure that no test reaches a GPU, input or VT device of the host, run the suite in a namespace whose `/dev` has none, with lavapipe as the only Vulkan driver: `bwrap --bind / / --dev /dev env VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json cargo test --workspace --no-fail-fast`. The three reference-image tests in crates/shingle-render/tests/offscreen_pixels.rs then fail, because their references were rendered on a hardware GPU; everything else passes.
+
 `.cargo/config.toml` limits Cargo to two jobs. Check `/proc/loadavg` before large builds, and run builds and test suites one after another rather than in parallel.
 
 `wayland_toplevels_look_unchanged` (crates/shingle/src/wayland_pins.rs) compares what xdg toplevels look like from outside (IPC replies and events, configures, surface snapshots and sessions) with crates/shingle/testdata/wayland_pins.txt byte for byte. If a change is meant to alter that, rerun it with `SHINGLE_BLESS_PINS=1` and review the diff of the file.

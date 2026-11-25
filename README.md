@@ -2,7 +2,7 @@
 
 Shingle is a tiling Wayland compositor written in Rust, built around Wayfire's tiling behaviour and compatible with Wayfire's configuration and IPC. Windows live in a persistent tiling tree rather than as independent positions, so the exact layout survives logout and login. Rendering uses wgpu.
 
-Shingle currently runs **nested** inside another Wayland or X11 session, or headless. It is not yet a replacement for Wayfire on real hardware: there is no DRM/KMS or libinput backend, no DMA-BUF, X11 windows do not map yet (Xwayland itself runs), and multi-output support is incomplete. See [docs/status.md](docs/status.md).
+Shingle currently runs **nested** inside another Wayland or X11 session, or headless. It is not yet a replacement for Wayfire on real hardware: the native backend (libseat, libinput and atomic KMS) is built but has not run on hardware yet, and there is no DMA-BUF, X11 windows do not map yet (Xwayland itself runs), and multi-output support is incomplete. See [docs/status.md](docs/status.md).
 
 ## Quick start
 
@@ -20,7 +20,7 @@ There is one binary, `shingle`, which picks its backend the way Wayfire does:
 | Backend | Selected when |
 | --- | --- |
 | nested, a window in the host session | `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` or `DISPLAY` is set |
-| native, libseat and libinput | none of them is set, as on a TTY. It takes the seat and its input devices but has no display output yet (no KMS); from an SSH login it refuses with "no seat" and exits with status 1 |
+| native, libseat, libinput and KMS | none of them is set, as on a TTY. It takes the seat, its input devices and one monitor (atomic KMS with copy scanout; not yet run on hardware); from an SSH login it refuses with "no seat" and exits with status 1 |
 | headless, no display or input devices | `--headless` |
 
 `--backend nested|native|headless` overrides the choice, and so does the `SHINGLE_BACKEND` environment variable with the same values; the command line wins over the variable. Other options are `--config PATH`, `--ipc PATH` (Wayfire IPC, exported to clients as `WAYFIRE_SOCKET`) and `--spawn PROGRAM [ARG]...`, which starts a client; `shingle --help` lists them all. The separate `shingle-nested` binary is gone: run `shingle`, or `shingle --backend nested` to be explicit.
