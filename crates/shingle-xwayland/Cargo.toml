@@ -11,4 +11,4 @@ workspace = true
 
 [dependencies]
 rustix = { workspace = true, features = ["pipe"] }
-x11rb = { version = "0.14", features = ["composite"] }
+x11rb = { version = "0.14", features = ["composite", "res"] }

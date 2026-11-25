@@ -15,7 +15,10 @@
 //!    [`StartMode::Lazy`] on the first connection to either display socket.
 //! 3. When the readiness pipe reports the display number, the window
 //!    manager connects ([`Xwm::start`]).
-//! 4. When the process exits, [`XwaylandServer::reap`] applies the restart
+//! 4. The window manager tracks X windows and reports them as
+//!    [`XwmEvent`]s; the compositor pairs each with its `wl_surface`
+//!    through [`Pairing`] and manages it.
+//! 5. When the process exits, [`XwaylandServer::reap`] applies the restart
 //!    rule ([`restart_after_exit`]).
 
 #![warn(missing_docs)]
@@ -33,7 +36,10 @@ pub use server::{
   Readiness, Restart, StartMode, XwaylandProcess, restart_after_exit,
 };
 pub use sockets::DisplaySockets;
-pub use xwm::{X11Connection, XConnection, Xwm, XwmError, XwmEvent};
+pub use xwm::{
+  Geometry, Kind, NetWmState, Paired, Pairing, Placement, Window, WindowInfo,
+  X11Connection, XConnection, Xwm, XwmError, XwmEvent, configure_reply,
+};
 
 /// How a server process ended, and what happens next.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

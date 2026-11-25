@@ -10,20 +10,27 @@ use std::{
 };
 
 use x11rb::{
-  COPY_FROM_PARENT, CURRENT_TIME,
+  COPY_FROM_PARENT, CURRENT_TIME, NONE,
   connection::{Connection, RequestConnection},
   protocol::{
     Event,
     composite::{self, ConnectionExt as _, Redirect},
+    res::{ClientIdMask, ClientIdSpec, ConnectionExt as _},
     xfixes::{ClientDisconnectFlags, ConnectionExt as _},
     xproto::{
-      ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux,
-      EventMask, PropMode, Window, WindowClass,
+      CONFIGURE_NOTIFY_EVENT, ChangeWindowAttributesAux, ClientMessageEvent,
+      ConfigureNotifyEvent, ConfigureWindowAux, ConnectionExt as _,
+      CreateWindowAux, EventMask, PropMode, Window, WindowClass,
     },
   },
   rust_connection::{DefaultStream, RustConnection},
   wrapper::ConnectionExt as _,
 };
+
+use super::{props::Property, window::Geometry};
+
+/// How many 32-bit items of a property are read at most: 256 KiB.
+const PROPERTY_LIMIT: u32 = 1 << 16;
 
 /// Why the window manager could not talk to the X server.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -169,6 +176,90 @@ pub trait XConnection {
     data: &[u8],
   ) -> Result<(), XwmError>;
 
+  /// Sets the event mask of a client window, unchecked, since the window
+  /// may already be gone.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn watch_window(
+    &mut self,
+    window: Window,
+    mask: EventMask,
+  ) -> Result<(), XwmError>;
+
+  /// Reads `properties` of `window` in one pipelined batch, in the same
+  /// order. A property that is not set, or cannot be read because the
+  /// window is gone, is `None`.
+  ///
+  /// # Errors
+  ///
+  /// When the connection fails.
+  fn get_properties(
+    &mut self,
+    window: Window,
+    properties: &[u32],
+  ) -> Result<Vec<Option<Property>>, XwmError>;
+
+  /// The PID of the client that created `window`, from XRes
+  /// `QueryClientIds` with `LocalClientPID`, as wlroots'
+  /// `read_surface_client_id` asks. `None` without XRes or a PID.
+  ///
+  /// # Errors
+  ///
+  /// When the connection fails.
+  fn client_pid(&mut self, window: Window) -> Result<Option<u32>, XwmError>;
+
+  /// Maps `window`.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn map_window(&mut self, window: Window) -> Result<(), XwmError>;
+
+  /// `ConfigureWindow` with position, size and a border of 0.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn configure_window(
+    &mut self,
+    window: Window,
+    geometry: Geometry,
+  ) -> Result<(), XwmError>;
+
+  /// Sends `window` a synthetic `ConfigureNotify` with `geometry`, as
+  /// ICCCM 4.1.5 asks when a configure leaves the size unchanged.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn send_configure_notify(
+    &mut self,
+    window: Window,
+    geometry: Geometry,
+  ) -> Result<(), XwmError>;
+
+  /// Sends `window` a format-32 `ClientMessage` of type `kind`, with no
+  /// event mask, so it goes to the window's creator.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn send_client_message(
+    &mut self,
+    window: Window,
+    kind: u32,
+    data: [u32; 5],
+  ) -> Result<(), XwmError>;
+
+  /// Disconnects the client that created `window`.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn kill_client(&mut self, window: Window) -> Result<(), XwmError>;
+
   /// Sends every queued request.
   ///
   /// # Errors
@@ -189,6 +280,7 @@ pub trait XConnection {
 pub struct X11Connection {
   connection: RustConnection,
   root: Window,
+  has_res: Option<bool>,
 }
 
 impl X11Connection {
@@ -203,7 +295,11 @@ impl X11Connection {
     let connection = RustConnection::connect_to_stream(stream, 0)
       .map_err(|error| XwmError::Connect(error.to_string()))?;
     let root = connection.setup().roots[0].root;
-    Ok(Self { connection, root })
+    Ok(Self {
+      connection,
+      root,
+      has_res: None,
+    })
   }
 }
 
@@ -354,6 +450,163 @@ impl XConnection for X11Connection {
       .map_err(connection_error)
   }
 
+  fn watch_window(
+    &mut self,
+    window: Window,
+    mask: EventMask,
+  ) -> Result<(), XwmError> {
+    self
+      .connection
+      .change_window_attributes(
+        window,
+        &ChangeWindowAttributesAux::new().event_mask(mask),
+      )
+      .map(drop)
+      .map_err(connection_error)
+  }
+
+  fn get_properties(
+    &mut self,
+    window: Window,
+    properties: &[u32],
+  ) -> Result<Vec<Option<Property>>, XwmError> {
+    let cookies = properties
+      .iter()
+      .map(|property| {
+        self.connection.get_property(
+          false,
+          window,
+          *property,
+          x11rb::protocol::xproto::AtomEnum::ANY,
+          0,
+          PROPERTY_LIMIT,
+        )
+      })
+      .collect::<Result<Vec<_>, _>>()
+      .map_err(connection_error)?;
+    let mut values = Vec::with_capacity(cookies.len());
+    for cookie in cookies {
+      match cookie.reply() {
+        Ok(reply) if reply.type_ != NONE => values.push(Some(Property {
+          kind: reply.type_,
+          format: reply.format,
+          value: reply.value,
+        })),
+        Ok(_) | Err(x11rb::errors::ReplyError::X11Error(_)) => {
+          values.push(None);
+        }
+        Err(error) => return Err(connection_error(error)),
+      }
+    }
+    Ok(values)
+  }
+
+  fn client_pid(&mut self, window: Window) -> Result<Option<u32>, XwmError> {
+    let has_res = match self.has_res {
+      Some(has_res) => has_res,
+      None => {
+        let has_res =
+          self.has_extension(x11rb::protocol::res::X11_EXTENSION_NAME)?;
+        self.has_res = Some(has_res);
+        has_res
+      }
+    };
+    if !has_res {
+      return Ok(None);
+    }
+    let spec = ClientIdSpec {
+      client: window,
+      mask: ClientIdMask::LOCAL_CLIENT_PID,
+    };
+    let cookie = self
+      .connection
+      .res_query_client_ids(&[spec])
+      .map_err(connection_error)?;
+    match cookie.reply() {
+      Ok(reply) => Ok(reply.ids.iter().find_map(|id| {
+        (id.spec.mask & ClientIdMask::LOCAL_CLIENT_PID
+          != ClientIdMask::from(0u32))
+        .then(|| id.value.first().copied())
+        .flatten()
+      })),
+      Err(x11rb::errors::ReplyError::X11Error(_)) => Ok(None),
+      Err(error) => Err(connection_error(error)),
+    }
+  }
+
+  fn map_window(&mut self, window: Window) -> Result<(), XwmError> {
+    self
+      .connection
+      .map_window(window)
+      .map(drop)
+      .map_err(connection_error)
+  }
+
+  fn configure_window(
+    &mut self,
+    window: Window,
+    geometry: Geometry,
+  ) -> Result<(), XwmError> {
+    let aux = ConfigureWindowAux::new()
+      .x(geometry.x)
+      .y(geometry.y)
+      .width(geometry.width)
+      .height(geometry.height)
+      .border_width(0);
+    self
+      .connection
+      .configure_window(window, &aux)
+      .map(drop)
+      .map_err(connection_error)
+  }
+
+  fn send_configure_notify(
+    &mut self,
+    window: Window,
+    geometry: Geometry,
+  ) -> Result<(), XwmError> {
+    let event = ConfigureNotifyEvent {
+      response_type: CONFIGURE_NOTIFY_EVENT,
+      sequence: 0,
+      event: window,
+      window,
+      above_sibling: NONE,
+      x: clamp_i16(geometry.x),
+      y: clamp_i16(geometry.y),
+      width: clamp_u16(geometry.width),
+      height: clamp_u16(geometry.height),
+      border_width: 0,
+      override_redirect: false,
+    };
+    self
+      .connection
+      .send_event(false, window, EventMask::STRUCTURE_NOTIFY, event)
+      .map(drop)
+      .map_err(connection_error)
+  }
+
+  fn send_client_message(
+    &mut self,
+    window: Window,
+    kind: u32,
+    data: [u32; 5],
+  ) -> Result<(), XwmError> {
+    let event = ClientMessageEvent::new(32, window, kind, data);
+    self
+      .connection
+      .send_event(false, window, EventMask::NO_EVENT, event)
+      .map(drop)
+      .map_err(connection_error)
+  }
+
+  fn kill_client(&mut self, window: Window) -> Result<(), XwmError> {
+    self
+      .connection
+      .kill_client(window)
+      .map(drop)
+      .map_err(connection_error)
+  }
+
   fn flush(&mut self) -> Result<(), XwmError> {
     self.connection.flush().map_err(connection_error)
   }
@@ -361,6 +614,16 @@ impl XConnection for X11Connection {
   fn poll_for_event(&mut self) -> Result<Option<Event>, XwmError> {
     self.connection.poll_for_event().map_err(connection_error)
   }
+}
+
+/// `value` clamped into an X coordinate.
+fn clamp_i16(value: i32) -> i16 {
+  value.clamp(i16::MIN.into(), i16::MAX.into()) as i16
+}
+
+/// `value` clamped into an X size.
+fn clamp_u16(value: u32) -> u16 {
+  value.min(u16::MAX.into()) as u16
 }
 
 /// The name Composite is registered under.
