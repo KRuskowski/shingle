@@ -141,6 +141,7 @@ fn gpu_rendering(
      copied",
     renderer.adapter_name()
   ));
+  diagnostics::log(&renderer.dmabuf_summary());
   let factory: RendererFactory = Box::new(move |size| {
     GpuRenderer::new(size, pci.as_deref())
       .map(|renderer| Box::new(renderer) as Box<dyn FrameRenderer>)

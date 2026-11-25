@@ -273,6 +273,11 @@ impl GpuRenderer {
     self.gpu.adapter().get_info().name
   }
 
+  /// [`GpuContext::dmabuf_summary`], for the log.
+  pub fn dmabuf_summary(&self) -> String {
+    self.gpu.dmabuf_summary()
+  }
+
   fn lost(&self) -> bool {
     self.lost.load(Ordering::SeqCst)
   }
@@ -284,6 +289,7 @@ fn open_gpu(pci: Option<&str>) -> Result<GpuContext, RenderError> {
       |info: &wgpu::AdapterInfo| adapter_matches(&info.device_pci_bus_id, slot);
     let options = GpuOptions {
       adapter_filter: Some(&filter),
+      dmabuf: true,
       ..GpuOptions::default()
     };
     match pollster::block_on(GpuContext::new(
@@ -298,7 +304,10 @@ fn open_gpu(pci: Option<&str>) -> Result<GpuContext, RenderError> {
   }
   pollster::block_on(GpuContext::new(
     GpuContext::create_instance(),
-    GpuOptions::default(),
+    GpuOptions {
+      dmabuf: true,
+      ..GpuOptions::default()
+    },
   ))
 }
 

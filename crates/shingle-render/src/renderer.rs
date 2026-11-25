@@ -15,7 +15,8 @@ pub struct Renderer {
 
 impl Renderer {
   /// Creates a GPU context able to present to `window` and a window target
-  /// of `size` physical pixels.
+  /// of `size` physical pixels. The device is opened for DMA-BUF import
+  /// where the adapter allows it ([`GpuContext::dmabuf`]).
   pub async fn new(
     window: impl Into<wgpu::SurfaceTarget<'static>>,
     size: (u32, u32),
@@ -26,6 +27,7 @@ impl Renderer {
       instance,
       GpuOptions {
         compatible_surface: Some(&surface),
+        dmabuf: true,
         ..Default::default()
       },
     )

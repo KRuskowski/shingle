@@ -391,6 +391,7 @@ impl ApplicationHandler for App {
         return;
       }
     };
+    eprintln!("shingle: {}", renderer.gpu().dmabuf_summary());
     if let Err(error) = self.frontend.set_output_size(size.width, size.height) {
       eprintln!("shingle: failed to set output size: {error}");
       event_loop.exit();
