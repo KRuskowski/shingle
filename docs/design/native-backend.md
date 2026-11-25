@@ -392,7 +392,7 @@ Diagnostics go to stderr and to `$XDG_STATE_HOME/shingle/native.log`, because st
 
 A deliberate design point: no code path in Shingle puts the VT into graphics mode itself.
 
-**A bug this design found and fixes.** `Compositor::with_core` installs a calloop `Signals` source for SIGINT and SIGTERM (crates/shingle/src/lib.rs:496-502). That source blocks both signals and only sets `state.shutdown`. `shingle-nested` never reads that flag (there is no accessor) and exits only on its own `quit` flag (main.rs:4518). That is why nested ignored SIGTERM and SIGINT in the 2026-11-25 run (roadmap item "Repeat real-client verification"). `Compositor::request_quit` (lib.rs:731) has the same problem. NB-2 adds `shutdown_requested()` and makes nested honour it.
+**A bug this design found and fixes.** `Compositor::with_core` installs a calloop `Signals` source for SIGINT and SIGTERM (crates/shingle/src/lib.rs:496-502). That source blocks both signals and only sets `state.shutdown`. `shingle-nested` never reads that flag (there is no accessor) and exits only on its own `quit` flag (main.rs:4518). That is why nested ignored SIGTERM and SIGINT in the 2026-11-25 run (roadmap item "Host input checks after the rename"). `Compositor::request_quit` (lib.rs:731) has the same problem. NB-2 adds `shutdown_requested()` and makes nested honour it.
 
 ## 7. Testing
 

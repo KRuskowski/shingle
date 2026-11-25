@@ -2,11 +2,11 @@
 
 Work items in priority order. Refer to items by name, not number, from other documents, since numbers change as items finish. Finish and verify one before starting the next compatibility feature. When an item is done, move what it delivered into [status.md](status.md) and delete it here.
 
-## 1. Repeat real-client verification after the rename
+## 1. Host input checks after the rename
 
-Run the nested smoke test and the IPC fixtures again under the Shingle names, including migration from an existing `tilefire` config and session. See [development.md](development.md#real-client-tests).
+The smoke test, IPC fixtures, session round trip and Tilefire migration were repeated with real clients on 2026-11-25 ([status.md](status.md#with-real-clients)). What remains needs physical input from the operator: input-device gating of real host keyboard, pointer and touch events, the nested switcher and drag clean-up on disable, and a clean quit followed by a restore. The steps are in [status.md](status.md#needs-operator-host-input); record the results there and delete this item.
 
-Also exercise input-device gating with real host keyboard, pointer and touch input, including the nested switcher and drag clean-up on disable; the 2026-11-25 real-client run covered STIPC input only (see [status.md](status.md#with-real-clients)). In that run `shingle-nested` ignored SIGTERM and SIGINT. The likely cause: `Compositor::with_core` blocks both signals in a calloop `Signals` source that only sets an internal `shutdown` flag (crates/shingle/src/lib.rs:496-502), and nested never reads it. The native design fixes this in NB-2 ([design/native-backend.md](design/native-backend.md#6-failure-handling)).
+`shingle-nested` still ignores SIGTERM and SIGINT, so stop test instances with SIGKILL. The likely cause: `Compositor::with_core` blocks both signals in a calloop `Signals` source that only sets an internal `shutdown` flag (crates/shingle/src/lib.rs:496-502), and nested never reads it. The native design fixes this in NB-2 ([design/native-backend.md](design/native-backend.md#6-failure-handling)).
 
 ## 2. Documentation for the other crates
 
@@ -46,6 +46,8 @@ Complete output lifecycle, focus, workspaces, sessions and rendering across outp
 Continue the missing plugins and configuration options, using Wayfire's source as the behavioural reference.
 
 - `stipc/feed_key` fires only bindings registered over IPC. Wayfire feeds STIPC keys through a headless keyboard into the normal input path (`plugins/ipc/stipc.cpp`), so configured key bindings fire too.
+- A view blocked in `view-pre-map` already holds its tile: the toplevel enters the tiling tree before its first map, so `simple-tile/get-layout` lists it and its neighbours shrink around an empty, unrendered slot until `unblock-map` (seen with real clients on 2026-11-25). Wayfire's tile plugin only attaches a view on `view-mapped` (`plugins/tile/tile-plugin.cpp`). Restored session placeholders rely on holding their slot, so the fix must keep that for them.
+- Clients receive the configured keymap as written, as `include` statements (for example `pc+us+de:2+inet(evdev)`), not compiled. libxkbcommon resolves them against the client's own XKB data, which works when that matches the host's. wlroots-based compositors, Wayfire included, send the compiled keymap from `xkb_keymap_get_as_string`, which needs no XKB data on the client side; `input::set_keymap` (crates/shingle/src/input.rs:154) already compiles it once to read the layout names.
 
 ## 8. Soak tests and measurements
 
