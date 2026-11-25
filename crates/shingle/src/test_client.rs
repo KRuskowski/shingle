@@ -113,6 +113,41 @@ impl TestClient {
       .unwrap_or_else(|| panic!("no {} global", I::interface().name));
     self.registry.bind(*name, version, &self.handle, ())
   }
+
+  /// Creates a surface with an attached and committed 1x1 shm buffer and
+  /// makes it the pointer's cursor, which keeps it visible without a shell.
+  pub(crate) fn cursor_surface(
+    &mut self,
+    compositor: &mut Compositor,
+  ) -> wl_surface::WlSurface {
+    let wl_compositor = self.bind::<wl_compositor::WlCompositor>(4);
+    let shm = self.bind::<wl_shm::WlShm>(1);
+    let seat = self.bind::<wl_seat::WlSeat>(5);
+    let pointer = seat.get_pointer(&self.handle, ());
+    let fd = rustix::fs::memfd_create(
+      "shingle-test-buffer",
+      rustix::fs::MemfdFlags::CLOEXEC,
+    )
+    .expect("memfd_create succeeds");
+    rustix::fs::ftruncate(&fd, 4).expect("ftruncate succeeds");
+    let pool =
+      shm.create_pool(rustix::fd::AsFd::as_fd(&fd), 4, &self.handle, ());
+    let buffer = pool.create_buffer(
+      0,
+      1,
+      1,
+      4,
+      wl_shm::Format::Argb8888,
+      &self.handle,
+      (),
+    );
+    let surface = wl_compositor.create_surface(&self.handle, ());
+    surface.attach(Some(&buffer), 0, 0);
+    surface.commit();
+    pointer.set_cursor(0, Some(&surface), 0, 0);
+    self.roundtrip(compositor);
+    surface
+  }
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for Events {

@@ -83,6 +83,28 @@ pub const OUTPUT_NAME: &str = "HEADLESS-1";
 pub const OUTPUT_WIDTH: u32 = 1280;
 pub const OUTPUT_HEIGHT: u32 = 720;
 
+/// Flags of a presented frame, as `wp_presentation_feedback` sends them.
+pub use wayland_protocols::wp::presentation_time::server::{
+  wp_presentation_feedback::Kind as PresentationFlags,
+};
+
+/// A frame that reached the screen, as [`Compositor::frame_presented`]
+/// reports it to `wp_presentation` clients.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PresentInfo {
+  /// `CLOCK_MONOTONIC` time at which the frame started to be shown, such as
+  /// a DRM page-flip timestamp.
+  pub time: Duration,
+  /// Nanoseconds until the next refresh, or zero when unknown or variable.
+  pub refresh_ns: u32,
+  /// The display's frame counter, such as the DRM vblank sequence, or zero
+  /// when there is none.
+  pub seq: u64,
+  /// How the frame was presented: `Vsync`, `HwClock`, `HwCompletion`,
+  /// `ZeroCopy`.
+  pub flags: PresentationFlags,
+}
+
 /// What clients are told about the physical output: its identity, size and
 /// refresh rate. A backend describes its output with
 /// [`Compositor::set_output_info`]; nested and headless compositors keep
@@ -679,13 +701,38 @@ impl Compositor {
     self.poll(Some(Duration::ZERO))
   }
 
+  /// Reports a frame drawn now, for frontends that learn nothing more
+  /// precise about presentation, such as nested. It is
+  /// [`Compositor::frame_presented`] with the current `CLOCK_MONOTONIC`
+  /// time, the output's refresh rate from [`OutputInfo`], no sequence
+  /// number and no flags.
   pub fn frame(&mut self) {
+    let refresh_ns =
+      presentation::refresh_ns(self.state.output_info.refresh_mhz);
+    self.frame_presented(PresentInfo {
+      time: clock::monotonic_now(),
+      refresh_ns,
+      seq: 0,
+      flags: PresentationFlags::empty(),
+    });
+  }
+
+  /// Reports that a frame reached the screen, for example on a DRM page
+  /// flip. Surfaces that were visible in it get their frame callbacks,
+  /// with `info.time` in milliseconds, and their `wp_presentation`
+  /// feedback, with every field of `info`. Hidden surfaces keep their
+  /// callbacks for a later frame, and their feedback is discarded. FIFO
+  /// and commit-timing barriers waiting for a frame are released.
+  ///
+  /// Does nothing while the session is inactive
+  /// ([`Compositor::set_session_active`]).
+  pub fn frame_presented(&mut self, info: PresentInfo) {
     if !input_device::session_active(&self.state) {
       return;
     }
     commit_timing::frame(&mut self.state);
     fifo::frame(&mut self.state);
-    let time = self.state.now().as_millis() as u32;
+    let time = clock::millis(info.time);
     let visible = self
       .state
       .visible_surfaces()
@@ -702,7 +749,7 @@ impl Compositor {
       }
     }
     self.state.frame_callbacks = hidden;
-    presentation::frame(&mut self.state);
+    presentation::frame(&mut self.state, &info);
   }
 
   /// Whether a constrained surface update needs a future frame.
@@ -2011,6 +2058,10 @@ pub(crate) mod tests {
     sync::atomic::{AtomicU32, Ordering},
   };
 
+  use wayland_protocols::wp::presentation_time::client::{
+    wp_presentation::WpPresentation, wp_presentation_feedback,
+  };
+
   use super::*;
 
   /// Builds a compositor whose Wayland socket lives in the temporary
@@ -2260,6 +2311,122 @@ pub(crate) mod tests {
       !events
         .iter()
         .any(|event| matches!(event, Event::Name { .. }))
+    );
+  }
+
+  /// A client with a visible cursor surface that has asked for a frame
+  /// callback and presentation feedback.
+  fn client_waiting_for_a_frame(
+    compositor: &mut Compositor,
+    path: &std::path::Path,
+  ) -> test_client::TestClient {
+    let mut client = test_client::TestClient::connect(compositor, path);
+    let surface = client.cursor_surface(compositor);
+    let presentation = client.bind::<WpPresentation>(2);
+    request_frame(&mut client, compositor, &surface, &presentation);
+    client
+  }
+
+  fn request_frame(
+    client: &mut test_client::TestClient,
+    compositor: &mut Compositor,
+    surface: &wayland_client::protocol::wl_surface::WlSurface,
+    presentation: &WpPresentation,
+  ) {
+    surface.frame(&client.handle, test_client::Frame);
+    presentation.feedback(surface, &client.handle, ());
+    surface.commit();
+    client.roundtrip(compositor);
+  }
+
+  #[test]
+  fn frame_presented_sends_the_page_flip_to_clients() {
+    use wp_presentation_feedback::{Event, Kind};
+    let (mut compositor, path) = test_compositor();
+    let mut client = client_waiting_for_a_frame(&mut compositor, &path);
+    assert!(client.events.frame_done.is_empty());
+    compositor.frame_presented(PresentInfo {
+      time: Duration::new(5, 250_000_123),
+      refresh_ns: 16_666_667,
+      seq: (1 << 32) + 2,
+      flags: PresentationFlags::Vsync | PresentationFlags::HwClock,
+    });
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.frame_done, [5_250]);
+    let presented = client
+      .events
+      .feedback
+      .iter()
+      .find(|event| matches!(event, Event::Presented { .. }));
+    let Some(Event::Presented {
+      tv_sec_hi,
+      tv_sec_lo,
+      tv_nsec,
+      refresh,
+      seq_hi,
+      seq_lo,
+      flags,
+    }) = presented
+    else {
+      panic!("no presented event in {:?}", client.events.feedback);
+    };
+    assert_eq!(
+      (*tv_sec_hi, *tv_sec_lo, *tv_nsec, *refresh, *seq_hi, *seq_lo),
+      (0, 5, 250_000_123, 16_666_667, 1, 2)
+    );
+    assert_eq!(
+      flags,
+      &wayland_client::WEnum::Value(Kind::Vsync | Kind::HwClock)
+    );
+  }
+
+  #[test]
+  fn frame_uses_the_output_refresh_rate_and_monotonic_clock() {
+    use wp_presentation_feedback::Event;
+    let (mut compositor, path) = test_compositor();
+    compositor.set_output_info(OutputInfo {
+      refresh_mhz: 59_951,
+      ..Default::default()
+    });
+    let mut client = client_waiting_for_a_frame(&mut compositor, &path);
+    let before = clock::monotonic_now();
+    compositor.frame();
+    client.roundtrip(&mut compositor);
+    let Some(Event::Presented {
+      tv_sec_lo,
+      refresh,
+      seq_lo,
+      ..
+    }) = client.events.feedback.first()
+    else {
+      panic!("no presented event in {:?}", client.events.feedback);
+    };
+    assert_eq!((*refresh, *seq_lo), (16_680_289, 0));
+    assert!(u64::from(*tv_sec_lo) >= before.as_secs());
+    assert_eq!(client.events.frame_done.len(), 1);
+    assert!(client.events.frame_done[0] >= clock::millis(before));
+  }
+
+  #[test]
+  fn inactive_session_withholds_frames_until_resumed() {
+    use wp_presentation_feedback::Event;
+    let (mut compositor, path) = test_compositor();
+    let mut client = client_waiting_for_a_frame(&mut compositor, &path);
+    compositor.set_session_active(false);
+    compositor.frame();
+    client.roundtrip(&mut compositor);
+    assert!(client.events.frame_done.is_empty());
+    assert!(client.events.feedback.is_empty());
+    compositor.set_session_active(true);
+    compositor.frame();
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.frame_done.len(), 1);
+    assert!(
+      client
+        .events
+        .feedback
+        .iter()
+        .any(|event| matches!(event, Event::Presented { .. }))
     );
   }
 

@@ -9,7 +9,7 @@ use wayland_server::{
   backend::ClientId, protocol::wl_surface::WlSurface,
 };
 
-use crate::{SurfaceId, state::CompositorState};
+use crate::{PresentInfo, SurfaceId, state::CompositorState};
 
 #[derive(Default)]
 pub(crate) struct Presentation {
@@ -25,15 +25,55 @@ pub(crate) fn create_global(handle: &DisplayHandle) {
   handle.create_global::<CompositorState, WpPresentation, ()>(2, ());
 }
 
-pub(crate) fn frame(state: &mut CompositorState) {
+/// Returns the refresh interval in nanoseconds for a refresh rate in
+/// millihertz, rounded to the nearest nanosecond, or zero when the rate is
+/// unknown.
+pub(crate) fn refresh_ns(refresh_mhz: u32) -> u32 {
+  if refresh_mhz == 0 {
+    return 0;
+  }
+  let mhz = u64::from(refresh_mhz);
+  ((1_000_000_000_000 + mhz / 2) / mhz).min(u64::from(u32::MAX)) as u32
+}
+
+/// The arguments of `wp_presentation_feedback.presented`.
+#[derive(Debug, Eq, PartialEq)]
+struct Presented {
+  tv_sec_hi: u32,
+  tv_sec_lo: u32,
+  tv_nsec: u32,
+  refresh: u32,
+  seq_hi: u32,
+  seq_lo: u32,
+  flags: wp_presentation_feedback::Kind,
+}
+
+impl Presented {
+  /// Splits a presented frame into the protocol's 32-bit fields.
+  fn new(info: &PresentInfo) -> Self {
+    let seconds = info.time.as_secs();
+    Self {
+      tv_sec_hi: (seconds >> 32) as u32,
+      tv_sec_lo: seconds as u32,
+      tv_nsec: info.time.subsec_nanos(),
+      refresh: info.refresh_ns,
+      seq_hi: (info.seq >> 32) as u32,
+      seq_lo: info.seq as u32,
+      flags: info.flags,
+    }
+  }
+}
+
+/// Sends feedback for a presented frame: `presented` for surfaces in it,
+/// `discarded` for the rest.
+pub(crate) fn frame(state: &mut CompositorState, info: &PresentInfo) {
   let visible = state
     .visible_surfaces()
     .into_iter()
     .map(|surface| surface.id)
     .collect::<HashSet<_>>();
   let pending = std::mem::take(&mut state.presentation.pending);
-  let time = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
-  let seconds = time.tv_sec as u64;
+  let presented = Presented::new(info);
   for feedback in pending {
     if !visible.contains(&feedback.surface) {
       feedback.resource.discarded();
@@ -55,13 +95,13 @@ pub(crate) fn frame(state: &mut CompositorState) {
       feedback.resource.sync_output(output);
     }
     feedback.resource.presented(
-      (seconds >> 32) as u32,
-      seconds as u32,
-      time.tv_nsec as u32,
-      16_666_667,
-      0,
-      0,
-      wp_presentation_feedback::Kind::empty(),
+      presented.tv_sec_hi,
+      presented.tv_sec_lo,
+      presented.tv_nsec,
+      presented.refresh,
+      presented.seq_hi,
+      presented.seq_lo,
+      presented.flags,
     );
   }
 }
@@ -176,4 +216,43 @@ pub(crate) fn cleanup_client(
       .client()
       .is_none_or(|client| client.id() != *disconnected)
   });
+}
+
+#[cfg(test)]
+mod tests {
+  use std::time::Duration;
+
+  use super::*;
+
+  #[test]
+  fn refresh_ns_rounds_millihertz_to_nanoseconds() {
+    assert_eq!(refresh_ns(60_000), 16_666_667);
+    assert_eq!(refresh_ns(59_951), 16_680_289);
+    assert_eq!(refresh_ns(144_000), 6_944_444);
+    assert_eq!(refresh_ns(0), 0);
+    assert_eq!(refresh_ns(1), u32::MAX);
+  }
+
+  #[test]
+  fn presented_splits_time_and_sequence_into_protocol_fields() {
+    use wp_presentation_feedback::Kind;
+    let info = PresentInfo {
+      time: Duration::new((7 << 32) + 5, 250_000_123),
+      refresh_ns: 16_666_667,
+      seq: (3 << 32) + 9,
+      flags: Kind::Vsync | Kind::HwClock | Kind::HwCompletion,
+    };
+    assert_eq!(
+      Presented::new(&info),
+      Presented {
+        tv_sec_hi: 7,
+        tv_sec_lo: 5,
+        tv_nsec: 250_000_123,
+        refresh: 16_666_667,
+        seq_hi: 3,
+        seq_lo: 9,
+        flags: Kind::Vsync | Kind::HwClock | Kind::HwCompletion,
+      }
+    );
+  }
 }
