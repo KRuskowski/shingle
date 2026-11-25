@@ -1087,6 +1087,7 @@ dependencies = [
 [[package]]
 name = "gloomy-app"
 version = "0.1.0"
+source = "git+https://github.com/KRuskowski/gloomy?rev=42673c8#42673c8e725140f822f4c02659bdebb3318e3a4f"
 dependencies = [
  "anyhow",
  "gloomy-core",
@@ -1099,6 +1100,7 @@ dependencies = [
 [[package]]
 name = "gloomy-core"
 version = "0.1.0"
+source = "git+https://github.com/KRuskowski/gloomy?rev=42673c8#42673c8e725140f822f4c02659bdebb3318e3a4f"
 dependencies = [
  "anyhow",
  "bytemuck",

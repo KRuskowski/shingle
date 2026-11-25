@@ -20,11 +20,11 @@ Rust/wgpu Wayland compositor built around Wayfire's tiling behaviour, compatible
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-rustfmt --edition 2024 $(find crates -path '*/src/*' \( -name lib.rs -o -name main.rs \))
+cargo fmt --all
 rg -n '.{81,}' crates --type rust
 ```
 
-- Never `cargo fmt --all`: it reformats vendored `third_party/gloomy` (docs/development.md#formatting).
+- Gloomy is a pinned git dependency (Cargo.toml, `[workspace.dependencies]`); change it in its own repo, then bump `rev` (docs/development.md#gloomy).
 - This host lacks `libpam0g-dev`; linking fails with `-lpam` (docs/development.md#requirements has the `LIBRARY_PATH` workaround).
 - Cargo writes to `~/.cargo`, which the Claude sandbox mounts read-only; cargo commands must run outside the sandbox.
 

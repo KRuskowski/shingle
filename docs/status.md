@@ -46,7 +46,7 @@ Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are pla
 - Wayfire INI and i3-style imports cover many options and key bindings, but not all of them.
 - Physical-key and case-sensitive `xkb:` bindings are supported.
 - Comma-separated XKB layouts and per-layout variants become distinct XKB groups.
-- WCM, built on the vendored Gloomy UI, edits, validates and converts configuration.
+- WCM, built on the Gloomy UI library, edits, validates and converts configuration.
 - Live IPC configuration updates are not written back to YAML.
 
 ### Wayfire IPC
@@ -59,7 +59,7 @@ Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are pla
 
 `cargo test --workspace` runs 60 unit tests (2026-11-25). Coverage is uneven: `shingle-core`, which holds the tiling tree and session model, has **no** unit tests.
 
-`cargo clippy --workspace --all-targets -- -D warnings` currently **fails**. The unfinished input-device slice (see [roadmap.md](roadmap.md)) leaves three dead-code warnings in `crates/shingle/src/input.rs`, and the vendored Gloomy crates emit their own warnings. Do not report the tree as Clippy-clean until both are resolved.
+`cargo clippy --workspace --all-targets -- -D warnings` currently **fails** on three dead-code warnings in `crates/shingle/src/input.rs`, left by the unfinished input-device slice (see [roadmap.md](roadmap.md)). Do not report the tree as Clippy-clean until it is finished.
 
 ### With real clients
 

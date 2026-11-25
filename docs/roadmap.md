@@ -21,11 +21,11 @@ Remaining:
 4. Gate keyboard, modifiers, scroll, touch, gestures and nested host input. Decide how disabling a device mid-hold releases pressed keys, buttons and touches so clients are not left with stuck input.
 5. Test with real IPC calls: list three devices; disable the pointer and check STIPC cursor movement is suppressed; disable the keyboard and check a registered binding does not fire; re-enable both; send bad requests.
 
-The three current dead-code warnings come from this partial state. Finishing the work should remove them; do not silence them with `allow` attributes.
+The three current dead-code warnings come from this partial state and are the only thing keeping `cargo clippy --workspace --all-targets -- -D warnings` from passing. Finishing the work should remove them; do not silence them with `allow` attributes.
 
-## 2. Make Clippy pass
+## 2. Repair Gloomy's examples and designer
 
-Get `cargo clippy --workspace --all-targets -- -D warnings` green. The vendored Gloomy warnings should be fixed upstream in the Gloomy repository and re-vendored, not patched locally.
+In the Gloomy repository, `gloomy-designer` and the examples no longer compile against the current widget API. This was already the case upstream, where it went unnoticed because the missing `assets/` fonts stopped the build earlier. The libraries and their 184 unit tests pass. Shingle does not depend on the broken targets.
 
 ## 3. Repeat real-client verification after the rename
 
@@ -60,5 +60,4 @@ Add long-running nested and native soak tests. Measure CPU, RSS, frame latency a
 
 ## Open decisions
 
-- **Gloomy vendoring.** `third_party/gloomy` is a copy of the Gloomy repository. Decide whether to keep the copy or switch to a git submodule or git dependency, so upstream fixes do not have to be copied by hand.
 - **Removing Tilefire fallbacks.** The rename kept fallbacks for old config, session, PAM service and environment variable names. Decide when they can be dropped.

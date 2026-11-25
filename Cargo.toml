@@ -1,6 +1,5 @@
 [workspace]
 members = ["crates/*"]
-exclude = ["third_party/gloomy"]
 resolver = "3"
 
 [workspace.package]
@@ -13,6 +12,9 @@ license = "MIT"
 all = "warn"
 
 [workspace.dependencies]
+# Gloomy UI for shingle-wcm. Pinned to a commit; see docs/development.md.
+gloomy-app = { git = "https://github.com/KRuskowski/gloomy", rev = "42673c8" }
+gloomy-core = { git = "https://github.com/KRuskowski/gloomy", rev = "42673c8" }
 bytemuck = { version = "1.24", features = ["derive"] }
 calloop = { version = "0.14.5", features = ["signals"] }
 nonstick = "0.1.2"

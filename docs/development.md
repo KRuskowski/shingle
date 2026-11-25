@@ -26,21 +26,26 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Formatting
 
-`rustfmt.toml` sets 80 columns and 2-space indentation. Format Shingle's crates with:
+`rustfmt.toml` sets 80 columns and 2-space indentation:
 
 ```sh
-rustfmt --edition 2024 $(find crates -path '*/src/*' \( -name lib.rs -o -name main.rs \))
+cargo fmt --all
 ```
-
-Do **not** run `cargo fmt --all`: it follows the path dependency from `shingle-wcm` into `third_party/gloomy` and reformats the vendored sources.
 
 rustfmt leaves an entire expression untouched if it cannot fit one of its lines in 80 columns. After formatting, check `rg -n '.{81,}' crates --type rust`. Fix any hit by hand, with a `use` for long protocol paths, a helper for long `matches!` guards, or `concat!` for long strings, then format again.
 
 Comments go on their own line above the code and use `//` or `///`, never `/* */`.
 
-## Vendored Gloomy
+## Gloomy
 
-`third_party/gloomy` is a copy of the Gloomy UI library used by WCM. It is excluded from the workspace and keeps its own formatting and warnings. Make changes upstream and copy them in, and keep any such update in its own commit.
+WCM uses the Gloomy UI library from https://github.com/KRuskowski/gloomy, pinned to a commit in the root `Cargo.toml`. To change Gloomy, commit and push there, then bump the `rev` in its own Shingle commit.
+
+To work on both at once, point Cargo at a local checkout without editing `Cargo.toml`:
+
+```sh
+cargo build --config 'patch."https://github.com/KRuskowski/gloomy".gloomy-core.path="../gloomy/crates/gloomy-core"' \
+  --config 'patch."https://github.com/KRuskowski/gloomy".gloomy-app.path="../gloomy/crates/gloomy-app"'
+```
 
 ## Running nested
 

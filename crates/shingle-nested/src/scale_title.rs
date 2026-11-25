@@ -2,9 +2,8 @@ use std::sync::OnceLock;
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
 
-const FONT: &[u8] = include_bytes!(
-  "../../../third_party/gloomy/crates/gloomy-core/src/fonts/Inter-Regular.ttf"
-);
+// Inter Regular, the same font Gloomy embeds, for Scale title overlays.
+const FONT: &[u8] = include_bytes!("../fonts/Inter-Regular.ttf");
 const HORIZONTAL_PADDING: u32 = 8;
 const VERTICAL_PADDING: u32 = 4;
 

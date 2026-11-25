@@ -13,7 +13,7 @@
 | `shingle-idle` | Idle, DPMS, fullscreen suppression and lock coordination. |
 | `shingle-auth` | PAM authentication for the lock client. |
 | `shingle-lock` | `ext-session-lock-v1` client with swaylock-style options. |
-| `shingle-wcm` | Graphical configuration manager built on the vendored Gloomy UI. |
+| `shingle-wcm` | Graphical configuration manager built on [Gloomy](https://github.com/KRuskowski/gloomy). |
 
 ## Where things live
 
