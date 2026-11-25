@@ -43,8 +43,6 @@ Complete output lifecycle, focus, workspaces, sessions and rendering across outp
 
 Continue the missing plugins and configuration options, using Wayfire's source as the behavioural reference.
 
-- `stipc/feed_key` fires only bindings registered over IPC. Wayfire feeds STIPC keys through a headless keyboard into the normal input path (`plugins/ipc/stipc.cpp`), so configured key bindings fire too.
-
 ## 8. Soak tests and measurements
 
 Add long-running nested and native soak tests. Measure CPU, RSS, frame latency and GPU behaviour before making any resource or stability claims.

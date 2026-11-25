@@ -61,7 +61,8 @@ The socket path is exported as `WAYFIRE_SOCKET` to every spawned process, so exi
 
 ## Runtime bindings
 
-- `command/register-binding` supports normal, repeat and release modes, dispatched through nested keyboard and pointer input. STIPC `feed_key` also fires matching runtime bindings, as keys from Wayfire's STIPC keyboard do; a matched key is not passed to clients. STIPC modifiers are the keyboard's depressed modifiers plus modifier keys held through `feed_key`. Configured (YAML) bindings and compositor actions still respond only to host keyboard input.
+- `command/register-binding` supports normal, repeat and release modes, dispatched through nested keyboard and pointer input.
+- STIPC `feed_key` keys take the path of a real key, as keys from Wayfire's headless STIPC keyboard do (`plugins/ipc/stipc.cpp`): in nested they go through the seat keyboard STIPC uses into the frontend's xkb state, so configured (YAML) key bindings, `xkb:` command bindings, runtime bindings, the overviews and the switchers all see them, modifiers come from the keys held, a matched key is not passed to clients and a held key repeats like a host key. The key is handled in the same turn as the request, just after the reply is sent. Without a frontend (the headless `shingle` binary) `feed_key` matches runtime bindings only, with the keyboard's depressed modifiers plus modifier keys held through `feed_key`.
 - A binding with a command runs it through the isolated launcher. Without one, the owning client receives a targeted `command-binding` event.
 - `call-method` and `call-data` invoke an IPC method directly when the binding triggers, so a binding can perform compositor actions without launching a process.
 - Notification bindings are removed when their client disconnects.
