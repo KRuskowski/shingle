@@ -97,6 +97,9 @@ pub struct ShingleConfig {
   /// Config reload, dialog, decoration and buffer-size behaviour, mostly from
   /// Wayfire's `[workarounds]`.
   pub behavior: BehaviorConfig,
+  /// Whether and when Shingle runs Xwayland for X11 clients, from
+  /// Wayfire's `[core] xwayland` options.
+  pub xwayland: XwaylandConfig,
   /// Protocols withheld from sandboxed clients (`[security-context-v1]`).
   pub security_context: SecurityContextConfig,
   /// Modifier-and-scroll output magnification (`[zoom]`).
@@ -170,6 +173,7 @@ impl Default for ShingleConfig {
       output: OutputConfig::default(),
       background_color: [0.1, 0.1, 0.1, 1.0],
       behavior: BehaviorConfig::default(),
+      xwayland: XwaylandConfig::default(),
       security_context: SecurityContextConfig::default(),
       zoom: ZoomConfig::default(),
       alpha: AlphaConfig::default(),
@@ -963,6 +967,106 @@ impl Default for BehaviorConfig {
       disable_primary_selection: false,
     }
   }
+}
+
+/// When Shingle starts its Xwayland server, Wayfire's `[core] xwayland`.
+///
+/// In YAML it is written as Wayfire's values: `true`, `false` or `lazy`.
+/// The mode is read once at startup; a reloaded config with another mode
+/// takes effect only after a restart, as in Wayfire.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum XwaylandMode {
+  /// `true`: start Xwayland with the compositor, before any client, and
+  /// again whenever it exits after running for more than 5 seconds.
+  Eager,
+  /// `lazy`: bind the display at startup and start Xwayland on the first
+  /// X11 connection. Shingle's default, so that sessions without X11
+  /// clients run no X server. Wayfire's default is `true`, which the
+  /// Wayfire importer keeps.
+  #[default]
+  Lazy,
+  /// `false`: no X display, and `DISPLAY` is removed from every client's
+  /// environment.
+  Disabled,
+}
+
+impl XwaylandMode {
+  /// The mode's Wayfire name: `true`, `lazy` or `false`.
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Eager => "true",
+      Self::Lazy => "lazy",
+      Self::Disabled => "false",
+    }
+  }
+}
+
+impl std::fmt::Display for XwaylandMode {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+impl std::str::FromStr for XwaylandMode {
+  type Err = ConfigError;
+
+  /// Parses `true`, `lazy` or `false`, ignoring case and surrounding
+  /// space.
+  fn from_str(text: &str) -> Result<Self, Self::Err> {
+    match text.trim().to_lowercase().as_str() {
+      "true" => Ok(Self::Eager),
+      "lazy" => Ok(Self::Lazy),
+      "false" => Ok(Self::Disabled),
+      _ => Err(ConfigError::Invalid(format!(
+        "xwayland.mode must be true, false or lazy, not {text:?}"
+      ))),
+    }
+  }
+}
+
+impl serde::Serialize for XwaylandMode {
+  fn serialize<S: serde::Serializer>(
+    &self,
+    serializer: S,
+  ) -> Result<S::Ok, S::Error> {
+    match self {
+      Self::Eager => serializer.serialize_bool(true),
+      Self::Disabled => serializer.serialize_bool(false),
+      Self::Lazy => serializer.serialize_str("lazy"),
+    }
+  }
+}
+
+impl<'de> Deserialize<'de> for XwaylandMode {
+  fn deserialize<D: serde::Deserializer<'de>>(
+    deserializer: D,
+  ) -> Result<Self, D::Error> {
+    /// A YAML boolean or string.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+      Bool(bool),
+      Text(String),
+    }
+    match Raw::deserialize(deserializer)? {
+      Raw::Bool(true) => Ok(Self::Eager),
+      Raw::Bool(false) => Ok(Self::Disabled),
+      Raw::Text(text) => text.parse().map_err(serde::de::Error::custom),
+    }
+  }
+}
+
+/// XWayland options, from Wayfire's `[core]`.
+#[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct XwaylandConfig {
+  /// When Xwayland starts. `[core] xwayland`; default `lazy` (Wayfire's is
+  /// `true`, and a Wayfire import without the option gets `true`).
+  pub mode: XwaylandMode,
+  /// A shell command run in the client environment each time Xwayland
+  /// becomes ready, for example `xrdb -merge ~/.Xresources`. Empty runs
+  /// nothing. `[core] xwayland_startup_script`; default empty.
+  pub startup_script: String,
 }
 
 /// Controls protocol visibility for clients created by a sandbox engine.
@@ -2736,6 +2840,99 @@ mod tests {
         ConfigFormat::Yaml,
       )
       .is_err()
+    );
+  }
+
+  #[test]
+  fn xwayland_defaults_to_lazy_without_a_startup_script() {
+    let config = ShingleConfig::default();
+    assert_eq!(config.xwayland.mode, XwaylandMode::Lazy);
+    assert_eq!(config.xwayland.startup_script, "");
+    let yaml =
+      ShingleConfig::parse("output:\n  width: 800\n", ConfigFormat::Yaml)
+        .unwrap();
+    assert_eq!(yaml.xwayland.mode, XwaylandMode::Lazy);
+  }
+
+  #[test]
+  fn xwayland_mode_takes_wayfire_values_in_yaml() {
+    let parse = |text: &str| {
+      ShingleConfig::parse(text, ConfigFormat::Yaml).map(|c| c.xwayland)
+    };
+    assert_eq!(
+      parse("xwayland:\n  mode: true\n").unwrap().mode,
+      XwaylandMode::Eager
+    );
+    assert_eq!(
+      parse("xwayland:\n  mode: false\n").unwrap().mode,
+      XwaylandMode::Disabled
+    );
+    assert_eq!(
+      parse("xwayland:\n  mode: lazy\n").unwrap().mode,
+      XwaylandMode::Lazy
+    );
+    assert_eq!(
+      parse("xwayland:\n  mode: \"true\"\n").unwrap().mode,
+      XwaylandMode::Eager
+    );
+    let script = parse("xwayland:\n  startup_script: xrdb -merge x\n").unwrap();
+    assert_eq!(script.startup_script, "xrdb -merge x");
+    assert!(parse("xwayland:\n  mode: sometimes\n").is_err());
+    assert!(parse("xwayland:\n  mode: 1\n").is_err());
+    assert!(parse("xwayland:\n  modes: lazy\n").is_err());
+  }
+
+  #[test]
+  fn xwayland_mode_round_trips_through_yaml() {
+    for mode in [
+      XwaylandMode::Eager,
+      XwaylandMode::Lazy,
+      XwaylandMode::Disabled,
+    ] {
+      let mut config = ShingleConfig::default();
+      config.xwayland.mode = mode;
+      config.xwayland.startup_script = "echo ready".into();
+      let text = serde_yaml::to_string(&config).unwrap();
+      let parsed = ShingleConfig::parse(&text, ConfigFormat::Yaml).unwrap();
+      assert_eq!(parsed.xwayland.mode, mode);
+      assert_eq!(parsed.xwayland.startup_script, "echo ready");
+      assert_eq!(mode.to_string().parse::<XwaylandMode>().unwrap(), mode);
+    }
+    assert_eq!(
+      " LAZY ".parse::<XwaylandMode>().unwrap(),
+      XwaylandMode::Lazy
+    );
+  }
+
+  #[test]
+  fn wayfire_import_keeps_wayfire_xwayland_default_and_values() {
+    let import = |text: &str| {
+      ShingleConfig::parse(text, ConfigFormat::Wayfire).map(|c| c.xwayland)
+    };
+    let default = import("[core]\nvwidth = 2\n").unwrap();
+    assert_eq!(default.mode, XwaylandMode::Eager);
+    assert_eq!(default.startup_script, "");
+    let lazy = import(concat!(
+      "[core]\n",
+      "xwayland = lazy\n",
+      "xwayland_startup_script = xrdb -merge ~/.Xresources\n",
+    ))
+    .unwrap();
+    assert_eq!(lazy.mode, XwaylandMode::Lazy);
+    assert_eq!(lazy.startup_script, "xrdb -merge ~/.Xresources");
+    assert_eq!(
+      import("[core]\nxwayland = false\n").unwrap().mode,
+      XwaylandMode::Disabled
+    );
+    assert_eq!(
+      import("[core]\nxwayland = TRUE\n").unwrap().mode,
+      XwaylandMode::Eager
+    );
+    assert!(import("[core]\nxwayland = maybe\n").is_err());
+    // Other sections' options of the same name are not XWayland's.
+    assert_eq!(
+      import("[other]\nxwayland = false\n").unwrap().mode,
+      XwaylandMode::Eager
     );
   }
 

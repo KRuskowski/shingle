@@ -239,6 +239,16 @@ pub fn build(model: &UiModel<'_>) -> Widget {
         config.behavior.disable_primary_selection,
       ),
       text_row(
+        "XWayland (true, lazy or false; requires restart)",
+        "xwayland_mode",
+        config.xwayland.mode.to_string(),
+      ),
+      text_row(
+        "XWayland startup script",
+        "xwayland_startup_script",
+        config.xwayland.startup_script.clone(),
+      ),
+      text_row(
         "Privileged protocols for sandbox filtering",
         "security_privileged_protocols",
         config.security_context.privileged_protocols.clone(),
@@ -1347,5 +1357,42 @@ impl WidgetExt for Widget {
       col_span: 1,
       row_span: 1,
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use gloomy_core::ui::find_widget_mut;
+
+  use super::*;
+
+  /// The value of the text input `id` on `page` for `config`.
+  fn text_value(config: &ShingleConfig, page: Page, id: &str) -> String {
+    let mut ui = build(&UiModel {
+      config,
+      source: Path::new("in.yaml"),
+      destination: Path::new("out.yaml"),
+      page,
+      capture_action: None,
+      status: "",
+      dirty: false,
+    });
+    match find_widget_mut(&mut ui, id) {
+      Some(Widget::TextInput { value, .. }) => value.clone(),
+      _ => panic!("no text input {id}"),
+    }
+  }
+
+  #[test]
+  fn general_page_shows_the_xwayland_options() {
+    let mut config = ShingleConfig::default();
+    assert_eq!(text_value(&config, Page::General, "xwayland_mode"), "lazy");
+    config.xwayland.mode = shingle_config::XwaylandMode::Disabled;
+    config.xwayland.startup_script = "xrdb -merge x".into();
+    assert_eq!(text_value(&config, Page::General, "xwayland_mode"), "false");
+    assert_eq!(
+      text_value(&config, Page::General, "xwayland_startup_script"),
+      "xrdb -merge x"
+    );
   }
 }

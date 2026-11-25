@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 
-use crate::{Binding, ConfigError, Modifier, ShingleConfig};
+use crate::{Binding, ConfigError, Modifier, ShingleConfig, XwaylandMode};
 
 pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
   let mut config = ShingleConfig::default();
+  // Wayfire starts Xwayland eagerly unless told otherwise
+  // (metadata/core.xml), unlike Shingle's own default.
+  config.xwayland.mode = XwaylandMode::Eager;
   let mut command_bindings = BTreeMap::new();
   let mut command_options = BTreeMap::new();
   let mut commands = BTreeMap::new();
@@ -467,6 +470,17 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
       }
       ("core", "preferred_decoration_mode") => {
         config.behavior.preferred_decoration_mode = value.to_lowercase()
+      }
+      ("core", "xwayland") => {
+        config.xwayland.mode = value.parse().map_err(|_| {
+          ConfigError::Invalid(format!(
+            "line {line_number}: [core] xwayland must be true, false or \
+             lazy, not {value:?}"
+          ))
+        })?;
+      }
+      ("core", "xwayland_startup_script") => {
+        config.xwayland.startup_script = value.to_owned()
       }
       ("workarounds", "auto_reload_config") => {
         config.behavior.auto_reload = boolean(value, line_number)?;

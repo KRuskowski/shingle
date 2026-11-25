@@ -20,6 +20,10 @@ behavior:
   focus_main_surface_instead_of_popup: false
   disable_primary_selection: false
 
+xwayland:
+  mode: lazy
+  startup_script: ""
+
 security_context:
   privileged_protocols: >-
     zwlr_foreign_toplevel_manager_v1,zwlr_screencopy_manager_v1,

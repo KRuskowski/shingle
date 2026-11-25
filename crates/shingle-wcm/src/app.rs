@@ -434,6 +434,12 @@ impl Editor {
           self.checkbox("focus_main_surface_instead_of_popup")?;
         self.config.behavior.disable_primary_selection =
           self.checkbox("disable_primary_selection")?;
+        self.config.xwayland.mode = self
+          .text("xwayland_mode")?
+          .parse()
+          .map_err(|error: shingle_config::ConfigError| error.to_string())?;
+        self.config.xwayland.startup_script =
+          self.text("xwayland_startup_script")?;
         self.config.security_context.privileged_protocols =
           self.text("security_privileged_protocols")?;
         self.config.placement.mode = self.text("placement_mode")?;
