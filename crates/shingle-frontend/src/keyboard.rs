@@ -9,6 +9,7 @@
 //! keyboard layout.
 
 mod names;
+mod repeat;
 
 use std::{collections::BTreeSet, fmt};
 
@@ -17,6 +18,7 @@ use shingle_config::Modifiers as ConfigModifiers;
 use xkbcommon::xkb;
 
 pub use names::key_name;
+pub use repeat::KeyRepeat;
 
 /// Offset between evdev key codes and XKB keycodes.
 const EVDEV_OFFSET: u32 = 8;
@@ -207,6 +209,12 @@ impl Keyboard {
   /// Returns whether key `code` is down.
   pub fn is_held(&self, code: u32) -> bool {
     self.held.contains(&code)
+  }
+
+  /// Returns whether key `code` repeats in the keymap. Modifiers usually
+  /// do not.
+  pub fn key_repeats(&self, code: u32) -> bool {
+    self.keymap.key_repeats(xkb_keycode(code))
   }
 }
 
@@ -470,5 +478,14 @@ mod tests {
     let mut keyboard = keyboard("us", "", "");
     assert!(keyboard.set_keymap("nonsense").is_err());
     assert_eq!(tap(&mut keyboard, KEY_A).symbol.as_deref(), Some("a"));
+  }
+
+  #[test]
+  fn letters_repeat_and_modifiers_do_not() {
+    let keyboard = keyboard("us", "", "");
+    assert!(keyboard.key_repeats(KEY_A));
+    assert!(keyboard.key_repeats(KEY_ENTER));
+    assert!(!keyboard.key_repeats(KEY_LEFTSHIFT));
+    assert!(!keyboard.key_repeats(KEY_LEFTMETA));
   }
 }

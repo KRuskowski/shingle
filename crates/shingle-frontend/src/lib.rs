@@ -11,6 +11,7 @@
 pub mod bindings;
 pub mod expo;
 pub mod extra_gestures;
+pub mod host;
 pub mod icon_theme;
 pub mod keyboard;
 pub mod scale;
