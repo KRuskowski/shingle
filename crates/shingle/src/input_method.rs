@@ -100,7 +100,7 @@ pub(crate) fn hardware_key(
   if state.input_methods.forwarding || state.input_methods.grabs.is_empty() {
     return false;
   }
-  let time = event_time.unwrap_or_else(|| state.now().as_millis() as u32);
+  let time = event_time.unwrap_or_else(|| crate::input::timestamp(state));
   let serial = state.serial();
   let state_value = if pressed {
     wl_keyboard::KeyState::Pressed
@@ -518,7 +518,7 @@ pub(crate) fn release_context(state: &mut CompositorState, context: &ObjectId) {
   let Some(grab) = state.input_methods.grabs.remove(context) else {
     return;
   };
-  let time = state.now().as_millis() as u32;
+  let time = crate::input::timestamp(state);
   for key in grab.forwarded_pressed {
     forward_key(state, context, key, false, time);
   }

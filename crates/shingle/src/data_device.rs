@@ -317,7 +317,7 @@ pub(crate) fn sync_drag(state: &mut CompositorState, handle: &DisplayHandle) {
     };
     let geometry =
       crate::shell::surface_geometry(state, &target).unwrap_or_default();
-    let time = state.now().as_millis() as u32;
+    let time = crate::input::timestamp(state);
     for device in state.data_devices.devices.values() {
       if device.client.id() == surface.client {
         device.resource.motion(

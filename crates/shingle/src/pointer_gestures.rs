@@ -369,5 +369,5 @@ fn holds(state: &CompositorState) -> Vec<(ZwpPointerGestureHoldV1, WlSurface)> {
 }
 
 fn timestamp(state: &CompositorState) -> u32 {
-  state.now().as_millis() as u32
+  crate::input::timestamp(state)
 }

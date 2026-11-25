@@ -1,6 +1,7 @@
 mod activation;
 mod alpha_modifier;
 mod buffer;
+mod clock;
 mod commit_timing;
 mod cursor_shape;
 mod data_control;
@@ -958,6 +959,20 @@ impl Compositor {
 
   pub fn keyboard_modifiers(&mut self, modifiers: Modifiers) {
     input_device::keyboard_modifiers(&mut self.state, modifiers);
+  }
+
+  /// Sets when the seat input passed in next happened, as a
+  /// `CLOCK_MONOTONIC` time such as libinput's `time_usec`.
+  ///
+  /// Until it is changed or cleared with `None`, the keyboard, pointer,
+  /// gesture and touch entry points send this time to clients, in
+  /// milliseconds for `wl_keyboard`, `wl_pointer`, `wl_touch` and pointer
+  /// gestures and in microseconds for relative pointer motion. A backend
+  /// sets it before feeding one device event and clears it afterwards.
+  /// Without it, events carry the `CLOCK_MONOTONIC` time at which the entry
+  /// point was called.
+  pub fn set_input_time(&mut self, time: Option<Duration>) {
+    input::set_event_time(&mut self.state, time);
   }
 
   pub fn locked_modifiers(&self) -> u32 {
@@ -1977,6 +1992,16 @@ pub(crate) mod tests {
     // Dispatching consumes the expiration, so the descriptor does not stay
     // readable and spin a backend's loop.
     assert!(!readable(compositor.as_fd(), Duration::ZERO));
+  }
+
+  #[test]
+  fn set_input_time_stamps_the_following_input() {
+    let (mut compositor, _) = test_compositor();
+    compositor.set_input_time(Some(Duration::from_micros(7_000_123)));
+    assert_eq!(input::timestamp(&compositor.state), 7_000);
+    assert_eq!(input::timestamp_usec(&compositor.state), 7_000_123);
+    compositor.set_input_time(None);
+    assert_ne!(input::timestamp_usec(&compositor.state), 7_000_123);
   }
 
   #[test]

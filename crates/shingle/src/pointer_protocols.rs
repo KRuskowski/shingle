@@ -84,7 +84,7 @@ pub(crate) fn relative_motion(
   else {
     return;
   };
-  let micros = state.now().as_micros() as u64;
+  let micros = crate::input::timestamp_usec(state);
   for pointer in state
     .input
     .pointers

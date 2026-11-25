@@ -1,6 +1,7 @@
 use std::{
   collections::{BTreeSet, HashMap},
   os::fd::{AsFd, OwnedFd},
+  time::Duration,
 };
 
 use rustix::fs::{MemfdFlags, memfd_create};
@@ -61,6 +62,7 @@ pub(crate) struct InputState {
   pointer_batch_depth: usize,
   pointer_event_time: Option<u32>,
   keyboard_event_time: Option<u32>,
+  event_time: Option<Duration>,
   pub(crate) pressed_keys: BTreeSet<u32>,
   pub(crate) modifiers: Modifiers,
   keymap: OwnedFd,
@@ -93,6 +95,7 @@ impl InputState {
       pointer_batch_depth: 0,
       pointer_event_time: None,
       keyboard_event_time: None,
+      event_time: None,
       pressed_keys: BTreeSet::new(),
       modifiers: Modifiers {
         locked: locked_modifiers,
@@ -1553,14 +1556,80 @@ fn pointer_frame(state: &CompositorState, pointer: &WlPointer) {
   }
 }
 
-fn timestamp(state: &CompositorState) -> u32 {
+/// Sets the backend's time for the seat input that follows, or clears it.
+pub(crate) fn set_event_time(
+  state: &mut CompositorState,
+  time: Option<Duration>,
+) {
+  state.input.event_time = time;
+}
+
+/// Returns the `CLOCK_MONOTONIC` time of the input being handled: the
+/// backend's event time if one is set, otherwise now.
+fn event_time(state: &CompositorState) -> Duration {
+  state
+    .input
+    .event_time
+    .unwrap_or_else(crate::clock::monotonic_now)
+}
+
+/// Returns the millisecond timestamp for an input event. A virtual
+/// pointer's own request time wins over the seat's event time.
+pub(crate) fn timestamp(state: &CompositorState) -> u32 {
   state
     .input
     .pointer_event_time
-    .unwrap_or_else(|| state.now().as_millis() as u32)
+    .unwrap_or_else(|| crate::clock::millis(event_time(state)))
+}
+
+/// Returns the microsecond timestamp for relative pointer motion.
+pub(crate) fn timestamp_usec(state: &CompositorState) -> u64 {
+  match state.input.pointer_event_time {
+    Some(millis) => u64::from(millis) * 1000,
+    None => event_time(state).as_micros() as u64,
+  }
 }
 
 pub(crate) fn activity(state: &mut CompositorState) {
   let commands = state.idle.activity(state.now());
   state.process_idle_commands(commands);
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::input_device::tests::test_state;
+
+  #[test]
+  fn timestamps_default_to_the_monotonic_clock() {
+    let state = test_state();
+    let before = crate::clock::monotonic_now();
+    let usec = timestamp_usec(&state);
+    let after = crate::clock::monotonic_now();
+    assert!(before.as_micros() as u64 <= usec);
+    assert!(usec <= after.as_micros() as u64);
+    let millis = timestamp(&state);
+    assert!(millis >= crate::clock::millis(before));
+  }
+
+  #[test]
+  fn backend_event_time_is_used_until_cleared() {
+    let mut state = test_state();
+    set_event_time(&mut state, Some(Duration::from_micros(123_456_789)));
+    assert_eq!(timestamp(&state), 123_456);
+    assert_eq!(timestamp_usec(&state), 123_456_789);
+    set_event_time(&mut state, None);
+    assert_ne!(timestamp_usec(&state), 123_456_789);
+  }
+
+  #[test]
+  fn virtual_pointer_request_time_wins_over_backend_time() {
+    let mut state = test_state();
+    set_event_time(&mut state, Some(Duration::from_millis(5_000)));
+    pointer_event_time(&mut state, 42);
+    assert_eq!(timestamp(&state), 42);
+    assert_eq!(timestamp_usec(&state), 42_000);
+    end_pointer_batch(&mut state);
+    assert_eq!(timestamp(&state), 5_000);
+  }
 }

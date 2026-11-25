@@ -29,8 +29,7 @@ pub(crate) fn create_global(handle: &DisplayHandle) {
 }
 
 fn now() -> Duration {
-  let time = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
-  Duration::new(time.tv_sec.max(0) as u64, time.tv_nsec.max(0) as u32)
+  crate::clock::monotonic_now()
 }
 
 /// Defers a commit until its timestamp, preserving content order.
