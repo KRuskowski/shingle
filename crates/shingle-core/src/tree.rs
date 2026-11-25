@@ -96,6 +96,15 @@ pub struct LeafState {
   /// directly, and sessions keep it as set.
   #[serde(default = "default_tiled_edges")]
   pub tiled_edges: u32,
+  /// Whether the window's first map is held, as by a `view-pre-map`
+  /// subscriber. A held window keeps its leaf but, like a minimized one,
+  /// takes no space in the layout and cannot take focus. Wayfire's tile
+  /// plugin only attaches a view on `view-mapped`
+  /// (`plugins/tile/tile-plugin.cpp`, `on_view_mapped`), so a held window
+  /// must not shrink its neighbours. Runtime state only: sessions never
+  /// persist it.
+  #[serde(skip)]
+  pub held: bool,
 }
 
 const fn default_tiled_edges() -> u32 {
@@ -115,7 +124,15 @@ impl Default for LeafState {
       snapped: None,
       restore_geometry: None,
       tiled_edges: default_tiled_edges(),
+      held: false,
     }
+  }
+}
+
+impl LeafState {
+  /// Whether the window can take focus: it is neither minimized nor held.
+  pub fn focusable(&self) -> bool {
+    !self.minimized && !self.held
   }
 }
 
@@ -160,10 +177,10 @@ pub(crate) enum Node {
 ///
 /// The root is a split whose children are leaves or nested splits, each with a
 /// nonzero weight. A visible child's share of its split is its weight over the
-/// total weight of the visible children; floating and minimized windows are not
-/// visible. Nested splits always have at least two children: removing a window
-/// collapses a split left with one child into that child, and a root left with
-/// a single split child is replaced by it, which can change
+/// total weight of the visible children; floating, minimized and held windows
+/// are not visible. Nested splits always have at least two children: removing
+/// a window collapses a split left with one child into that child, and a root
+/// left with a single split child is replaced by it, which can change
 /// [`TileTree::direction`].
 ///
 /// The tree also holds the focused window, which operations keep unminimized,
@@ -264,9 +281,10 @@ impl TileTree {
   ///
   /// # Errors
   ///
-  /// [`ShingleError::WindowNotFound`] if the window is absent or minimized.
+  /// [`ShingleError::WindowNotFound`] if the window is absent, minimized or
+  /// held.
   pub fn set_focus(&mut self, window: WindowId) -> Result<()> {
-    if self.leaf_state(window)?.minimized {
+    if !self.leaf_state(window)?.focusable() {
       return Err(ShingleError::WindowNotFound(window.0));
     }
     self.focused = Some(window);
@@ -321,7 +339,7 @@ impl TileTree {
     if self.contains(window) {
       return Err(ShingleError::DuplicateWindow(window.0));
     }
-    let minimized = state.minimized;
+    let minimized = !state.focusable();
     let weight = added_child_weight(&self.root);
     self.root.children.push(Child {
       weight,
@@ -370,7 +388,7 @@ impl TileTree {
     if self.contains(window) {
       return Err(ShingleError::DuplicateWindow(window.0));
     }
-    let minimized = state.minimized;
+    let minimized = !state.focusable();
     self.insert_leaf(target, window, state, position)?;
     if minimized {
       self.focus_fallback();
@@ -417,7 +435,7 @@ impl TileTree {
       return Err(ShingleError::WindowNotFound(target.0));
     }
     let state = self.take_leaf(source)?;
-    let minimized = state.minimized;
+    let minimized = !state.focusable();
     self.flatten();
     self.insert_leaf(target, source, state, position)?;
     if minimized {
@@ -564,6 +582,22 @@ impl TileTree {
       .ok_or(ShingleError::WindowNotFound(window.0))?;
     state.minimized = minimized;
     if minimized && self.focused == Some(window) {
+      self.focus_fallback();
+    }
+    Ok(())
+  }
+
+  /// Sets the held flag; see [`LeafState::held`]. Holding the focused window
+  /// moves focus as [`TileTree::detach`] does.
+  pub fn set_held(&mut self, window: WindowId, held: bool) -> Result<()> {
+    let state = find_leaf_mut(&mut self.root, window)
+      .and_then(|node| match node {
+        Node::Leaf(_, state) => Some(state),
+        Node::Split(_) => None,
+      })
+      .ok_or(ShingleError::WindowNotFound(window.0))?;
+    state.held = held;
+    if held && self.focused == Some(window) {
       self.focus_fallback();
     }
     Ok(())
@@ -727,9 +761,9 @@ impl TileTree {
       .ok_or(ShingleError::WindowNotFound(window.0))
   }
 
-  /// Computes the placement of every tiled window, in tree order. Floating and
-  /// minimized windows are left out, and their share goes to their visible
-  /// siblings.
+  /// Computes the placement of every tiled window, in tree order. Floating,
+  /// minimized and held windows are left out, and their share goes to their
+  /// visible siblings.
   pub fn layout(&self) -> Vec<WindowLayout> {
     let mut layouts = Vec::with_capacity(self.len());
     layout_children(
@@ -746,8 +780,8 @@ impl TileTree {
   ///
   /// # Errors
   ///
-  /// [`ShingleError::WindowNotFound`] if the window is absent, floating or
-  /// minimized.
+  /// [`ShingleError::WindowNotFound`] if the window is absent, floating,
+  /// minimized or held.
   pub fn window_layout(&self, window: WindowId) -> Result<WindowLayout> {
     self
       .layout()
@@ -894,11 +928,15 @@ impl TileTree {
       .rev()
       .copied()
       .find(|window| {
-        self.leaf_state(*window).is_ok_and(|state| !state.minimized)
+        self
+          .leaf_state(*window)
+          .is_ok_and(|state| state.focusable())
       })
       .or_else(|| {
         self.windows().into_iter().find(|window| {
-          self.leaf_state(*window).is_ok_and(|state| !state.minimized)
+          self
+            .leaf_state(*window)
+            .is_ok_and(|state| state.focusable())
         })
       });
   }
@@ -1126,7 +1164,9 @@ fn layout_children(
 
 fn child_visible(node: &Node) -> bool {
   match node {
-    Node::Leaf(_, state) => !state.minimized && state.floating.is_none(),
+    Node::Leaf(_, state) => {
+      !state.minimized && !state.held && state.floating.is_none()
+    }
     Node::Split(split) => split
       .children
       .iter()
@@ -1145,7 +1185,8 @@ fn layout_node(
     Node::Split(split) => {
       layout_children(split, rect, edges, workarea, layouts)
     }
-    Node::Leaf(_, state) if state.minimized || state.floating.is_some() => {}
+    Node::Leaf(_, state)
+      if state.minimized || state.held || state.floating.is_some() => {}
     Node::Leaf(window, state) => {
       let tiled_gaps = state.gaps.effective(edges);
       let gaps = if state.maximized {
@@ -1468,6 +1509,33 @@ mod tests {
       Err(ShingleError::WindowNotFound(9))
     ));
     assert_eq!(tree.windows(), vec![id(1)]);
+  }
+
+  #[test]
+  fn held_window_takes_no_space_or_focus() {
+    let mut tree = tree_with(2);
+    tree
+      .attach_with_state(
+        id(3),
+        LeafState {
+          held: true,
+          ..LeafState::default()
+        },
+      )
+      .unwrap();
+    assert_eq!(tree.focused(), Some(id(2)));
+    assert_eq!(widths(&tree), vec![600, 600]);
+    assert!(tree.window_layout(id(3)).is_err());
+    assert!(tree.set_focus(id(3)).is_err());
+
+    tree.set_held(id(3), false).unwrap();
+    assert_eq!(widths(&tree), vec![400, 400, 400]);
+    tree.set_focus(id(3)).unwrap();
+
+    tree.set_held(id(3), true).unwrap();
+    assert_eq!(tree.focused(), Some(id(2)));
+    assert_eq!(widths(&tree), vec![600, 600]);
+    assert!(tree.set_held(id(9), true).is_err());
   }
 
   #[test]

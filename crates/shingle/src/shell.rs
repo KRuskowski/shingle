@@ -394,6 +394,10 @@ fn finish_map(state: &mut CompositorState, window: WindowId) {
   {
     return;
   }
+  // A held view joins its tiling tree only now, as Wayfire's tile plugin
+  // attaches a view on view-mapped (plugins/tile/tile-plugin.cpp,
+  // on_view_mapped).
+  let _ = state.core.release_held(window);
   if state.core.mark_window_mapped(window).is_err() {
     return;
   }
@@ -416,26 +420,26 @@ fn finish_map(state: &mut CompositorState, window: WindowId) {
 }
 
 fn request_map(state: &mut CompositorState, object: &ObjectId) {
-  let Some((window, has_buffer, mapped)) =
-    state
-      .surfaces
-      .get(object)
-      .and_then(|surface| match &surface.role {
-        Role::Xdg {
-          kind: Some(XdgKind::Toplevel(toplevel)),
-          ..
-        } => toplevel.window().map(|window| {
-          (
-            window,
-            surface.buffer.is_some(),
-            state
-              .core
-              .window_info(window)
-              .is_ok_and(|info| info.presence == WindowPresence::Mapped),
-          )
-        }),
-        _ => None,
-      })
+  let Some((window, has_buffer, mapped, created)) = state
+    .surfaces
+    .get(object)
+    .and_then(|surface| match &surface.role {
+      Role::Xdg {
+        kind: Some(XdgKind::Toplevel(toplevel)),
+        ..
+      } => toplevel.window().map(|window| {
+        (
+          window,
+          surface.buffer.is_some(),
+          state
+            .core
+            .window_info(window)
+            .is_ok_and(|info| info.presence == WindowPresence::Mapped),
+          toplevel.created_rules_pending == Some(true),
+        )
+      }),
+      _ => None,
+    })
   else {
     return;
   };
@@ -444,6 +448,12 @@ fn request_map(state: &mut CompositorState, object: &ObjectId) {
   }
   if !state.delayed_maps.contains(&window) && !state.pre_map_clients.is_empty()
   {
+    // A new view gives up its tile until it is released; a claimed
+    // placeholder keeps the slot its session saved.
+    if created {
+      let _ = state.core.set_held(window, true);
+      reconfigure_all(state);
+    }
     state.delayed_maps.insert(window);
     state.pending_maps.insert(
       window,
@@ -962,6 +972,9 @@ pub(crate) fn materialize_toplevel(
             snapped: None,
             restore_geometry: None,
             tiled_edges: 15,
+            // A view that a view-pre-map subscriber will block takes no
+            // tile before its first map; see request_map.
+            held: !state.pre_map_clients.is_empty(),
           },
           parent,
         )
@@ -1494,12 +1507,19 @@ pub(crate) fn toggle_tiling(
   };
   let geometry = if tiled {
     let info = state.core.window_info(window)?;
-    Some(
-      info
-        .state
-        .restore_geometry
-        .unwrap_or(state.core.window_layout(window)?.geometry),
-    )
+    // A held view has no tile yet, so it floats at its configured size.
+    let tile = state
+      .core
+      .window_layout(window)
+      .map(|layout| layout.geometry)
+      .or_else(|error| {
+        if info.state.held {
+          Ok(configured_geometry(state, &object))
+        } else {
+          Err(error)
+        }
+      });
+    Some(info.state.restore_geometry.map_or(tile, Ok)?)
   } else {
     None
   };
@@ -1526,6 +1546,15 @@ pub(crate) fn toggle_tiling(
   reconfigure_all(state);
   crate::input::focus_window(state, window);
   Ok(!tiled)
+}
+
+fn configured_geometry(state: &CompositorState, object: &ObjectId) -> Rect {
+  state
+    .surfaces
+    .get(object)
+    .and_then(|surface| surface.role.toplevel())
+    .and_then(|toplevel| toplevel.configured_geometry)
+    .unwrap_or(state.output)
 }
 
 pub(crate) fn assign_pending_popup(
@@ -2416,10 +2445,14 @@ mod tests {
     sync::{Arc, Mutex},
   };
 
-  use shingle_core::LaunchIdentity;
+  use shingle_core::{LaunchIdentity, WindowId, WindowPresence};
   use wayland_server::Display;
 
-  use crate::state::{ClientDataImpl, CompositorState};
+  use super::unblock_map;
+  use crate::{
+    state::{ClientDataImpl, CompositorState},
+    test_client::TestClient,
+  };
 
   /// Minimal wire-protocol client on one end of a socket pair.
   struct WireClient {
@@ -2489,6 +2522,234 @@ mod tests {
   ) {
     display.dispatch_clients(state).unwrap();
     display.flush_clients().unwrap();
+  }
+
+  /// The IPC client id the map-blocking tests subscribe as.
+  const SUBSCRIBER: u64 = 7;
+
+  /// Lists the tiles `simple-tile/get-layout` reports for the first
+  /// workspace, as `(view-id, width)` in layout order.
+  fn layout_tiles(state: &mut CompositorState) -> Vec<(u64, u64)> {
+    fn collect(node: &serde_json::Value, tiles: &mut Vec<(u64, u64)>) {
+      if let Some(id) = node.get("view-id").and_then(|id| id.as_u64()) {
+        let width = node["geometry"]["width"].as_u64().unwrap();
+        tiles.push((id, width));
+      }
+      for key in ["vertical-split", "horizontal-split"] {
+        for child in node.get(key).and_then(|v| v.as_array()).into_iter() {
+          for child in child {
+            collect(child, tiles);
+          }
+        }
+      }
+    }
+    let reply = crate::ipc::respond(
+      state,
+      &serde_json::json!({
+        "method": "simple-tile/get-layout",
+        "data": {"wset-index": 1, "workspace": {"x": 0, "y": 0}},
+      }),
+    );
+    assert_eq!(reply["result"], "ok", "{reply}");
+    let mut tiles = Vec::new();
+    collect(&reply["layout"], &mut tiles);
+    tiles
+  }
+
+  /// Returns the windows whose identity has `app_id`, in id order.
+  fn windows_with(state: &CompositorState, app_id: &str) -> Vec<WindowId> {
+    state
+      .core
+      .window_ids()
+      .filter(|window| {
+        state
+          .core
+          .window_info(*window)
+          .is_ok_and(|info| info.identity.app_id == app_id)
+      })
+      .collect()
+  }
+
+  fn presence(state: &CompositorState, window: WindowId) -> WindowPresence {
+    state.core.window_info(window).unwrap().presence
+  }
+
+  #[test]
+  fn blocked_new_view_joins_the_layout_when_released() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let width = u64::from(compositor.state.output.width);
+    let first = client.toplevel(&mut compositor, "first");
+    client.attach_buffer(&mut compositor, &first.surface, 64, 64);
+    let first_id = windows_with(&compositor.state, "first")[0];
+    assert_eq!(
+      layout_tiles(&mut compositor.state),
+      vec![(first_id.0, width)]
+    );
+
+    compositor.state.pre_map_clients.insert(SUBSCRIBER);
+    let second = client.toplevel(&mut compositor, "second");
+    let second_id = windows_with(&compositor.state, "second")[0];
+    // Wayfire's tile plugin attaches a view on view-mapped, so a view
+    // that will be held takes no tile before its first buffer either.
+    assert_eq!(
+      layout_tiles(&mut compositor.state),
+      vec![(first_id.0, width)]
+    );
+    client.attach_buffer(&mut compositor, &second.surface, 64, 64);
+    assert!(compositor.state.delayed_maps.contains(&second_id));
+    assert_eq!(
+      layout_tiles(&mut compositor.state),
+      vec![(first_id.0, width)]
+    );
+    assert_eq!(
+      client.events.last_configure(&first.toplevel),
+      Some((width as i32, compositor.state.output.height as i32)),
+      "the neighbour of a blocked view keeps its size"
+    );
+    // The blocked view still answers state queries.
+    let info = crate::ipc::respond(
+      &mut compositor.state,
+      &serde_json::json!({
+        "method": "window-rules/view-info",
+        "data": {"id": second_id.0},
+      }),
+    );
+    assert_eq!(info["info"]["app-id"], "second", "{info}");
+
+    // A second client with the same app ID gets its own window instead of
+    // claiming the blocked one.
+    let third = client.toplevel(&mut compositor, "second");
+    client.attach_buffer(&mut compositor, &third.surface, 64, 64);
+    assert_eq!(windows_with(&compositor.state, "second").len(), 2);
+    let third_id = windows_with(&compositor.state, "second")[1];
+    unblock_map(&mut compositor.state, third_id, SUBSCRIBER).unwrap();
+    assert_eq!(
+      layout_tiles(&mut compositor.state),
+      vec![(first_id.0, width / 2), (third_id.0, width / 2)]
+    );
+
+    unblock_map(&mut compositor.state, second_id, SUBSCRIBER).unwrap();
+    client.roundtrip(&mut compositor);
+    assert_eq!(
+      presence(&compositor.state, second_id),
+      WindowPresence::Mapped
+    );
+    // The released view joins the tree last, after the view that mapped
+    // while it was blocked.
+    let tiles = layout_tiles(&mut compositor.state);
+    assert_eq!(
+      tiles.iter().map(|tile| tile.0).collect::<Vec<_>>(),
+      vec![first_id.0, third_id.0, second_id.0]
+    );
+    assert_eq!(tiles.iter().map(|tile| tile.1).sum::<u64>(), width);
+    assert!(tiles.iter().all(|tile| tile.1.abs_diff(width / 3) <= 1));
+    assert_eq!(
+      client
+        .events
+        .last_configure(&second.toplevel)
+        .map(|size| size.0 as u64),
+      Some(tiles[2].1)
+    );
+  }
+
+  #[test]
+  fn view_blocked_after_creation_gives_its_tile_back() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let width = u64::from(compositor.state.output.width);
+    let first = client.toplevel(&mut compositor, "first");
+    client.attach_buffer(&mut compositor, &first.surface, 64, 64);
+    let first_id = windows_with(&compositor.state, "first")[0];
+
+    // Subscribing between the app ID and the first buffer still blocks.
+    let second = client.toplevel(&mut compositor, "second");
+    compositor.state.pre_map_clients.insert(SUBSCRIBER);
+    client.attach_buffer(&mut compositor, &second.surface, 64, 64);
+    let second_id = windows_with(&compositor.state, "second")[0];
+    assert!(compositor.state.delayed_maps.contains(&second_id));
+    assert_eq!(
+      layout_tiles(&mut compositor.state),
+      vec![(first_id.0, width)]
+    );
+
+    // The subscriber leaving releases the view, as unblock-map does.
+    compositor.state.pre_map_clients.remove(&SUBSCRIBER);
+    unblock_map(&mut compositor.state, second_id, SUBSCRIBER).unwrap();
+    assert_eq!(
+      layout_tiles(&mut compositor.state),
+      vec![(first_id.0, width / 2), (second_id.0, width / 2)]
+    );
+  }
+
+  #[test]
+  fn blocked_view_outside_tile_by_default_floats() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    compositor.state.tile_by_default =
+      shingle_config::ViewMatcher::try_from("none".to_owned()).unwrap();
+    compositor.state.pre_map_clients.insert(SUBSCRIBER);
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let view = client.toplevel(&mut compositor, "float");
+    client.attach_buffer(&mut compositor, &view.surface, 200, 100);
+    let window = windows_with(&compositor.state, "float")[0];
+    let floating = compositor.state.core.window_info(window).unwrap();
+    assert_eq!(
+      floating
+        .state
+        .floating
+        .map(|rect| (rect.width, rect.height)),
+      Some((200, 100))
+    );
+
+    unblock_map(&mut compositor.state, window, SUBSCRIBER).unwrap();
+    assert_eq!(presence(&compositor.state, window), WindowPresence::Mapped);
+    assert!(layout_tiles(&mut compositor.state).is_empty());
+    let info = compositor.state.core.window_info(window).unwrap();
+    assert_eq!(info.state.floating, floating.state.floating);
+  }
+
+  #[test]
+  fn blocked_restored_placeholder_keeps_its_slot() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let output = compositor.state.output_id.clone();
+    let width = u64::from(compositor.state.output.width);
+    let placeholder = compositor
+      .state
+      .core
+      .attach_window(&output, LaunchIdentity::new("restore.test"))
+      .unwrap();
+    compositor
+      .state
+      .core
+      .reconcile_unmapped(placeholder)
+      .unwrap();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let first = client.toplevel(&mut compositor, "first");
+    client.attach_buffer(&mut compositor, &first.surface, 64, 64);
+    let first_id = windows_with(&compositor.state, "first")[0];
+    let tiles = vec![(placeholder.0, width / 2), (first_id.0, width / 2)];
+    assert_eq!(layout_tiles(&mut compositor.state), tiles);
+
+    compositor.state.pre_map_clients.insert(SUBSCRIBER);
+    let restored = client.toplevel(&mut compositor, "restore.test");
+    client.attach_buffer(&mut compositor, &restored.surface, 64, 64);
+    assert_eq!(
+      windows_with(&compositor.state, "restore.test"),
+      [placeholder]
+    );
+    assert!(compositor.state.delayed_maps.contains(&placeholder));
+    assert_eq!(
+      presence(&compositor.state, placeholder),
+      WindowPresence::Placeholder
+    );
+    assert_eq!(layout_tiles(&mut compositor.state), tiles);
+
+    unblock_map(&mut compositor.state, placeholder, SUBSCRIBER).unwrap();
+    assert_eq!(
+      presence(&compositor.state, placeholder),
+      WindowPresence::Mapped
+    );
+    assert_eq!(layout_tiles(&mut compositor.state), tiles);
   }
 
   #[test]

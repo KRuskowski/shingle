@@ -978,7 +978,8 @@ fn layout_node(
       window,
       state: leaf,
     } => {
-      if leaf.floating.is_some() {
+      // A held view has no tile until its first map, as in Wayfire.
+      if leaf.floating.is_some() || leaf.held {
         return None;
       }
       Some(json!({
@@ -1267,7 +1268,9 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
       if touched.contains(&window) {
         return None;
       }
-      if target_workspace && leaf.floating.is_none() {
+      // A held view is not part of the layout yet and joins it when
+      // released, so it is left alone.
+      if target_workspace && leaf.floating.is_none() && !leaf.held {
         let geometry = state
           .core
           .window_layout(window)

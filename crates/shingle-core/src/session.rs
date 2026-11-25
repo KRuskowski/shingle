@@ -982,6 +982,22 @@ mod tests {
   }
 
   #[test]
+  fn held_flag_is_not_persisted() {
+    let mut shingle = Shingle::new();
+    shingle
+      .add_output(primary(), Rect::new(0, 0, 1000, 800))
+      .unwrap();
+    let held = shingle
+      .attach_window(&primary(), LaunchIdentity::new("a"))
+      .unwrap();
+    shingle.set_held(held, true).unwrap();
+    let json = shingle.to_json().unwrap();
+    assert!(!json.contains("held"), "{json}");
+    let restored = Shingle::from_json(&json).unwrap();
+    assert!(!restored.window_info(held).unwrap().state.held);
+  }
+
+  #[test]
   fn custom_tiled_edges_survive_round_trip() {
     let mut snapshot = simple_snapshot();
     leaf_state(&mut snapshot).tiled_edges = 6;

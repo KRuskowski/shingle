@@ -878,9 +878,40 @@ impl Shingle {
     Ok(())
   }
 
+  /// Holds or releases a window's first map; see [`LeafState::held`].
+  ///
+  /// [`LeafState::held`]: crate::LeafState::held
+  pub fn set_held(&mut self, window: WindowId, held: bool) -> Result<()> {
+    let location = self.location(window)?.clone();
+    self.tree_mut(&location)?.set_held(window, held)
+  }
+
+  /// Ends a hold and lets the window join its workspace's tiling tree, as
+  /// Wayfire's tile plugin attaches a view on `view-mapped`
+  /// (`plugins/tile/tile-plugin.cpp`, `on_view_mapped`, which appends it to
+  /// the workspace root in `tile_workspace_set_data_t::attach_view`).
+  ///
+  /// The window is moved to the end of the root split, after windows that
+  /// mapped while it was held, keeping its id, identity, presence and other
+  /// state. Returns whether the window was held; a window that was not is
+  /// left untouched.
+  pub fn release_held(&mut self, window: WindowId) -> Result<bool> {
+    let location = self.location(window)?.clone();
+    let tree = self.tree_mut(&location)?;
+    let mut state = tree.leaf_state(window)?;
+    if !state.held {
+      return Ok(false);
+    }
+    state.held = false;
+    tree.detach(window)?;
+    tree.attach_with_state(window, state)?;
+    Ok(true)
+  }
+
   /// Claims a placeholder for a newly mapped client and marks it mapped.
   ///
-  /// Only placeholders with the same app id are candidates. In id order, the
+  /// Held windows already belong to a client and are never claimed. Only
+  /// placeholders with the same app id are candidates. In id order, the
   /// first with an equal launch id wins; failing that, if the client has a
   /// launch id, the first placeholder without one; failing that, the lowest id.
   /// Returns `None` if no placeholder has the app id.
@@ -891,8 +922,13 @@ impl Shingle {
     let mut candidates: Vec<(WindowId, &WindowRecord)> = self
       .windows
       .iter()
-      .filter(|(_, record)| {
-        !record.mapped && record.identity.app_id == identity.app_id
+      .filter(|(id, record)| {
+        !record.mapped
+          && record.identity.app_id == identity.app_id
+          && !self
+            .tree(&record.location.output, record.location.workspace)
+            .and_then(|tree| tree.leaf_state(**id))
+            .is_ok_and(|state| state.held)
       })
       .map(|(id, record)| (*id, record))
       .collect();
@@ -1399,6 +1435,69 @@ mod tests {
     assert_eq!(identity.app_id, "b");
     assert_eq!(identity.title.as_deref(), Some("Title"));
     assert!(shingle.set_window_app_id(WindowId(9), "c".into()).is_err());
+  }
+
+  #[test]
+  fn released_window_joins_the_tree_after_windows_mapped_while_held() {
+    let mut shingle = shingle();
+    let first = attach(&mut shingle, "a");
+    let held = attach(&mut shingle, "b");
+    placeholder(&mut shingle, held);
+    shingle.set_held(held, true).unwrap();
+    let later = attach(&mut shingle, "c");
+    let tiled = |shingle: &Shingle| {
+      shingle
+        .tree(&output(), WorkspaceId::ORIGIN)
+        .unwrap()
+        .layout()
+        .into_iter()
+        .map(|layout| (layout.window, layout.node.width))
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(tiled(&shingle), vec![(first, 600), (later, 600)]);
+
+    assert!(shingle.release_held(held).unwrap());
+    assert_eq!(
+      order(&shingle, WorkspaceId::ORIGIN),
+      vec![first, later, held]
+    );
+    assert_eq!(
+      tiled(&shingle),
+      vec![(first, 400), (later, 400), (held, 400)]
+    );
+    let info = shingle.window_info(held).unwrap();
+    assert!(!info.state.held);
+    assert_eq!(info.presence, WindowPresence::Placeholder);
+    assert_eq!(info.identity.app_id, "b");
+
+    // Releasing a window that is not held changes nothing.
+    assert!(!shingle.release_held(first).unwrap());
+    assert_eq!(
+      order(&shingle, WorkspaceId::ORIGIN),
+      vec![first, later, held]
+    );
+    assert!(shingle.release_held(WindowId(9)).is_err());
+    assert!(shingle.set_held(WindowId(9), true).is_err());
+  }
+
+  #[test]
+  fn reconcile_mapped_never_claims_a_held_window() {
+    let mut shingle = shingle();
+    let held = attach(&mut shingle, "a");
+    placeholder(&mut shingle, held);
+    shingle.set_held(held, true).unwrap();
+    assert_eq!(shingle.reconcile_mapped(&LaunchIdentity::new("a")), None);
+
+    let restored = attach(&mut shingle, "a");
+    placeholder(&mut shingle, restored);
+    assert_eq!(
+      shingle.reconcile_mapped(&LaunchIdentity::new("a")),
+      Some(restored)
+    );
+    assert_eq!(
+      shingle.window_info(held).unwrap().presence,
+      WindowPresence::Placeholder
+    );
   }
 
   #[test]
