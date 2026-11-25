@@ -24,18 +24,29 @@ namespaces:
 
   tools/gpu_test/run.py [--modeset] [--keep] [--timeout SECONDS]
       -- COMMAND [ARGUMENT ...]
+  tools/gpu_test/run.py [--modeset] [--keep] [--binary target/debug/shingle]
+      [--wl-probe target/debug/examples/wl_probe] [--captures DIR]
+      --checks offscreen|nested|baseline ...
 
 For example, DB-1's import test:
 
   cargo test -p shingle-render --test dmabuf_import --no-run
   tools/gpu_test/run.py -- target/debug/deps/dmabuf_import-<hash>
 
-It exits with the command's status, or 1 when a check failed. The only
-signal it sends is SIGKILL to its own command on timeout, through
-`signal_checked`. The pure helpers are tested by `python3 -m unittest` in
-this directory (test_run.py). The work directory under `target/` is
-removed afterwards unless `--keep` is given. DB-2 builds the offscreen
-backend's checks on this namespace.
+and DB-2's real-client checks of `shingle --backend offscreen`
+(checks.py), after `cargo build -p shingle-bin` and
+`cargo build -p shingle --example wl_probe`:
+
+  tools/gpu_test/run.py --checks offscreen nested baseline
+
+It exits with the command's status, or 1 when a check failed. With
+`--checks` it prints one PASS or FAIL line per check and INFO lines for
+what is only recorded, and `--captures` saves the settled captures there
+as PPM files. Signals go only to processes inside the PID namespace,
+through `signal_checked`. The pure helpers are tested by
+`python3 -m unittest` in this directory (test_run.py, test_checks.py).
+The work directory under `target/` is removed afterwards unless `--keep`
+is given.
 """
 
 import argparse
@@ -57,6 +68,8 @@ STRIPPED_VARIABLES = ('WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'DISPLAY',
 # What the private /dev may also hold besides the bound nodes.
 PRIVATE_ENTRIES = ('pts', 'ptmx', 'shm', 'fd', 'stdin', 'stdout', 'stderr')
 SAMPLE_INTERVAL = 0.05
+# checks.GROUPS, kept here so that `--help` works without importing it.
+CHECK_GROUPS = ('offscreen', 'nested', 'baseline')
 
 def allowed_devices(modeset):
   """The device nodes, relative to /dev, that the namespace exposes."""
@@ -205,8 +218,22 @@ def build_dev(work, devices):
     os.symlink(f'/proc/self/fd/{number}', f'/dev/{name}')
   return bound
 
-def inner(work, command, modeset, timeout):
-  """Sets up the namespace and runs `command`; returns the exit status."""
+def run_command(command, environment, timeout):
+  """Runs `command` and returns its status; SIGKILL after `timeout`."""
+  process = subprocess.Popen(command, env=environment)
+  try:
+    return process.wait(timeout=timeout)
+  except subprocess.TimeoutExpired:
+    name = os.path.basename(command[0])
+    print(f'gpu_test: FAIL timed out after {timeout} s', flush=True)
+    signal_checked(process.pid, signal.SIGKILL, name)
+    process.wait()
+    return 1
+
+def inner(work, command, modeset, timeout, checks=None):
+  """Sets up the namespace and runs `command`, or the check groups of
+  `checks` ({'groups', 'binary', 'wl_probe', 'captures'}); returns the
+  exit status."""
   private_tmp = os.path.join(work, 'tmp')
   os.makedirs(private_tmp)
   mount('--bind', private_tmp, '/tmp')
@@ -236,15 +263,16 @@ def inner(work, command, modeset, timeout):
   environment = clean_environment(dict(os.environ), work, runtime)
   sampler = DeviceSampler()
   sampler.start()
-  process = subprocess.Popen(command, env=environment)
-  try:
-    status = process.wait(timeout=timeout)
-  except subprocess.TimeoutExpired:
-    name = os.path.basename(command[0])
-    print(f'gpu_test: FAIL timed out after {timeout} s', flush=True)
-    signal_checked(process.pid, signal.SIGKILL, name)
-    process.wait()
-    status = 1
+  if checks is None:
+    status = run_command(command, environment, timeout)
+  else:
+    # The checks start their processes from here, so they inherit it.
+    os.environ.clear()
+    os.environ.update(environment)
+    import checks as real_client_checks
+    status = real_client_checks.run_checks(
+        checks['groups'], checks['binary'], checks['wl_probe'],
+        checks['captures'])
   sampler.stop()
   bad = disallowed(sampler.opened, bound)
   seen = sorted({path for _, path in sampler.opened})
@@ -266,14 +294,32 @@ def main():
   parser.add_argument('--keep', action='store_true',
                       help='keep the work directory')
   parser.add_argument('--timeout', type=float, default=600.0)
+  parser.add_argument('--checks', nargs='+', metavar='GROUP',
+                      choices=CHECK_GROUPS,
+                      help='run these real-client check groups')
+  parser.add_argument('--binary', default='target/debug/shingle')
+  parser.add_argument('--wl-probe', default='target/debug/examples/wl_probe')
+  parser.add_argument('--captures', metavar='DIR',
+                      help='save settled captures here')
   parser.add_argument(INNER_FLAG, metavar='WORK')
-  parser.add_argument('command', nargs='+')
+  parser.add_argument('command', nargs='*')
   options = parser.parse_args()
+  if bool(options.checks) == bool(options.command):
+    parser.error('give either --checks or a command')
+  checks = None
+  if options.checks:
+    checks = {
+        'groups': options.checks,
+        'binary': os.path.abspath(options.binary),
+        'wl_probe': os.path.abspath(options.wl_probe),
+        'captures': (os.path.abspath(options.captures)
+                     if options.captures else None),
+    }
   if options.inner:
     return inner(options.inner, options.command, options.modeset,
-                 options.timeout)
+                 options.timeout, checks)
   command = list(options.command)
-  if os.path.sep in command[0]:
+  if command and os.path.sep in command[0]:
     command[0] = os.path.abspath(command[0])
   work = os.path.abspath(os.path.join('target', f'gpu_test-{os.getpid()}'))
   os.makedirs(work)
@@ -286,6 +332,11 @@ def main():
                  '--timeout', str(options.timeout), INNER_FLAG, work]
     if options.modeset:
       arguments.append('--modeset')
+    if checks:
+      arguments += ['--checks', *checks['groups'], '--binary',
+                    checks['binary'], '--wl-probe', checks['wl_probe']]
+      if checks['captures']:
+        arguments += ['--captures', checks['captures']]
     environment = dict(os.environ)
     environment['SHINGLE_GPU_TEST_UID'] = str(os.getuid())
     return subprocess.run(namespace + arguments + ['--'] + command,
