@@ -24,7 +24,8 @@
 | Session snapshot format | `crates/shingle-core/src/session.rs` |
 | Public compositor API and renderer events | `crates/shingle/src/lib.rs` |
 | Shared state and workspace transitions | `crates/shingle/src/state.rs` |
-| Keymap, focus, input routing, STIPC input | `crates/shingle/src/input.rs` |
+| Keymap, focus, input routing | `crates/shingle/src/input.rs` |
+| Seat devices, device gating, `input/*` IPC | `crates/shingle/src/input_device.rs` |
 | XDG roles, map lifecycle, geometry, window rules | `crates/shingle/src/shell.rs` |
 | IPC transport, dispatch, method list, events | `crates/shingle/src/ipc.rs` |
 | Host input, visual state, frontend dispatch | `crates/shingle-nested/src/main.rs` |

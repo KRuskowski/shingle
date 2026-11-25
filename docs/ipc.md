@@ -8,7 +8,7 @@ cargo run -p shingle-nested -- --ipc /tmp/shingle-ipc.socket
 
 The socket path is exported as `WAYFIRE_SOCKET` to every spawned process, so existing Wayfire scripts work unchanged. Library users can start the same server with `Compositor::enable_ipc(path)`.
 
-`list-methods` returns a sorted inventory of the 75 supported methods. Numeric vswitch activators such as `binding_4` are matched dynamically and are not part of that count. The method table lives in `SUPPORTED_METHODS` in `crates/shingle/src/ipc.rs`.
+`list-methods` returns a sorted inventory of the 77 supported methods. Numeric vswitch activators such as `binding_4` are matched dynamically and are not part of that count. The method table lives in `SUPPORTED_METHODS` in `crates/shingle/src/ipc.rs`.
 
 ## Methods
 
@@ -21,6 +21,7 @@ The socket path is exported as `WAYFIRE_SOCKET` to every spawned process, so exi
 | `wayfire` | `get-config-option`, `list-config-options`, `set-config-options`, `get-keyboard-state`, `set-keyboard-state` |
 | `wf/alpha` | `get-view-alpha`, `set-view-alpha` |
 | `command` | `register-binding`, `unregister-binding`, `clear-bindings` |
+| `input` | `list-devices`, `configure-device` |
 | `scale`, `expo`, `invert` | `scale/toggle`, `scale/toggle_all`, `expo/toggle`, `invert/toggle` |
 | `stipc` | `feed_key`, `feed_button`, `move_cursor`, `touch`, `touch_release`, `ping`, `run`, `get_display`, `layout_views` |
 | (none) | `list-methods` |
@@ -59,10 +60,28 @@ The socket path is exported as `WAYFIRE_SOCKET` to every spawned process, so exi
 
 ## Runtime bindings
 
-- `command/register-binding` supports normal, repeat and release modes, dispatched through nested keyboard and pointer input.
+- `command/register-binding` supports normal, repeat and release modes, dispatched through nested keyboard and pointer input. STIPC `feed_key` also fires matching runtime bindings, as keys from Wayfire's STIPC keyboard do; a matched key is not passed to clients. STIPC modifiers are the keyboard's depressed modifiers plus modifier keys held through `feed_key`. Configured (YAML) bindings and compositor actions still respond only to host keyboard input.
 - A binding with a command runs it through the isolated launcher. Without one, the owning client receives a targeted `command-binding` event.
 - `call-method` and `call-data` invoke an IPC method directly when the binding triggers, so a binding can perform compositor actions without launching a process.
 - Notification bindings are removed when their client disconnects.
+
+## Input devices
+
+Shingle has three seat devices: the keyboard, pointer and touch input that reach it from the nested host window and from STIPC. Client-created virtual keyboards and pointers are separate devices, as in Wayfire, and are neither listed nor gated.
+
+- `input/list-devices` returns one object per device with Wayfire's fields: `id` (stable: 1 keyboard, 2 pointer, 3 touch), `name`, `vendor` and `product` (always `"unknown"` for these virtual devices), `type` (`keyboard`, `pointer` or `touch`) and `enabled`.
+- `input/configure-device` takes an integer `id` and a boolean `enabled`. Errors match Wayfire's text and order: `Missing "id"`, `Field "id" does not have the correct type, expected int64`, `Missing "enabled"`, `Field "enabled" does not have the correct type, expected bool`, then `Unknown input device!`. A rejected request changes nothing; repeating the current state is a no-op.
+- A disabled keyboard delivers no keys or modifier changes and fires no bindings. A disabled pointer delivers no motion, buttons, scroll or pointer gestures. A disabled touch device delivers no touch points. This covers host input, which the nested frontend also stops matching against its own bindings and actions, and STIPC input, whose methods still reply `ok`.
+
+### Releasing held input
+
+Disabling a device first returns it to a neutral state, the way libinput does when Wayfire suspends a device, so no client is left with stuck input:
+
+- Held keys and pointer buttons get ordinary release events. The protocol has no cancel for them, and a release is what the client would see if the user let go; a held button therefore also completes a drag-and-drop in progress.
+- Depressed and latched modifiers are cleared and sent; locked modifiers are kept.
+- Active touch points are cancelled with `wl_touch.cancel` rather than lifted, so a touch interrupted by disabling never registers as a tap.
+- An active swipe, pinch or hold gesture ends with `cancelled` set.
+- The nested frontend finishes an open window switcher as if its modifiers were released, and abandons a move or resize drag where the window is, without the drop, swap or snap a release would perform. When the keyboard is re-enabled, the host's current modifiers are sent again.
 
 ## Events
 
@@ -83,6 +102,7 @@ While blocked, a view answers geometry and state methods but is not rendered, fo
 ## STIPC test input
 
 - `feed_key` and `feed_button` accept common evdev key and button names, including `S-` prefixes and `press`, `release` or `full` click modes.
+- STIPC input goes through the seat devices, so it is dropped while the matching device is disabled (see [Input devices](#input-devices)).
 - `move_cursor` moves the pointer. `touch` sends down for a new finger and motion for an active one; `touch_release` lifts it.
 - `run` launches a shell command with the compositor's `WAYLAND_DISPLAY`, returns its PID, and reaps exited children while polling.
 - `get_display` reports the Wayland socket and an empty XWayland display, since XWayland is not implemented.

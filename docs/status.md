@@ -1,6 +1,6 @@
 # Status
 
-Last updated 2026-11-25, after the Tilefire-to-Shingle rename.
+Last updated 2026-11-25, after the input-device IPC methods were finished.
 
 ## Readiness
 
@@ -51,20 +51,34 @@ Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are pla
 
 ### Wayfire IPC
 
-75 methods and the Wayfire event set. See [ipc.md](ipc.md).
+77 methods and the Wayfire event set, including `input/list-devices` and `input/configure-device` for the three nested seat devices. Disabling a device releases its held input. See [ipc.md](ipc.md).
 
 ## Verification
 
 ### Automated
 
-`cargo test --workspace` runs 60 unit tests (2026-11-25). Coverage is uneven: `shingle-core`, which holds the tiling tree and session model, has **no** unit tests.
+`cargo test --workspace` runs 80 unit tests (2026-11-25). Coverage is uneven: `shingle-core`, which holds the tiling tree and session model, has **no** unit tests.
 
-`cargo clippy --workspace --all-targets -- -D warnings` currently **fails** on three dead-code warnings in `crates/shingle/src/input.rs`, left by the unfinished input-device slice (see [roadmap.md](roadmap.md)). Do not report the tree as Clippy-clean until it is finished.
+`cargo clippy --workspace --all-targets -- -D warnings` passes (2026-11-25).
+
+The input-device unit tests (`crates/shingle/src/input_device.rs`, `crates/shingle/src/ipc.rs`, `crates/shingle-nested/src/main.rs`) cover IPC dispatch, the 77-method inventory, field validation and error text, gating of keys, modifiers, motion, buttons, gestures and touch, release of held input on disable, STIPC binding dispatch and host-event classification. They run without a Wayland client, so they check compositor state, not delivered protocol events.
 
 ### With real clients
 
 Before the rename, real XDG clients and Unix-socket IPC fixtures exercised mapping, geometry, workspaces, XKB layout switching (`us,de`), runtime bindings and event delivery. Plugin activation events were checked over IPC, but no interactive visual test was done in a host session.
 
-After the rename, only the unit tests have been run. The nested smoke test and real-client IPC checks still need repeating under the new names.
+After the rename, the older smoke test and IPC fixtures have not been repeated under the new names.
+
+Input devices, 2026-11-25: a Python IPC fixture and a minimal raw-protocol Wayland client (one `xdg_toplevel` with `wl_pointer`, `wl_keyboard` and `wl_touch`) ran against `shingle-nested` in a window on the host session, with a private `XDG_RUNTIME_DIR`, Wayland socket, IPC socket and XDG config/state directories. All 38 checks passed:
+
+- `list-methods` reported 77 methods including both input methods; `input/list-devices` returned the keyboard, pointer and touch devices (IDs 1–3) with all six fields, all enabled.
+- With a button, a key and a touch point held, disabling the pointer delivered a button release, disabling the keyboard delivered a key release, and disabling touch delivered `wl_touch.cancel`.
+- With the pointer disabled, `stipc/move_cursor` produced no client event and left `get-cursor-position` unchanged; STIPC button clicks were also dropped.
+- A binding registered with `command/register-binding` fired a `command-binding` event from STIPC `feed_key` while enabled, did not fire with the keyboard disabled, and keys produced no client events.
+- Touch input was dropped while touch was disabled.
+- Re-enabling all three restored client motion and cursor position, key delivery and binding firing.
+- Unknown ID, missing `id` or `enabled`, non-boolean `enabled` and string `id` returned Wayfire's errors and changed nothing.
+
+Not covered by that run: gating of real host keyboard, pointer and touch events and the nested frontend's switcher and drag clean-up, which need host input injection; and modifier delivery on disable, which was only unit-tested. The fixture's `shingle-nested` did not exit on SIGTERM or SIGINT and had to be killed.
 
 When recording new verification, keep real-client results separate from compiled or unit-tested ones.
