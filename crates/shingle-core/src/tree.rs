@@ -664,8 +664,12 @@ impl TileTree {
         },
       );
     } else {
-      let target_node = parent.children.remove(target_index).node;
-      let weight = added_child_weight(parent);
+      // The new split takes over the target's slot, so it keeps the target's
+      // weight and its siblings keep their extents.
+      let Child {
+        weight,
+        node: target_node,
+      } = parent.children.remove(target_index);
       let first = Child {
         weight: 1,
         node: target_node,
@@ -1282,6 +1286,32 @@ mod tests {
         (1, Rect::new(0, 400, 600, 400)),
         (2, Rect::new(600, 0, 600, 400)),
         (3, Rect::new(600, 400, 600, 400)),
+      ]
+    );
+  }
+
+  #[test]
+  fn cross_axis_split_keeps_target_extent() {
+    let mut tree = tree_with(2);
+    tree
+      .resize_adjacent(id(1), Direction::Right, -300, 1)
+      .unwrap();
+    tree.attach_at(id(3), id(2), Direction::Down).unwrap();
+    assert_eq!(
+      nodes(&tree),
+      vec![
+        (1, Rect::new(0, 0, 300, 800)),
+        (2, Rect::new(300, 0, 900, 400)),
+        (3, Rect::new(300, 400, 900, 400)),
+      ]
+    );
+    tree.drop(id(1), id(3), Direction::Right).unwrap();
+    assert_eq!(
+      nodes(&tree),
+      vec![
+        (2, Rect::new(0, 0, 1200, 400)),
+        (3, Rect::new(0, 400, 600, 400)),
+        (1, Rect::new(600, 400, 600, 400)),
       ]
     );
   }
