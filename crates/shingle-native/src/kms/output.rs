@@ -15,6 +15,7 @@ use super::{
   ConnectorId, ConnectorInfo, CrtcId, CrtcInfo, FORMAT_XRGB8888, KmsDevice,
   Mode, Object, PlaneInfo,
   atomic::{OutputProps, Teardown},
+  edid::{self, Edid},
   in_formats::{self, InFormats},
   props::{
     ConnectorProps, CrtcProps, MissingProperty, PLANE_TYPE_PRIMARY, PlaneProps,
@@ -40,8 +41,15 @@ pub fn probe(device: &mut dyn KmsDevice) -> io::Result<Card> {
   let resources = device.resources()?;
   let mut card = Card::default();
   for id in resources.connectors {
-    let info = device.connector(id)?;
+    let mut info = device.connector(id)?;
     let table = PropertyTable::load(device, Object::Connector(id))?;
+    if info.connection == Connection::Connected {
+      info.edid = table
+        .value("EDID")
+        .filter(|blob| *blob != 0)
+        .and_then(|blob| device.blob(blob).ok())
+        .and_then(|blob| Edid::parse(&blob, &edid::system_manufacturer));
+    }
     card.connectors.push((info, table));
   }
   for id in resources.crtcs {

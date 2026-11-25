@@ -55,6 +55,7 @@ pub(crate) fn connector_info(id: u32, name: &str) -> ConnectorInfo {
     subpixel: Subpixel::HorizontalRgb,
     current_crtc: None,
     possible_crtcs: Vec::new(),
+    edid: None,
   }
 }
 
@@ -112,6 +113,8 @@ pub(crate) struct FakeKms {
   pub(crate) events: VecDeque<PageFlip>,
   /// Whether dumb buffer allocation fails.
   pub(crate) no_buffers: bool,
+  /// EDID blobs by connector.
+  pub(crate) edids: HashMap<ConnectorId, Vec<u8>>,
 }
 
 impl FakeKms {
@@ -143,6 +146,7 @@ impl FakeKms {
       flip_pending: false,
       events: VecDeque::new(),
       no_buffers: false,
+      edids: HashMap::new(),
     }
   }
 
@@ -161,6 +165,33 @@ impl FakeKms {
   /// Unplugs the first connector.
   pub(crate) fn disconnect(&mut self) {
     self.connection = Connection::Disconnected;
+  }
+
+  /// Plugs a display into or out of the connector `name`.
+  pub(crate) fn set_connection(&mut self, name: &str, connection: Connection) {
+    if name == "HDMI-A-1" {
+      self.connection = connection;
+      return;
+    }
+    let info = self
+      .extra_connectors
+      .iter_mut()
+      .find(|info| info.name == name)
+      .expect("a known connector");
+    info.connection = connection;
+  }
+
+  /// The id of the connector `name`.
+  pub(crate) fn connector_named(&self, name: &str) -> ConnectorId {
+    if name == "HDMI-A-1" {
+      return self.connector_id;
+    }
+    self
+      .extra_connectors
+      .iter()
+      .find(|info| info.name == name)
+      .map(|info| info.id)
+      .expect("a known connector")
   }
 
   /// Lights a second connector `DP-1` on a second CRTC, as the console
@@ -398,6 +429,11 @@ impl KmsDevice for FakeKms {
         (Object::Plane(plane), "IN_FORMATS") if plane == self.plane_id => {
           u64::from(self.in_formats.is_some()) * 77
         }
+        (Object::Connector(connector), "EDID")
+          if self.edids.contains_key(&connector) =>
+        {
+          5000 + u64::from(connector.0)
+        }
         _ => self.value(id, name),
       };
       properties.push(Property {
@@ -410,6 +446,13 @@ impl KmsDevice for FakeKms {
   }
 
   fn blob(&mut self, id: u64) -> io::Result<Vec<u8>> {
+    if let Some(edid) = id
+      .checked_sub(5000)
+      .and_then(|connector| u32::try_from(connector).ok())
+      .and_then(|connector| self.edids.get(&ConnectorId(connector)))
+    {
+      return Ok(edid.clone());
+    }
     match (id, &self.in_formats) {
       (77, Some(blob)) => Ok(blob.clone()),
       _ => Err(io::ErrorKind::NotFound.into()),

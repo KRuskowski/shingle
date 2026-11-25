@@ -12,6 +12,7 @@
 
 pub mod atomic;
 pub mod drm;
+pub mod edid;
 pub mod in_formats;
 pub mod modes;
 pub mod output;
@@ -207,6 +208,10 @@ pub struct ConnectorInfo {
   pub current_crtc: Option<CrtcId>,
   /// The CRTCs any of its encoders can drive.
   pub possible_crtcs: Vec<CrtcId>,
+  /// What its `EDID` property says about the display. [`KmsDevice`]
+  /// leaves it `None`; [`output::probe`] reads it for connected
+  /// connectors.
+  pub edid: Option<edid::Edid>,
 }
 
 /// What a CRTC reports.

@@ -220,6 +220,7 @@ impl KmsDevice for DrmDevice {
       subpixel: subpixel(info.subpixel()),
       current_crtc,
       possible_crtcs,
+      edid: None,
     })
   }
 
