@@ -21,10 +21,19 @@
 //!   is probed again and a full modeset follows.
 //! - **DPMS** ([`Display::set_dpms`]): `ACTIVE=0` or a modeset with
 //!   `ACTIVE=1`, never while a flip is pending.
+//! - **Outputs** ([`Display::hotplug`], [`Display::set_policy`]): a DRM
+//!   hotplug probes the card again and diffs the connectors with the last
+//!   probe; the lit connector stays while it is connected and offers its
+//!   mode, otherwise the next one is chosen ([`outputs::choose`]), or none,
+//!   and nothing is drawn until a display is plugged in again. The mode of
+//!   each connector comes from the configuration ([`OutputPolicy`]).
+//! - **Mode requests** ([`Display::test_mode`], [`Display::set_mode`]):
+//!   wlr-output-management mode changes pass a `TEST_ONLY` modeset before
+//!   they are made.
 
 use std::{fmt, io, path::PathBuf, time::Instant};
 
-use shingle::{OutputInfo, PresentInfo, PresentationFlags};
+use shingle::{OutputInfo, PresentInfo, PresentationFlags, RequestedMode};
 use wayland_server::protocol::wl_output;
 
 use crate::{
@@ -32,9 +41,11 @@ use crate::{
   kms::{
     BlobId, CommitFlags, ConnectorInfo, KmsDevice, Mode, Subpixel,
     atomic::{self, ModesetState},
+    edid::Edid,
     modes::{self, ModeChoice},
     output::{self, Card, Output, OutputError},
   },
+  outputs::{self, ConnectorChange, ConnectorState, OutputPolicy},
   pacing::{FrameScheduler, State},
   scanout::{Frame, Scanout, copy::CopyScanout},
 };
@@ -166,6 +177,51 @@ enum LightError {
   NoMode(String, Vec<(String, String)>),
 }
 
+/// A mode set up on `output` with fresh copy buffers and a mode blob,
+/// after a passed `TEST_ONLY` modeset.
+fn test_mode(
+  device: &mut dyn KmsDevice,
+  output: &Output,
+  mode: &Mode,
+) -> Result<(BlobId, CopyScanout), (io::Error, bool)> {
+  let size = mode.size();
+  let mut scanout = CopyScanout::new(device, size).map_err(|error| {
+    (io::Error::other(format!("no buffers: {error}")), false)
+  })?;
+  let blob = match device.create_mode_blob(mode) {
+    Ok(blob) => blob,
+    Err(error) => {
+      scanout.destroy(device);
+      return Err((error, false));
+    }
+  };
+  let state = ModesetState {
+    mode: blob,
+    framebuffer: scanout.current(),
+    size,
+    active: true,
+    vrr: false,
+  };
+  let request = atomic::modeset(&output.props, &state, &output.teardown);
+  match device.commit(
+    &request,
+    CommitFlags::TEST_ONLY | CommitFlags::ALLOW_MODESET,
+  ) {
+    Ok(()) => Ok((blob, scanout)),
+    Err(error) => {
+      scanout.destroy(device);
+      let _ = device.destroy_blob(blob);
+      let master = not_master(&error) || error.raw_os_error() == Some(EBUSY);
+      Err((error, master))
+    }
+  }
+}
+
+/// The name of `mode` in log lines, such as `1920x1080@60`.
+fn mode_name(mode: &Mode) -> String {
+  format!("{}@{}", mode.name, mode.refresh_mhz() as f64 / 1000.0)
+}
+
 /// Finds the first candidate mode of `output` that passes a `TEST_ONLY`
 /// modeset with fresh copy buffers.
 fn light(
@@ -180,36 +236,8 @@ fn light(
   );
   let mut tried = Vec::new();
   for mode in candidates {
-    let name = format!("{}@{}", mode.name, mode.refresh_mhz() as f64 / 1000.0);
-    let size = mode.size();
-    let mut scanout = match CopyScanout::new(device, size) {
-      Ok(scanout) => scanout,
-      Err(error) => {
-        tried.push((name, format!("no buffers: {error}")));
-        continue;
-      }
-    };
-    let blob = match device.create_mode_blob(&mode) {
-      Ok(blob) => blob,
-      Err(error) => {
-        scanout.destroy(device);
-        tried.push((name, error.to_string()));
-        continue;
-      }
-    };
-    let state = ModesetState {
-      mode: blob,
-      framebuffer: scanout.current(),
-      size,
-      active: true,
-      vrr: false,
-    };
-    let request = atomic::modeset(&output.props, &state, &output.teardown);
-    match device.commit(
-      &request,
-      CommitFlags::TEST_ONLY | CommitFlags::ALLOW_MODESET,
-    ) {
-      Ok(()) => {
+    match test_mode(device, &output, &mode) {
+      Ok((blob, scanout)) => {
         return Ok(Lit {
           output,
           mode,
@@ -217,14 +245,10 @@ fn light(
           scanout: Box::new(scanout),
         });
       }
-      Err(error) => {
-        scanout.destroy(device);
-        let _ = device.destroy_blob(blob);
-        if not_master(&error) || error.raw_os_error() == Some(EBUSY) {
-          return Err(LightError::NoMaster(error.to_string()));
-        }
-        tried.push((name, error.to_string()));
+      Err((error, true)) => {
+        return Err(LightError::NoMaster(error.to_string()));
       }
+      Err((error, false)) => tried.push((mode_name(&mode), error.to_string())),
     }
   }
   Err(LightError::NoMode(output.connector.name, tried))
@@ -255,7 +279,10 @@ pub struct Display {
   device: Box<dyn KmsDevice>,
   lit: Option<Lit>,
   scheduler: FrameScheduler,
-  choice: ModeChoice,
+  /// The configured mode of each connector.
+  policy: OutputPolicy,
+  /// The connectors as the last probe saw them, for diffing.
+  connectors: Vec<ConnectorState>,
   /// Whether the seat is enabled.
   active: bool,
   /// Whether the display is on, and whether it should be.
@@ -267,14 +294,13 @@ pub struct Display {
 
 impl Display {
   /// Sets up the display without committing anything for real: enables
-  /// atomic modesetting, probes the card, chooses the output (`wanted`
-  /// by name if connected) and finds a mode that passes a `TEST_ONLY`
+  /// atomic modesetting, probes the card, chooses the output as `policy`
+  /// says ([`outputs::choose`]) and finds a mode that passes a `TEST_ONLY`
   /// modeset. No connected output is not an error: the display then
   /// shows nothing until one appears.
   pub fn prepare(
     mut device: Box<dyn KmsDevice>,
-    choice: ModeChoice,
-    wanted: Option<&str>,
+    policy: OutputPolicy,
   ) -> Result<Self, StartError> {
     device
       .enable_atomic()
@@ -292,14 +318,17 @@ impl Display {
       device,
       lit: None,
       scheduler: FrameScheduler::default(),
-      choice,
+      connectors: outputs::snapshot(&card),
+      policy,
       active: true,
       dpms_on: true,
       wanted_dpms: true,
       monotonic,
       sequence: Sequence::default(),
     };
-    let Some(connector) = card.choose_connector(wanted).cloned() else {
+    let Some(connector) =
+      outputs::choose(&card, &display.policy, None).cloned()
+    else {
       diagnostics::log("no connected output; nothing is shown until one is");
       return Ok(display);
     };
@@ -318,12 +347,11 @@ impl Display {
     let output = card
       .output(connector, &mut |blob| device.blob(blob).ok())
       .map_err(StartError::Output)?;
-    light(self.device.as_mut(), output, self.choice).map_err(
-      |error| match error {
-        LightError::NoMaster(error) => StartError::NoMaster(error),
-        LightError::NoMode(name, tried) => StartError::NoMode(name, tried),
-      },
-    )
+    let choice = self.policy.choice(&connector.name).unwrap_or_default();
+    light(self.device.as_mut(), output, choice).map_err(|error| match error {
+      LightError::NoMaster(error) => StartError::NoMaster(error),
+      LightError::NoMode(name, tried) => StartError::NoMode(name, tried),
+    })
   }
 
   fn log_lit(&self, lit: &Lit) {
@@ -388,20 +416,38 @@ impl Display {
     self.lit.as_ref().map(|lit| lit.mode.size())
   }
 
-  /// What clients are told about the lit output.
+  /// What clients are told about the lit output: the connector's name,
+  /// the EDID's make, model and serial ([`Edid::unknown`] without one),
+  /// physical size, subpixel layout, the connector's modes and the lit
+  /// one.
   pub fn output_info(&self) -> Option<OutputInfo> {
     let lit = self.lit.as_ref()?;
     let connector = &lit.output.connector;
+    let edid = connector.edid.clone().unwrap_or_else(Edid::unknown);
     Some(OutputInfo {
       name: connector.name.clone(),
-      // EDID parsing is NB-9's; wlroots says "Unknown" without one too.
-      make: "Unknown".into(),
-      model: "Unknown".into(),
-      serial: None,
+      make: edid.make,
+      model: edid.model,
+      serial: edid.serial,
       physical_size_mm: connector.physical_size_mm,
       subpixel: wl_subpixel(connector.subpixel),
       refresh_mhz: lit.mode.refresh_mhz(),
+      modes: outputs::mode_list(&connector.modes),
+      current_mode: connector.modes.iter().position(|mode| *mode == lit.mode),
     })
+  }
+
+  /// The name of the lit connector, if one is lit.
+  pub fn output_name(&self) -> Option<&str> {
+    self
+      .lit
+      .as_ref()
+      .map(|lit| lit.output.connector.name.as_str())
+  }
+
+  /// The lit mode, if an output is lit.
+  pub fn mode(&self) -> Option<&Mode> {
+    self.lit.as_ref().map(|lit| &lit.mode)
   }
 
   /// The scheduler's state.
@@ -569,12 +615,18 @@ impl Display {
         return Resumed::default();
       }
     };
+    self.log_changes(&card);
     let wanted = before.as_ref().map(|(name, _)| name.as_str());
-    let connector = card.choose_connector(wanted).cloned();
+    let connector = outputs::choose(&card, &self.policy, wanted).cloned();
     let kept = self.refresh_lit(&card, connector.as_ref());
     if !kept {
       self.relight(&card, connector.as_ref());
     }
+    self.changes_since(before)
+  }
+
+  /// What changed since the lit output was `before` (its name and size).
+  fn changes_since(&self, before: Option<(String, (u32, u32))>) -> Resumed {
     let after = self
       .lit
       .as_ref()
@@ -587,6 +639,198 @@ impl Display {
       output_changed: after.map(|(name, _)| name)
         != before.map(|(name, _)| name),
     }
+  }
+
+  /// The lit output's name and size.
+  fn lit_state(&self) -> Option<(String, (u32, u32))> {
+    self
+      .lit
+      .as_ref()
+      .map(|lit| (lit.output.connector.name.clone(), lit.mode.size()))
+  }
+
+  /// Logs how the connectors changed since the last probe and remembers
+  /// this one. Returns the changes.
+  fn log_changes(&mut self, card: &Card) -> Vec<ConnectorChange> {
+    let now = outputs::snapshot(card);
+    let changes = outputs::diff(&self.connectors, &now);
+    for change in &changes {
+      diagnostics::log(&match change {
+        ConnectorChange::Connected(name) => format!("{name} connected"),
+        ConnectorChange::Disconnected(name) => format!("{name} disconnected"),
+        ConnectorChange::ModesChanged(name) => {
+          format!("{name} offers other modes")
+        }
+      });
+    }
+    self.connectors = now;
+    changes
+  }
+
+  /// Follows a DRM hotplug: probes the card again and diffs it with the
+  /// last probe. The lit output stays, without a modeset, while it is
+  /// connected and still offers its mode; otherwise the output is chosen
+  /// again ([`outputs::choose`]) and lit with a modeset, or, with nothing
+  /// connected, none is lit and nothing is drawn. While the seat is
+  /// disabled this does nothing, since the resume probes anyway.
+  pub fn hotplug(&mut self) -> Resumed {
+    if !self.active {
+      return Resumed::default();
+    }
+    let before = self.lit_state();
+    let card = match output::probe(self.device.as_mut()) {
+      Ok(card) => card,
+      Err(error) => {
+        diagnostics::log(&format!("probing the card failed: {error}"));
+        return Resumed::default();
+      }
+    };
+    let changes = self.log_changes(&card);
+    let wanted = before.as_ref().map(|(name, _)| name.as_str());
+    let connector = outputs::choose(&card, &self.policy, wanted).cloned();
+    let keep = match (&self.lit, &connector) {
+      (Some(lit), Some(connector)) => {
+        connector.id == lit.output.connector.id
+          && connector.modes.contains(&lit.mode)
+      }
+      (None, None) => true,
+      _ => false,
+    };
+    if keep {
+      if let (Some(lit), Some(connector)) = (self.lit.as_mut(), connector) {
+        // Modes, EDID and properties may have changed with a new monitor.
+        let device = self.device.as_mut();
+        match card.output(&connector, &mut |blob| device.blob(blob).ok()) {
+          Ok(output) => lit.output = output,
+          Err(error) => {
+            diagnostics::log(&format!("{}: {error}", connector.name))
+          }
+        }
+      }
+      return Resumed {
+        output_changed: changes
+          .iter()
+          .any(|change| Some(change_name(change)) == wanted),
+        ..Resumed::default()
+      };
+    }
+    self.relight(&card, connector.as_ref());
+    self.changes_since(before)
+  }
+
+  /// Takes a reloaded configuration. If it gives the lit output another
+  /// mode, turns it off, or names another connected output to prefer, the
+  /// output is lit again as it says.
+  pub fn set_policy(&mut self, policy: OutputPolicy) -> Resumed {
+    if policy == self.policy {
+      return Resumed::default();
+    }
+    self.policy = policy;
+    if !self.active {
+      return Resumed::default();
+    }
+    let before = self.lit_state();
+    let card = match output::probe(self.device.as_mut()) {
+      Ok(card) => card,
+      Err(error) => {
+        diagnostics::log(&format!("probing the card failed: {error}"));
+        return Resumed::default();
+      }
+    };
+    self.log_changes(&card);
+    let wanted = before.as_ref().map(|(name, _)| name.as_str());
+    let connector = outputs::choose(&card, &self.policy, wanted).cloned();
+    let same = match (&self.lit, &connector) {
+      (Some(lit), Some(connector)) => {
+        connector.id == lit.output.connector.id
+          && self.policy.preferred_mode(connector).as_ref() == Some(&lit.mode)
+      }
+      (None, None) => true,
+      _ => false,
+    };
+    if !same {
+      self.relight(&card, connector.as_ref());
+    }
+    self.changes_since(before)
+  }
+
+  /// Whether `request` names a mode of the lit output that passes a
+  /// `TEST_ONLY` modeset.
+  pub fn test_mode(&mut self, request: RequestedMode) -> Result<(), String> {
+    let (blob, mut scanout) = self.tested(request)?;
+    scanout.destroy(self.device.as_mut());
+    let _ = self.device.destroy_blob(blob);
+    Ok(())
+  }
+
+  /// Sets the mode `request` names on the lit output: a `TEST_ONLY`
+  /// modeset first, then the modeset. The old mode stays if either fails.
+  /// The caller waits until no flip is pending.
+  pub fn set_mode(
+    &mut self,
+    request: RequestedMode,
+  ) -> Result<Resumed, String> {
+    let before = self.lit_state();
+    let (blob, scanout) = self.tested(request)?;
+    let Some(lit) = self.lit.as_mut() else {
+      return Err("no output is lit".into());
+    };
+    let mode = outputs::requested_mode(&lit.output.connector.modes, request)
+      .ok_or("the output does not offer that mode")?;
+    let old_mode = std::mem::replace(&mut lit.mode, mode);
+    let old_blob = std::mem::replace(&mut lit.blob, blob);
+    let old_scanout = std::mem::replace(
+      &mut lit.scanout,
+      Box::new(scanout) as Box<dyn Scanout>,
+    );
+    match self.modeset() {
+      Ok(()) => {
+        let mut old_scanout = old_scanout;
+        old_scanout.destroy(self.device.as_mut());
+        let _ = self.device.destroy_blob(old_blob);
+        if let Some(lit) = &self.lit {
+          self.log_lit(lit);
+        }
+        Ok(self.changes_since(before))
+      }
+      Err(error) => {
+        let Some(lit) = self.lit.as_mut() else {
+          return Err(error.to_string());
+        };
+        lit.mode = old_mode;
+        let blob = std::mem::replace(&mut lit.blob, old_blob);
+        let mut scanout = std::mem::replace(&mut lit.scanout, old_scanout);
+        scanout.destroy(self.device.as_mut());
+        let _ = self.device.destroy_blob(blob);
+        if let Err(error) = self.modeset() {
+          diagnostics::log(&format!("restoring the old mode failed: {error}"));
+        }
+        Err(error.to_string())
+      }
+    }
+  }
+
+  /// The blob and buffers of `request`'s mode after a passed `TEST_ONLY`
+  /// modeset.
+  fn tested(
+    &mut self,
+    request: RequestedMode,
+  ) -> Result<(BlobId, CopyScanout), String> {
+    if !self.active {
+      return Err("the seat is not active".into());
+    }
+    let Some(lit) = &self.lit else {
+      return Err("no output is lit".into());
+    };
+    let mode = outputs::requested_mode(&lit.output.connector.modes, request)
+      .ok_or("the output does not offer that mode")?;
+    test_mode(self.device.as_mut(), &lit.output, &mode)
+      .map_err(|(error, _)| format!("{}: {error}", mode_name(&mode)))
+  }
+
+  /// Whether a page flip is pending, during which no modeset may be made.
+  pub fn flip_pending(&self) -> bool {
+    self.scheduler.flip_pending()
   }
 
   /// Keeps the lit output if `connector` is it and still offers its
@@ -692,6 +936,15 @@ impl Display {
   /// The card's descriptor, readable when page flips completed.
   pub fn poll_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
     self.device.poll_fd()
+  }
+}
+
+/// The connector a change is about.
+fn change_name(change: &ConnectorChange) -> &str {
+  match change {
+    ConnectorChange::Connected(name)
+    | ConnectorChange::Disconnected(name)
+    | ConnectorChange::ModesChanged(name) => name,
   }
 }
 

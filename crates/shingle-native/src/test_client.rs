@@ -3,8 +3,8 @@
 //! test thread and records the keyboard, pointer and touch events it gets,
 //! with their timestamps, its frame callbacks and `wp_presentation`
 //! feedback, and the output's name. It can also turn the output off and
-//! on with wlr-output-power-management. Based on shingle-frontend's test
-//! client.
+//! on with wlr-output-power-management and test or set a mode with
+//! wlr-output-management. Based on shingle-frontend's test client.
 
 use std::{os::unix::net::UnixStream, path::Path};
 
@@ -20,8 +20,14 @@ use wayland_protocols::{
   wp::presentation_time::client::{wp_presentation, wp_presentation_feedback},
   xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
 };
-use wayland_protocols_wlr::output_power_management::v1::client::{
-  zwlr_output_power_manager_v1, zwlr_output_power_v1,
+use wayland_protocols_wlr::{
+  output_management::v1::client::{
+    zwlr_output_configuration_head_v1, zwlr_output_configuration_v1,
+    zwlr_output_head_v1, zwlr_output_manager_v1, zwlr_output_mode_v1,
+  },
+  output_power_management::v1::client::{
+    zwlr_output_power_manager_v1, zwlr_output_power_v1,
+  },
 };
 
 /// `wp_presentation_feedback.presented`, with the halves joined.
@@ -56,6 +62,16 @@ pub(crate) struct Events {
   pub(crate) output_name: Option<String>,
   /// The modes wlr-output-power reported.
   pub(crate) power_modes: Vec<u32>,
+  /// Output-management heads that are not finished.
+  heads: Vec<zwlr_output_head_v1::ZwlrOutputHeadV1>,
+  /// Output-management modes that are not finished, in order, with their
+  /// sizes.
+  pub(crate) modes: Vec<(zwlr_output_mode_v1::ZwlrOutputModeV1, (i32, i32))>,
+  /// The serial of the last output-manager `done`.
+  serial: u32,
+  /// Outcomes of output configurations: `succeeded`, `failed` or
+  /// `cancelled`.
+  pub(crate) configurations: Vec<&'static str>,
 }
 
 /// One seat event the client received.
@@ -248,6 +264,39 @@ impl TestClient {
     self.roundtrip(compositor);
   }
 
+  /// Binds wlr-output-management and reads the head and its modes.
+  pub(crate) fn output_manager(
+    &mut self,
+    compositor: &mut Compositor,
+  ) -> zwlr_output_manager_v1::ZwlrOutputManagerV1 {
+    let manager = self.bind::<zwlr_output_manager_v1::ZwlrOutputManagerV1>(4);
+    self.roundtrip(compositor);
+    manager
+  }
+
+  /// Asks for mode `index` of the head through `manager`, testing it if
+  /// `test`, else applying it. The answer arrives in a later round trip.
+  pub(crate) fn request_mode(
+    &mut self,
+    compositor: &mut Compositor,
+    manager: &zwlr_output_manager_v1::ZwlrOutputManagerV1,
+    index: usize,
+    test: bool,
+  ) {
+    let head = self.events.heads.last().expect("a head").clone();
+    let mode = self.events.modes[index].0.clone();
+    let configuration =
+      manager.create_configuration(self.events.serial, &self.handle, ());
+    let configured = configuration.enable_head(&head, &self.handle, ());
+    configured.set_mode(&mode);
+    if test {
+      configuration.test();
+    } else {
+      configuration.apply();
+    }
+    self.roundtrip(compositor);
+  }
+
   /// Attaches and commits a `width` by `height` shm buffer on `surface`.
   pub(crate) fn attach_buffer(
     &mut self,
@@ -291,13 +340,16 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Events {
     _: &Connection,
     _: &QueueHandle<Self>,
   ) {
-    if let wl_registry::Event::Global {
-      name,
-      interface,
-      version,
-    } = event
-    {
-      events.globals.push((name, interface, version));
+    match event {
+      wl_registry::Event::Global {
+        name,
+        interface,
+        version,
+      } => events.globals.push((name, interface, version)),
+      wl_registry::Event::GlobalRemove { name } => {
+        events.globals.retain(|(global, ..)| *global != name);
+      }
+      _ => {}
     }
   }
 }
@@ -393,6 +445,123 @@ impl Dispatch<zwlr_output_power_v1::ZwlrOutputPowerV1, ()> for Events {
     {
       events.power_modes.push(mode as u32);
     }
+  }
+}
+
+impl Dispatch<zwlr_output_manager_v1::ZwlrOutputManagerV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &zwlr_output_manager_v1::ZwlrOutputManagerV1,
+    event: zwlr_output_manager_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      zwlr_output_manager_v1::Event::Head { head } => events.heads.push(head),
+      zwlr_output_manager_v1::Event::Done { serial } => events.serial = serial,
+      _ => {}
+    }
+  }
+
+  wayland_client::event_created_child!(
+    Events,
+    zwlr_output_manager_v1::ZwlrOutputManagerV1,
+    [
+      zwlr_output_manager_v1::EVT_HEAD_OPCODE =>
+        (zwlr_output_head_v1::ZwlrOutputHeadV1, ()),
+    ]
+  );
+}
+
+impl Dispatch<zwlr_output_head_v1::ZwlrOutputHeadV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    head: &zwlr_output_head_v1::ZwlrOutputHeadV1,
+    event: zwlr_output_head_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      zwlr_output_head_v1::Event::Mode { mode } => {
+        events.modes.push((mode, (0, 0)));
+      }
+      zwlr_output_head_v1::Event::Finished => {
+        events.heads.retain(|known| known.id() != head.id());
+      }
+      _ => {}
+    }
+  }
+
+  wayland_client::event_created_child!(
+    Events,
+    zwlr_output_head_v1::ZwlrOutputHeadV1,
+    [
+      zwlr_output_head_v1::EVT_MODE_OPCODE =>
+        (zwlr_output_mode_v1::ZwlrOutputModeV1, ()),
+    ]
+  );
+}
+
+impl Dispatch<zwlr_output_mode_v1::ZwlrOutputModeV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    mode: &zwlr_output_mode_v1::ZwlrOutputModeV1,
+    event: zwlr_output_mode_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      zwlr_output_mode_v1::Event::Size { width, height } => {
+        if let Some((_, size)) = events
+          .modes
+          .iter_mut()
+          .find(|(known, _)| known.id() == mode.id())
+        {
+          *size = (width, height);
+        }
+      }
+      zwlr_output_mode_v1::Event::Finished => {
+        events.modes.retain(|(known, _)| known.id() != mode.id());
+      }
+      _ => {}
+    }
+  }
+}
+
+impl Dispatch<zwlr_output_configuration_v1::ZwlrOutputConfigurationV1, ()>
+  for Events
+{
+  fn event(
+    events: &mut Self,
+    _: &zwlr_output_configuration_v1::ZwlrOutputConfigurationV1,
+    event: zwlr_output_configuration_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.configurations.push(match event {
+      zwlr_output_configuration_v1::Event::Succeeded => "succeeded",
+      zwlr_output_configuration_v1::Event::Failed => "failed",
+      _ => "cancelled",
+    });
+  }
+}
+
+impl
+  Dispatch<zwlr_output_configuration_head_v1::ZwlrOutputConfigurationHeadV1, ()>
+  for Events
+{
+  fn event(
+    _: &mut Self,
+    _: &zwlr_output_configuration_head_v1::ZwlrOutputConfigurationHeadV1,
+    _: zwlr_output_configuration_head_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
   }
 }
 

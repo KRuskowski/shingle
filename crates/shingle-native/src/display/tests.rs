@@ -14,7 +14,7 @@ use crate::{
 type Card = Rc<RefCell<FakeKms>>;
 
 fn prepare(card: &Card) -> Result<Display, StartError> {
-  Display::prepare(Box::new(Rc::clone(card)), ModeChoice::Auto, None)
+  Display::prepare(Box::new(Rc::clone(card)), OutputPolicy::default())
 }
 
 /// A display that passed its test and made its first modeset.
@@ -459,4 +459,276 @@ fn start_errors_name_their_cause() {
     "no DRM device: tried /dev/dri/card1 (Permission denied), \
      /dev/dri/card0 (No such device)"
   );
+}
+
+fn policy(named: &[(&str, &str)]) -> OutputPolicy {
+  OutputPolicy {
+    default: shingle_config::OutputMode::Auto,
+    named: named
+      .iter()
+      .map(|(name, mode)| ((*name).to_owned(), mode.parse().unwrap()))
+      .collect(),
+  }
+}
+
+/// A started display on HDMI-A-1 with a second connector, DP-2, that is
+/// unplugged until a test plugs it in.
+fn with_second_connector() -> (Card, Display) {
+  let mut fake = FakeKms::single_output();
+  let mut dp = crate::kms::fake::connector_info(9, "DP-2");
+  dp.connection = Connection::Disconnected;
+  dp.modes = vec![mode(2560, 1440, 60, true), mode(1920, 1080, 60, false)];
+  fake.add_connector(dp);
+  let card = fake.shared();
+  let mut display = prepare(&card).expect("the display starts");
+  display.start().expect("the modeset is accepted");
+  (card, display)
+}
+
+/// The connector the last real modeset lit.
+fn lit_connector(card: &Card) -> Option<u64> {
+  let crtc_id = property(card, "CRTC_ID");
+  let commits = card.borrow().real_commits();
+  commits.iter().rev().find_map(|(request, _)| {
+    request
+      .entries()
+      .iter()
+      .find_map(|(object, property, value)| {
+        (matches!(object, Object::Connector(_))
+          && *property == crtc_id
+          && *value != 0)
+          .then(|| u64::from(object.id()))
+      })
+  })
+}
+
+#[test]
+fn the_configured_mode_is_lit_and_off_outputs_are_skipped() {
+  let card = FakeKms::single_output().shared();
+  let display = Display::prepare(
+    Box::new(Rc::clone(&card)),
+    policy(&[("HDMI-A-1", "1920x1080@60")]),
+  )
+  .unwrap();
+  assert_eq!(display.size(), Some((1920, 1080)));
+  let off = Display::prepare(
+    Box::new(FakeKms::single_output()),
+    policy(&[("HDMI-A-1", "off")]),
+  )
+  .unwrap();
+  assert_eq!(off.size(), None, "an output configured off stays dark");
+  let highres = Display::prepare(
+    Box::new(FakeKms::single_output()),
+    policy(&[("HDMI-A-1", "highres")]),
+  )
+  .unwrap();
+  assert_eq!(highres.size(), Some((1920, 1080)));
+}
+
+#[test]
+fn a_hotplug_that_leaves_the_lit_output_alone_changes_nothing() {
+  let (card, mut display) = with_second_connector();
+  let before = card.borrow().commits.len();
+  card
+    .borrow_mut()
+    .set_connection("DP-2", Connection::Connected);
+  let change = display.hotplug();
+  assert_eq!(change, Resumed::default());
+  assert_eq!(card.borrow().commits.len(), before, "no modeset");
+  assert_eq!(display.output_name(), Some("HDMI-A-1"));
+  assert!(display.ready());
+}
+
+#[test]
+fn unplugging_the_lit_output_lights_the_next_one() {
+  let (card, mut display) = with_second_connector();
+  card
+    .borrow_mut()
+    .set_connection("DP-2", Connection::Connected);
+  display.hotplug();
+  card.borrow_mut().disconnect();
+  let change = display.hotplug();
+  assert!(change.output_changed);
+  assert_eq!(change.resized, Some((2560, 1440)));
+  assert_eq!(display.output_name(), Some("DP-2"));
+  let dp = card.borrow().connector_named("DP-2");
+  assert_eq!(lit_connector(&card), Some(u64::from(dp.0)));
+  assert!(display.ready());
+  // Plugging HDMI-A-1 back in keeps DP-2 lit.
+  card
+    .borrow_mut()
+    .set_connection("HDMI-A-1", Connection::Connected);
+  assert_eq!(display.hotplug(), Resumed::default());
+  assert_eq!(display.output_name(), Some("DP-2"));
+}
+
+#[test]
+fn with_every_output_unplugged_nothing_is_drawn_until_one_returns() {
+  let (card, mut display) = started();
+  flip_frame(&mut display, Instant::now());
+  card.borrow_mut().disconnect();
+  let change = display.hotplug();
+  assert!(change.output_changed);
+  assert_eq!(display.size(), None);
+  assert!(!display.ready());
+  assert!(!display.begin_frame());
+  assert!(card.borrow().buffers.is_empty(), "its buffers are freed");
+  // The flip of the unplugged output completes late and is ignored.
+  card.borrow_mut().complete_flip(Duration::from_secs(1), 1);
+  assert!(display.dispatch().is_empty());
+  card.borrow_mut().connection = Connection::Connected;
+  let change = display.hotplug();
+  assert!(change.output_changed);
+  assert_eq!(change.resized, Some((1280, 720)));
+  assert!(display.ready());
+}
+
+#[test]
+fn a_replugged_monitor_with_other_modes_gets_a_new_mode() {
+  let (card, mut display) = started();
+  card.borrow_mut().disconnect();
+  display.hotplug();
+  {
+    let mut fake = card.borrow_mut();
+    fake.connection = Connection::Connected;
+    fake.modes = vec![mode(3840, 2160, 60, true), mode(1920, 1080, 60, false)];
+  }
+  let change = display.hotplug();
+  assert_eq!(change.resized, Some((3840, 2160)));
+  assert_eq!(display.output_info().unwrap().modes.len(), 2);
+}
+
+#[test]
+fn hotplugs_while_paused_wait_for_the_resume() {
+  let (card, mut display) = started();
+  display.pause();
+  card.borrow_mut().disconnect();
+  let before = card.borrow().commits.len();
+  assert_eq!(display.hotplug(), Resumed::default());
+  assert_eq!(card.borrow().commits.len(), before);
+  assert!(display.resume().output_changed);
+}
+
+#[test]
+fn a_reloaded_policy_relights_with_the_new_mode() {
+  let (card, mut display) = started();
+  let change = display.set_policy(policy(&[("HDMI-A-1", "1920x1080")]));
+  assert_eq!(change.resized, Some((1920, 1080)));
+  let before = card.borrow().commits.len();
+  assert_eq!(
+    display.set_policy(policy(&[("HDMI-A-1", "1920x1080@60")])),
+    Resumed::default(),
+    "the same mode is not set again"
+  );
+  assert_eq!(card.borrow().commits.len(), before);
+  let change = display.set_policy(policy(&[("HDMI-A-1", "off")]));
+  assert!(change.output_changed);
+  assert_eq!(display.size(), None);
+}
+
+#[test]
+fn mode_requests_are_tested_before_they_are_made() {
+  let (card, mut display) = started();
+  let before = card.borrow().commits.len();
+  display.test_mode(RequestedMode::Listed(1)).unwrap();
+  {
+    let fake = card.borrow();
+    let tests: Vec<_> = fake.commits[before..].iter().map(|c| c.1).collect();
+    assert_eq!(
+      tests,
+      [CommitFlags::TEST_ONLY | CommitFlags::ALLOW_MODESET],
+      "a test commits nothing"
+    );
+    assert_eq!(fake.buffers.len(), 2, "its buffers are freed again");
+  }
+  assert_eq!(display.size(), Some((1280, 720)));
+  let change = display.set_mode(RequestedMode::Listed(1)).unwrap();
+  assert_eq!(change.resized, Some((1920, 1080)));
+  let fake = card.borrow();
+  let flags: Vec<_> = fake.commits[before + 1..].iter().map(|c| c.1).collect();
+  assert_eq!(
+    flags,
+    [
+      CommitFlags::TEST_ONLY | CommitFlags::ALLOW_MODESET,
+      CommitFlags::TEST_ONLY | CommitFlags::ALLOW_MODESET,
+      CommitFlags::ALLOW_MODESET,
+    ]
+  );
+  assert_eq!(fake.buffers.len(), 2, "the old buffers are gone");
+  assert_eq!(fake.blobs.len(), 1);
+  drop(fake);
+  assert_eq!(display.output_info().unwrap().current_mode, Some(1));
+}
+
+#[test]
+fn a_rejected_mode_request_keeps_the_old_mode() {
+  let (card, mut display) = started();
+  card.borrow_mut().reject_width(1920);
+  let error = display.set_mode(RequestedMode::Listed(1)).unwrap_err();
+  assert!(error.starts_with("1920x1080@60"), "{error}");
+  assert!(display.test_mode(RequestedMode::Listed(1)).is_err());
+  let missing = RequestedMode::Custom {
+    width: 800,
+    height: 600,
+    refresh_mhz: 0,
+  };
+  assert_eq!(
+    display.set_mode(missing).unwrap_err(),
+    "the output does not offer that mode"
+  );
+  assert_eq!(display.size(), Some((1280, 720)));
+  assert_eq!(card.borrow().buffers.len(), 2);
+  assert_eq!(card.borrow().blobs.len(), 1);
+  display.pause();
+  assert_eq!(
+    display.test_mode(RequestedMode::Listed(0)).unwrap_err(),
+    "the seat is not active"
+  );
+}
+
+#[test]
+fn the_edid_names_make_model_and_serial_and_modes_are_listed() {
+  let mut fake = FakeKms::single_output();
+  let id = fake.connector_id;
+  fake.edids.insert(
+    id,
+    crate::kms::edid::tests::blob(
+      "DEL",
+      0x1234,
+      0,
+      &[(0xfc, "Test Monitor"), (0xff, "SN-1")],
+    ),
+  );
+  let card = fake.shared();
+  let mut display = prepare(&card).unwrap();
+  display.start().unwrap();
+  let info = display.output_info().unwrap();
+  // The make is hwdata's name for DEL where hwdata is installed.
+  let make = crate::kms::edid::system_manufacturer("DEL")
+    .unwrap_or_else(|| "DEL".into());
+  assert_eq!(
+    (
+      info.make.as_str(),
+      info.model.as_str(),
+      info.serial.as_deref()
+    ),
+    (make.as_str(), "Test Monitor", Some("SN-1"))
+  );
+  assert_eq!(
+    info.description(),
+    format!("{make} Test Monitor SN-1 (HDMI-A-1)")
+  );
+  let sizes: Vec<_> = info
+    .modes
+    .iter()
+    .map(|mode| (mode.width, mode.height, mode.preferred))
+    .collect();
+  assert_eq!(
+    sizes,
+    [(1280, 720, true), (1920, 1080, false), (1024, 768, false)]
+  );
+  assert_eq!(info.current_mode, Some(0));
+  let (_, plain) = started();
+  let info = plain.output_info().unwrap();
+  assert_eq!((info.make.as_str(), info.serial), ("Unknown", None));
 }

@@ -5,7 +5,7 @@ use std::{
   cell::RefCell, collections::VecDeque, path::PathBuf, rc::Rc, time::Duration,
 };
 
-use shingle::{Compositor, Config, InputDeviceId, InputDeviceKind};
+use shingle::{Compositor, Config, InputDeviceId, InputDeviceKind, WindowId};
 use shingle_config::ShingleConfig;
 use shingle_frontend::{
   Frontend,
@@ -18,12 +18,14 @@ use super::{Backend, Rendering};
 use crate::{
   display::Display,
   gpu::{RenderFailure, tests::FakeRenderer},
+  hotplug::{DrmEvent, tests::FakeMonitor},
   input::{
     Capabilities, DeviceDescription, DeviceInput, DeviceKey, NativeEvent,
     ScrollAxis, ScrollSource, SendEvents, Setting,
     tests::{FakeInput, POINTER, device, key},
   },
-  kms::{CommitFlags, Connection, fake::FakeKms, modes::ModeChoice},
+  kms::{CommitFlags, Connection, fake::FakeKms},
+  outputs::OutputPolicy,
   session::{SeatEvent, tests::FakeSession},
   test_client::{Input, Presented, TestClient, Toplevel},
   tests::{base_path, configure_request, ipc_request, test_config},
@@ -68,6 +70,8 @@ struct Fixture {
   client: TestClient,
   toplevel: Toplevel,
   base: PathBuf,
+  /// The fake DRM hotplug monitor.
+  monitor: FakeMonitor,
 }
 
 /// A rendering setup with fake renderers that share `failures` and
@@ -126,9 +130,11 @@ impl Fixture {
     .expect("the frontend starts");
     let session = Rc::new(RefCell::new(FakeSession::default()));
     let card = card.shared();
-    let display =
-      Display::prepare(Box::new(Rc::clone(&card)), ModeChoice::Auto, None)
-        .expect("the display passes its test");
+    let display = Display::prepare(
+      Box::new(Rc::clone(&card)),
+      OutputPolicy::from_config(&config),
+    )
+    .expect("the display passes its test");
     let failures = Rc::new(RefCell::new(VecDeque::new()));
     let frames = Rc::new(RefCell::new(0));
     let recreated = Rc::new(RefCell::new(0));
@@ -143,6 +149,8 @@ impl Fixture {
       rendering,
     )
     .expect("the backend starts");
+    let monitor = FakeMonitor::default();
+    backend.set_device_monitor(Box::new(monitor.clone()));
     let compositor = backend.frontend_mut().compositor_mut();
     let mut client = TestClient::connect(compositor, &base);
     client.seat(compositor);
@@ -157,6 +165,7 @@ impl Fixture {
       client,
       toplevel,
       base,
+      monitor,
     };
     fixture.step();
     fixture
@@ -265,6 +274,28 @@ impl Fixture {
       .into_iter()
       .map(|(_, flags)| flags)
       .collect()
+  }
+
+  /// Delivers a DRM hotplug event and runs a turn.
+  fn hotplug(&mut self) {
+    self
+      .monitor
+      .events
+      .borrow_mut()
+      .push(DrmEvent::Hotplug(None));
+    self.step();
+  }
+
+  /// The client's window and the core output it is on, with the windows
+  /// of that output's current workspace.
+  fn window_place(&self) -> (WindowId, String, Vec<WindowId>) {
+    let compositor = self.backend.frontend().compositor();
+    let window = compositor.focused_window().expect("the window is focused");
+    let core = compositor.core();
+    let output = core.window_location(window).unwrap().output.clone();
+    let workspace = core.current_workspace(&output).unwrap();
+    let windows = core.tree(&output, workspace).unwrap().windows();
+    (window, output.0, windows)
   }
 
   /// The CRTC's `ACTIVE` as the card has it now.
@@ -984,4 +1015,117 @@ fn traced_flips_are_logged_with_their_sequence_and_time() {
   fixture.backend.set_trace_flips(true);
   fixture.flip(Duration::from_secs(1), 1);
   assert_eq!(fixture.client.events.frames.len(), 0, "none was asked for");
+}
+
+#[test]
+fn a_monitor_plugged_in_later_is_lit_without_a_vt_switch() {
+  let mut card = FakeKms::single_output();
+  card.disconnect();
+  let mut fixture = Fixture::with_card(test_config(), card);
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture.client.output(compositor);
+  assert_eq!(
+    fixture.client.events.output_name.as_deref(),
+    Some("HEADLESS-1")
+  );
+  fixture.card.borrow_mut().connection = Connection::Connected;
+  fixture.hotplug();
+  assert_eq!(fixture.commit_flags(), vec![MODESET, FLIP]);
+  // The output global was replaced; binding it again gives the connector.
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture.client.output(compositor);
+  assert_eq!(
+    fixture.client.events.output_name.as_deref(),
+    Some("HDMI-A-1")
+  );
+  let (_, output, _) = fixture.window_place();
+  assert_eq!(output, "HDMI-A-1", "the core output follows the connector");
+}
+
+#[test]
+fn unplugging_the_lit_monitor_moves_to_the_next_with_the_tree_intact() {
+  let mut card = FakeKms::single_output();
+  let mut dp = crate::kms::fake::connector_info(9, "DP-2");
+  dp.modes = vec![crate::kms::fake::mode(2560, 1440, 60, true)];
+  card.add_connector(dp);
+  let mut fixture = Fixture::with_card(test_config(), card);
+  let (window, output, windows) = fixture.window_place();
+  assert_eq!(
+    (output.as_str(), windows.clone()),
+    ("HDMI-A-1", vec![window])
+  );
+  fixture.flip(Duration::from_secs(1), 1);
+  fixture.card.borrow_mut().disconnect();
+  fixture.hotplug();
+  let compositor = fixture.backend.frontend().compositor();
+  assert_eq!(compositor.output_info().name, "DP-2");
+  assert_eq!(compositor.output().width, 2560);
+  assert_eq!(fixture.window_place(), (window, "DP-2".into(), windows));
+  assert!(fixture.flip_pending(), "the new output shows a frame");
+}
+
+#[test]
+fn with_every_monitor_unplugged_clients_live_and_the_picture_returns() {
+  let mut fixture = Fixture::new();
+  fixture.flip(Duration::from_secs(1), 1);
+  let place = fixture.window_place();
+  fixture.card.borrow_mut().disconnect();
+  fixture.hotplug();
+  let commits = fixture.card.borrow().commits.len();
+  let frames = *fixture.frames.borrow();
+  // The client keeps running and committing; nothing is drawn or
+  // committed, and the compositor keeps its output and windows.
+  fixture.client_frame();
+  fixture.step();
+  assert_eq!(fixture.card.borrow().commits.len(), commits);
+  assert_eq!(*fixture.frames.borrow(), frames);
+  let compositor = fixture.backend.frontend().compositor();
+  assert_eq!(compositor.output_info().name, "HDMI-A-1");
+  assert_eq!(compositor.output().width, 1280);
+  assert_eq!(fixture.window_place(), place);
+  fixture.card.borrow_mut().connection = Connection::Connected;
+  fixture.hotplug();
+  assert!(fixture.flip_pending(), "the picture is back");
+  assert_eq!(*fixture.frames.borrow(), frames + 1);
+  assert_eq!(fixture.window_place(), place);
+  fixture.flip(Duration::from_secs(2), 2);
+  assert_eq!(fixture.client.events.frames.len(), 1, "the frame callback");
+}
+
+#[test]
+fn output_management_modes_are_tested_before_they_are_set() {
+  let mut fixture = Fixture::new();
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  let manager = fixture.client.output_manager(compositor);
+  let sizes: Vec<_> = fixture.client.events.modes.iter().map(|m| m.1).collect();
+  assert_eq!(sizes, [(1280, 720), (1920, 1080), (1024, 768)]);
+  // A test of a mode the driver refuses fails and commits nothing.
+  fixture.card.borrow_mut().reject_width(1024);
+  let before = fixture.commit_flags();
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture.client.request_mode(compositor, &manager, 2, true);
+  fixture.step();
+  assert_eq!(fixture.client.events.configurations, ["failed"]);
+  assert_eq!(fixture.commit_flags(), before);
+  // Applying a mode waits for the pending flip, then tests and sets it.
+  assert!(fixture.flip_pending());
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture.client.request_mode(compositor, &manager, 1, false);
+  fixture.step();
+  assert_eq!(fixture.client.events.configurations, ["failed"], "waiting");
+  let tests = fixture.card.borrow().commits.len();
+  fixture.flip(Duration::from_secs(1), 1);
+  assert_eq!(
+    fixture.client.events.configurations,
+    ["failed", "succeeded"]
+  );
+  let card = fixture.card.borrow();
+  let flags: Vec<_> = card.commits[tests..].iter().map(|c| c.1).collect();
+  drop(card);
+  let test = CommitFlags::TEST_ONLY | CommitFlags::ALLOW_MODESET;
+  assert_eq!(&flags[..3], [test, test, MODESET]);
+  let compositor = fixture.backend.frontend().compositor();
+  assert_eq!(compositor.output().width, 1920);
+  assert_eq!(compositor.output_info().current_mode, Some(1));
+  assert_eq!(fixture.backend.output_size, (1920, 1080));
 }

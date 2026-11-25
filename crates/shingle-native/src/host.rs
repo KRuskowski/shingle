@@ -23,6 +23,17 @@
 //! seat device ids, probes the card again and makes a fresh modeset,
 //! resumes the frontend, resends the keyboard LEDs and draws again.
 //!
+//! Outputs follow DRM hotplug ([`DeviceMonitor`]): the display probes the
+//! card again, and when another output is lit, or none, the compositor is
+//! told ([`shingle::Compositor::set_output_info`], which renames the core
+//! output and replaces the `wl_output` global) and the frontend, renderer
+//! and input mapping get the new size. With nothing connected the
+//! compositor keeps the last output and its windows, and nothing is drawn
+//! until a display is plugged in again. wlr-output-management mode
+//! changes ([`shingle::Compositor::take_output_requests`]) pass a
+//! `TEST_ONLY` modeset first, and a config reload applies the output
+//! modes it configures.
+//!
 //! Rendering failures follow [`GpuHealth`]: a lost or hung GPU is replaced
 //! with a new renderer from the [`RendererFactory`], and a third loss
 //! within a minute, like a third page flip in a row that never completes,
@@ -37,7 +48,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use shingle::{DpmsState, InputDeviceId, InputDeviceKind};
+use shingle::{DpmsState, InputDeviceId, InputDeviceKind, OutputRequest};
 use shingle_config::InputConfig;
 use shingle_frontend::{
   Frontend,
@@ -49,10 +60,12 @@ use crate::{
   OUTPUT_SIZE, diagnostics,
   display::{Display, Fatal},
   gpu::{FrameRenderer, GpuHealth, RenderFailure, RendererFactory, Verdict},
+  hotplug::{DeviceMonitor, DrmEvent},
   input::{
     DeviceInput, InputSource, NativeEvent, OutputGeometry, SendEvents,
     Translator, device_settings, enabled_mode,
   },
+  outputs::OutputPolicy,
   session::{SeatEvent, Session},
   udev::{Added, DeviceRegistry, input_kind},
 };
@@ -155,6 +168,10 @@ pub struct Backend<S: Session, I: InputSource> {
   leds: Option<Leds>,
   /// Whether the missing-devices warning was given.
   warned_no_devices: bool,
+  /// Where DRM hotplug events come from, if anywhere.
+  monitor: Option<Box<dyn DeviceMonitor>>,
+  /// Mode changes waiting for no flip to be pending.
+  output_requests: Vec<OutputRequest>,
 }
 
 impl<S: Session, I: InputSource> Backend<S, I> {
@@ -206,7 +223,14 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       trace_flips: false,
       leds: None,
       warned_no_devices: false,
+      monitor: None,
+      output_requests: Vec::new(),
     })
+  }
+
+  /// Follows DRM hotplug events from `monitor`.
+  pub fn set_device_monitor(&mut self, monitor: Box<dyn DeviceMonitor>) {
+    self.monitor = Some(monitor);
   }
 
   /// The frontend, for queries.
@@ -243,8 +267,11 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     self.dispatch_session();
     self.dispatch_input();
     self.dispatch_display(now);
+    self.dispatch_monitor();
     self.frontend.process(&mut self.host);
     self.apply_host_requests();
+    self.apply_reloaded_config();
+    self.handle_output_requests();
     self.update_dpms();
     self.update_leds();
     self.render_if_wanted(now);
@@ -313,6 +340,8 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       fds.extend(self.input.poll_fd());
       fds.extend(self.display.poll_fd());
     }
+    // Read even while paused, so that events do not pile up.
+    fds.extend(self.monitor.as_ref().and_then(|monitor| monitor.poll_fd()));
     let mut poll_fds: Vec<PollFd<'_>> = fds
       .iter()
       .map(|fd| PollFd::new(fd, PollFlags::IN))
@@ -381,21 +410,93 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       diagnostics::log(&format!("input device {} is gone", device.0));
     }
     let resumed = self.display.resume();
-    if resumed.output_changed
-      && let Some(info) = self.display.output_info()
-    {
-      // NB-9 recreates the output globals; until then clients that bound
-      // the output keep its old name.
-      self.frontend.compositor_mut().set_output_info(info);
-    }
-    if let Some(size) = resumed.resized {
-      self.resize(size);
+    if resumed.output_changed || resumed.resized.is_some() {
+      self.describe_output();
     }
     self.active = true;
     self.frontend.set_session_active(&mut self.host, true);
     self.leds = None;
     self.host.redraw = true;
     diagnostics::log("seat enabled; resumed");
+  }
+
+  /// Tells the compositor about the lit output, if one is lit, and gives
+  /// the frontend, renderer and input mapping its size. With none lit, the
+  /// compositor keeps the last output, so windows stay where they are.
+  fn describe_output(&mut self) {
+    if let Some(info) = self.display.output_info() {
+      self.frontend.compositor_mut().set_output_info(info);
+    }
+    if let Some(size) = self.display.size()
+      && size != self.output_size
+    {
+      self.resize(size);
+    }
+    self.host.redraw = true;
+  }
+
+  /// Follows DRM hotplug: the display probes the card again, and the
+  /// compositor learns about a different output. While the seat is
+  /// disabled, events are read and dropped; the resume probes anyway.
+  fn dispatch_monitor(&mut self) {
+    let Some(monitor) = self.monitor.as_mut() else {
+      return;
+    };
+    let events = monitor.dispatch();
+    if events.contains(&DrmEvent::Removed) {
+      diagnostics::log("the DRM card was removed; nothing can be shown");
+    }
+    if !self.active
+      || !events
+        .iter()
+        .any(|event| matches!(event, DrmEvent::Hotplug(_)))
+    {
+      return;
+    }
+    let change = self.display.hotplug();
+    if change.output_changed || change.resized.is_some() {
+      self.describe_output();
+    }
+  }
+
+  /// Applies the output modes of a reloaded configuration.
+  fn apply_reloaded_config(&mut self) {
+    let Some(config) = self.frontend.take_reloaded_config() else {
+      return;
+    };
+    let change = self.display.set_policy(OutputPolicy::from_config(&config));
+    if change.output_changed || change.resized.is_some() {
+      self.describe_output();
+    }
+  }
+
+  /// Tests or makes the mode changes wlr-output-management clients asked
+  /// for, each with a `TEST_ONLY` modeset first, and answers them. A
+  /// change waits while a page flip is pending, because no modeset may be
+  /// committed then; tests do not.
+  fn handle_output_requests(&mut self) {
+    let requests = self.frontend.compositor_mut().take_output_requests();
+    self.output_requests.extend(requests);
+    while let Some(request) = self.output_requests.first().copied() {
+      if !request.test_only && self.display.flip_pending() {
+        return;
+      }
+      self.output_requests.remove(0);
+      let result = if request.test_only {
+        self.display.test_mode(request.mode)
+      } else {
+        self.display.set_mode(request.mode).map(|_| {
+          self.describe_output();
+        })
+      };
+      if let Err(error) = &result {
+        diagnostics::log(&format!("output mode {:?}: {error}", request.mode));
+      }
+      self
+        .frontend
+        .compositor_mut()
+        .finish_output_request(request.id, result.is_ok());
+    }
   }
 
   /// Follows a new mode: the frontend's output, the renderer and the

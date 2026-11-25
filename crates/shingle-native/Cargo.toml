@@ -19,6 +19,7 @@ shingle-config = { path = "../shingle-config" }
 shingle-core = { path = "../shingle-core" }
 shingle-frontend = { path = "../shingle-frontend" }
 shingle-render = { path = "../shingle-render" }
+udev = "0.9.3"
 wayland-server.workspace = true
 wgpu.workspace = true
 

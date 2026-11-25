@@ -4,14 +4,16 @@
 //! VT switching ([`session`]), libinput for input devices ([`input`]) with
 //! hotplug through libinput's udev backend ([`udev`]), atomic KMS for the
 //! display ([`kms`], [`display`]) with copy scanout ([`scanout`]) and
-//! page-flip pacing ([`pacing`]), a Vulkan renderer on the card's GPU
-//! ([`gpu`]), and the event loop in [`host`]
+//! page-flip pacing ([`pacing`]), DRM hotplug ([`hotplug`]) and the
+//! configured choice of output and mode ([`outputs`]), a Vulkan renderer
+//! on the card's GPU ([`gpu`]), and the event loop in [`host`]
 //! (docs/design/native-backend.md). The `shingle` binary
 //! (crates/shingle-bin) checks [`preflight`] when it selects this backend
 //! and then calls [`run`].
 //!
 //! Every device interaction sits behind a trait ([`session::Session`],
-//! [`input::InputSource`], [`kms::KmsDevice`]) whose real implementation
+//! [`input::InputSource`], [`kms::KmsDevice`],
+//! [`hotplug::DeviceMonitor`]) whose real implementation
 //! is only ever run on a machine whose seat Shingle may take; the unit
 //! tests use fakes.
 
@@ -21,8 +23,10 @@ mod diagnostics;
 pub mod display;
 pub mod gpu;
 pub mod host;
+pub mod hotplug;
 pub mod input;
 pub mod kms;
+pub mod outputs;
 pub mod pacing;
 pub mod scanout;
 pub mod session;
@@ -50,8 +54,10 @@ pub use session::{NoSeat, preflight};
 use crate::{
   gpu::{Card, FrameRenderer, GpuRenderer, RendererFactory},
   host::{Backend, Rendering},
+  hotplug::UdevMonitor,
   input::LibinputSource,
-  kms::{KmsDevice, drm::DrmDevice, modes::ModeChoice},
+  kms::{KmsDevice, drm::DrmDevice},
+  outputs::OutputPolicy,
   session::{
     ENABLE_TIMEOUT, LibSeatSession, Session, check_backend, wait_for_enable,
   },
@@ -72,17 +78,19 @@ pub struct Options {
   pub allow_builtin_seat: bool,
 }
 
-/// A prepared display and its card's PCI slot.
-pub type Prepared = (display::Display, Option<String>);
+/// A prepared display, its card's PCI slot and its device node.
+pub type Prepared = (display::Display, Option<String>, PathBuf);
 
 /// Opens the first card in `cards` that the seat lets Shingle open, as
 /// `open` makes a [`KmsDevice`] of its descriptor, and prepares its
-/// display ([`display::Display::prepare`]). Returns the display and the
-/// card's PCI slot, for the renderer. Cards that cannot be opened are
-/// skipped; if none can, the error names each one tried.
+/// display ([`display::Display::prepare`]) with the configured modes of
+/// `policy`. Returns the display, the card's PCI slot, for the renderer,
+/// and its device node, for the hotplug monitor. Cards that cannot be
+/// opened are skipped; if none can, the error names each one tried.
 pub fn open_display(
   session: &mut dyn Session,
   cards: &[Card],
+  policy: &OutputPolicy,
   open: &mut dyn FnMut(OwnedFd) -> io::Result<Box<dyn KmsDevice>>,
 ) -> Result<Prepared, StartError> {
   let mut tried = Vec::new();
@@ -95,8 +103,8 @@ pub fn open_display(
       }
     };
     diagnostics::log(&format!("using {}", card.devnode.display()));
-    let display = display::Display::prepare(device, ModeChoice::Auto, None)?;
-    return Ok((display, card.pci_slot.clone()));
+    let display = display::Display::prepare(device, policy.clone())?;
+    return Ok((display, card.pci_slot.clone(), card.devnode.clone()));
   }
   Err(StartError::NoDrmDevice(tried))
 }
@@ -113,11 +121,11 @@ pub fn startup<T>(
     Option<String>,
   ) -> Result<Rendering, StartError>,
   frontend: impl FnOnce() -> Result<T, Box<dyn Error>>,
-) -> Result<(display::Display, Rendering, T), Box<dyn Error>> {
-  let (display, pci) = display()?;
+) -> Result<(display::Display, Rendering, T, PathBuf), Box<dyn Error>> {
+  let (display, pci, devnode) = display()?;
   let rendering = rendering(display.size().unwrap_or(OUTPUT_SIZE), pci)?;
   let frontend = frontend()?;
-  Ok((display, rendering, frontend))
+  Ok((display, rendering, frontend, devnode))
 }
 
 /// The real renderer on the card's GPU, and the factory that recreates it
@@ -180,9 +188,10 @@ pub fn run(
   let forced = std::env::var_os("SHINGLE_DRM_DEVICE");
   let cards = gpu::card_order(&cards, forced.as_deref());
   let input_config = config.input.clone();
-  let (display, rendering, (frontend, input)) = startup(
+  let policy = OutputPolicy::from_config(&config);
+  let (display, rendering, (frontend, input), devnode) = startup(
     || {
-      open_display(&mut *session.borrow_mut(), &cards, &mut |fd| {
+      open_display(&mut *session.borrow_mut(), &cards, &policy, &mut |fd| {
         Ok(Box::new(DrmDevice::new(fd)?))
       })
     },
@@ -198,6 +207,15 @@ pub fn run(
   backend.set_trace_flips(
     std::env::var_os("SHINGLE_TRACE_FLIPS").is_some_and(|value| value == "1"),
   );
+  // Without a monitor, outputs plugged in later are only seen after a VT
+  // switch, as in NB-7; that is worth a warning, not a refusal.
+  match UdevMonitor::new(&devnode) {
+    Ok(monitor) => backend.set_device_monitor(Box::new(monitor)),
+    Err(error) => diagnostics::log(&format!(
+      "no DRM hotplug monitor ({error}); outputs are probed again only \
+       after a VT switch"
+    )),
+  }
   backend.run()
 }
 
@@ -312,6 +330,7 @@ mod tests {
   use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
   use super::{OUTPUT_SIZE, StartError, open_display, startup};
+  use crate::outputs::OutputPolicy;
   use crate::{
     gpu::Card,
     kms::{CommitFlags, KmsDevice, fake::FakeKms},
@@ -334,12 +353,15 @@ mod tests {
     };
     let cards = [card(1, "0000:01:00.0"), card(0, "0000:00:02.0")];
     let fake = FakeKms::single_output().shared();
-    let (display, pci) = open_display(&mut session, &cards, &mut |_fd| {
-      Ok(Box::new(Rc::clone(&fake)) as Box<dyn KmsDevice>)
-    })
-    .expect("the second card works");
+    let policy = OutputPolicy::default();
+    let (display, pci, devnode) =
+      open_display(&mut session, &cards, &policy, &mut |_fd| {
+        Ok(Box::new(Rc::clone(&fake)) as Box<dyn KmsDevice>)
+      })
+      .expect("the second card works");
     assert_eq!(session.opened, ["/dev/dri/card1", "/dev/dri/card0"]);
     assert_eq!(pci.as_deref(), Some("0000:00:02.0"));
+    assert_eq!(devnode, PathBuf::from("/dev/dri/card0"));
     assert_eq!(display.size(), Some((1280, 720)));
   }
 
@@ -350,17 +372,22 @@ mod tests {
       ..FakeSession::default()
     };
     let cards = [card(1, "a"), card(0, "b")];
-    let Err(error) = open_display(&mut session, &cards, &mut |_fd| {
-      Ok(Box::new(FakeKms::single_output()) as Box<dyn KmsDevice>)
-    }) else {
+    let Err(error) = open_display(
+      &mut session,
+      &cards,
+      &OutputPolicy::default(),
+      &mut |_fd| Ok(Box::new(FakeKms::single_output()) as Box<dyn KmsDevice>),
+    ) else {
       panic!("no card opens");
     };
     let message = error.to_string();
     assert!(message.starts_with("no DRM device: tried /dev/dri/card1 ("));
     assert!(message.contains(", /dev/dri/card0 ("), "{message}");
-    let Err(error) = open_display(&mut session, &[], &mut |_fd| {
-      Ok(Box::new(FakeKms::single_output()) as Box<dyn KmsDevice>)
-    }) else {
+    let Err(error) =
+      open_display(&mut session, &[], &OutputPolicy::default(), &mut |_fd| {
+        Ok(Box::new(FakeKms::single_output()) as Box<dyn KmsDevice>)
+      })
+    else {
       panic!("there is no card");
     };
     assert!(
@@ -372,16 +399,13 @@ mod tests {
   fn the_test_commit_passes_before_the_socket_exists() {
     let fake = FakeKms::single_output().shared();
     let order = Rc::new(RefCell::new(VecDeque::new()));
-    let (display, _, _) = startup(
+    let (display, _, _, _) = startup(
       || {
         let device = Box::new(Rc::clone(&fake));
-        let display = crate::display::Display::prepare(
-          device,
-          crate::kms::modes::ModeChoice::Auto,
-          None,
-        )?;
+        let display =
+          crate::display::Display::prepare(device, OutputPolicy::default())?;
         order.borrow_mut().push_back("display");
-        Ok((display, None))
+        Ok((display, None, PathBuf::from("/dev/dri/card0")))
       },
       |size, _| {
         assert_eq!(size, (1280, 720));
@@ -429,12 +453,9 @@ mod tests {
     let result = startup(
       || {
         let device = Box::new(Rc::clone(&fake));
-        let display = crate::display::Display::prepare(
-          device,
-          crate::kms::modes::ModeChoice::Auto,
-          None,
-        )?;
-        Ok((display, None))
+        let display =
+          crate::display::Display::prepare(device, OutputPolicy::default())?;
+        Ok((display, None, PathBuf::from("/dev/dri/card0")))
       },
       |_, _| -> Result<crate::host::Rendering, StartError> {
         panic!("no renderer without a display")
@@ -449,7 +470,7 @@ mod tests {
       "{error}"
     );
     let renderer = startup(
-      || Ok((no_output_display(), None)),
+      || Ok((no_output_display(), None, PathBuf::from("/dev/dri/card0"))),
       |size, _| {
         assert_eq!(size, OUTPUT_SIZE, "no output renders at the default size");
         Err(StartError::NoAdapter("none".into()))
@@ -465,11 +486,7 @@ mod tests {
   fn no_output_display() -> crate::display::Display {
     let mut fake = FakeKms::single_output();
     fake.disconnect();
-    crate::display::Display::prepare(
-      Box::new(fake),
-      crate::kms::modes::ModeChoice::Auto,
-      None,
-    )
-    .expect("no output is no error")
+    crate::display::Display::prepare(Box::new(fake), OutputPolicy::default())
+      .expect("no output is no error")
   }
 }
