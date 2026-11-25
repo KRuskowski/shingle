@@ -1,7 +1,10 @@
 //! A minimal in-process Wayland client for native backend tests: it maps
 //! `xdg_toplevel`s with `wl_shm` buffers on a compositor running on the
 //! test thread and records the keyboard, pointer and touch events it gets,
-//! with their timestamps. Based on shingle-frontend's test client.
+//! with their timestamps, its frame callbacks and `wp_presentation`
+//! feedback, and the output's name. It can also turn the output off and
+//! on with wlr-output-power-management. Based on shingle-frontend's test
+//! client.
 
 use std::{os::unix::net::UnixStream, path::Path};
 
@@ -9,13 +12,30 @@ use shingle::Compositor;
 use wayland_client::{
   Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
   protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_pointer,
+    wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer,
     wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface, wl_touch,
   },
 };
-use wayland_protocols::xdg::shell::client::{
-  xdg_surface, xdg_toplevel, xdg_wm_base,
+use wayland_protocols::{
+  wp::presentation_time::client::{wp_presentation, wp_presentation_feedback},
+  xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
 };
+use wayland_protocols_wlr::output_power_management::v1::client::{
+  zwlr_output_power_manager_v1, zwlr_output_power_v1,
+};
+
+/// `wp_presentation_feedback.presented`, with the halves joined.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Presented {
+  /// Seconds and nanoseconds of the presentation time.
+  pub(crate) time: (u64, u32),
+  pub(crate) refresh: u32,
+  pub(crate) seq: u64,
+  pub(crate) flags: u32,
+}
+
+/// User data that tells frame callbacks from sync callbacks.
+pub(crate) struct FrameCallback;
 
 /// What the client has received.
 #[derive(Default)]
@@ -26,6 +46,16 @@ pub(crate) struct Events {
   synced: bool,
   /// Seat input, in order.
   pub(crate) input: Vec<Input>,
+  /// The times of frame callbacks that fired, in milliseconds.
+  pub(crate) frames: Vec<u32>,
+  /// Presentation feedback received.
+  pub(crate) presented: Vec<Presented>,
+  /// Feedback discarded.
+  pub(crate) discarded: usize,
+  /// The name `wl_output` reported.
+  pub(crate) output_name: Option<String>,
+  /// The modes wlr-output-power reported.
+  pub(crate) power_modes: Vec<u32>,
 }
 
 /// One seat event the client received.
@@ -53,7 +83,9 @@ pub(crate) enum Input {
 
 /// A mapped toplevel; dropping it leaves the window in place.
 pub(crate) struct Toplevel {
-  _surface: wl_surface::WlSurface,
+  pub(crate) surface: wl_surface::WlSurface,
+  /// The size of its buffer.
+  pub(crate) size: (i32, i32),
   _xdg_surface: xdg_surface::XdgSurface,
   _toplevel: xdg_toplevel::XdgToplevel,
 }
@@ -157,7 +189,8 @@ impl TestClient {
       .unwrap_or((200, 150));
     self.attach_buffer(compositor, &surface, width, height);
     Toplevel {
-      _surface: surface,
+      surface,
+      size: (width, height),
       _xdg_surface: xdg_surface,
       _toplevel: toplevel,
     }
@@ -170,6 +203,48 @@ impl TestClient {
     seat.get_pointer(&self.handle, ());
     seat.get_touch(&self.handle, ());
     self.seat = Some(seat);
+    self.roundtrip(compositor);
+  }
+
+  /// Binds `wl_output`, whose name event arrives in the round trip.
+  pub(crate) fn output(
+    &mut self,
+    compositor: &mut Compositor,
+  ) -> wl_output::WlOutput {
+    let output = self.bind::<wl_output::WlOutput>(4);
+    self.roundtrip(compositor);
+    output
+  }
+
+  /// Asks for a frame callback and presentation feedback on `surface`,
+  /// then commits a new `width` by `height` buffer.
+  pub(crate) fn frame(
+    &mut self,
+    compositor: &mut Compositor,
+    surface: &wl_surface::WlSurface,
+    size: (i32, i32),
+  ) {
+    let presentation = self.bind::<wp_presentation::WpPresentation>(1);
+    surface.frame(&self.handle, FrameCallback);
+    presentation.feedback(surface, &self.handle, ());
+    self.attach_buffer(compositor, surface, size.0, size.1);
+  }
+
+  /// Sets the output's power mode through wlr-output-power-management.
+  pub(crate) fn set_power(
+    &mut self,
+    compositor: &mut Compositor,
+    output: &wl_output::WlOutput,
+    on: bool,
+  ) {
+    let manager =
+      self.bind::<zwlr_output_power_manager_v1::ZwlrOutputPowerManagerV1>(1);
+    let power = manager.get_output_power(output, &self.handle, ());
+    power.set_mode(if on {
+      zwlr_output_power_v1::Mode::On
+    } else {
+      zwlr_output_power_v1::Mode::Off
+    });
     self.roundtrip(compositor);
   }
 
@@ -237,6 +312,87 @@ impl Dispatch<wl_callback::WlCallback, ()> for Events {
     _: &QueueHandle<Self>,
   ) {
     events.synced = true;
+  }
+}
+
+impl Dispatch<wl_callback::WlCallback, FrameCallback> for Events {
+  fn event(
+    events: &mut Self,
+    _: &wl_callback::WlCallback,
+    event: wl_callback::Event,
+    _: &FrameCallback,
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wl_callback::Event::Done { callback_data } = event {
+      events.frames.push(callback_data);
+    }
+  }
+}
+
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &wp_presentation_feedback::WpPresentationFeedback,
+    event: wp_presentation_feedback::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      wp_presentation_feedback::Event::Presented {
+        tv_sec_hi,
+        tv_sec_lo,
+        tv_nsec,
+        refresh,
+        seq_hi,
+        seq_lo,
+        flags,
+      } => events.presented.push(Presented {
+        time: ((u64::from(tv_sec_hi) << 32) | u64::from(tv_sec_lo), tv_nsec),
+        refresh,
+        seq: (u64::from(seq_hi) << 32) | u64::from(seq_lo),
+        flags: match flags {
+          WEnum::Value(flags) => flags.bits(),
+          WEnum::Unknown(bits) => bits,
+        },
+      }),
+      wp_presentation_feedback::Event::Discarded => events.discarded += 1,
+      _ => {}
+    }
+  }
+}
+
+impl Dispatch<wl_output::WlOutput, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &wl_output::WlOutput,
+    event: wl_output::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wl_output::Event::Name { name } = event {
+      events.output_name = Some(name);
+    }
+  }
+}
+
+impl Dispatch<zwlr_output_power_v1::ZwlrOutputPowerV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &zwlr_output_power_v1::ZwlrOutputPowerV1,
+    event: zwlr_output_power_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let zwlr_output_power_v1::Event::Mode {
+      mode: WEnum::Value(mode),
+    } = event
+    {
+      events.power_modes.push(mode as u32);
+    }
   }
 }
 
@@ -395,4 +551,6 @@ ignore_events!(
   wl_shm_pool::WlShmPool,
   wl_buffer::WlBuffer,
   wl_seat::WlSeat,
+  wp_presentation::WpPresentation,
+  zwlr_output_power_manager_v1::ZwlrOutputPowerManagerV1,
 );

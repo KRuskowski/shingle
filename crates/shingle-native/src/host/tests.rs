@@ -1,7 +1,9 @@
 //! The native host driven through a fake seat and fake libinput, with a
 //! real frontend, compositor and Wayland client on a private socket.
 
-use std::{cell::RefCell, path::PathBuf, rc::Rc, time::Duration};
+use std::{
+  cell::RefCell, collections::VecDeque, path::PathBuf, rc::Rc, time::Duration,
+};
 
 use shingle::{Compositor, Config, InputDeviceId, InputDeviceKind};
 use shingle_config::ShingleConfig;
@@ -12,15 +14,18 @@ use shingle_frontend::{
 };
 use shingle_session::SessionStore;
 
-use super::Backend;
+use super::{Backend, Rendering};
 use crate::{
+  display::Display,
+  gpu::{RenderFailure, tests::FakeRenderer},
   input::{
     Capabilities, DeviceDescription, DeviceInput, DeviceKey, NativeEvent,
     ScrollAxis, ScrollSource, SendEvents, Setting,
     tests::{FakeInput, POINTER, device, key},
   },
+  kms::{CommitFlags, Connection, fake::FakeKms, modes::ModeChoice},
   session::{SeatEvent, tests::FakeSession},
-  test_client::{Input, TestClient, Toplevel},
+  test_client::{Input, Presented, TestClient, Toplevel},
   tests::{base_path, configure_request, ipc_request, test_config},
 };
 
@@ -52,9 +57,45 @@ const TOUCHSCREEN: Capabilities = Capabilities {
 struct Fixture {
   backend: Backend<FakeSession, FakeInput>,
   session: Rc<RefCell<FakeSession>>,
+  /// The fake card behind the display.
+  card: Rc<RefCell<FakeKms>>,
+  /// Failures the renderer returns, one per frame, before drawing again.
+  failures: Rc<RefCell<VecDeque<RenderFailure>>>,
+  /// How many frames the renderers drew.
+  frames: Rc<RefCell<u32>>,
+  /// How many renderers the factory made after the first.
+  recreated: Rc<RefCell<u32>>,
   client: TestClient,
-  _toplevel: Toplevel,
+  toplevel: Toplevel,
   base: PathBuf,
+}
+
+/// A rendering setup with fake renderers that share `failures` and
+/// `frames`, counting recreations in `recreated`.
+pub(crate) fn fake_rendering(
+  size: (u32, u32),
+  failures: &Rc<RefCell<VecDeque<RenderFailure>>>,
+  frames: &Rc<RefCell<u32>>,
+  recreated: &Rc<RefCell<u32>>,
+) -> Rendering {
+  let renderer = FakeRenderer {
+    size,
+    failures: Rc::clone(failures),
+    frames: Rc::clone(frames),
+  };
+  let (failures, frames, recreated) =
+    (Rc::clone(failures), Rc::clone(frames), Rc::clone(recreated));
+  Rendering {
+    renderer: Box::new(renderer),
+    factory: Box::new(move |size| {
+      *recreated.borrow_mut() += 1;
+      Ok(Box::new(FakeRenderer {
+        size,
+        failures: Rc::clone(&failures),
+        frames: Rc::clone(&frames),
+      }))
+    }),
+  }
 }
 
 impl Fixture {
@@ -63,6 +104,10 @@ impl Fixture {
   }
 
   fn with_config(config: ShingleConfig) -> Self {
+    Self::with_card(config, FakeKms::single_output())
+  }
+
+  fn with_card(config: ShingleConfig, card: FakeKms) -> Self {
     let base = base_path();
     let mut compositor =
       Compositor::with_socket_path(Config::from(config.clone()), &base)
@@ -80,13 +125,22 @@ impl Fixture {
     )
     .expect("the frontend starts");
     let session = Rc::new(RefCell::new(FakeSession::default()));
+    let card = card.shared();
+    let display =
+      Display::prepare(Box::new(Rc::clone(&card)), ModeChoice::Auto, None)
+        .expect("the display passes its test");
+    let failures = Rc::new(RefCell::new(VecDeque::new()));
+    let frames = Rc::new(RefCell::new(0));
+    let recreated = Rc::new(RefCell::new(0));
+    let size = display.size().unwrap_or(crate::OUTPUT_SIZE);
+    let rendering = fake_rendering(size, &failures, &frames, &recreated);
     let mut backend = Backend::new(
       frontend,
       Rc::clone(&session),
       FakeInput::default(),
       config.input,
-      (1280, 720),
-      None,
+      display,
+      rendering,
     )
     .expect("the backend starts");
     let compositor = backend.frontend_mut().compositor_mut();
@@ -96,8 +150,12 @@ impl Fixture {
     let mut fixture = Self {
       backend,
       session,
+      card,
+      failures,
+      frames,
+      recreated,
       client,
-      _toplevel: toplevel,
+      toplevel,
       base,
     };
     fixture.step();
@@ -177,7 +235,50 @@ impl Fixture {
   fn send_events(&self) -> &[(DeviceKey, SendEvents)] {
     &self.backend.input.send_events
   }
+
+  /// Whether a flip waits for its event.
+  fn flip_pending(&self) -> bool {
+    self.card.borrow().flip_pending
+  }
+
+  /// Completes the pending page flip at `time` and runs a turn.
+  fn flip(&mut self, time: Duration, sequence: u32) {
+    self.card.borrow_mut().complete_flip(time, sequence);
+    self.step();
+  }
+
+  /// The client asks for a frame callback and feedback and commits a new
+  /// buffer; then a turn runs.
+  fn client_frame(&mut self) {
+    let surface = self.toplevel.surface.clone();
+    let size = self.toplevel.size;
+    let compositor = self.backend.frontend_mut().compositor_mut();
+    self.client.frame(compositor, &surface, size);
+    self.step();
+  }
+
+  /// The flags of every accepted commit that was not a test.
+  fn commit_flags(&self) -> Vec<CommitFlags> {
+    let card = self.card.borrow();
+    card
+      .real_commits()
+      .into_iter()
+      .map(|(_, flags)| flags)
+      .collect()
+  }
+
+  /// The CRTC's `ACTIVE` as the card has it now.
+  fn crtc_active(&self) -> u64 {
+    let card = self.card.borrow();
+    card.value(card.crtc_id.0, "ACTIVE")
+  }
 }
+
+const FLIP: CommitFlags =
+  CommitFlags(CommitFlags::NONBLOCK.0 | CommitFlags::PAGE_FLIP_EVENT.0);
+const MODESET: CommitFlags = CommitFlags::ALLOW_MODESET;
+/// `wp_presentation_feedback.kind` `vsync | hw_clock | hw_completion`.
+const FLIP_FEEDBACK: u32 = 0x1 | 0x2 | 0x4;
 
 fn keys(input: &[Input]) -> Vec<(u32, bool)> {
   input
@@ -620,4 +721,252 @@ fn sigterm_saves_the_session_and_closes_the_seat() {
     1,
     "the backend let go of the seat"
   );
+}
+
+#[test]
+fn the_first_frame_is_drawn_after_a_tested_modeset() {
+  let fixture = Fixture::new();
+  let card = fixture.card.borrow();
+  let flags: Vec<_> = card.commits.iter().map(|(_, flags, _)| *flags).collect();
+  let test = CommitFlags::TEST_ONLY | CommitFlags::ALLOW_MODESET;
+  // prepare's test, start's test and modeset, then the window's frame.
+  assert_eq!(flags, vec![test, test, MODESET, FLIP]);
+  drop(card);
+  assert_eq!(*fixture.frames.borrow(), 1);
+  assert!(fixture.flip_pending());
+}
+
+#[test]
+fn clients_see_the_connector_as_their_output() {
+  let mut fixture = Fixture::new();
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture.client.output(compositor);
+  assert_eq!(
+    fixture.client.events.output_name.as_deref(),
+    Some("HDMI-A-1")
+  );
+  let info = fixture.backend.frontend().compositor().output_info();
+  assert_eq!(info.refresh_mhz, 60_000);
+  assert_eq!(info.physical_size_mm, (600, 340));
+}
+
+#[test]
+fn frame_callbacks_and_presentation_carry_the_page_flip_time() {
+  let mut fixture = Fixture::new();
+  fixture.flip(Duration::from_secs(1), 1);
+  fixture.client_frame();
+  assert!(fixture.flip_pending(), "the commit was drawn and flipped");
+  assert!(
+    fixture.client.events.frames.is_empty(),
+    "no frame callback before the flip completes"
+  );
+  assert!(fixture.client.events.presented.is_empty());
+  fixture.flip(Duration::new(1234, 567_891_000), 42);
+  assert_eq!(fixture.client.events.frames, [1_234_567]);
+  assert_eq!(
+    fixture.client.events.presented,
+    [Presented {
+      time: (1234, 567_891_000),
+      refresh: 16_666_666,
+      seq: 42,
+      flags: FLIP_FEEDBACK,
+    }]
+  );
+}
+
+#[test]
+fn frames_wait_for_the_previous_flip() {
+  let mut fixture = Fixture::new();
+  fixture.flip(Duration::from_secs(1), 1);
+  fixture.client_frame();
+  let drawn = *fixture.frames.borrow();
+  let flips = fixture.commit_flags().len();
+  // The client commits again while the flip is pending.
+  fixture.client_frame();
+  fixture.step();
+  assert_eq!(*fixture.frames.borrow(), drawn, "nothing drawn meanwhile");
+  assert_eq!(fixture.commit_flags().len(), flips, "nothing committed");
+  assert!(fixture.client.events.frames.is_empty());
+  // Both callbacks fire with the flip, as the compositor sends every
+  // pending callback of a visible surface when a frame is shown.
+  fixture.flip(Duration::from_secs(2), 2);
+  assert_eq!(fixture.client.events.frames, [2_000, 2_000]);
+  assert_eq!(
+    *fixture.frames.borrow(),
+    drawn + 1,
+    "the next frame follows"
+  );
+  assert!(fixture.flip_pending());
+  fixture.flip(Duration::from_secs(3), 3);
+  assert_eq!(fixture.client.events.frames.len(), 2, "none was asked for");
+  assert_eq!(fixture.client.events.presented.len(), 2);
+}
+
+#[test]
+fn output_power_management_turns_the_crtc_off_and_on() {
+  let mut fixture = Fixture::new();
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  let output = fixture.client.output(compositor);
+  // The first frame's flip is still pending, so the change waits for it.
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture.client.set_power(compositor, &output, false);
+  fixture.step();
+  assert_eq!(fixture.crtc_active(), 1, "not while a flip is pending");
+  fixture.flip(Duration::from_secs(1), 1);
+  assert_eq!(fixture.crtc_active(), 0);
+  assert!(!fixture.backend.display().dpms_on());
+  assert_eq!(fixture.client.events.power_modes.last(), Some(&0));
+  let drawn = *fixture.frames.borrow();
+  fixture.client_frame();
+  assert_eq!(
+    *fixture.frames.borrow(),
+    drawn,
+    "nothing is drawn while off"
+  );
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture.client.set_power(compositor, &output, true);
+  fixture.step();
+  assert_eq!(fixture.crtc_active(), 1);
+  assert!(fixture.backend.display().dpms_on());
+  let flags = fixture.commit_flags();
+  assert_eq!(
+    flags[flags.len() - 2..],
+    [MODESET, FLIP],
+    "on, then a frame"
+  );
+  assert_eq!(fixture.client.events.power_modes.last(), Some(&1));
+}
+
+#[test]
+fn a_vt_switch_with_a_flip_pending_resumes_with_a_fresh_modeset() {
+  let mut fixture = Fixture::new();
+  assert!(fixture.flip_pending());
+  fixture.seat(vec![SeatEvent::Disable]);
+  assert_eq!(
+    fixture.backend.display().state(),
+    crate::pacing::State::Paused
+  );
+  // The flip completes while another session has the display; it is
+  // stale and presents nothing.
+  fixture.flip(Duration::from_secs(1), 1);
+  let before = fixture.card.borrow().commits.len();
+  fixture.client_frame();
+  assert_eq!(
+    fixture.card.borrow().commits.len(),
+    before,
+    "nothing while away"
+  );
+  assert!(fixture.client.events.presented.is_empty());
+  fixture.seat(vec![SeatEvent::Enable]);
+  let card = fixture.card.borrow();
+  let flags: Vec<_> = card.commits[before..]
+    .iter()
+    .map(|(_, flags, _)| *flags)
+    .collect();
+  drop(card);
+  assert_eq!(
+    flags,
+    vec![CommitFlags::TEST_ONLY | MODESET, MODESET, FLIP],
+    "a tested modeset, then the first frame"
+  );
+  fixture.flip(Duration::from_secs(2), 2);
+  assert_eq!(fixture.client.events.frames, [2_000]);
+}
+
+#[test]
+fn a_lost_gpu_is_replaced_and_frames_continue() {
+  let mut fixture = Fixture::new();
+  fixture.flip(Duration::from_secs(1), 1);
+  fixture
+    .failures
+    .borrow_mut()
+    .push_back(RenderFailure::Lost("test".into()));
+  fixture.client_frame();
+  assert_eq!(*fixture.recreated.borrow(), 1, "a new GPU context");
+  assert!(!fixture.flip_pending(), "the failed frame was not flipped");
+  fixture.step();
+  assert!(fixture.flip_pending(), "the new renderer draws the frame");
+  fixture.flip(Duration::from_secs(2), 2);
+  assert_eq!(fixture.client.events.frames, [2_000]);
+  assert!(fixture.backend.fatal().is_none());
+}
+
+#[test]
+fn a_gpu_that_keeps_timing_out_is_replaced() {
+  let mut fixture = Fixture::new();
+  fixture.flip(Duration::from_secs(1), 1);
+  fixture
+    .failures
+    .borrow_mut()
+    .extend([RenderFailure::Timeout, RenderFailure::Timeout]);
+  fixture.client_frame();
+  fixture.step();
+  assert_eq!(
+    *fixture.recreated.borrow(),
+    0,
+    "two slow frames are retried"
+  );
+  fixture.step();
+  assert!(fixture.flip_pending(), "the third attempt drew");
+  fixture.flip(Duration::from_secs(2), 2);
+  fixture
+    .failures
+    .borrow_mut()
+    .extend(std::iter::repeat_n(RenderFailure::Timeout, 3));
+  fixture.client_frame();
+  fixture.step();
+  fixture.step();
+  assert_eq!(
+    *fixture.recreated.borrow(),
+    1,
+    "three in a row count as hung"
+  );
+}
+
+#[test]
+fn a_third_gpu_loss_within_a_minute_saves_and_exits() {
+  let mut fixture = Fixture::new();
+  fixture.flip(Duration::from_secs(1), 1);
+  fixture
+    .failures
+    .borrow_mut()
+    .extend([0, 1, 2].map(|n| RenderFailure::Lost(format!("loss {n}"))));
+  fixture.client_frame();
+  let mut running = true;
+  for _ in 0..3 {
+    running = fixture.step();
+  }
+  assert!(!running, "the loop ends");
+  assert_eq!(*fixture.recreated.borrow(), 2);
+  let fatal = fixture.backend.fatal().expect("a fatal failure").clone();
+  assert_eq!(fatal.0, "the GPU failed 3 times within 60 s");
+  let Fixture { backend, base, .. } = fixture;
+  backend.finish();
+  assert!(base.with_extension("session.json").exists(), "saved");
+}
+
+#[test]
+fn no_connected_output_runs_clients_without_drawing() {
+  let mut card = FakeKms::single_output();
+  card.disconnect();
+  let mut fixture = Fixture::with_card(test_config(), card);
+  fixture.client_frame();
+  assert!(
+    fixture.card.borrow().commits.is_empty(),
+    "nothing is committed"
+  );
+  assert_eq!(*fixture.frames.borrow(), 0);
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture.client.output(compositor);
+  assert_eq!(
+    fixture.client.events.output_name.as_deref(),
+    Some("HEADLESS-1")
+  );
+  // A monitor plugged in on another VT is lit on the way back.
+  fixture.seat(vec![SeatEvent::Disable]);
+  fixture.card.borrow_mut().connection = Connection::Connected;
+  fixture.seat(vec![SeatEvent::Enable]);
+  assert_eq!(fixture.commit_flags(), vec![MODESET, FLIP]);
+  let info = fixture.backend.frontend().compositor().output_info();
+  assert_eq!(info.name, "HDMI-A-1");
 }

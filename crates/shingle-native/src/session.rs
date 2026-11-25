@@ -391,6 +391,8 @@ pub(crate) mod tests {
     pub(crate) refuse_switch: bool,
     pub(crate) opened: Vec<String>,
     pub(crate) closed: usize,
+    /// Paths `open_device` refuses with `EACCES`.
+    pub(crate) refuse_open: Vec<String>,
   }
 
   impl Session for FakeSession {
@@ -399,7 +401,11 @@ pub(crate) mod tests {
     }
 
     fn open_device(&mut self, path: &Path) -> io::Result<OwnedFd> {
-      self.opened.push(path.display().to_string());
+      let path = path.display().to_string();
+      self.opened.push(path.clone());
+      if self.refuse_open.contains(&path) {
+        return Err(io::ErrorKind::PermissionDenied.into());
+      }
       Ok(std::fs::File::open("/dev/null")?.into())
     }
 

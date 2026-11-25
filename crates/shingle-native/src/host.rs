@@ -1,19 +1,32 @@
 //! The native host: the event loop that runs [`Frontend`] on a seat.
 //!
 //! [`Backend`] owns the frontend, the [`Session`], the [`InputSource`] and
-//! the [`DeviceRegistry`]. Each [`Backend::step`] dispatches the seat,
-//! feeds libinput's events to the frontend with their timestamps, runs the
-//! frontend's turn, carries out what the frontend asked of its
-//! [`NativeHost`] and draws a frame if one is due. [`Backend::run`] repeats
-//! that, sleeping in `poll(2)` on the seat, libinput and compositor
+//! the [`DeviceRegistry`], and the [`Display`] with its [`FrameRenderer`].
+//! Each [`Backend::step`] dispatches the seat, feeds libinput's events to
+//! the frontend with their timestamps, reports completed page flips to the
+//! compositor, runs the frontend's turn, carries out what the frontend
+//! asked of its [`NativeHost`], follows DPMS and draws a frame if one is
+//! wanted and the display is ready for it. [`Backend::run`] repeats that,
+//! sleeping in `poll(2)` on the seat, libinput, DRM and compositor
 //! descriptors in between, until the frontend asks to exit, and then saves
 //! the session and closes every device.
 //!
+//! Frames are paced by page flips: a frame is drawn only when no flip is
+//! pending, and frame callbacks and `wp_presentation` feedback are sent
+//! with the flip's timestamp when it completes
+//! ([`shingle::Compositor::frame_presented`]).
+//!
 //! A seat pause ([`SeatEvent::Disable`], for example a VT switch) follows
-//! docs/design/native-backend.md, "Pause": stop drawing, suspend libinput,
-//! pause the frontend (which releases held input) and acknowledge. A
-//! resume reopens the devices, which keep their seat device ids, resumes
-//! the frontend, resends the keyboard LEDs and draws again.
+//! docs/design/native-backend.md, "Pause": stop committing and drop the
+//! pending flip, suspend libinput, pause the frontend (which releases held
+//! input) and acknowledge. A resume reopens the devices, which keep their
+//! seat device ids, probes the card again and makes a fresh modeset,
+//! resumes the frontend, resends the keyboard LEDs and draws again.
+//!
+//! Rendering failures follow [`GpuHealth`]: a lost or hung GPU is replaced
+//! with a new renderer from the [`RendererFactory`], and a third loss
+//! within a minute, like a third page flip in a row that never completes,
+//! ends the loop with [`Fatal`] after the session was saved.
 
 use std::{
   cell::RefCell,
@@ -24,17 +37,18 @@ use std::{
   time::{Duration, Instant},
 };
 
-use shingle::{InputDeviceId, InputDeviceKind};
+use shingle::{DpmsState, InputDeviceId, InputDeviceKind};
 use shingle_config::InputConfig;
 use shingle_frontend::{
   Frontend,
   host::{Host, InputEvent},
   keyboard::Leds,
-  render_target::RenderTarget,
 };
 
 use crate::{
-  diagnostics,
+  OUTPUT_SIZE, diagnostics,
+  display::{Display, Fatal},
+  gpu::{FrameRenderer, GpuHealth, RenderFailure, RendererFactory, Verdict},
   input::{
     DeviceInput, InputSource, NativeEvent, OutputGeometry, SendEvents,
     Translator, device_settings, enabled_mode,
@@ -104,6 +118,15 @@ impl<S: Session> Host for NativeHost<S> {
   }
 }
 
+/// What the backend draws with: a renderer, and how to make a new one
+/// after the GPU was lost.
+pub struct Rendering {
+  /// The renderer for the output's current size.
+  pub renderer: Box<dyn FrameRenderer>,
+  /// Makes a new renderer of a size.
+  pub factory: RendererFactory,
+}
+
 /// The native backend's state and event loop.
 pub struct Backend<S: Session, I: InputSource> {
   frontend: Frontend,
@@ -117,9 +140,15 @@ pub struct Backend<S: Session, I: InputSource> {
   output_size: (u32, u32),
   /// Whether the seat is enabled.
   active: bool,
-  renderer: Option<Box<dyn RenderTarget>>,
-  frame_interval: Duration,
-  next_frame: Instant,
+  display: Display,
+  /// The renderer, or none after creating one failed.
+  renderer: Option<Box<dyn FrameRenderer>>,
+  factory: RendererFactory,
+  health: GpuHealth,
+  /// The DPMS state the display was last asked for.
+  dpms: DpmsState,
+  /// Why the loop ended, if it had to.
+  fatal: Option<Fatal>,
   /// The LEDs last sent to the keyboards, or `None` to send them again.
   leds: Option<Leds>,
   /// Whether the missing-devices warning was given.
@@ -127,30 +156,36 @@ pub struct Backend<S: Session, I: InputSource> {
 }
 
 impl<S: Session, I: InputSource> Backend<S, I> {
-  /// Sets up the frontend for the native backend on an enabled seat: the
-  /// compositor draws its own cursor, libinput applies natural
-  /// scrolling, the output is `output_size` pixels and the pointer starts
-  /// in its middle. With no `renderer`, frames are reported without
-  /// drawing.
+  /// Sets up the frontend for the native backend on an enabled seat and
+  /// makes the display's first modeset: the compositor describes the lit
+  /// output (before any client could bind it) and draws its own cursor,
+  /// libinput applies natural scrolling, the output has the mode's size
+  /// ([`OUTPUT_SIZE`] while none is lit) and the pointer starts in its
+  /// middle.
   pub fn new(
     mut frontend: Frontend,
     session: Rc<RefCell<S>>,
     input: I,
     config: InputConfig,
-    output_size: (u32, u32),
-    renderer: Option<Box<dyn RenderTarget>>,
-  ) -> Result<Self, shingle::Error> {
+    mut display: Display,
+    rendering: Rendering,
+  ) -> Result<Self, Box<dyn Error>> {
+    let output_size = display.size().unwrap_or(OUTPUT_SIZE);
     let compositor = frontend.compositor_mut();
+    if let Some(info) = display.output_info() {
+      compositor.set_output_info(info);
+    }
     compositor.set_default_cursor(true);
     compositor.set_device_natural_scroll(true);
     frontend.set_output_size(output_size.0, output_size.1)?;
+    display.start()?;
     let output = frontend.compositor().output();
     let mut translator = Translator::default();
     translator.pointer = (
       f64::from(output.x) + f64::from(output.width) / 2.0,
       f64::from(output.y) + f64::from(output.height) / 2.0,
     );
-    let refresh_mhz = frontend.compositor().output_info().refresh_mhz.max(1);
+    let dpms = frontend.compositor().dpms_state();
     Ok(Self {
       frontend,
       host: NativeHost::new(session),
@@ -160,11 +195,12 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       config,
       output_size,
       active: true,
-      renderer,
-      frame_interval: Duration::from_nanos(
-        1_000_000_000_000 / u64::from(refresh_mhz),
-      ),
-      next_frame: Instant::now(),
+      display,
+      renderer: Some(rendering.renderer),
+      factory: rendering.factory,
+      health: GpuHealth::default(),
+      dpms,
+      fatal: None,
       leds: None,
       warned_no_devices: false,
     })
@@ -185,26 +221,45 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     self.active
   }
 
+  /// The display, for queries.
+  pub fn display(&self) -> &Display {
+    &self.display
+  }
+
   /// Runs one turn of the loop without waiting. Returns false once the
   /// frontend asked to exit.
   pub fn step(&mut self) -> bool {
+    let now = Instant::now();
     self.dispatch_session();
     self.dispatch_input();
+    self.dispatch_display(now);
     self.frontend.process(&mut self.host);
     self.apply_host_requests();
+    self.update_dpms();
     self.update_leds();
-    self.render_if_due(Instant::now());
+    self.render_if_wanted(now);
     !self.host.exit
   }
 
   /// Runs until the frontend asks to exit (the quit binding, IPC, SIGINT
-  /// or SIGTERM), then saves the session and closes every device.
+  /// or SIGTERM), then saves the session and closes every device. A
+  /// [`Fatal`] failure also ends it, after the session was saved, and is
+  /// returned.
   pub fn run(mut self) -> Result<(), Box<dyn Error>> {
     while self.step() {
       self.wait(self.timeout(Instant::now()))?;
     }
+    let fatal = self.fatal.take();
     self.finish();
-    Ok(())
+    match fatal {
+      Some(fatal) => Err(Box::new(fatal)),
+      None => Ok(()),
+    }
+  }
+
+  /// Why the loop ended, if a failure ended it.
+  pub fn fatal(&self) -> Option<&Fatal> {
+    self.fatal.as_ref()
   }
 
   /// Saves the session, then closes libinput's devices and, as the last
@@ -220,20 +275,25 @@ impl<S: Session, I: InputSource> Backend<S, I> {
   }
 
   /// How long the loop may sleep after a turn at `now`: until key repeat,
-  /// the next frame if one is wanted, or [`TICK`].
+  /// the page-flip timeout, at once if a frame is wanted and the display
+  /// is ready, or [`TICK`]. Completed flips wake the loop through the DRM
+  /// descriptor.
   fn timeout(&self, now: Instant) -> Duration {
     let mut wake = now + TICK;
     if let Some(deadline) = self.frontend.next_deadline() {
       wake = wake.min(deadline);
     }
-    if self.active && self.host.redraw {
-      wake = wake.min(self.next_frame);
+    if let Some(deadline) = self.display.deadline() {
+      wake = wake.min(deadline);
+    }
+    if self.host.redraw && self.display.ready() {
+      wake = now;
     }
     wake.saturating_duration_since(now)
   }
 
-  /// Sleeps until the seat, libinput or the compositor has work, or for
-  /// `timeout`.
+  /// Sleeps until the seat, libinput, the card or the compositor has
+  /// work, or for `timeout`.
   fn wait(&self, timeout: Duration) -> io::Result<()> {
     use rustix::event::{PollFd, PollFlags, Timespec, poll};
     let session = self.host.session.borrow();
@@ -241,6 +301,7 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     fds.extend(session.poll_fd());
     if self.active {
       fds.extend(self.input.poll_fd());
+      fds.extend(self.display.poll_fd());
     }
     let mut poll_fds: Vec<PollFd<'_>> = fds
       .iter()
@@ -277,6 +338,7 @@ impl<S: Session, I: InputSource> Backend<S, I> {
   fn pause(&mut self) {
     if self.active {
       self.active = false;
+      self.display.pause();
       // The events of the suspend are removals and libinput's releases
       // of held keys; the devices stay registered, and the frontend
       // releases everything at once.
@@ -308,11 +370,72 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     {
       diagnostics::log(&format!("input device {} is gone", device.0));
     }
+    let resumed = self.display.resume();
+    if resumed.output_changed
+      && let Some(info) = self.display.output_info()
+    {
+      // NB-9 recreates the output globals; until then clients that bound
+      // the output keep its old name.
+      self.frontend.compositor_mut().set_output_info(info);
+    }
+    if let Some(size) = resumed.resized {
+      self.resize(size);
+    }
     self.active = true;
     self.frontend.set_session_active(&mut self.host, true);
     self.leds = None;
-    self.next_frame = Instant::now();
+    self.host.redraw = true;
     diagnostics::log("seat enabled; resumed");
+  }
+
+  /// Follows a new mode: the frontend's output, the renderer and the
+  /// input mapping get the new size.
+  fn resize(&mut self, size: (u32, u32)) {
+    self.output_size = size;
+    if let Err(error) = self.frontend.output_resized(size.0, size.1) {
+      diagnostics::log(&format!("resizing the output failed: {error}"));
+    }
+    if let Some(renderer) = self.renderer.as_mut()
+      && let Err(error) = renderer.resize(size)
+    {
+      diagnostics::log(&format!("resizing the renderer failed: {error}"));
+      self.renderer = None;
+    }
+  }
+
+  /// Reports completed page flips to the compositor, which sends frame
+  /// callbacks and presentation feedback with their times, and recovers
+  /// from a flip that never completes.
+  fn dispatch_display(&mut self, now: Instant) {
+    for info in self.display.dispatch() {
+      self.frontend.compositor_mut().frame_presented(info);
+    }
+    if let Err(fatal) = self.display.check_timeout(now) {
+      self.fail(fatal);
+    }
+  }
+
+  /// Ends the loop because of `fatal`.
+  fn fail(&mut self, fatal: Fatal) {
+    diagnostics::log(&format!("{fatal}; saving the session and exiting"));
+    self.fatal = Some(fatal);
+    self.host.exit = true;
+  }
+
+  /// Turns the display off or on when the compositor's DPMS state
+  /// changes (wlr-output-power-management, idle timeouts, activity).
+  fn update_dpms(&mut self) {
+    let state = self.frontend.compositor().dpms_state();
+    if state == self.dpms {
+      return;
+    }
+    self.dpms = state;
+    let on = state == DpmsState::On;
+    diagnostics::log(if on { "display on" } else { "display off" });
+    self.display.set_dpms(on);
+    if on {
+      self.host.redraw = true;
+    }
   }
 
   fn dispatch_input(&mut self) {
@@ -503,24 +626,64 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     }
   }
 
-  /// Draws a frame offscreen if one was requested and the refresh
-  /// interval has passed since the last, while the seat is enabled.
-  fn render_if_due(&mut self, now: Instant) {
-    if !self.active || !self.host.redraw || now < self.next_frame {
+  /// Draws and flips a frame if one was requested and the display is
+  /// ready for it: the seat is enabled, an output is lit, the display is
+  /// on and no flip is pending.
+  fn render_if_wanted(&mut self, now: Instant) {
+    if !self.active || !self.host.redraw || !self.display.begin_frame() {
       return;
     }
     self.host.redraw = false;
-    self.next_frame = now + self.frame_interval;
-    match self.renderer.as_mut() {
-      Some(renderer) => {
-        if let Err(error) =
-          self.frontend.render(&mut self.host, renderer.as_mut())
-        {
-          diagnostics::log(&format!("render failed: {error}"));
+    let result = match self.renderer.as_mut() {
+      Some(renderer) => renderer.draw(&mut self.frontend, &mut self.host),
+      None => Err(RenderFailure::Lost("no renderer".into())),
+    };
+    match result {
+      Ok(frame) => {
+        self.health.success();
+        self.display.present(&frame, now);
+      }
+      Err(failure) => {
+        self.display.abandon_frame();
+        self.render_failed(&failure, now);
+      }
+    }
+  }
+
+  /// Decides what a failed frame means and acts on it.
+  fn render_failed(&mut self, failure: &RenderFailure, now: Instant) {
+    diagnostics::log(&failure.to_string());
+    match self.health.failure(failure, now) {
+      Verdict::Skip => {
+        // A slow frame is drawn again; another error waits for the next
+        // change.
+        if *failure == RenderFailure::Timeout {
+          self.host.redraw = true;
         }
       }
-      None => self.frontend.compositor_mut().frame(),
+      Verdict::Recreate => self.recreate_renderer(),
+      Verdict::GiveUp => self.fail(Fatal(format!(
+        "the GPU failed {} times within {} s",
+        crate::gpu::MAX_GPU_LOSSES,
+        crate::gpu::GPU_LOSS_WINDOW.as_secs()
+      ))),
     }
+  }
+
+  /// Drops the GPU context and every texture made with it, and creates a
+  /// new renderer. The frontend uploads its textures again from the
+  /// compositor's surface snapshots.
+  fn recreate_renderer(&mut self) {
+    diagnostics::log("recreating the GPU context");
+    self.renderer = None;
+    self.frontend.drop_gpu_resources();
+    match (self.factory)(self.output_size) {
+      Ok(renderer) => self.renderer = Some(renderer),
+      Err(error) => {
+        diagnostics::log(&format!("creating a GPU context failed: {error}"))
+      }
+    }
+    self.host.redraw = true;
   }
 }
 
@@ -531,4 +694,4 @@ fn id_list(ids: &[InputDeviceId]) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

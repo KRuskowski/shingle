@@ -109,6 +109,17 @@ fn start(
   }
 }
 
+/// The exit status for a backend that ended with `error`: 2 for a native
+/// backend that gave up after startup (docs/design/native-backend.md,
+/// section 6), 1 for everything else, such as a start that failed.
+fn failure_status(error: &(dyn Error + 'static)) -> u8 {
+  if error.downcast_ref::<shingle_native::Fatal>().is_some() {
+    2
+  } else {
+    1
+  }
+}
+
 fn main() -> ExitCode {
   match plan(std::env::args_os().skip(1), |name| std::env::var_os(name)) {
     Plan::Print(text) => {
@@ -128,7 +139,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
           eprintln!("shingle: {error}");
-          ExitCode::FAILURE
+          ExitCode::from(failure_status(error.as_ref()))
         }
       }
     }
@@ -138,6 +149,17 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_native_backend_that_gives_up_exits_with_status_2() {
+    let fatal = shingle_native::Fatal("3 page flips in a row".into());
+    assert_eq!(failure_status(&fatal), 2);
+    let start =
+      shingle_native::StartError::NoAdapter("no Vulkan driver".into());
+    assert_eq!(failure_status(&start), 1);
+    let io = std::io::Error::other("anything else");
+    assert_eq!(failure_status(&io), 1);
+  }
 
   fn planned(arguments: &[&str], pairs: &[(&str, &str)]) -> Plan {
     let pairs: Vec<(String, OsString)> = pairs
