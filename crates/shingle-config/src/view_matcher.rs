@@ -1,5 +1,23 @@
 use crate::ConfigError;
 
+/// A boolean expression over view properties in Wayfire's view-matcher syntax
+/// (Wayfire's `src/core/matcher.cpp`), as used by `tile_by_default`,
+/// `animate/enabled_for`, the shortcuts-inhibit lists and window rules.
+///
+/// Grammar, loosest first: `A | B`, `A & B`, `!A`, `( A )`, and the atoms
+/// `all`, `none`, `FIELD OP VALUE` and `PREDICATE [is true|false]`. `FIELD` is
+/// `app_id`, `title`, `role` or `type`; `OP` is `is` or `equals` (exact,
+/// case-sensitive) or `contains` (substring). `role` is always `TOPLEVEL`,
+/// since Shingle has no X11 or desktop-environment views. `PREDICATE` is one of
+/// `fullscreen`, `activated`, `minimized`, `focusable`, `mapped`, `tiled-left`,
+/// `tiled-right`, `tiled-top`, `tiled-bottom`, `maximized` or `floating`;
+/// without `is` it tests for true. Values containing spaces or operator
+/// characters must be double-quoted.
+///
+/// The matcher serializes back to the text it was parsed from. Parsing fails
+/// with [`ConfigError::Invalid`] on unknown fields or operators, missing
+/// operands, unbalanced parentheses, trailing tokens or an unterminated quote.
+/// The default matches everything (`all`).
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ViewMatcher {
@@ -39,21 +57,39 @@ enum Operator {
   Contains,
 }
 
+/// The view state a [`ViewMatcher`] is evaluated against. The compositor fills
+/// it from the window's current state; the default is a mapped, focusable
+/// `toplevel` with empty app ID and title and every other predicate false.
 #[derive(Clone, Debug)]
 pub struct ViewProperties<'a> {
+  /// `xdg_toplevel` app ID.
   pub app_id: &'a str,
+  /// `xdg_toplevel` title, empty if none was set.
   pub title: &'a str,
+  /// Wayfire view type compared by `type`, such as `toplevel`.
   pub view_type: &'a str,
+  /// The view is fullscreen.
   pub fullscreen: bool,
+  /// The view is the focused view of its workspace.
   pub activated: bool,
+  /// The view is minimized.
   pub minimized: bool,
+  /// The view can take keyboard focus.
   pub focusable: bool,
+  /// The view has a mapped buffer.
   pub mapped: bool,
+  /// The view's left edge is constrained, as in `xdg_toplevel`'s `tiled_left`
+  /// state. Shingle sets all four edges for any tiled view.
   pub tiled_left: bool,
+  /// The view's right edge is constrained.
   pub tiled_right: bool,
+  /// The view's top edge is constrained.
   pub tiled_top: bool,
+  /// The view's bottom edge is constrained.
   pub tiled_bottom: bool,
+  /// The view is maximized.
   pub maximized: bool,
+  /// The view floats, that is it has floating geometry and is not maximized.
   pub floating: bool,
 }
 
@@ -129,6 +165,8 @@ impl PredicateField {
 }
 
 impl ViewMatcher {
+  /// Matches a view known only by app ID and title, with every other property
+  /// at its [`ViewProperties::default`].
   pub fn matches(&self, app_id: &str, title: Option<&str>) -> bool {
     self.matches_view(&ViewProperties {
       app_id,
@@ -137,10 +175,12 @@ impl ViewMatcher {
     })
   }
 
+  /// Evaluates the expression against `view`.
   pub fn matches_view(&self, view: &ViewProperties<'_>) -> bool {
     self.expression.matches(view)
   }
 
+  /// The matcher's source text.
   pub fn as_str(&self) -> &str {
     &self.text
   }

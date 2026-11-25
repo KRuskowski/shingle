@@ -15,6 +15,14 @@ struct FileStamp {
   changed_nanoseconds: i64,
 }
 
+/// Polls one config file for changes and reports when it has been stable long
+/// enough to reload, implementing Wayfire's `auto_reload_config` and
+/// `config_reload_delay`.
+///
+/// A change is any difference in modification time, length, device, inode or
+/// ctime, so an editor that saves by renaming a new file over the old one is
+/// noticed too, and so is the file appearing or disappearing. There is no
+/// inotify: the host calls [`ConfigWatcher::poll`] from its loop.
 pub struct ConfigWatcher {
   path: PathBuf,
   stamp: Option<FileStamp>,
@@ -22,6 +30,7 @@ pub struct ConfigWatcher {
 }
 
 impl ConfigWatcher {
+  /// Watches `path`, taking its current state as already loaded.
   pub fn new(path: impl Into<PathBuf>) -> Self {
     let path = path.into();
     let stamp = file_stamp(&path);
@@ -32,6 +41,10 @@ impl ConfigWatcher {
     }
   }
 
+  /// Records any change since the last poll and returns true once, when the
+  /// file has gone `delay` without a further change. Each new change restarts
+  /// the delay, so a burst of writes yields one reload. `now` is passed in so
+  /// tests can control time.
   pub fn poll(&mut self, now: Instant, delay: Duration) -> bool {
     let stamp = file_stamp(&self.path);
     if stamp != self.stamp {
@@ -48,6 +61,8 @@ impl ConfigWatcher {
     false
   }
 
+  /// Takes the file's current state as loaded and drops any pending reload, for
+  /// example after the host reloaded or saved the file itself.
   pub fn mark_loaded(&mut self) {
     self.stamp = file_stamp(&self.path);
     self.changed_at = None;

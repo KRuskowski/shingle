@@ -1,3 +1,22 @@
+//! Shingle's configuration: the validated YAML model, imports from Wayfire
+//! INI and i3-style files, and XKB keymap generation.
+//!
+//! [`ShingleConfig`] is the native format and the only one written back.
+//! [`ShingleConfig::load`] picks the syntax from the file name or contents
+//! ([`ConfigFormat`]), and every route into a `ShingleConfig` ends in
+//! [`ShingleConfig::validate`], so a value returned by this crate is always
+//! within the documented ranges. Most sections mirror a Wayfire plugin; field
+//! docs name the Wayfire option each one is imported from, and Wayfire's
+//! `metadata/*.xml` is the behavioural reference for those options.
+//!
+//! Window rules ([`WindowRule`]) and view matchers ([`ViewMatcher`]) use
+//! Wayfire's syntax. [`ConfigWatcher`] implements automatic reloading.
+//!
+//! [`default_path`] falls back to the pre-rename Tilefire location when only
+//! that file exists; see README.md#upgrading-from-tilefire.
+
+#![warn(missing_docs)]
+
 mod config_watcher;
 mod i3;
 mod view_matcher;
@@ -18,45 +37,130 @@ use serde::Deserialize;
 use shingle_core::{Gaps, Rect};
 use thiserror::Error;
 
+/// Source syntax accepted by [`ShingleConfig::parse`].
+///
+/// Imports are one way: a Wayfire or i3 file is read into a [`ShingleConfig`]
+/// and can then be saved as YAML, but nothing writes INI or i3 syntax back.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigFormat {
+  /// Shingle's native YAML, deserialized straight into [`ShingleConfig`]. Every
+  /// section rejects unknown fields, so a typo is an error rather than a
+  /// silently ignored key.
   Yaml,
+  /// Wayfire's `wayfire.ini`. Recognised `[section] option` pairs are imported
+  /// and everything else, including whole plugins Shingle lacks, is ignored, so
+  /// an existing Wayfire config can be loaded as it is; only an unparsable
+  /// value for a recognised option is an error. Import starts from
+  /// [`ShingleConfig::default`], not from Wayfire's defaults; in particular the
+  /// workspace grid stays 10×1 unless `[core] vwidth` and `vheight` are set
+  /// (Wayfire defaults to 3×3).
+  ///
+  /// A `#` starts a comment when it begins the line or follows whitespace,
+  /// except where it introduces a 6 or 8 digit hex colour after `=`. Activators
+  /// are Wayfire's `<super> <shift> KEY_Q` form, and `|` separates alternatives
+  /// where the field takes a list.
   Wayfire,
+  /// An i3- or sway-style config. `bindsym`, `exec`, `gaps` and `output` are
+  /// understood, Shingle-specific options are given as `set $option value` (for
+  /// example `set $scale_spacing 40`), and any other `set $name value` becomes
+  /// a variable substituted into later lines, longest name first. Unknown
+  /// commands are ignored. `bindsym` recognises a fixed set of command strings
+  /// such as `focus left`, `workspace 3`, `move container to workspace next`
+  /// and `exec CMD`; any other `exec` binding becomes a [`CommandBinding`].
+  /// `exec shingle-lock` binds the lock key instead.
   I3,
 }
 
+/// The complete compositor configuration.
+///
+/// Every section is `#[serde(default, deny_unknown_fields)]`: YAML may omit any
+/// field, which then takes the default documented on it, but may not contain
+/// unknown ones. A value returned by [`ShingleConfig::load`] or
+/// [`ShingleConfig::parse`] has passed [`ShingleConfig::validate`]; one built
+/// by hand or edited in place (as `shingle-wcm` does) must be validated again
+/// before it is used or saved.
+///
+/// Unless a field says otherwise, durations are milliseconds, distances are
+/// logical pixels and colours are `[r, g, b, a]` with every component in 0–1.
+/// Field docs name the Wayfire option a value is imported from as `[section]
+/// option`; Wayfire's `metadata/*.xml` describes what each option does there.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShingleConfig {
+  /// The single output's mode, position, scale and transform. Multi-output
+  /// support is not there yet, so every Wayfire `[output:NAME]` section writes
+  /// into this one, the last value winning.
   pub output: OutputConfig,
+  /// Colour shown where no surface covers the output. `[core]
+  /// background_color`; default `[0.1, 0.1, 0.1, 1.0]`.
   pub background_color: [f64; 4],
+  /// Config reload, dialog, decoration and buffer-size behaviour, mostly from
+  /// Wayfire's `[workarounds]`.
   pub behavior: BehaviorConfig,
+  /// Protocols withheld from sandboxed clients (`[security-context-v1]`).
   pub security_context: SecurityContextConfig,
+  /// Modifier-and-scroll output magnification (`[zoom]`).
   pub zoom: ZoomConfig,
+  /// Modifier-and-scroll window opacity (`[alpha]`).
   pub alpha: AlphaConfig,
+  /// The Alt+Escape switcher (`[fast-switcher]`).
   pub fast_switcher: FastSwitcherConfig,
+  /// Open, close and minimize animations (`[animate]`).
   pub animate: AnimateConfig,
+  /// The Scale window overview (`[scale]`).
   pub scale: ScaleConfig,
+  /// Type-to-filter in Scale (`[scale-title-filter]`).
   pub scale_title_filter: ScaleTitleFilterConfig,
+  /// The Expo workspace overview (`[expo]`).
   pub expo: ExpoConfig,
+  /// Options of the `invert` and `wrot` effect plugins.
   pub effects: EffectsConfig,
+  /// Where new floating windows appear (`[place]`).
   pub placement: PlacementConfig,
+  /// Click-to-focus, from Wayfire's `[core]`.
   pub focus: FocusConfig,
+  /// Checks on `xdg-activation-v1` tokens (`[xdg-activation]`).
   pub activation: ActivationConfig,
+  /// Keyboard-shortcuts-inhibit policy (`[shortcuts-inhibit]`).
   pub shortcuts: ShortcutConfig,
+  /// Snapping and edge behaviour during an interactive move. Despite the name
+  /// these come from Wayfire's `[move]`; the `[grid]` slot bindings live in
+  /// [`Keybindings`].
   pub grid: GridConfig,
+  /// Multi-finger touch gestures (`[extra-gestures]`).
   pub extra_gestures: ExtraGesturesConfig,
+  /// Size of the workspace grid and edge wraparound.
   pub workspaces: WorkspaceConfig,
+  /// The sliding workspace-switch transition (`[vswitch]`).
   pub vswitch: VswitchConfig,
+  /// Gaps, tiling policy, minimum tile size and drag previews, mostly from
+  /// `[simple-tile]`.
   pub tiling: TilingConfig,
+  /// Interactive resize limits (`[resize]`).
   pub resize: ResizeConfig,
+  /// Idle, DPMS and lock timeouts (`[idle]`).
   pub idle: IdleConfig,
+  /// Whether and where the tiling session is saved and restored.
   pub session: SessionConfig,
+  /// Commands started once after the compositor is up, each through `/bin/sh
+  /// -c` with `WAYLAND_DISPLAY` set. A command is skipped when a restored
+  /// session already relaunched an application started by the same command
+  /// line. Imported from every non-empty `[autostart]` value except
+  /// `autostart_wf_shell`, and from i3 `exec` lines (`--no-startup-id` is
+  /// dropped).
   pub autostart: Vec<String>,
+  /// Wayfire `[window-rules]` entries in file order. When an event fires, every
+  /// rule for that event whose matcher fits is applied in this order, so a
+  /// later rule can override an earlier one.
   pub window_rules: Vec<WindowRule>,
+  /// Keyboard bindings for built-in actions.
   pub keybindings: Keybindings,
+  /// Bindings that run shell commands: Wayfire `[command]` `binding_NAME` and
+  /// `command_NAME` pairs, and i3 `bindsym KEY exec CMD`.
   pub commands: Vec<CommandBinding>,
+  /// Modifier-and-button bindings for move, resize and rotation.
   pub pointer: PointerBindings,
+  /// Keymap, key repeat, pointer and cursor settings (`[input]`).
   pub input: InputConfig,
 }
 
@@ -98,6 +202,19 @@ impl Default for ShingleConfig {
 }
 
 impl ShingleConfig {
+  /// Reads, parses and validates the configuration at `path`, or at
+  /// [`default_path`] when `path` is `None`.
+  ///
+  /// The format is chosen in this order: Wayfire when the extension is `.ini`
+  /// or the first non-blank character is `[`, i3 when the extension is `.conf`
+  /// or `.i3`, and YAML otherwise. A missing file at the default path yields
+  /// [`ShingleConfig::default`], so a fresh install needs no config; a missing
+  /// file at an explicit path is an error.
+  ///
+  /// # Errors
+  ///
+  /// [`ConfigError::Read`] if the file cannot be read, otherwise whatever
+  /// [`ShingleConfig::parse`] returns.
   pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
     let path = path.map(Path::to_owned).unwrap_or_else(default_path);
     let text = match fs::read_to_string(&path) {
@@ -130,6 +247,15 @@ impl ShingleConfig {
     Self::parse(&text, format)
   }
 
+  /// Parses `text` as `format` and validates the result.
+  ///
+  /// # Errors
+  ///
+  /// [`ConfigError::Yaml`] for malformed YAML, a wrong type or an unknown
+  /// field; [`ConfigError::Binding`] for an unparsable key binding;
+  /// [`ConfigError::Invalid`] for an unparsable INI or i3 value (the message
+  /// carries the line number), an invalid colour, matcher or window rule, or
+  /// any [`ShingleConfig::validate`] failure.
   pub fn parse(text: &str, format: ConfigFormat) -> Result<Self, ConfigError> {
     let config = match format {
       ConfigFormat::Yaml => serde_yaml::from_str::<Self>(text)?,
@@ -140,11 +266,33 @@ impl ShingleConfig {
     Ok(config)
   }
 
+  /// Validates and serializes the configuration as native YAML. Matchers and
+  /// window rules are written back as the text they were parsed from; bindings
+  /// are written in the canonical `super+shift+key` form.
+  ///
+  /// # Errors
+  ///
+  /// [`ConfigError::Invalid`] if validation fails, or [`ConfigError::Yaml`] if
+  /// serialization does.
   pub fn to_yaml(&self) -> Result<String, ConfigError> {
     self.validate()?;
     Ok(serde_yaml::to_string(self)?)
   }
 
+  /// Validates the configuration and atomically replaces `path` with its YAML
+  /// form.
+  ///
+  /// The YAML is written to a new hidden file `.NAME.PID.N.tmp` next to `path`
+  /// (creating the directory if needed), synced, then renamed over `path`, so a
+  /// reader such as a [`ConfigWatcher`] sees either the old or the new file,
+  /// never a partial one. The temporary file is removed if writing or renaming
+  /// fails. The directory itself is not synced after the rename.
+  ///
+  /// # Errors
+  ///
+  /// [`ConfigError::Invalid`] if validation fails or `path` has no UTF-8 file
+  /// name, and [`ConfigError::Write`] for any I/O failure, including when 100
+  /// temporary names in a row already exist.
   pub fn save_yaml(&self, path: &Path) -> Result<(), ConfigError> {
     let yaml = self.to_yaml()?;
     let parent = path
@@ -211,6 +359,16 @@ impl ShingleConfig {
     Ok(())
   }
 
+  /// Checks the ranges and cross-field constraints serde cannot express. The
+  /// limits are listed on the fields they apply to; the cross-field ones are
+  /// that Expo workspace bindings and `assign_workspace` window rules must name
+  /// a workspace inside the configured grid, and that `workspace_switch` and
+  /// `workspace_move` hold exactly ten bindings each.
+  ///
+  /// # Errors
+  ///
+  /// The first violated constraint, as [`ConfigError::Invalid`] with a message
+  /// naming the field.
   pub fn validate(&self) -> Result<(), ConfigError> {
     if !(1..=20).contains(&self.extra_gestures.move_fingers)
       || !(1..=20).contains(&self.extra_gestures.close_fingers)
@@ -485,6 +643,14 @@ impl ShingleConfig {
   }
 }
 
+/// Parses a colour in either of Wayfire's notations: `#RRGGBB` or `#RRGGBBAA`
+/// hex (alpha 1 when omitted), or four whitespace-separated numbers `r g b a`.
+/// Surrounding whitespace is ignored.
+///
+/// # Errors
+///
+/// [`ConfigError::Invalid`] for any other length or syntax, or for a component
+/// that is not finite or lies outside 0–1. Short `#RGB` hex is not accepted.
 pub fn parse_color(text: &str) -> Result<[f64; 4], ConfigError> {
   let invalid = || ConfigError::Invalid(format!("invalid color {text:?}"));
   let text = text.trim();
@@ -519,14 +685,34 @@ pub fn parse_color(text: &str) -> Result<[f64; 4], ConfigError> {
   Ok(color)
 }
 
+/// Mode, position, scale and transform of the single output.
+///
+/// Wayfire's `[output:NAME]` supplies `mode = WxH[@rate]` (the refresh rate is
+/// ignored), `position = X,Y`, `scale` and `transform`; i3 supplies `output
+/// NAME mode WxH scale S transform T`.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OutputConfig {
+  /// Horizontal position of the output's top-left corner in the global layout.
+  /// Default 0.
   pub x: i32,
+  /// Vertical position of the output's top-left corner in the global layout.
+  /// Default 0.
   pub y: i32,
+  /// Output width in the untransformed orientation, before `scale` is applied.
+  /// The compositor swaps width and height for 90° and 270° transforms. Must be
+  /// nonzero; default 1280.
   pub width: u32,
+  /// Output height in the untransformed orientation, before `scale` is applied.
+  /// Must be nonzero; default 720.
   pub height: u32,
+  /// Scale factor advertised to clients through `wl_output` and
+  /// fractional-scale. Must be finite and positive; default 1.
   pub scale: f64,
+  /// `wl_output` transform: `normal`, `90`, `180`, `270`, `flipped` or
+  /// `90_flipped`, `180_flipped`, `270_flipped` as Wayfire spells them.
+  /// `flipped-90` and `flipped90` style spellings are also accepted. Rotations
+  /// are counter-clockwise, as in the Wayland protocol. Default `normal`.
   pub transform: String,
 }
 
@@ -544,20 +730,40 @@ impl Default for OutputConfig {
 }
 
 impl OutputConfig {
+  /// The output's position and untransformed size as a layout rectangle.
   pub fn rect(&self) -> Rect {
     Rect::new(self.x, self.y, self.width, self.height)
   }
 }
 
+/// Snapping during an interactive move, from Wayfire's `[move]` plugin
+/// (metadata/move.xml).
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GridConfig {
+  /// Whether dragging a window to an output edge snaps it to that half, or to a
+  /// quarter near a corner. `[move] enable_snap`; default true.
   pub enable_snap: bool,
+  /// Distance from an output edge, in pixels, at which the pointer triggers an
+  /// edge snap. `[move] snap_threshold`; default 10.
   pub snap_threshold: u32,
+  /// Distance from an output corner, in pixels, at which an edge snap becomes a
+  /// quarter snap. The pointer must still be within `snap_threshold` of an
+  /// edge. `[move] quarter_snap_threshold`; default 50.
   pub quarter_snap_threshold: u32,
+  /// Whether dragging a snapped window un-snaps it once it has moved
+  /// `snap_off_threshold` pixels. `[move] enable_snap_off`; default true.
   pub enable_snap_off: bool,
+  /// Pointer travel, in pixels, before a snapped window follows the drag. Only
+  /// used when `enable_snap_off` is set. `[move] snap_off_threshold`; default
+  /// 10.
   pub snap_off_threshold: u32,
+  /// Milliseconds the pointer must rest on an output edge during a move before
+  /// the workspace switches in that direction; negative disables it. `[move]
+  /// workspace_switch_after`; default -1.
   pub workspace_switch_after: i64,
+  /// Whether dialogs move together with their parent instead of independently.
+  /// `[move] join_views`; default false.
   pub join_views: bool,
 }
 
@@ -575,11 +781,19 @@ impl Default for GridConfig {
   }
 }
 
+/// Touch gestures from Wayfire's `extra-gestures` plugin
+/// (metadata/extra-gestures.xml).
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExtraGesturesConfig {
+  /// Fingers to press and hold on a window to start an interactive move. 1–20;
+  /// default 3.
   pub move_fingers: u32,
+  /// How long, in milliseconds, the fingers must be held before the move
+  /// starts. 1–10000; default 750.
   pub move_delay: u64,
+  /// Fingers to tap with to close a window. 1–20; the default of 20 effectively
+  /// disables the gesture, as in Wayfire.
   pub close_fingers: u32,
 }
 
@@ -593,9 +807,12 @@ impl Default for ExtraGesturesConfig {
   }
 }
 
+/// Initial position of new floating windows (`[place]`).
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PlacementConfig {
+  /// `center`, `cascade`, `maximize`, `random` or `pointer` (centred on the
+  /// cursor, clamped to the workarea). Default `center`.
   pub mode: String,
 }
 
@@ -607,11 +824,19 @@ impl Default for PlacementConfig {
   }
 }
 
+/// Click-to-focus, from Wayfire's `[core]` (metadata/core.xml).
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FocusConfig {
+  /// Buttons that focus the view under the pointer when clicked. `[core]
+  /// focus_buttons`; default left, middle and right.
   pub buttons: Vec<Binding>,
+  /// Whether a click focuses even while keyboard modifiers are held; when
+  /// false, click-to-focus only works with no modifiers pressed. `[core]
+  /// focus_button_with_modifiers`; default false.
   pub button_with_modifiers: bool,
+  /// Whether the click that changes focus is also delivered to the client.
+  /// `[core] focus_buttons_passthrough`; default true.
   pub buttons_passthrough: bool,
 }
 
@@ -628,11 +853,19 @@ impl Default for FocusConfig {
   }
 }
 
+/// Policy for `xdg-activation-v1` focus requests (metadata/xdg-activation.xml).
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ActivationConfig {
+  /// Reject tokens created without a source surface. Without this any client
+  /// can take focus at any time. `[xdg-activation] check_surface`; default
+  /// false.
   pub check_surface: bool,
+  /// Reject a token when a newer one has been created since. `[xdg-activation]
+  /// only_last_request`; default false.
   pub only_last_request: bool,
+  /// Seconds after creation after which a token is no longer honoured.
+  /// `[xdg-activation] timeout`; default 30.
   pub timeout_seconds: u64,
 }
 
@@ -646,10 +879,17 @@ impl Default for ActivationConfig {
   }
 }
 
+/// `keyboard-shortcuts-inhibit-v1` policy (metadata/shortcuts-inhibit.xml). The
+/// break-grab key is [`Keybindings::break_grab`].
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShortcutConfig {
+  /// Views that inhibit compositor shortcuts while focused even though they
+  /// never asked through the protocol. `[shortcuts-inhibit]
+  /// inhibit_by_default`; default `none`.
   pub inhibit_by_default: ViewMatcher,
+  /// Views whose inhibit requests are refused. `[shortcuts-inhibit]
+  /// ignore_views`; default `none`.
   pub ignore_views: ViewMatcher,
 }
 
@@ -668,13 +908,29 @@ impl Default for ShortcutConfig {
   }
 }
 
+/// Core switches and workarounds, mostly from Wayfire's `[workarounds]`
+/// (metadata/workarounds.xml).
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BehaviorConfig {
+  /// Reload the config file when it changes on disk, through [`ConfigWatcher`].
+  /// `[workarounds] auto_reload_config`; default true.
   pub auto_reload: bool,
+  /// Milliseconds a changed config file must stay unchanged before it is
+  /// reloaded, so an editor's multi-step save is read once. `[workarounds]
+  /// config_reload_delay`; default 20.
   pub config_reload_delay: u64,
+  /// Treat every dialog as modal: its parent cannot be focused while it is
+  /// open. When false the parent can take focus, though the dialog stays above
+  /// it. `[workarounds] all_dialogs_modal`; default true.
   pub all_dialogs_modal: bool,
+  /// Send the stdout and stderr of spawned commands to `/dev/null` instead of
+  /// the compositor's log. `[workarounds] discard_command_output`; default
+  /// true.
   pub discard_command_output: bool,
+  /// When a layer-shell surface takes keyboard focus, keep the last focused
+  /// toplevel in the activated state. `[workarounds]
+  /// keep_last_toplevel_activated`; default true.
   pub keep_last_toplevel_activated: bool,
   /// Largest accepted shared-memory buffer width or height in pixels.
   pub max_buffer_size: u32,
@@ -709,6 +965,10 @@ impl Default for BehaviorConfig {
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SecurityContextConfig {
+  /// Comma-separated interface names withheld from sandboxed clients.
+  /// `[security-context-v1] privileged_protocols`; the default lists
+  /// foreign-toplevel management, screencopy, data control and shortcuts
+  /// inhibit, matching Wayfire.
   pub privileged_protocols: String,
 }
 
@@ -726,12 +986,24 @@ impl Default for SecurityContextConfig {
   }
 }
 
+/// Output magnification while a modifier is held and the wheel turns
+/// (metadata/zoom.xml).
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ZoomConfig {
+  /// Modifiers that must be held, exactly, for scrolling to zoom: names such as
+  /// `super`, `ctrl`, `alt` and `shift`, separated by spaces or `+`, with or
+  /// without Wayfire's angle brackets. `[zoom] modifier`; default `super`.
   pub modifier: String,
+  /// Zoom change per scroll unit, relative to the current level. Finite and
+  /// non-negative; `[zoom] speed`; default 0.01.
   pub speed: f64,
+  /// Duration of the eased approach to the target zoom level; 0 jumps
+  /// immediately. `[zoom] smoothing_duration`; default 300.
   pub smoothing_ms: u64,
+  /// Texture filter while zoomed: `linear` or `nearest`. Imported from
+  /// Wayfire's numeric `[zoom] interpolation_method`, where 0 is linear and 1
+  /// nearest. Default `linear`.
   pub interpolation: String,
 }
 
@@ -746,10 +1018,16 @@ impl Default for ZoomConfig {
   }
 }
 
+/// Window opacity adjusted by wheel while a modifier is held
+/// (metadata/alpha.xml).
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AlphaConfig {
+  /// Modifiers that must be held, in the same syntax as
+  /// [`ZoomConfig::modifier`]. `[alpha] modifier`; default `super alt`.
   pub modifier: String,
+  /// Lowest opacity scrolling can reach, so a window cannot vanish. 0–1;
+  /// `[alpha] min_value`; default 0.1.
   pub min_value: f32,
 }
 
@@ -762,9 +1040,14 @@ impl Default for AlphaConfig {
   }
 }
 
+/// The fast switcher, which cycles focus without an overview
+/// (metadata/fast-switcher.xml). Its keys are
+/// [`Keybindings::fast_switcher_next`] and `fast_switcher_previous`.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FastSwitcherConfig {
+  /// Opacity of the windows not currently selected while switching. 0–1;
+  /// `[fast-switcher] inactive_alpha`; default 0.7.
   pub inactive_alpha: f32,
 }
 
@@ -851,10 +1134,15 @@ pub struct ExpoConfig {
   pub workspace_bindings: Vec<ExpoWorkspaceBinding>,
 }
 
+/// A binding that, while Expo is open, selects a workspace and exits Expo. From
+/// `[expo] select_workspace_N` or i3 `bindsym KEY expo select N`.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExpoWorkspaceBinding {
+  /// One-based workspace number, counted row by row across the grid. Must lie
+  /// in `1..=width*height` of [`WorkspaceConfig`].
   pub workspace: usize,
+  /// Key that selects the workspace.
   pub binding: Binding,
 }
 
@@ -903,13 +1191,25 @@ impl Default for ScaleTitleFilterConfig {
   }
 }
 
+/// Window open, close and minimize animations (metadata/animate.xml). Only
+/// `fade` and `zoom` are implemented; Wayfire's `fire`, `squeezimize`, `zap`
+/// and `spin` are not.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AnimateConfig {
+  /// Views that are animated. `[animate] enabled_for`; default `type equals
+  /// "toplevel"`. Shingle has no X11 views, so Wayfire's `x-or` clause is not
+  /// needed.
   pub enabled_for: ViewMatcher,
+  /// `none`, `fade` or `zoom`. `[animate] open_animation`; default `zoom`.
   pub open_animation: String,
+  /// `none`, `fade` or `zoom`. `[animate] close_animation`; default `zoom`.
   pub close_animation: String,
+  /// `none`, `fade` or `zoom`. `[animate] minimize_animation`; default `zoom`
+  /// (Wayfire's default, `squeezimize`, is not implemented).
   pub minimize_animation: String,
+  /// Length of every animation. `[animate] duration` (an easing suffix such as
+  /// `400ms linear` is ignored, and `0.4s` is accepted); default 400.
   pub duration_ms: u64,
 }
 
@@ -928,10 +1228,16 @@ impl Default for AnimateConfig {
   }
 }
 
+/// Options of the colour-inversion and window-rotation effects.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EffectsConfig {
+  /// Invert only black and white, preserving hue, instead of inverting every
+  /// channel. `[invert] preserve_hue`; default false.
   pub invert_preserve_hue: bool,
+  /// Radius, in logical pixels, around a window's centre: while rotating,
+  /// moving the pointer inside it resets the window's rotation to zero. Finite
+  /// and positive; `[wrot] reset_radius`; default 25.
   pub wrot_reset_radius: f64,
 }
 
@@ -944,11 +1250,21 @@ impl Default for EffectsConfig {
   }
 }
 
+/// The workspace grid.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkspaceConfig {
+  /// Columns of workspaces. `[core] vwidth`; must be nonzero; default 10
+  /// (Wayfire's default is 3).
   pub width: u32,
+  /// Rows of workspaces. `[core] vheight`; must be nonzero; default 1
+  /// (Wayfire's default is 3).
   pub height: u32,
+  /// Directional switching at the grid edge: `false` stops; `true` wraps within
+  /// the same row or column, as Wayfire's vswitch does; `on_end` treats the
+  /// grid as one row-major list, so moving right from the end of a row
+  /// continues on the next row and past the last workspace to the first, while
+  /// vertical moves do not wrap. `[vswitch] wraparound`; default `false`.
   pub wraparound: String,
 }
 
@@ -984,16 +1300,37 @@ impl Default for VswitchConfig {
   }
 }
 
+/// Tiling policy and appearance, mostly from Wayfire's `[simple-tile]`
+/// (metadata/simple-tile.xml).
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TilingConfig {
+  /// Gaps around tiles. `[simple-tile] inner_gap_size` sets the gap between
+  /// neighbours; `outer_horiz_gap_size` sets left and right and
+  /// `outer_vert_gap_size` top and bottom. i3 `gaps
+  /// inner|outer|horizontal|vertical|top|right|bottom|left N` sets the same
+  /// values.
   pub gaps: Gaps,
+  /// Smallest width or height, in logical pixels, a tile may be resized or
+  /// split to. Must be nonzero; default 50. i3 `$minimum_extent`.
   pub minimum_extent: u32,
+  /// When focus moves from a fullscreen tile to a neighbour, make the neighbour
+  /// fullscreen instead of leaving fullscreen. `[simple-tile]
+  /// keep_fullscreen_on_adjacent`; default true.
   pub keep_fullscreen_on_adjacent: bool,
+  /// Views that are tiled when they first map; the rest float. `[simple-tile]
+  /// tile_by_default`; default `all`.
   pub tile_by_default: ViewMatcher,
+  /// Duration of the crossfade when a tile's geometry changes; 0 disables it.
+  /// `[simple-tile] animation_duration`; default 0.
   pub animation_duration: u64,
+  /// Fill colour of the drop preview drawn while dragging a tile.
+  /// `[simple-tile] preview_base_color`.
   pub preview_base_color: [f64; 4],
+  /// Border colour of the drop preview. `[simple-tile] preview_base_border`.
   pub preview_border_color: [f64; 4],
+  /// Border width of the drop preview, in logical pixels. `[simple-tile]
+  /// preview_border_width`; default 3.
   pub preview_border_width: u32,
 }
 
@@ -1012,11 +1349,20 @@ impl Default for TilingConfig {
   }
 }
 
+/// Interactive resize behaviour (metadata/resize.xml).
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResizeConfig {
+  /// Narrowest width an interactive resize may produce; 0 leaves it to the
+  /// client. `[resize] min_width`; default 0.
   pub min_width: u32,
+  /// Lowest height an interactive resize may produce; 0 leaves it to the
+  /// client. `[resize] min_height`; default 0.
   pub min_height: u32,
+  /// Fraction of a window's width and height, measured from each edge, in which
+  /// grabbing resizes that edge. On an axis where the grab falls between the
+  /// two bands, that axis is not resized. 0–0.5; Shingle-specific; default
+  /// 0.33.
   pub corner_threshold: f64,
 }
 
@@ -1030,13 +1376,27 @@ impl Default for ResizeConfig {
   }
 }
 
+/// Idle timeouts in whole seconds, converted to the idle state machine's
+/// [`shingle_idle::Config`] by [`IdleConfig::as_idle_config`].
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IdleConfig {
+  /// Inactivity before the screensaver (idle) state. `None` disables it.
+  /// Imported from `[idle] screensaver_timeout`, where a negative value means
+  /// disabled. Unlike Wayfire (3600), the default is `None`.
   pub idle_seconds: Option<u64>,
+  /// Inactivity before outputs are powered off. `None` disables it; `[idle]
+  /// dpms_timeout`, negative meaning disabled. Default `None`.
   pub dpms_seconds: Option<u64>,
+  /// Inactivity before the session is locked. `None` disables it; `[idle]
+  /// lock_timeout` (not a stock Wayfire option), negative meaning disabled.
+  /// Default `None`.
   pub lock_seconds: Option<u64>,
+  /// Suppress the idle timeouts while a fullscreen window is shown. `[idle]
+  /// disable_on_fullscreen`; default true.
   pub disable_on_fullscreen: bool,
+  /// Start with the idle timeouts suspended, as if the idle toggle had been
+  /// pressed once. `[idle] disable_initially`; default false.
   pub disable_initially: bool,
 }
 
@@ -1053,6 +1413,9 @@ impl Default for IdleConfig {
 }
 
 impl IdleConfig {
+  /// Converts to the idle crate's configuration. Fields not configurable here,
+  /// such as the lock-failure policy, keep their [`shingle_idle::Config`]
+  /// defaults.
   pub fn as_idle_config(&self) -> shingle_idle::Config {
     shingle_idle::Config {
       idle_timeout: self.idle_seconds.map(Duration::from_secs),
@@ -1065,10 +1428,17 @@ impl IdleConfig {
   }
 }
 
+/// Persistence of the tiling session across restarts.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SessionConfig {
+  /// Restore the saved session at startup, relaunching its applications. This
+  /// only controls loading at startup. `[session] restore` (a Shingle section);
+  /// default true.
   pub restore: bool,
+  /// Session file to use. `None` means the default location chosen by
+  /// `shingle-session` (`$XDG_STATE_HOME/shingle/session.json`, falling back to
+  /// a pre-rename Tilefire file if only that exists).
   pub path: Option<PathBuf>,
 }
 
@@ -1081,20 +1451,39 @@ impl Default for SessionConfig {
   }
 }
 
+/// A key binding that runs a shell command.
+///
+/// Wayfire's `[command]` pairs `binding_NAME` (or `repeatable_binding_NAME`,
+/// `release_binding_NAME`, `always_binding_NAME`) with `command_NAME`; a
+/// binding without a matching command, or a command without a binding, is
+/// dropped.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandBinding {
+  /// Key combination that triggers the command.
   pub binding: Binding,
+  /// Command line, run through `/bin/sh -c`.
   pub command: String,
+  /// Run again on every key-repeat event while the key is held. From
+  /// `repeatable_binding_NAME`; default false.
   #[serde(default)]
   pub repeatable: bool,
+  /// Run when the key is released instead of when it is pressed. From
+  /// `release_binding_NAME`; default false.
   #[serde(default)]
   pub on_release: bool,
+  /// Run even while the session is locked. From `always_binding_NAME`; default
+  /// false.
   #[serde(default)]
   pub always: bool,
 }
 
 impl CommandBinding {
+  /// Decides whether a key event should run the command: `pressed` is false for
+  /// a release, `repeat` marks key-repeat presses and `locked` is the session
+  /// lock state. While locked only `always` bindings run; an `on_release`
+  /// binding runs only on release, any other only on press, and repeats only
+  /// when `repeatable`.
   pub fn should_run(&self, pressed: bool, repeat: bool, locked: bool) -> bool {
     if locked && !self.always {
       return false;
@@ -1107,74 +1496,212 @@ impl CommandBinding {
   }
 }
 
+/// Keyboard bindings for built-in actions.
+///
+/// Each field is one [`Binding`], where [`Binding::disabled`] (written `none`
+/// or empty) turns the action off; `Vec` fields accept several alternatives, as
+/// Wayfire activators separated by `|` do. Defaults are given per field, with
+/// `super` written for the logo key. Movement and workspace bindings follow
+/// Wayfire's vswitch naming: `move` carries the focused window to the target
+/// workspace and follows it, `send` moves the window but stays.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Keybindings {
+  /// Focus the tile to the left. `[simple-tile] key_focus_left`; default
+  /// `super+h`.
   pub focus_left: Binding,
+  /// Focus the tile to the right. `[simple-tile] key_focus_right`; default
+  /// `super+l`.
   pub focus_right: Binding,
+  /// Focus the tile above. `[simple-tile] key_focus_above`; default `super+k`.
   pub focus_up: Binding,
+  /// Focus the tile below. `[simple-tile] key_focus_below`; default `super+j`.
   pub focus_down: Binding,
+  /// Start the regular switcher, moving forward. `[switcher] next_view`;
+  /// default `alt+tab`.
   pub focus_next: Binding,
+  /// Start the regular switcher, moving backward. `[switcher] prev_view`;
+  /// default `alt+shift+tab`.
   pub focus_previous: Binding,
+  /// Toggle fullscreen on the focused window. `[wm-actions] toggle_fullscreen`;
+  /// default `super+f`.
   pub toggle_fullscreen: Binding,
+  /// Toggle whether the focused window shows on every workspace. `[wm-actions]
+  /// toggle_sticky`; default `super+s`.
   pub toggle_sticky: Binding,
+  /// Toggle Scale for the current workspace. `[scale] toggle`; default
+  /// `super+p`.
   pub scale_toggle: Binding,
+  /// Toggle Scale for all workspaces. `[scale] toggle_all`; disabled by
+  /// default.
   pub scale_toggle_all: Binding,
+  /// Toggle Expo. `[expo] toggle`; default `super+e`.
   pub expo_toggle: Binding,
+  /// Start the fast switcher, moving forward. `[fast-switcher] activate`;
+  /// default `alt+escape`.
   pub fast_switcher_next: Binding,
+  /// Start the fast switcher, moving backward. `[fast-switcher]
+  /// activate_backward`; default `alt+shift+escape`.
   pub fast_switcher_previous: Binding,
+  /// Toggle colour inversion of the output. `[invert] toggle`; default
+  /// `super+i`.
   pub invert_toggle: Binding,
+  /// Reset the rotation of every window. `[wrot] reset`; default
+  /// `super+ctrl+r`.
   pub wrot_reset: Binding,
+  /// Reset the focused window's rotation. `[wrot] reset-one`; default
+  /// `super+r`.
   pub wrot_reset_one: Binding,
+  /// Toggle always-on-top for the focused window. `[wm-actions]
+  /// toggle_always_on_top`; disabled by default.
   pub always_on_top: Binding,
+  /// Toggle always-on-bottom for the focused window. `[wm-actions]
+  /// toggle_always_on_bottom`; disabled by default.
   pub always_on_bottom: Binding,
+  /// Minimize the focused window. `[wm-actions] minimize`; default `super+n`.
   pub minimize: Binding,
+  /// Raise the focused window to the top of its stacking layer. `[wm-actions]
+  /// bring_to_front`; default `super+b`.
   pub bring_to_front: Binding,
+  /// Lower the focused window to the bottom of its stacking layer.
+  /// `[wm-actions] send_to_back`; default `super+shift+b`.
   pub send_to_back: Binding,
+  /// Toggle show-desktop, minimizing every window and restoring them on the
+  /// next press. `[wm-actions] toggle_showdesktop`; default `super+d`.
   pub show_desktop: Binding,
+  /// Toggle maximize on the focused window. `[wm-actions] toggle_maximize` or
+  /// `[simple-tile] key_toggle_maximized`; default `super+m`.
   pub toggle_maximized: Binding,
+  /// Toggle the focused window between tiled and floating. `[simple-tile]
+  /// key_toggle`; i3 `floating toggle`; default `super+t`.
   pub toggle_tiling: Binding,
+  /// Swap the focused tile with its left neighbour. `[simple-tile]
+  /// key_move_left`; default `super+shift+h`.
   pub move_left: Binding,
+  /// Swap the focused tile with its right neighbour. `[simple-tile]
+  /// key_move_right`; default `super+shift+l`.
   pub move_right: Binding,
+  /// Swap the focused tile with the one above. `[simple-tile] key_move_above`;
+  /// default `super+shift+k`.
   pub move_up: Binding,
+  /// Swap the focused tile with the one below. `[simple-tile] key_move_below`;
+  /// default `super+shift+j`.
   pub move_down: Binding,
+  /// Move the focused tile's split edge left. `[simple-tile] key_resize_left`;
+  /// default `super+ctrl+h`.
   pub resize_left: Binding,
+  /// Move the focused tile's split edge right. `[simple-tile]
+  /// key_resize_right`; default `super+ctrl+l`.
   pub resize_right: Binding,
+  /// Move the focused tile's split edge up. `[simple-tile] key_resize_above`;
+  /// default `super+ctrl+k`.
   pub resize_up: Binding,
+  /// Move the focused tile's split edge down. `[simple-tile] key_resize_below`;
+  /// default `super+ctrl+j`.
   pub resize_down: Binding,
+  /// Snap the focused window to the top-left quarter. `[grid] slot_tl`; default
+  /// `super+kp7`.
   pub grid_slot_top_left: Vec<Binding>,
+  /// Snap the focused window to the top half. `[grid] slot_t`; default
+  /// `super+kp8`.
   pub grid_slot_top: Vec<Binding>,
+  /// Snap the focused window to the top-right quarter. `[grid] slot_tr`;
+  /// default `super+kp9`.
   pub grid_slot_top_right: Vec<Binding>,
+  /// Snap the focused window to the left half. `[grid] slot_l`; default
+  /// `super+left` and `super+kp4`.
   pub grid_slot_left: Vec<Binding>,
+  /// Snap the focused window to the whole workarea. `[grid] slot_c`; default
+  /// `super+up` and `super+kp5`.
   pub grid_slot_center: Vec<Binding>,
+  /// Snap the focused window to the right half. `[grid] slot_r`; default
+  /// `super+right` and `super+kp6`.
   pub grid_slot_right: Vec<Binding>,
+  /// Snap the focused window to the bottom-left quarter. `[grid] slot_bl`;
+  /// default `super+kp1`.
   pub grid_slot_bottom_left: Vec<Binding>,
+  /// Snap the focused window to the bottom half. `[grid] slot_b`; default
+  /// `super+kp2`.
   pub grid_slot_bottom: Vec<Binding>,
+  /// Snap the focused window to the bottom-right quarter. `[grid] slot_br`;
+  /// default `super+kp3`.
   pub grid_slot_bottom_right: Vec<Binding>,
+  /// Restore a snapped window's geometry from before it was snapped. `[grid]
+  /// restore`; default `super+down` and `super+kp0`.
   pub grid_restore: Vec<Binding>,
+  /// Suspend or resume the idle timeouts. `[idle] toggle`; disabled by default.
   pub idle_toggle: Binding,
+  /// End a client's keyboard-shortcuts inhibition so compositor bindings work
+  /// again. Checked before the inhibitor, so it always reaches the compositor.
+  /// `[shortcuts-inhibit] break_grab`; disabled by default.
   pub break_grab: Binding,
+  /// Lock the session. Imported from `[idle] key_lock` or `[simple-tile]
+  /// key_lock` (Shingle names, not stock Wayfire), or i3 `bindsym KEY exec
+  /// shingle-lock`; default `super+f8`.
   pub lock: Binding,
+  /// Ask the focused window to close. `[core] close_top_view`, whose first
+  /// alternative lands here and the rest in `close_alternatives`; default
+  /// `super+q`.
   pub close: Binding,
+  /// Further bindings that close the focused window. Default `alt+f4`.
   pub close_alternatives: Vec<Binding>,
+  /// Reload the configuration file. i3 `reload`; no Wayfire equivalent; default
+  /// `super+shift+r`.
   pub reload: Binding,
+  /// Quit the compositor, saving the session. `[core] exit`; default
+  /// `super+shift+q`.
   pub quit: Binding,
+  /// Switch to workspace 1 to 10, in order; exactly ten entries. Defaults
+  /// `super+1` … `super+9`, `super+0`. i3 `workspace N`.
   pub workspace_switch: Vec<Binding>,
+  /// Carry the focused window to workspace 1 to 10 and follow it; exactly ten
+  /// entries. Defaults `super+shift+1` … `super+shift+0`. i3 `move container to
+  /// workspace N`.
   pub workspace_move: Vec<Binding>,
+  /// Switch to the workspace to the right. `[vswitch] binding_right`; default
+  /// `super+alt+right`.
   pub workspace_next: Binding,
+  /// Switch to the workspace to the left. `[vswitch] binding_left`; default
+  /// `super+alt+left`.
   pub workspace_previous: Binding,
+  /// Switch to the workspace above. `[vswitch] binding_up`; default
+  /// `super+alt+up`.
   pub workspace_up: Binding,
+  /// Switch to the workspace below. `[vswitch] binding_down`; default
+  /// `super+alt+down`.
   pub workspace_down: Binding,
+  /// Carry the focused window right and follow it. `[vswitch] with_win_right`;
+  /// default `super+alt+shift+right`.
   pub workspace_move_next: Binding,
+  /// Carry the focused window left and follow it. `[vswitch] with_win_left`;
+  /// default `super+alt+shift+left`.
   pub workspace_move_previous: Binding,
+  /// Carry the focused window up and follow it. `[vswitch] with_win_up`;
+  /// default `super+alt+shift+up`.
   pub workspace_move_up: Binding,
+  /// Carry the focused window down and follow it. `[vswitch] with_win_down`;
+  /// default `super+alt+shift+down`.
   pub workspace_move_down: Binding,
+  /// Send the focused window right without switching. `[vswitch]
+  /// send_win_right`; disabled by default.
   pub workspace_send_next: Binding,
+  /// Send the focused window left without switching. `[vswitch] send_win_left`;
+  /// disabled by default.
   pub workspace_send_previous: Binding,
+  /// Send the focused window up without switching. `[vswitch] send_win_up`;
+  /// disabled by default.
   pub workspace_send_up: Binding,
+  /// Send the focused window down without switching. `[vswitch] send_win_down`;
+  /// disabled by default.
   pub workspace_send_down: Binding,
+  /// Switch back to the previously active workspace. `[vswitch] binding_last`;
+  /// i3 `workspace back_and_forth`; default `super+grave`.
   pub workspace_last: Binding,
+  /// Carry the focused window to the previous workspace and follow it.
+  /// `[vswitch] with_win_last`; default `super+shift+grave`.
   pub workspace_move_last: Binding,
+  /// Send the focused window to the previous workspace without switching.
+  /// `[vswitch] send_win_last`; disabled by default.
   pub workspace_send_last: Binding,
 }
 
@@ -1292,12 +1819,23 @@ impl Default for Keybindings {
   }
 }
 
+/// Modifier-and-button bindings that start pointer grabs. The key part of each
+/// [`Binding`] is a button name such as `btn_left`.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PointerBindings {
+  /// Start an interactive move of the window under the pointer. `[move]
+  /// activate` or `[simple-tile] button_move`; default `super+btn_left`.
   pub move_button: Binding,
+  /// Start an interactive resize of the window under the pointer, from the edge
+  /// chosen by [`ResizeConfig::corner_threshold`]. `[resize] activate` or
+  /// `[simple-tile] button_resize`; default `super+btn_right`.
   pub resize_button: Binding,
+  /// Start a resize that keeps the window's aspect ratio. `[resize]
+  /// activate_preserve_aspect`; disabled by default.
   pub resize_preserve_aspect_button: Binding,
+  /// Start rotating the window under the pointer in 2D. `[wrot] activate`;
+  /// default `super+ctrl+btn_right`.
   pub wrot_activate: Binding,
 }
 
@@ -1315,24 +1853,58 @@ impl Default for PointerBindings {
   }
 }
 
+/// Keyboard, pointer and cursor settings from Wayfire's `[input]`
+/// (metadata/input.xml). The XKB fields feed [`InputConfig::keymap`].
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InputConfig {
+  /// XKB rules name. `[input] xkb_rules`; default `evdev`. Not used by
+  /// [`InputConfig::keymap`], which always includes evdev keycodes.
   pub rules: String,
+  /// Path of a complete XKB keymap file; when non-empty it replaces the
+  /// generated keymap. `[input] xkb_file` (Shingle-specific); default empty.
   pub xkb_file: String,
+  /// XKB keyboard model. `[input] xkb_model`; default `pc105`. Not used by
+  /// [`InputConfig::keymap`].
   pub model: String,
+  /// Comma-separated XKB layouts, the first being group 1. `[input]
+  /// xkb_layout`; default `us`.
   pub layout: String,
+  /// Comma-separated XKB variants, matched to `layout` by position; an empty
+  /// entry means the layout's default variant. `[input] xkb_variant`; default
+  /// empty.
   pub variant: String,
+  /// Comma-separated XKB options such as `ctrl:nocaps`. `[input] xkb_options`;
+  /// default empty.
   pub options: String,
+  /// Key repeats per second once `repeat_delay` has passed. `[input]
+  /// kb_repeat_rate`; default 40.
   pub repeat_rate: u32,
+  /// Milliseconds a key must be held before it starts repeating. `[input]
+  /// kb_repeat_delay`; default 400.
   pub repeat_delay: u32,
+  /// Num Lock state at startup. `[input] kb_numlock_default_state`; default
+  /// false.
   pub numlock_default: bool,
+  /// Caps Lock state at startup. `[input] kb_capslock_default_state`; default
+  /// false.
   pub capslock_default: bool,
+  /// Multiplier for wheel scroll distances. Finite and non-negative; `[input]
+  /// mouse_scroll_speed`; default 1.
   pub mouse_scroll_speed: f64,
+  /// Invert wheel scrolling direction. `[input] mouse_natural_scroll`; default
+  /// false.
   pub mouse_natural_scroll: bool,
+  /// Swap the left and right mouse buttons. `[input] left_handed_mode`; default
+  /// false.
   pub left_handed_mode: bool,
+  /// Emulate a middle click when left and right are pressed together. `[input]
+  /// middle_emulation`; default false.
   pub middle_emulation: bool,
+  /// XCursor theme for the compositor's own cursors and `wp-cursor-shape-v1`
+  /// shapes. `[input] cursor_theme`; default `default`.
   pub cursor_theme: String,
+  /// XCursor size. 1–256; `[input] cursor_size`; default 24.
   pub cursor_size: u32,
   /// Enable the text-input-v3 protocol for editable client surfaces.
   pub enable_text_input_v3: bool,
@@ -1363,6 +1935,13 @@ impl Default for InputConfig {
 }
 
 impl InputConfig {
+  /// Returns the XKB keymap text for clients: the contents of `xkb_file` when
+  /// it is set, otherwise [`InputConfig::keymap`].
+  ///
+  /// # Errors
+  ///
+  /// [`ConfigError::Read`] if `xkb_file` is set but cannot be read. The file's
+  /// contents are not compiled or checked here.
   pub fn load_keymap(&self) -> Result<String, ConfigError> {
     if self.xkb_file.is_empty() {
       return Ok(self.keymap());
@@ -1407,14 +1986,29 @@ impl InputConfig {
   }
 }
 
+/// A key or button with the exact set of modifiers that must be held.
+///
+/// The text form, used in YAML, is modifiers and key joined by `+`, such as
+/// `super+shift+q`; modifier names are case-insensitive (`super`, `super_key`,
+/// `logo`, `ctrl`, `control`, `alt`, `shift`). Keys are lower-cased Wayfire key
+/// names without the `KEY_` prefix (`q`, `enter`, `kp5`, `btn_left`). A key
+/// written `xkb:NAME` matches the case-sensitive XKB keysym name instead, so
+/// layout-dependent symbols such as `xkb:XF86AudioMute` can be bound. An empty
+/// string or `none` is the disabled binding.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Binding {
+  /// Lower-case key or button name, `xkb:` followed by a keysym name, or empty
+  /// for a disabled binding.
   pub key: String,
+  /// Modifiers that must be held. Order does not matter, and no other modifier
+  /// may be held.
   pub modifiers: Vec<Modifier>,
 }
 
 impl Binding {
+  /// Creates a binding from an already normalized key name. The key is not
+  /// lower-cased or checked.
   pub fn new(key: impl Into<String>, modifiers: Vec<Modifier>) -> Self {
     Self {
       key: key.into(),
@@ -1422,10 +2016,14 @@ impl Binding {
     }
   }
 
+  /// The binding that never matches, written `none` in YAML.
   pub fn disabled() -> Self {
     Self::new("", Vec::new())
   }
 
+  /// Whether `key`, a Wayfire key name, pressed with exactly `modifiers`
+  /// triggers this binding. A disabled binding never matches, and an `xkb:`
+  /// binding only matches through [`Binding::matches_xkb`].
   pub fn matches(&self, modifiers: Modifiers, key: &str) -> bool {
     !self.key.is_empty() && self.key == key && self.modifiers_match(modifiers)
   }
@@ -1502,23 +2100,36 @@ impl TryFrom<String> for Binding {
   }
 }
 
+/// A modifier a [`Binding`] can require. There is no distinction between left
+/// and right keys.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Modifier {
+  /// The logo (Windows) key, XKB `Mod4`.
   Super,
+  /// Either Control key.
   Control,
+  /// Either Alt key, XKB `Mod1`.
   Alt,
+  /// Either Shift key.
   Shift,
 }
 
+/// The modifiers currently held, as reported by the keyboard state.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Modifiers {
+  /// The logo key is held.
   pub super_key: bool,
+  /// A Control key is held.
   pub control: bool,
+  /// An Alt key is held.
   pub alt: bool,
+  /// A Shift key is held.
   pub shift: bool,
 }
 
 impl Modifiers {
+  /// The held modifiers as a list, in the order control, alt, shift, super.
+  /// Despite the name this allocates a `Vec`.
   pub fn as_slice(self) -> Vec<Modifier> {
     let mut modifiers = Vec::new();
     if self.control {
@@ -1537,16 +2148,34 @@ impl Modifiers {
   }
 }
 
+/// Why a configuration could not be loaded, parsed, validated or saved.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+  /// The file could not be read.
   #[error("failed to read config {path}: {source}")]
-  Read { path: PathBuf, source: io::Error },
+  Read {
+    /// File that was being read.
+    path: PathBuf,
+    /// Underlying I/O error.
+    source: io::Error,
+  },
+  /// The file or its temporary copy could not be written, synced or renamed.
   #[error("failed to write config {path}: {source}")]
-  Write { path: PathBuf, source: io::Error },
+  Write {
+    /// Destination path; the failure may concern its temporary copy.
+    path: PathBuf,
+    /// Underlying I/O error.
+    source: io::Error,
+  },
+  /// YAML syntax error, wrong type or unknown field.
   #[error("invalid YAML: {0}")]
   Yaml(#[from] serde_yaml::Error),
+  /// A value is malformed or outside its range. The message names the field, or
+  /// the line number for INI and i3 input.
   #[error("invalid config: {0}")]
   Invalid(String),
+  /// A key binding could not be parsed, for example an unknown modifier or a
+  /// missing key. Carries the original binding text.
   #[error("invalid keybinding: {0}")]
   Binding(String),
 }
