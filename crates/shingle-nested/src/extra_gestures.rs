@@ -108,9 +108,9 @@ impl GestureState {
     let delay = Duration::from_millis(self.config.move_delay);
     if self.move_triggered
       || self.touches.len() != self.config.move_fingers as usize
-      || !self
+      || self
         .hold_started
-        .is_some_and(|started| now.duration_since(started) >= delay)
+        .is_none_or(|started| now.duration_since(started) < delay)
     {
       return None;
     }
