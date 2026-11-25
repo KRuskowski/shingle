@@ -124,6 +124,17 @@ class PatternTest(unittest.TestCase):
                      '300 frames')
     self.assertEqual(checks.summary_lines(''), '')
 
+  def test_released_buffers_reads_the_probe_s_release_lines(self):
+    output = ('{"event": "configure", "width": 1}\nnot json\n'
+              '{"event": "release", "buffer": "a"}\n[1]\n'
+              '{"event": "release", "buffer": "c"}\n')
+    self.assertEqual(checks.released_buffers(output), {'a', 'c'})
+    self.assertEqual(checks.released_buffers(''), set())
+
+  def test_every_group_has_a_check(self):
+    self.assertEqual(set(checks.GROUPS), set(checks.CHECKS))
+    self.assertEqual(checks.GROUPS, checks.run.CHECK_GROUPS)
+
   def test_tail(self):
     self.assertEqual(checks.tail('a\nb\nc\n', 2), 'b | c')
     self.assertEqual(checks.tail(''), '')

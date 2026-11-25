@@ -10,13 +10,21 @@
 //! so that it never opens a window on the host's Wayland session.
 //!
 //! ```text
-//! wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern]
+//! wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern] [--fifo]
 //! ```
 //!
 //! With `--pattern` the buffer is not white but four quadrants: red top
 //! left, green top right, blue bottom left and white bottom right, so
 //! that a capture shows where and which way up the buffer was drawn
 //! (docs/design/dmabuf.md, DB-2).
+//!
+//! With `--fifo`, once the toplevel is mapped the probe sends three
+//! commits in one flush: buffer `a` with a `wp_fifo_v1` barrier, then
+//! buffers `b` and `c`, each waiting for the barrier. `b` is replaced
+//! before it is shown, so the compositor must release it without drawing
+//! it, and `c` is shown at the next frame. The probe reports `fifo` when
+//! it has sent them and `release` (buffer) for each buffer given back
+//! (docs/design/dmabuf.md, DB-3).
 //!
 //! With `--copy`, the probe also makes a `wl_data_source` offering
 //! `text/plain;charset=utf-8` the clipboard, and answers each `send` with
@@ -26,7 +34,7 @@
 //!
 //! Events: `configure` (width, height, activated), `enter`, `leave`,
 //! `key` (key, pressed), `copied`, `send` (mime), `sent`, `cancelled`,
-//! `close` and `error`.
+//! `fifo`, `release` (buffer), `close` and `error`.
 
 use std::{
   io::Write,
@@ -41,8 +49,9 @@ use wayland_client::{
     wl_shm_pool, wl_surface,
   },
 };
-use wayland_protocols::xdg::shell::client::{
-  xdg_surface, xdg_toplevel, xdg_wm_base,
+use wayland_protocols::{
+  wp::fifo::v1::client::{wp_fifo_manager_v1, wp_fifo_v1},
+  xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
 };
 
 /// The variables the test harnesses set inside their namespaces.
@@ -53,6 +62,9 @@ const NAMESPACE_VARIABLES: [&str; 2] = [
 
 /// The size drawn before the first configure that names one.
 const DEFAULT_SIZE: (i32, i32) = (320, 240);
+
+/// The labels of the buffers `--fifo` commits, in order.
+const FIFO_BUFFERS: [&str; 3] = ["a", "b", "c"];
 
 /// The MIME type the probe's selection offers.
 const COPY_TYPE: &str = "text/plain;charset=utf-8";
@@ -67,6 +79,8 @@ struct Options {
   delay_ms: u64,
   /// Draws the quadrant pattern instead of white.
   pattern: bool,
+  /// Commits two buffers behind a FIFO barrier once mapped.
+  fifo: bool,
 }
 
 /// The XRGB8888 bytes (B, G, R, X) of pixel (`x`, `y`) of a `width` by
@@ -93,7 +107,8 @@ fn buffer_bytes(width: i32, height: i32, pattern: bool) -> Vec<u8> {
     .collect()
 }
 
-/// Parses `wl_probe [APP_ID] [--copy TEXT] [--delay-ms N]`.
+/// Parses `wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern]
+/// [--fifo]`.
 fn parse(arguments: &[String]) -> Result<Options, String> {
   let mut options = Options::default();
   let mut arguments = arguments.iter();
@@ -110,6 +125,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
           .map_err(|_| format!("bad --delay-ms {value:?}"))?;
       }
       "--pattern" => options.pattern = true,
+      "--fifo" => options.fifo = true,
       other if other.starts_with("--") => {
         return Err(format!("unknown option {other}"));
       }
@@ -143,6 +159,7 @@ struct Probe {
   wm_base: Option<xdg_wm_base::XdgWmBase>,
   seat: Option<wl_seat::WlSeat>,
   data_device_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
+  fifo_manager: Option<wp_fifo_manager_v1::WpFifoManagerV1>,
   keyboard: Option<wl_keyboard::WlKeyboard>,
   /// The text the selection offers and how long each send waits.
   copy: Option<(String, u64)>,
@@ -151,36 +168,56 @@ struct Probe {
   surface: Option<wl_surface::WlSurface>,
   /// The size of the pending configure.
   pending: (i32, i32),
+  /// The size last drawn, if anything was.
+  drawn: Option<(i32, i32)>,
+  /// How many buffers were drawn for configures.
+  draws: u32,
   /// Whether the pending configure says activated.
   activated: bool,
   closed: bool,
 }
 
 impl Probe {
-  /// Attaches and commits a white or patterned buffer of `width` by
-  /// `height`.
-  fn draw(&self, handle: &QueueHandle<Self>, width: i32, height: i32) {
-    let (Some(shm), Some(surface)) = (&self.shm, &self.surface) else {
-      return;
-    };
-    let stride = width * 4;
-    let size = stride * height;
+  /// A pool holding `count` white or patterned buffers of `width` by
+  /// `height`, one after the other, or None after reporting an error.
+  fn pool(
+    &self,
+    handle: &QueueHandle<Self>,
+    width: i32,
+    height: i32,
+    count: i32,
+  ) -> Option<wl_shm_pool::WlShmPool> {
+    let shm = self.shm.as_ref()?;
     let Ok(fd) = rustix::fs::memfd_create(
       "wl-probe-buffer",
       rustix::fs::MemfdFlags::CLOEXEC,
     ) else {
       report("error", &[("text", "\"memfd_create failed\"".into())]);
-      return;
+      return None;
     };
     let fd: OwnedFd = fd;
     let mut file = std::fs::File::from(fd);
-    let _ = file.write_all(&buffer_bytes(width, height, self.pattern));
-    let pool = shm.create_pool(file.as_fd(), size, handle, ());
+    let bytes = buffer_bytes(width, height, self.pattern);
+    for _ in 0..count {
+      let _ = file.write_all(&bytes);
+    }
+    Some(shm.create_pool(file.as_fd(), width * height * 4 * count, handle, ()))
+  }
+
+  /// Attaches and commits a white or patterned buffer of `width` by
+  /// `height`.
+  fn draw(&mut self, handle: &QueueHandle<Self>, width: i32, height: i32) {
+    let Some(surface) = self.surface.clone() else {
+      return;
+    };
+    let Some(pool) = self.pool(handle, width, height, 1) else {
+      return;
+    };
     let buffer = pool.create_buffer(
       0,
       width,
       height,
-      stride,
+      width * 4,
       wl_shm::Format::Xrgb8888,
       handle,
       (),
@@ -189,6 +226,46 @@ impl Probe {
     surface.damage_buffer(0, 0, width, height);
     surface.commit();
     pool.destroy();
+    self.drawn = Some((width, height));
+    self.draws += 1;
+  }
+
+  /// Sends `--fifo`'s three commits ([`FIFO_BUFFERS`]) at the size last
+  /// drawn. They go out in one flush, so the compositor reads them in one
+  /// dispatch, before any frame can clear the barrier.
+  fn fifo_commits(
+    &self,
+    handle: &QueueHandle<Self>,
+    fifo: &wp_fifo_v1::WpFifoV1,
+  ) -> Result<(), String> {
+    let (Some(surface), Some((width, height))) = (&self.surface, self.drawn)
+    else {
+      return Err("nothing was drawn before the FIFO commits".into());
+    };
+    let pool = self
+      .pool(handle, width, height, FIFO_BUFFERS.len() as i32)
+      .ok_or("no wl_shm pool for the FIFO commits")?;
+    for (index, label) in FIFO_BUFFERS.into_iter().enumerate() {
+      let buffer = pool.create_buffer(
+        width * height * 4 * index as i32,
+        width,
+        height,
+        width * 4,
+        wl_shm::Format::Xrgb8888,
+        handle,
+        label,
+      );
+      surface.attach(Some(&buffer), 0, 0);
+      surface.damage_buffer(0, 0, width, height);
+      if index == 0 {
+        fifo.set_barrier();
+      } else {
+        fifo.wait_barrier();
+      }
+      surface.commit();
+    }
+    pool.destroy();
+    Ok(())
   }
 }
 
@@ -216,6 +293,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
       "wl_seat" => probe.seat = Some(registry.bind(name, 1, handle, ())),
       "wl_data_device_manager" => {
         probe.data_device_manager = Some(registry.bind(name, 3, handle, ()));
+      }
+      "wp_fifo_manager_v1" => {
+        probe.fifo_manager = Some(registry.bind(name, 1, handle, ()));
       }
       _ => {}
     }
@@ -389,6 +469,21 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for Probe {
   ]);
 }
 
+impl Dispatch<wl_buffer::WlBuffer, &'static str> for Probe {
+  fn event(
+    _: &mut Self,
+    _: &wl_buffer::WlBuffer,
+    event: wl_buffer::Event,
+    label: &&'static str,
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wl_buffer::Event::Release = event {
+      report("release", &[("buffer", format!("{label:?}"))]);
+    }
+  }
+}
+
 /// Objects whose events the probe ignores.
 macro_rules! ignore_events {
   ($($interface:ty),*) => {
@@ -415,7 +510,9 @@ ignore_events!(
   wl_buffer::WlBuffer,
   wl_surface::WlSurface,
   wl_data_device_manager::WlDataDeviceManager,
-  wl_data_offer::WlDataOffer
+  wl_data_offer::WlDataOffer,
+  wp_fifo_manager_v1::WpFifoManagerV1,
+  wp_fifo_v1::WpFifoV1
 );
 
 /// Maps the toplevel, sets the selection with `--copy`, and serves events
@@ -445,7 +542,37 @@ fn run(options: &Options) -> Result<(), String> {
   toplevel.set_app_id(app_id.into());
   toplevel.set_title(app_id.into());
   surface.commit();
-  probe.surface = Some(surface);
+  probe.surface = Some(surface.clone());
+  // Kept alive for as long as the probe runs.
+  let mut _fifo = None;
+  if options.fifo {
+    let manager = probe
+      .fifo_manager
+      .clone()
+      .ok_or("wp_fifo_manager_v1 is missing")?;
+    let fifo = manager.get_fifo(&surface, &handle, ());
+    while probe.drawn.is_none() && !probe.closed {
+      queue
+        .blocking_dispatch(&mut probe)
+        .map_err(|error| error.to_string())?;
+    }
+    // Mapping may bring a configure with the tiled size, which is drawn
+    // too. A round trip that brings none means the toplevel is mapped at
+    // its size, so no draw can follow the FIFO commits.
+    loop {
+      let draws = probe.draws;
+      queue
+        .roundtrip(&mut probe)
+        .map_err(|error| error.to_string())?;
+      if probe.draws == draws {
+        break;
+      }
+    }
+    probe.fifo_commits(&handle, &fifo)?;
+    queue.flush().map_err(|error| error.to_string())?;
+    report("fifo", &[]);
+    _fifo = Some(fifo);
+  }
   // Kept alive for as long as the probe runs.
   let mut _selection = None;
   if probe.copy.is_some() {
@@ -516,12 +643,14 @@ mod tests {
         copy: Some("hi".into()),
         delay_ms: 1500,
         pattern: false,
+        fifo: false,
       }
     );
     assert!(parse(&arguments(&["--copy"])).is_err());
     assert!(parse(&arguments(&["--delay-ms", "soon"])).is_err());
     assert!(parse(&arguments(&["--paste"])).is_err());
     assert!(parse(&arguments(&["--pattern"])).unwrap().pattern);
+    assert!(parse(&arguments(&["--fifo"])).unwrap().fifo);
     assert!(parse(&arguments(&["a", "b"])).is_err());
   }
 

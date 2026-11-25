@@ -1,6 +1,6 @@
 """Real-client checks of offscreen Shingle, run inside run.py's namespace.
 
-These are DB-2's checks (docs/design/dmabuf.md, section 11):
+These are DB-2's and DB-3's checks (docs/design/dmabuf.md, section 11):
 
 - `offscreen`: offscreen Shingle starts on the GPU; a `wl_probe --pattern`
   shm client maps and `grim` shows its four quadrants at the view
@@ -10,6 +10,9 @@ These are DB-2's checks (docs/design/dmabuf.md, section 11):
 - `baseline`: what `vkcube`, `es2gears_wayland` and nested Shingle on the
   GPU do against a compositor without linux-dmabuf. These are recorded
   (`INFO` lines), not judged; DB-4 compares against them.
+- `buffers` (DB-3): a `wl_probe --fifo` client commits buffer `a` with a
+  FIFO barrier and then `b` and `c` behind it in one flush; `b` is
+  replaced before it is shown, and both `b` and `c` must be released.
 
 Only run.py imports this, after it has built the namespace, so every
 process started here sees only the private /dev, /tmp and runtime
@@ -30,7 +33,7 @@ import run
 LAVAPIPE = '/usr/share/vulkan/icd.d/lvp_icd.json'
 NVIDIA_ICD = '/etc/vulkan/icd.d/nvidia_icd.json'
 NAMESPACE_VARIABLE = 'SHINGLE_GPU_TEST_NAMESPACE'
-GROUPS = ('offscreen', 'nested', 'baseline')
+GROUPS = ('offscreen', 'nested', 'baseline', 'buffers')
 # What every Shingle here runs with: no X display, one workspace, no
 # session restore or config reload.
 BASE_CONFIG = {
@@ -141,6 +144,19 @@ def summary_lines(text):
                                           'Selected GPU'))]
   last = [line.strip() for line in lines[-2:] if line.strip() not in named]
   return ' | '.join(named + last)
+
+def released_buffers(output):
+  """The labels of the buffers a `wl_probe` reported `release` for, in
+  `output`, its JSON lines; other lines are skipped."""
+  released = set()
+  for line in output.splitlines():
+    try:
+      event = json.loads(line)
+    except ValueError:
+      continue
+    if isinstance(event, dict) and event.get('event') == 'release':
+      released.add(event.get('buffer'))
+  return released
 
 def tail(text, lines=6):
   """The last `lines` lines of `text`, joined by ' | '."""
@@ -509,10 +525,49 @@ def baseline_checks(results, binary, wl_probe, captures):
   results.check('baseline: SIGTERM exits offscreen Shingle with status 0',
                 status == 0, f'status {status}')
 
+def buffer_checks(results, binary, wl_probe, captures):
+  """Buffers replaced behind a FIFO barrier are released (DB-3)."""
+  outer = Shingle(binary, 'buffers', with_gaps(OUTER_GAPS))
+  probe = Client(outer, [wl_probe, 'fifo', '--pattern', '--fifo'],
+                 'wl_probe')
+  try:
+    view = xw.wait_for(lambda: outer.view('fifo'), timeout=15)
+    results.check('buffers: the wl_probe --fifo client maps',
+                  view is not None, tail(probe.output()))
+    sent = xw.wait_for(lambda: '"event": "fifo"' in probe.output(),
+                       timeout=15)
+    results.check('buffers: the probe sent its FIFO commits', sent,
+                  tail(probe.output()))
+    # Waits the whole time when a release is missing, so that a late one
+    # still counts.
+    xw.wait_for(lambda: {'b', 'c'} <= released_buffers(probe.output()),
+                timeout=10)
+    released = released_buffers(probe.output())
+    print(f'INFO buffers: released {sorted(released)}', flush=True)
+    results.check(
+        'buffers: both buffers committed behind the FIFO barrier are '
+        'released',
+        {'b', 'c'} <= released,
+        f'released {sorted(released)}, {tail(probe.output())}')
+    if view is not None:
+      geometry = view['geometry']
+      shot = captures.settled(
+          outer, lambda shot: not pattern_mismatches(shot, geometry))
+      results.check(
+          'buffers: the capture shows the last buffer\'s quadrants',
+          shot is not None and not pattern_mismatches(shot, geometry),
+          f'wrong {pattern_mismatches(shot, geometry) if shot else None}')
+  finally:
+    probe.stop()
+  status = outer.stop()
+  results.check('buffers: SIGTERM exits offscreen Shingle with status 0',
+                status == 0, f'status {status}, {tail(outer.log_text())}')
+
 CHECKS = {
     'offscreen': offscreen_checks,
     'nested': nested_checks,
     'baseline': baseline_checks,
+    'buffers': buffer_checks,
 }
 
 def run_checks(groups, binary, wl_probe, captures_directory=None):

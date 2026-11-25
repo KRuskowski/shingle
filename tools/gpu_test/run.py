@@ -26,7 +26,7 @@ namespaces:
       -- COMMAND [ARGUMENT ...]
   tools/gpu_test/run.py [--modeset] [--keep] [--binary target/debug/shingle]
       [--wl-probe target/debug/examples/wl_probe] [--captures DIR]
-      --checks offscreen|nested|baseline ...
+      --checks offscreen|nested|baseline|buffers ...
 
 For example, DB-1's import test:
 
@@ -38,6 +38,9 @@ and DB-2's real-client checks of `shingle --backend offscreen`
 `cargo build -p shingle --example wl_probe`:
 
   tools/gpu_test/run.py --checks offscreen nested baseline
+
+DB-3's check that buffers replaced behind a FIFO barrier are released is
+`--checks buffers`.
 
 It exits with the command's status, or 1 when a check failed. With
 `--checks` it prints one PASS or FAIL line per check and INFO lines for
@@ -69,7 +72,7 @@ STRIPPED_VARIABLES = ('WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'DISPLAY',
 PRIVATE_ENTRIES = ('pts', 'ptmx', 'shm', 'fd', 'stdin', 'stdout', 'stderr')
 SAMPLE_INTERVAL = 0.05
 # checks.GROUPS, kept here so that `--help` works without importing it.
-CHECK_GROUPS = ('offscreen', 'nested', 'baseline')
+CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers')
 
 def allowed_devices(modeset):
   """The device nodes, relative to /dev, that the namespace exposes."""
