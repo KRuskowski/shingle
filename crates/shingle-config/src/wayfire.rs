@@ -218,6 +218,40 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
       ("input", "middle_emulation") => {
         config.input.middle_emulation = boolean(value, line_number)?;
       }
+      ("input", "mouse_accel_profile") => {
+        config.input.mouse_accel_profile = value.into();
+      }
+      ("input", "mouse_cursor_speed") => {
+        config.input.mouse_cursor_speed = number(value, line_number)?;
+      }
+      ("input", "touchpad_accel_profile") => {
+        config.input.touchpad_accel_profile = value.into();
+      }
+      ("input", "touchpad_cursor_speed") => {
+        config.input.touchpad_cursor_speed = number(value, line_number)?;
+      }
+      ("input", "tap_to_click") => {
+        config.input.tap_to_click = boolean(value, line_number)?;
+      }
+      ("input", "click_method") => config.input.click_method = value.into(),
+      ("input", "scroll_method") => config.input.scroll_method = value.into(),
+      ("input", "natural_scroll") => {
+        config.input.natural_scroll = boolean(value, line_number)?;
+      }
+      ("input", "disable_touchpad_while_typing") => {
+        config.input.disable_touchpad_while_typing =
+          boolean(value, line_number)?;
+      }
+      ("input", "disable_touchpad_while_mouse") => {
+        config.input.disable_touchpad_while_mouse =
+          boolean(value, line_number)?;
+      }
+      ("input", "tap_and_drag") => {
+        config.input.tap_and_drag = boolean(value, line_number)?;
+      }
+      ("input", "drag_lock") => {
+        config.input.drag_lock = boolean(value, line_number)?;
+      }
       ("input", "cursor_theme") => config.input.cursor_theme = value.into(),
       ("input", "cursor_size") => {
         config.input.cursor_size = number(value, line_number)?

@@ -245,6 +245,18 @@ input:
   mouse_natural_scroll: false
   left_handed_mode: false
   middle_emulation: false
+  mouse_accel_profile: default
+  mouse_cursor_speed: 0.0
+  touchpad_accel_profile: default
+  touchpad_cursor_speed: 0.0
+  tap_to_click: true
+  click_method: default
+  scroll_method: default
+  natural_scroll: false
+  disable_touchpad_while_typing: false
+  disable_touchpad_while_mouse: false
+  tap_and_drag: true
+  drag_lock: false
   cursor_theme: default
   cursor_size: 24
   enable_text_input_v3: true

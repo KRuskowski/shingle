@@ -433,6 +433,7 @@ impl ShingleConfig {
         "input.mouse_scroll_speed must be finite and non-negative".into(),
       ));
     }
+    self.input.validate_devices()?;
     if !(1..=256).contains(&self.input.cursor_size) {
       return Err(ConfigError::Invalid(
         "input.cursor_size must be between 1 and 256".into(),
@@ -2011,6 +2012,46 @@ pub struct InputConfig {
   /// Emulate a middle click when left and right are pressed together. `[input]
   /// middle_emulation`; default false.
   pub middle_emulation: bool,
+  /// libinput acceleration profile for mice and other pointers that are not
+  /// touchpads: `default` (the device's default), `none`, `adaptive` or
+  /// `flat`. `[input] mouse_accel_profile`; default `default`. Native only.
+  pub mouse_accel_profile: String,
+  /// libinput pointer speed for mice, from -1 to 1. `[input]
+  /// mouse_cursor_speed`; default 0. Native only.
+  pub mouse_cursor_speed: f64,
+  /// libinput acceleration profile for touchpads; the values of
+  /// `mouse_accel_profile`. `[input] touchpad_accel_profile`; default
+  /// `default`. Native only.
+  pub touchpad_accel_profile: String,
+  /// libinput pointer speed for touchpads, from -1 to 1. `[input]
+  /// touchpad_cursor_speed`; default 0. Native only.
+  pub touchpad_cursor_speed: f64,
+  /// Tapping a touchpad clicks. `[input] tap_to_click`; default true. Native
+  /// only.
+  pub tap_to_click: bool,
+  /// How a touchpad click picks its button: `default`, `none`,
+  /// `button-areas` or `clickfinger`. `[input] click_method`; default
+  /// `default`. Native only.
+  pub click_method: String,
+  /// How a touchpad scrolls: `default`, `none`, `two-finger`, `edge` or
+  /// `on-button-down`. `[input] scroll_method`; default `default`. Native
+  /// only.
+  pub scroll_method: String,
+  /// Natural (inverted) scrolling on touchpads. `[input] natural_scroll`;
+  /// default false. Native only.
+  pub natural_scroll: bool,
+  /// Ignore a touchpad while typing. `[input] disable_touchpad_while_typing`;
+  /// default false. Native only.
+  pub disable_touchpad_while_typing: bool,
+  /// Ignore a touchpad while an external mouse is plugged in. `[input]
+  /// disable_touchpad_while_mouse`; default false. Native only.
+  pub disable_touchpad_while_mouse: bool,
+  /// Tap and drag on touchpads. `[input] tap_and_drag`; default true. Native
+  /// only.
+  pub tap_and_drag: bool,
+  /// Keep a tap-and-drag going briefly after the finger lifts. `[input]
+  /// drag_lock`; default false. Native only.
+  pub drag_lock: bool,
   /// XCursor theme for the compositor's own cursors and `wp-cursor-shape-v1`
   /// shapes. `[input] cursor_theme`; default `default`.
   pub cursor_theme: String,
@@ -2037,6 +2078,18 @@ impl Default for InputConfig {
       mouse_natural_scroll: false,
       left_handed_mode: false,
       middle_emulation: false,
+      mouse_accel_profile: "default".into(),
+      mouse_cursor_speed: 0.0,
+      touchpad_accel_profile: "default".into(),
+      touchpad_cursor_speed: 0.0,
+      tap_to_click: true,
+      click_method: "default".into(),
+      scroll_method: "default".into(),
+      natural_scroll: false,
+      disable_touchpad_while_typing: false,
+      disable_touchpad_while_mouse: false,
+      tap_and_drag: true,
+      drag_lock: false,
       cursor_theme: "default".into(),
       cursor_size: 24,
       enable_text_input_v3: true,
@@ -2044,7 +2097,57 @@ impl Default for InputConfig {
   }
 }
 
+/// The values of `[input] mouse_accel_profile` and
+/// `touchpad_accel_profile`.
+pub const ACCEL_PROFILES: [&str; 4] = ["default", "none", "adaptive", "flat"];
+
+/// The values of `[input] click_method`.
+pub const CLICK_METHODS: [&str; 4] =
+  ["default", "none", "button-areas", "clickfinger"];
+
+/// The values of `[input] scroll_method`.
+pub const SCROLL_METHODS: [&str; 5] =
+  ["default", "none", "two-finger", "edge", "on-button-down"];
+
 impl InputConfig {
+  /// Checks the libinput device options against the values Wayfire's
+  /// metadata/input.xml allows.
+  fn validate_devices(&self) -> Result<(), ConfigError> {
+    let choices = [
+      (
+        "mouse_accel_profile",
+        &self.mouse_accel_profile,
+        &ACCEL_PROFILES[..],
+      ),
+      (
+        "touchpad_accel_profile",
+        &self.touchpad_accel_profile,
+        &ACCEL_PROFILES[..],
+      ),
+      ("click_method", &self.click_method, &CLICK_METHODS[..]),
+      ("scroll_method", &self.scroll_method, &SCROLL_METHODS[..]),
+    ];
+    for (name, value, allowed) in choices {
+      if !allowed.contains(&value.as_str()) {
+        return Err(ConfigError::Invalid(format!(
+          "input.{name} must be one of {}, not {value:?}",
+          allowed.join(", ")
+        )));
+      }
+    }
+    for (name, speed) in [
+      ("mouse_cursor_speed", self.mouse_cursor_speed),
+      ("touchpad_cursor_speed", self.touchpad_cursor_speed),
+    ] {
+      if !(-1.0..=1.0).contains(&speed) {
+        return Err(ConfigError::Invalid(format!(
+          "input.{name} must be between -1 and 1"
+        )));
+      }
+    }
+    Ok(())
+  }
+
   /// Returns the XKB keymap text for clients: the contents of `xkb_file` when
   /// it is set, otherwise [`InputConfig::keymap`].
   ///
@@ -2934,6 +3037,70 @@ mod tests {
       import("[other]\nxwayland = false\n").unwrap().mode,
       XwaylandMode::Eager
     );
+  }
+
+  #[test]
+  fn wayfire_import_reads_libinput_device_options() {
+    let defaults = InputConfig::default();
+    assert_eq!(defaults.mouse_accel_profile, "default");
+    assert_eq!(defaults.touchpad_cursor_speed, 0.0);
+    assert!(defaults.tap_to_click && defaults.tap_and_drag);
+    assert!(!defaults.natural_scroll && !defaults.drag_lock);
+    let input = ShingleConfig::parse(
+      concat!(
+        "[input]\n",
+        "mouse_accel_profile = flat\n",
+        "mouse_cursor_speed = -0.5\n",
+        "touchpad_accel_profile = adaptive\n",
+        "touchpad_cursor_speed = 0.25\n",
+        "tap_to_click = false\n",
+        "click_method = clickfinger\n",
+        "scroll_method = two-finger\n",
+        "natural_scroll = true\n",
+        "disable_touchpad_while_typing = true\n",
+        "disable_touchpad_while_mouse = true\n",
+        "tap_and_drag = false\n",
+        "drag_lock = true\n",
+      ),
+      ConfigFormat::Wayfire,
+    )
+    .unwrap()
+    .input;
+    assert_eq!(input.mouse_accel_profile, "flat");
+    assert_eq!(input.mouse_cursor_speed, -0.5);
+    assert_eq!(input.touchpad_accel_profile, "adaptive");
+    assert_eq!(input.touchpad_cursor_speed, 0.25);
+    assert!(!input.tap_to_click);
+    assert_eq!(input.click_method, "clickfinger");
+    assert_eq!(input.scroll_method, "two-finger");
+    assert!(input.natural_scroll);
+    assert!(input.disable_touchpad_while_typing);
+    assert!(input.disable_touchpad_while_mouse);
+    assert!(!input.tap_and_drag);
+    assert!(input.drag_lock);
+  }
+
+  #[test]
+  fn libinput_device_options_are_validated() {
+    for line in [
+      "mouse_accel_profile = fast",
+      "touchpad_accel_profile = Flat",
+      "click_method = areas",
+      "scroll_method = three-finger",
+      "mouse_cursor_speed = 1.5",
+      "touchpad_cursor_speed = -2",
+    ] {
+      let text = format!("[input]\n{line}\n");
+      assert!(
+        ShingleConfig::parse(&text, ConfigFormat::Wayfire).is_err(),
+        "{line}"
+      );
+    }
+    let yaml = "input:\n  scroll_method: on-button-down\n";
+    let input = ShingleConfig::parse(yaml, ConfigFormat::Yaml)
+      .unwrap()
+      .input;
+    assert_eq!(input.scroll_method, "on-button-down");
   }
 
   #[test]
