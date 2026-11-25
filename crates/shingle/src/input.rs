@@ -1767,7 +1767,8 @@ mod tests {
     assert_ne!(timestamp_usec(&state), 123_456_789);
   }
 
-  /// A `us,de` keymap as `include` statements, as shingle-config writes it.
+  /// A `us,de` keymap as `include` statements, as a hand-written keymap file
+  /// (`xkb_file`) may give it.
   const US_DE: &str = r#"xkb_keymap {
   xkb_keycodes { include "evdev+aliases(qwerty)" };
   xkb_types { include "complete" };

@@ -57,6 +57,8 @@ The requirement is exact tile order and size after logout and login. Test full f
 
 Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are placeholders until released. They must not be rendered, focused, included in Scale or reported as mapped.
 
+A session file that is not UTF-8, not JSON or not a valid snapshot is renamed to `session.json.corrupt-SECONDS` next to it (with `.N` if that name exists; nothing is overwritten or deleted), a warning names both paths, and Shingle starts with an empty session.
+
 ### Idle and locking
 
 `shingle-lock` is an `ext-session-lock-v1` client with swaylock-style options and PAM authentication through `shingle-auth`. Idle, DPMS, fullscreen suppression and lock coordination exist. Option compatibility does not imply full swaylock parity; keep testing real locking.
@@ -77,13 +79,38 @@ Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are pla
 
 ### API documentation
 
-Every library crate enforces `#![warn(missing_docs)]`: `shingle`, `shingle-core`, `shingle-frontend`, `shingle-config`, `shingle-render`, `shingle-session`, `shingle-idle` and `shingle-auth`. `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps` passes. The docs give units and coordinate spaces, invariants, the protocol request or Wayfire file an item follows, and each error case; the crate docs of `shingle` and `shingle-idle` describe the compositor lifecycle a backend drives and the lock state machine. `shingle-nested` and the binaries `shingle-lock` and `shingle-wcm` are not covered. Bugs found while documenting are listed under "Bugs found while documenting the crates" in [roadmap.md](roadmap.md).
+Every library crate enforces `#![warn(missing_docs)]`: `shingle`, `shingle-core`, `shingle-frontend`, `shingle-config`, `shingle-render`, `shingle-session`, `shingle-idle` and `shingle-auth`. `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps` passes. The docs give units and coordinate spaces, invariants, the protocol request or Wayfire file an item follows, and each error case; the crate docs of `shingle` and `shingle-idle` describe the compositor lifecycle a backend drives and the lock state machine. `shingle-nested` and the binaries `shingle-lock` and `shingle-wcm` are not covered. The bugs found while documenting are fixed; see [Fixes from the API documentation](#fixes-from-the-api-documentation).
+
+### Fixes from the API documentation
+
+Fixed on the `shingle-doc-bugs` branch (2026-11-25), each with a regression test that failed before the fix:
+
+- `Event::DpmsChanged` is emitted once per DPMS change, from `emit_idle_changes` only.
+- A mapped toplevel that commits a null buffer is unmapped as xdg-shell defines it: its window leaves the layout, `WindowDestroyed` (IPC `view-unmapped`) is emitted, focus moves on, and the xdg_surface is unconfigured again. Its next initial commit gets a configure, and its next buffer maps it as a new window with a new view ID, as Wayfire's tile plugin re-attaches a remapped view.
+- `touch_cancel` forgets every touch point of the client, since `wl_touch.cancel` ends the client's whole sequence.
+- Scrolling reports its source: `Compositor::pointer_axis_detailed` takes a `shingle::Axis` with an `AxisSource` and per-axis stops, finger and continuous scrolls end with `wl_pointer.axis_stop`, and nested reports winit pixel deltas (touchpads) as fingers that stop when the gesture ends.
+- An aspect-preserving floating resize from the left or top edge keeps the opposite edge in place at a size limit.
+- `wl_surface.damage` is converted through the viewport, buffer scale and buffer transform, following wlroots' `surface_update_damage`. Measured first with a protocol test: a 90° buffer reported the surface's top-left 10×20 at buffer (0, 0, 10×20) instead of (0, 40, 20×10), and a 180° buffer at scale 2 and a viewport crop were wrong too. No renderer reads `BufferSnapshot::damage` yet, so nothing was drawn wrongly.
+- A move drag to the top edge no longer switches workspace up; the top edge is the maximize slot, and only the top corners switch, diagonally, as in Wayfire's `calc_slot` and move's `update_workspace_switch_timeout`. `grid_slot` uses `<` for the top and bottom corner bands, as `calc_slot` does.
+- `set_fullscreen`, `set_sticky`, `set_minimized` and `set_maximized` emit events and run window rules only when the state changes; switching to the current workspace and moving a window to its own workspace do nothing, as Wayfire's vswitch does for the current workspace.
+- `Compositor::apply_config` checks the output scale and rectangle before applying anything.
+- The Wayfire import names the line number of an unknown `[zoom] interpolation_method`.
+- `ShingleConfig::save_yaml` syncs the directory after the rename.
+- A corrupt session file (not UTF-8, not JSON or not a valid snapshot) is renamed to `session.json.corrupt-SECONDS` (never overwritten or deleted), a warning naming both paths is printed, and Shingle starts with an empty session.
+- `SessionStore::restore` and `RestoreReport` are gone, and `launch_saved` takes a `&ClientEnvironment`, so no saved client can start in the host's environment.
+- An empty or relative `XDG_STATE_HOME` falls back to `$HOME/.local/state`.
+- An idle inhibitor turns DPMS back on and ends an idle period, like fullscreen suppression.
+- `shingle-lock` installs `shingle_auth::ZeroOnFree` as its global allocator, so the password copy that nonstick hands to PAM and then drops, and the old buffers of a growing password, are zeroed before they are freed. The copy itself cannot be zeroed in `shingle-auth`, because nonstick owns and frees it.
+- `InputConfig::keymap` compiles the XKB rules, model, layout, variant and options with libxkbcommon, as Wayfire does, so `xkb_rules` and `xkb_model` take effect; it now returns a `Result`.
+- `ViewMatcher::matches` and `WindowRule::matches` are removed; nothing called them.
+
+Kept: `shingle_render::preview_tiles` and `interpolate_zoom`, which the frontend's scene build uses (crates/shingle-frontend/src/frontend/scene.rs), and `ScaleTitleFilterConfig::share_filter`, which is documented as having no effect with Shingle's single output. Several Wayfire `[output:*]` sections still write into one `OutputConfig`; that is part of the multi-output roadmap item.
 
 ## Verification
 
 ### Automated
 
-`cargo test --workspace` runs 351 tests (2026-11-25). Coverage of the other crates is uneven.
+`cargo test --workspace` runs 374 tests (2026-11-25). Coverage of the other crates is uneven.
 
 The Wayland pin test (`wayland_toplevels_look_unchanged`, crates/shingle/src/wayland_pins.rs) plays one scripted session of xdg toplevels through the in-process test client: two windows (one with size hints), fullscreen, minimize, always-on-top, sticky, alpha, a float through `configure-view`, a retitle, a child window, focus, `close-view` and destruction, then a restore of the saved session into a new compositor. It records every IPC reply and event (`list-views`, `get-focused-view`, `view-info` and the `view-*` events), the renderer events, the visible and Scale surface snapshots, each `xdg_toplevel.configure` with its states, the close requests and the session snapshot (with the test process's command line, directory and PID replaced), 296 lines, and requires them to match crates/shingle/testdata/wayland_pins.txt byte for byte. The file was recorded on `master` at `daad6af`, before the XW-1 refactor, and the refactor left it unchanged. The client-environment tests (crates/shingle-session/src/environment.rs and lib.rs, crates/shingle/src/lib.rs, crates/shingle-bin/src/headless.rs) check the variables with and without an X display and IPC, that values a host set on a command are overridden, and that real children started by `launch_command`, `launch_program`, `launch_autostart`, `launch_saved`, `stipc/run` and headless `--spawn` see no `DISPLAY`, Shingle's `WAYLAND_DISPLAY` and the IPC socket. `launch::capture_pid` is tested on a fake `/proc`.
 
@@ -219,6 +246,16 @@ Environment check: Shingle was started with the host session's `DISPLAY=:1` and 
 Nested pin script and smoke test, as in the NB-4 run, with the after build against the before build: the 38-step script gave 152/152 identical IPC replies and 74/74 identical outer and inner captures, the held repeatable binding ran 46 times in both and the quit binding exited 0 in both; two runs of the before build were identical to each other in the same way. The nested smoke test passed 14/14 on both builds: `WAYLAND_DISPLAY` printed and served from the private runtime directory, `stipc/get_display`, 77 sorted methods, 48 globals in `wayland-info` including `xdg_wm_base`, `wl_seat`, `wl_shm` and `zwlr_layer_shell_v1`, one client mapped, focused and filling the output, and SIGTERM ending nested with status 0 after saving the session. The session saved by the first environment run was restored by the second and third, relaunching its window.
 
 Not covered: an X11 client, since there is no X server yet; XW-2 adds one and fills in `DISPLAY`.
+
+Fixes from the API documentation, 2026-11-25: a Python fixture (`doc_bugs_run.py`, outside the repository) ran the `shingle` binary nested in the headless outer compositor of the NB-4 run, so no window opened on the host session and no host input was sent. Each run had its own `XDG_RUNTIME_DIR`, Wayland and IPC sockets, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `HOME`, lavapipe, a 3×3 workspace grid and `workspace_switch_after: 300`. Raw-protocol `wl_shm` clients and IPC drove three scenarios; pointer and keys went through the outer compositor's STIPC as real `wl_pointer` and `wl_keyboard` events. The debug build of `d53d4bb` passed 23/23 checks, twice; `master` at `a5b9bf0` passed 8/21:
+
+| Scenario | Branch | `master` |
+| --- | --- | --- |
+| Null-buffer unmap: of two tiled clients, one commits a null buffer, then a new initial commit and a buffer | `view-unmapped` for it, only the other listed, at the full workarea width and focused; its initial commit answered with a configure; `view-mapped` with a new ID and both tiled again | No event, both still listed at half width, the hidden one still focused; its remap only worked because it had never unmapped |
+| Top-edge drag: super+left drag of a tiled view from workspace (1, 1) to the middle of the top edge, held 1 s, dropped; then to the top-left corner | No switch while held, dropped view fills the workarea; the corner switches to (0, 0) after 300 ms and the view goes along | Switched up to (1, 0) while held; the corner from there switches nothing, as no row is above |
+| Corrupt session: garbage in `shingle/session.json` with `session.restore` on | Starts and serves IPC, warns once naming `session.json` and `session.json.corrupt-SECONDS`, the set-aside file is byte-identical, a client maps, SIGTERM exits 0 and saves a fresh session | Exits 1 with `expected ident at line 1 column 30` and leaves the file in place |
+
+`/proc/<pid>/fd` of both compositors showed no DRM, input or TTY device open. Writing the remapping client found that an unmapped toplevel got no configure for its new initial commit, and the first branch run showed the JSON error twice in the warning; both are fixed in the branch. The other fixes are covered by unit and protocol tests only.
 
 #### Needs operator: host input
 

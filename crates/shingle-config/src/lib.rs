@@ -1170,7 +1170,11 @@ impl Default for ExpoConfig {
 pub struct ScaleTitleFilterConfig {
   /// Whether title and app-ID substring matching preserves letter case.
   pub case_sensitive: bool,
-  /// Whether outputs share filter text once multi-output support is present.
+  /// Whether all outputs share one filter text, Wayfire's
+  /// `scale-title-filter/share_filter` (plugins/scale/scale-title-filter.cpp,
+  /// `get_active_filter`, which picks the global or the per-output filter).
+  /// Shingle has one output, where both are the same, so it has no effect
+  /// until multi-output support exists.
   pub share_filter: bool,
   /// Whether the current filter is displayed above the overview.
   pub overlay: bool,

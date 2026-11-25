@@ -1,6 +1,6 @@
 # XWayland design
 
-Status: proposed, 2026-11-25, awaiting the operator's answers to the [open questions](#open-questions). Roadmap item "XWayland" ([roadmap.md](../roadmap.md#5-xwayland)). XW-1 is done (2026-11-25); its deviations from this design are listed in [its entry](#xw-1-shingle-toplevel-handle-shell-neutral-toplevel-and-client-environment).
+Status: proposed, 2026-11-25, awaiting the operator's answers to the [open questions](#open-questions). Roadmap item "XWayland" ([roadmap.md](../roadmap.md#4-xwayland)). XW-1 is done (2026-11-25); its deviations from this design are listed in [its entry](#xw-1-shingle-toplevel-handle-shell-neutral-toplevel-and-client-environment).
 
 Shingle has no XWayland, so X11 applications cannot run under it. `stipc/get_display` returns an empty `xwayland` value (crates/shingle/src/ipc.rs:2676). This document decides how Shingle starts and supervises `Xwayland`, how its own X window manager (XWM) turns X11 windows into Shingle windows, and how input, selections and scaling work for them. It is the brief for the implementation workspaces in [section 8](#8-implementation-plan). Nothing here is implemented yet.
 

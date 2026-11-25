@@ -6,29 +6,7 @@ Work items in priority order. Refer to items by name, not number, from other doc
 
 The smoke test, IPC fixtures, session round trip and Tilefire migration were repeated with real clients on 2026-11-25 ([status.md](status.md#with-real-clients)). What remains needs physical input from the operator: input-device gating of real host keyboard, pointer and touch events, the nested switcher and drag clean-up on disable, modifiers held across host keyboard focus changes, and a clean quit followed by a restore. The steps are in [status.md](status.md#needs-operator-host-input); record the results there and delete this item.
 
-## 2. Bugs found while documenting the crates
-
-Found while writing the API docs (see [status.md](status.md#api-documentation)); none is fixed yet. Each needs a test that fails first.
-
-- `Event::DpmsChanged` is emitted twice for every DPMS change: once from the `RequestDpms*` command and again from `emit_idle_changes` (crates/shingle/src/state.rs:1052, crates/shingle/src/state.rs:1069).
-- Attaching a null buffer to a mapped toplevel does not unmap it. The window keeps its tile and gets no `WindowDestroyed`; it only stops being drawn. xdg-shell says a null buffer unmaps (`WindowDestroyed` only comes from `detach_toplevel`, crates/shingle/src/shell.rs:689).
-- `touch_cancel` sends `wl_touch.cancel`, which cancels the client's whole touch sequence, but drops only one ID from the active touches (crates/shingle/src/input.rs:1190).
-- `pointer_axis_detailed` always reports the axis source as `wheel` and never sends `axis_stop`, even for touchpad scrolling (crates/shingle/src/input.rs:1016).
-- In an aspect-preserving floating resize from the left or top edge, a size limit makes the opposite edge drift, because the position correction uses the already-clamped size (crates/shingle/src/input.rs:767, `resize_floating_from`). `resize_window` anchors the far edge correctly.
-- Surface damage is scaled by the buffer scale but not transformed by the buffer transform or viewport, so rotated or cropped buffers may get wrong damage rectangles (crates/shingle/src/state.rs:1409, `clip_damage`). Impact not measured.
-- Dragging a window to the top edge switches workspace up (crates/shingle/src/lib.rs:2295, `workspace_drag_direction_at`); Wayfire's move plugin turns the top edge into the maximize slot instead (`calc_slot` in /home/karl/dev/wayfire/plugins/grid/wayfire/plugins/grid.hpp:136, used by plugins/single_plugins/move.cpp:385). `grid_slot` also uses `<=` where Wayfire uses `<` for the far corners (crates/shingle/src/shell.rs:1423). Decide whether to follow Wayfire.
-- `set_fullscreen`, `set_sticky` and `set_minimized` emit their events when the state does not change, `switch_workspace` emits `WorkspaceChanged` for the current workspace, and `move_window_to_workspace` to the window's own workspace detaches and reattaches it and emits `WindowMoved`.
-- `Compositor::apply_config` is not atomic: an invalid output scale or rectangle is reported after earlier settings were already applied.
-- The Wayfire import error for an unknown `[zoom] interpolation_method` prints the line's text instead of its number (`line {line}` should be `line {line_number}`, crates/shingle-config/src/wayfire.rs:405).
-- `ShingleConfig::save_yaml` does not sync the directory after the rename, unlike `Shingle::save_atomic` (crates/shingle-config/src/lib.rs:296).
-- A corrupt session file stops the compositor from starting, because `SessionStore::load` errors are propagated (crates/shingle-frontend/src/frontend.rs:177, crates/shingle-bin/src/headless.rs:28). It should probably be logged, set aside and the session started empty.
-- `SessionStore::restore` and `RestoreReport::launch` start clients in the process's own environment, `WAYLAND_DISPLAY` included, which in nested is the host session (crates/shingle-session/src/lib.rs:190). Nothing calls them; remove them or take a `ClientEnvironment`.
-- An empty `XDG_STATE_HOME` gives a relative session path instead of falling back to `~/.local/state` (crates/shingle-session/src/lib.rs:114).
-- An idle inhibitor created while DPMS is off or idle has been notified leaves that state until the next input, unlike fullscreen suppression (crates/shingle-idle/src/lib.rs:369).
-- The PAM conversation copies the password into a plain `OsString` for PAM, which is not zeroed (crates/shingle-auth/src/lib.rs:149).
-- Unused public API: `shingle_render::preview_tiles` and `interpolate_zoom` (crates/shingle-render/src/lib.rs:269, :278), `ScaleTitleFilterConfig::share_filter`, and `ViewMatcher::matches` and `WindowRule::matches` outside tests. `InputConfig::rules` and `model` are ignored by `keymap()`, and every Wayfire `[output:*]` section writes into the one `OutputConfig`, so the last one wins.
-
-## 3. Native backend
+## 2. Native backend
 
 Add DRM/KMS and libinput with careful failure handling. The design is [design/native-backend.md](design/native-backend.md).
 
@@ -47,11 +25,11 @@ In short, the interactive frontend moves out of `shingle-nested` into a shared `
 
 NB-1 to NB-5 are done, and so is the single `shingle` binary of decision 4, with nested and headless backends and native as a stub that says it is not built yet ([status.md](status.md#the-shingle-binary)); NB-6 adds `shingle-native` to it. NB-6 is next and, like everything after it, waits for the test machine. The operator's decisions are recorded in the design's [Decisions](design/native-backend.md#decisions) section.
 
-## 4. DMA-BUF
+## 3. DMA-BUF
 
 Add DMA-BUF import and remove unnecessary CPU texture copies.
 
-## 5. XWayland
+## 4. XWayland
 
 Run X11 applications through a rootless `Xwayland` with Shingle's own X window manager. The design is [design/xwayland.md](design/xwayland.md), proposed on 2026-11-25 and waiting on the operator's [open questions](design/xwayland.md#open-questions).
 
@@ -76,15 +54,17 @@ The work is split into seven workspaces, each with acceptance criteria in the de
 
 XW-2 is next. The design's open questions are still unanswered, so it proceeds with their stated defaults.
 
-## 6. Multi-output
+## 5. Multi-output
 
 Complete output lifecycle, focus, workspaces, sessions and rendering across outputs, including headless outputs over IPC where Wayfire offers them.
 
-## 7. Remaining Wayfire compatibility
+The Wayfire import must keep one output configuration per `[output:NAME]` section: today every section writes into the single `OutputConfig`, so with several sections the last one wins (crates/shingle-config/src/wayfire.rs, `parse`). Found while documenting the crates and left for this item.
+
+## 6. Remaining Wayfire compatibility
 
 Continue the missing plugins and configuration options, using Wayfire's source as the behavioural reference.
 
-## 8. Soak tests and measurements
+## 7. Soak tests and measurements
 
 Add long-running nested and native soak tests. Measure CPU, RSS, frame latency and GPU behaviour before making any resource or stability claims.
 
