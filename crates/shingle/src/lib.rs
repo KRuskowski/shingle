@@ -1191,6 +1191,13 @@ impl Compositor {
     self.state.input.modifiers.locked
   }
 
+  /// Returns the index of the active keyboard layout, as `wl_keyboard`
+  /// modifiers and `wayfire/get-keyboard-state` report it. IPC can change
+  /// it with `wayfire/set-keyboard-state`.
+  pub fn keyboard_layout_index(&self) -> u32 {
+    self.state.input.modifiers.group
+  }
+
   pub fn shortcuts_inhibited(&self) -> bool {
     shortcuts::active(&self.state)
   }
@@ -2186,6 +2193,29 @@ pub(crate) mod tests {
     )
     .expect("the default config builds a compositor");
     (compositor, path)
+  }
+
+  #[test]
+  fn keyboard_layout_index_follows_set_keyboard_state() {
+    let (mut compositor, _) = test_compositor();
+    let keymap = shingle_config::InputConfig {
+      layout: "us,de".into(),
+      ..shingle_config::InputConfig::default()
+    }
+    .keymap();
+    compositor.set_keymap(&keymap).expect("the keymap compiles");
+    assert_eq!(compositor.keyboard_layout_index(), 0);
+    let reply = ipc::respond(
+      &mut compositor.state,
+      &serde_json::json!({
+        "method": "wayfire/set-keyboard-state",
+        "data": {"layout-index": 1},
+      }),
+    );
+    assert_eq!(reply["result"], "ok");
+    assert_eq!(compositor.keyboard_layout_index(), 1);
+    compositor.set_keymap(&keymap).expect("the keymap compiles");
+    assert_eq!(compositor.keyboard_layout_index(), 0);
   }
 
   /// Dispatches the compositor until `done` holds or a second has passed.

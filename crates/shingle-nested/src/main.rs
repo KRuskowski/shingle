@@ -1,3 +1,5 @@
+mod host_keyboard;
+
 use std::{
   collections::{HashMap, HashSet},
   error::Error,
@@ -8,8 +10,7 @@ use std::{
 
 use shingle::{
   BufferSnapshot, Compositor, Config, Direction, Event, InputDeviceId,
-  InputDeviceInfo, InputDeviceKind, Modifiers, SurfaceId, SurfaceRole,
-  SurfaceSnapshot,
+  InputDeviceInfo, InputDeviceKind, SurfaceId, SurfaceRole, SurfaceSnapshot,
 };
 use shingle_config::{
   CommandBinding, ConfigWatcher, Keybindings, Modifiers as ConfigModifiers,
@@ -22,6 +23,7 @@ use shingle_frontend::{
     modifiers_held,
   },
   expo, extra_gestures, icon_theme,
+  keyboard::{Key, KeyState, Keyboard},
   scale::{
     ScaleState, fit_scale_tile, interpolate_scale_rect, rect_contains,
     scale_cells, scale_columns, scale_filter_matches, scale_geometry_at,
@@ -43,7 +45,6 @@ use winit::{
     TouchPhase, WindowEvent,
   },
   event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-  keyboard::ModifiersState,
   platform::scancode::PhysicalKeyExtScancode,
   window::{Window, WindowAttributes, WindowId},
 };
@@ -228,7 +229,8 @@ struct App {
   dirty: HashSet<SurfaceId>,
   lock_client: Option<Child>,
   session_children: Vec<Child>,
-  modifiers: ModifiersState,
+  keyboard: Keyboard,
+  host_keyboard: host_keyboard::HostKeyboard,
   switcher: Option<SwitcherState>,
   switcher_inactive_alpha: f32,
   scale: Option<ScaleState>,
@@ -349,6 +351,11 @@ impl App {
     let devices = SeatDevices::register(&mut compositor);
     compositor.set_keymap(&keymap)?;
     compositor.set_repeat(config.input.repeat_rate, config.input.repeat_delay);
+    let mut keyboard = Keyboard::new(&keymap)?;
+    keyboard.sync_locked(
+      compositor.locked_modifiers(),
+      compositor.keyboard_layout_index(),
+    );
     println!(
       "WAYLAND_DISPLAY={}",
       compositor.socket_name().to_string_lossy()
@@ -382,7 +389,8 @@ impl App {
       dirty: HashSet::new(),
       lock_client: None,
       session_children,
-      modifiers: ModifiersState::empty(),
+      keyboard,
+      host_keyboard: host_keyboard::HostKeyboard::default(),
       switcher: None,
       switcher_inactive_alpha: config.fast_switcher.inactive_alpha,
       scale: None,
@@ -671,7 +679,7 @@ impl App {
         }
       }
       (InputDeviceKind::Keyboard, true) => {
-        // Host modifiers kept being tracked while disabled; resync them.
+        // Keys kept being tracked while disabled; resync the modifiers.
         self.update_modifiers();
       }
       (InputDeviceKind::Pointer, false) => {
@@ -744,6 +752,7 @@ impl App {
       let keymap = config.input.load_keymap()?;
       self.compositor.apply_config(config.clone().into())?;
       self.compositor.set_keymap(&keymap)?;
+      self.keyboard.set_keymap(&keymap)?;
       self
         .compositor
         .set_repeat(config.input.repeat_rate, config.input.repeat_delay);
@@ -841,38 +850,26 @@ impl App {
     true
   }
 
+  /// Sends the shared keyboard's modifier masks to the compositor.
   fn update_modifiers(&mut self) {
-    let mut depressed = 0;
-    if self.modifiers.shift_key() {
-      depressed |= 1;
+    self
+      .compositor
+      .keyboard_modifiers(self.devices.keyboard, self.keyboard.modifiers());
+  }
+
+  /// Ends the switcher once its modifiers are released and sends the new
+  /// modifier masks, after a key or focus change altered them.
+  fn keyboard_modifiers_changed(&mut self) {
+    if self.switcher.as_ref().is_some_and(|state| {
+      !modifiers_held(state.modifiers, self.config_modifiers())
+    }) {
+      self.finish_switcher();
     }
-    if self.modifiers.control_key() {
-      depressed |= 4;
-    }
-    if self.modifiers.alt_key() {
-      depressed |= 8;
-    }
-    if self.modifiers.super_key() {
-      depressed |= 64;
-    }
-    self.compositor.keyboard_modifiers(
-      self.devices.keyboard,
-      Modifiers {
-        depressed,
-        latched: 0,
-        locked: self.compositor.locked_modifiers(),
-        group: 0,
-      },
-    );
+    self.update_modifiers();
   }
 
   fn config_modifiers(&self) -> ConfigModifiers {
-    ConfigModifiers {
-      super_key: self.modifiers.super_key(),
-      control: self.modifiers.control_key(),
-      alt: self.modifiers.alt_key(),
-      shift: self.modifiers.shift_key(),
-    }
+    self.keyboard.binding_modifiers()
   }
 
   fn map_zoom_input(&self, x: f64, y: f64) -> (f64, f64) {
@@ -1350,15 +1347,15 @@ impl App {
   fn run_matching_symbol_command(
     &mut self,
     modifiers: ConfigModifiers,
-    key: &winit::keyboard::Key,
+    symbol: Option<&str>,
     pressed: bool,
     repeat: bool,
   ) -> bool {
-    let Some(symbol) = xkb_symbol(key) else {
+    let Some(symbol) = symbol else {
       return false;
     };
     self.run_matching_command_with(pressed, repeat, |binding| {
-      binding.matches_xkb(modifiers, &symbol)
+      binding.matches_xkb(modifiers, symbol)
     })
   }
 
@@ -2569,16 +2566,80 @@ impl App {
     true
   }
 
-  fn keyboard_input(&mut self, event: winit::event::KeyEvent) {
-    let pressed = event.state == ElementState::Pressed;
-    let modifiers = self.config_modifiers();
-    let key = binding_key_name(event.physical_key);
+  /// Feeds host keyboard and focus events to the shared keyboard and, if
+  /// the keyboard device is enabled, dispatches the result. Returns whether
+  /// the event was a keyboard event.
+  fn host_keyboard_event(&mut self, event: &WindowEvent) -> bool {
+    let enabled = self.compositor.input_device_enabled(self.devices.keyboard);
+    match event {
+      WindowEvent::Focused(focused) => {
+        if self
+          .host_keyboard
+          .focus_changed(&mut self.keyboard, *focused)
+          && enabled
+        {
+          self.keyboard_modifiers_changed();
+        }
+        false
+      }
+      WindowEvent::ModifiersChanged(modifiers) => {
+        let state = modifiers.state();
+        let host = ConfigModifiers {
+          super_key: state.super_key(),
+          control: state.control_key(),
+          alt: state.alt_key(),
+          shift: state.shift_key(),
+        };
+        if self.host_keyboard.host_modifiers(&mut self.keyboard, host)
+          && enabled
+        {
+          self.keyboard_modifiers_changed();
+        }
+        true
+      }
+      WindowEvent::KeyboardInput { event, .. } => {
+        let Some(code) = event.physical_key.to_scancode() else {
+          return true;
+        };
+        let state = if event.repeat {
+          KeyState::Repeated
+        } else if event.state == ElementState::Pressed {
+          KeyState::Pressed
+        } else {
+          KeyState::Released
+        };
+        self.host_keyboard.key(code);
+        // Locks and the layout can change over IPC.
+        self.keyboard.sync_locked(
+          self.compositor.locked_modifiers(),
+          self.compositor.keyboard_layout_index(),
+        );
+        let key = self.keyboard.key(code, state);
+        if enabled {
+          self.keyboard_input(&key);
+          if key.modifiers_changed {
+            self.keyboard_modifiers_changed();
+          }
+        }
+        true
+      }
+      _ => false,
+    }
+  }
+
+  /// Dispatches one key, interpreted by the shared keyboard, to the
+  /// overviews, the switcher, bindings and finally the focused client.
+  fn keyboard_input(&mut self, event: &Key) {
+    let pressed = event.state != KeyState::Released;
+    let repeat = event.state == KeyState::Repeated;
+    let modifiers = event.modifiers;
+    let key = event.name.unwrap_or_default();
     let locked = self.compositor.is_locked();
-    if self.expo_key(modifiers, &key, pressed, locked) {
+    if self.expo_key(modifiers, key, pressed, locked) {
       return;
     }
-    if self.scale_key(modifiers, &key, pressed, locked) {
-      self.scale_filter_input(&key, event.text.as_deref(), pressed);
+    if self.scale_key(modifiers, key, pressed, locked) {
+      self.scale_filter_input(key, event.text.as_deref(), pressed);
       return;
     }
     if self.switcher.is_some() {
@@ -2600,8 +2661,8 @@ impl App {
               &self.keybindings.focus_next,
             ),
           };
-          let reverse = previous.matches(modifiers, &key);
-          if reverse || next.matches(modifiers, &key) {
+          let reverse = previous.matches(modifiers, key);
+          if reverse || next.matches(modifiers, key) {
             self.advance_switcher(reverse);
           }
         }
@@ -2611,30 +2672,28 @@ impl App {
     if (locked || !pressed) && !self.compositor.shortcuts_inhibited() {
       if self.run_matching_symbol_command(
         modifiers,
-        &event.logical_key,
+        event.symbol.as_deref(),
         pressed,
-        event.repeat,
+        repeat,
       ) {
         return;
       }
-      if self.run_matching_command(modifiers, &key, pressed, event.repeat) {
+      if self.run_matching_command(modifiers, key, pressed, repeat) {
         return;
       }
     }
     if locked {
-      if let Some(scancode) = event.physical_key.to_scancode() {
-        self
-          .compositor
-          .keyboard_key(self.devices.keyboard, scancode, pressed);
-      }
+      self
+        .compositor
+        .keyboard_key(self.devices.keyboard, event.code, pressed);
       return;
     }
-    if pressed && self.keybindings.break_grab.matches(modifiers, &key) {
+    if pressed && self.keybindings.break_grab.matches(modifiers, key) {
       self.compositor.break_shortcuts_inhibit();
       return;
     }
     if pressed && !self.compositor.shortcuts_inhibited() {
-      if self.keybindings.wrot_reset.matches(modifiers, &key) {
+      if self.keybindings.wrot_reset.matches(modifiers, key) {
         self.rotations.clear();
         self.rotation_drag = None;
         if let Some(window) = &self.window {
@@ -2642,7 +2701,7 @@ impl App {
         }
         return;
       }
-      if self.keybindings.wrot_reset_one.matches(modifiers, &key) {
+      if self.keybindings.wrot_reset_one.matches(modifiers, key) {
         if let Some(window) = self.compositor.focused_window() {
           self.rotations.remove(&window);
         }
@@ -2652,17 +2711,17 @@ impl App {
         }
         return;
       }
-      if self.keybindings.invert_toggle.matches(modifiers, &key) {
+      if self.keybindings.invert_toggle.matches(modifiers, key) {
         self.toggle_inversion();
         return;
       }
-      let direction = if self.keybindings.focus_left.matches(modifiers, &key) {
+      let direction = if self.keybindings.focus_left.matches(modifiers, key) {
         Some(Direction::Left)
-      } else if self.keybindings.focus_right.matches(modifiers, &key) {
+      } else if self.keybindings.focus_right.matches(modifiers, key) {
         Some(Direction::Right)
-      } else if self.keybindings.focus_up.matches(modifiers, &key) {
+      } else if self.keybindings.focus_up.matches(modifiers, key) {
         Some(Direction::Up)
-      } else if self.keybindings.focus_down.matches(modifiers, &key) {
+      } else if self.keybindings.focus_down.matches(modifiers, key) {
         Some(Direction::Down)
       } else {
         None
@@ -2674,24 +2733,24 @@ impl App {
         self.save();
         return;
       }
-      if self.keybindings.expo_toggle.matches(modifiers, &key) {
+      if self.keybindings.expo_toggle.matches(modifiers, key) {
         self.toggle_expo();
         return;
       }
-      if self.keybindings.scale_toggle_all.matches(modifiers, &key) {
+      if self.keybindings.scale_toggle_all.matches(modifiers, key) {
         self.toggle_scale(true);
         return;
       }
-      if self.keybindings.scale_toggle.matches(modifiers, &key) {
+      if self.keybindings.scale_toggle.matches(modifiers, key) {
         self.toggle_scale(false);
         return;
       }
       let fast_reverse = self
         .keybindings
         .fast_switcher_previous
-        .matches(modifiers, &key);
+        .matches(modifiers, key);
       if fast_reverse
-        || self.keybindings.fast_switcher_next.matches(modifiers, &key)
+        || self.keybindings.fast_switcher_next.matches(modifiers, key)
       {
         let binding = if fast_reverse {
           self.keybindings.fast_switcher_previous.clone()
@@ -2701,8 +2760,8 @@ impl App {
         self.start_switcher(fast_reverse, binding, SwitcherKind::Fast);
         return;
       }
-      let reverse = self.keybindings.focus_previous.matches(modifiers, &key);
-      if reverse || self.keybindings.focus_next.matches(modifiers, &key) {
+      let reverse = self.keybindings.focus_previous.matches(modifiers, key);
+      if reverse || self.keybindings.focus_next.matches(modifiers, key) {
         let binding = if reverse {
           self.keybindings.focus_previous.clone()
         } else {
@@ -2711,7 +2770,7 @@ impl App {
         self.start_switcher(reverse, binding, SwitcherKind::Regular);
         return;
       }
-      if self.keybindings.toggle_fullscreen.matches(modifiers, &key) {
+      if self.keybindings.toggle_fullscreen.matches(modifiers, key) {
         if let Some(window) = self.compositor.focused_window() {
           if let Err(error) = self.compositor.toggle_fullscreen(window) {
             eprintln!("shingle: fullscreen toggle failed: {error}");
@@ -2720,7 +2779,7 @@ impl App {
         }
         return;
       }
-      if self.keybindings.toggle_sticky.matches(modifiers, &key) {
+      if self.keybindings.toggle_sticky.matches(modifiers, key) {
         if let Some(window) = self.compositor.focused_window() {
           if let Err(error) = self.compositor.toggle_sticky(window) {
             eprintln!("shingle: sticky toggle failed: {error}");
@@ -2729,7 +2788,7 @@ impl App {
         }
         return;
       }
-      if self.keybindings.always_on_top.matches(modifiers, &key) {
+      if self.keybindings.always_on_top.matches(modifiers, key) {
         if let Some(window) = self.compositor.focused_window() {
           if let Err(error) = self.compositor.toggle_always_on_top(window) {
             eprintln!("shingle: always-on-top toggle failed: {error}");
@@ -2738,7 +2797,7 @@ impl App {
         }
         return;
       }
-      if self.keybindings.always_on_bottom.matches(modifiers, &key) {
+      if self.keybindings.always_on_bottom.matches(modifiers, key) {
         if let Some(window) = self.compositor.focused_window() {
           if let Err(error) = self.compositor.toggle_always_on_bottom(window) {
             eprintln!("shingle: always-on-bottom toggle failed: {error}");
@@ -2747,12 +2806,12 @@ impl App {
         }
         return;
       }
-      if self.keybindings.minimize.matches(modifiers, &key) {
+      if self.keybindings.minimize.matches(modifiers, key) {
         self.compositor.minimize_focused();
         self.save();
         return;
       }
-      if self.keybindings.bring_to_front.matches(modifiers, &key) {
+      if self.keybindings.bring_to_front.matches(modifiers, key) {
         if let Some(window) = self.compositor.focused_window()
           && let Err(error) = self.compositor.raise_window(window)
         {
@@ -2761,7 +2820,7 @@ impl App {
         self.save();
         return;
       }
-      if self.keybindings.send_to_back.matches(modifiers, &key) {
+      if self.keybindings.send_to_back.matches(modifiers, key) {
         if let Some(window) = self.compositor.focused_window()
           && let Err(error) = self.compositor.lower_window(window)
         {
@@ -2770,12 +2829,12 @@ impl App {
         self.save();
         return;
       }
-      if self.keybindings.show_desktop.matches(modifiers, &key) {
+      if self.keybindings.show_desktop.matches(modifiers, key) {
         self.compositor.toggle_show_desktop();
         self.save();
         return;
       }
-      if self.keybindings.toggle_maximized.matches(modifiers, &key) {
+      if self.keybindings.toggle_maximized.matches(modifiers, key) {
         if let Some(window) = self.compositor.focused_window() {
           if let Err(error) = self.compositor.toggle_maximized(window) {
             eprintln!("shingle: maximize failed: {error}");
@@ -2784,7 +2843,7 @@ impl App {
         }
         return;
       }
-      if self.keybindings.toggle_tiling.matches(modifiers, &key) {
+      if self.keybindings.toggle_tiling.matches(modifiers, key) {
         if let Some(window) = self.compositor.focused_window() {
           if let Err(error) = self.compositor.toggle_tiling(window) {
             eprintln!("shingle: tiling toggle failed: {error}");
@@ -2793,12 +2852,12 @@ impl App {
         }
         return;
       }
-      let grid_slot = grid_slot(&self.keybindings, modifiers, &key);
+      let grid_slot = grid_slot(&self.keybindings, modifiers, key);
       let grid_restore = self
         .keybindings
         .grid_restore
         .iter()
-        .any(|binding| binding.matches(modifiers, &key));
+        .any(|binding| binding.matches(modifiers, key));
       if grid_slot.is_some() || grid_restore {
         if let Some(window) = self.compositor.focused_window() {
           let result = if let Some(slot) = grid_slot {
@@ -2813,18 +2872,18 @@ impl App {
         }
         return;
       }
-      let move_direction =
-        if self.keybindings.move_left.matches(modifiers, &key) {
-          Some(Direction::Left)
-        } else if self.keybindings.move_right.matches(modifiers, &key) {
-          Some(Direction::Right)
-        } else if self.keybindings.move_up.matches(modifiers, &key) {
-          Some(Direction::Up)
-        } else if self.keybindings.move_down.matches(modifiers, &key) {
-          Some(Direction::Down)
-        } else {
-          None
-        };
+      let move_direction = if self.keybindings.move_left.matches(modifiers, key)
+      {
+        Some(Direction::Left)
+      } else if self.keybindings.move_right.matches(modifiers, key) {
+        Some(Direction::Right)
+      } else if self.keybindings.move_up.matches(modifiers, key) {
+        Some(Direction::Up)
+      } else if self.keybindings.move_down.matches(modifiers, key) {
+        Some(Direction::Down)
+      } else {
+        None
+      };
       if let Some(direction) = move_direction {
         if let Some(source) = self.compositor.focused_window() {
           match self.compositor.focus_directional(direction) {
@@ -2845,13 +2904,13 @@ impl App {
         return;
       }
       let resize_direction =
-        if self.keybindings.resize_left.matches(modifiers, &key) {
+        if self.keybindings.resize_left.matches(modifiers, key) {
           Some(Direction::Left)
-        } else if self.keybindings.resize_right.matches(modifiers, &key) {
+        } else if self.keybindings.resize_right.matches(modifiers, key) {
           Some(Direction::Right)
-        } else if self.keybindings.resize_up.matches(modifiers, &key) {
+        } else if self.keybindings.resize_up.matches(modifiers, key) {
           Some(Direction::Up)
-        } else if self.keybindings.resize_down.matches(modifiers, &key) {
+        } else if self.keybindings.resize_down.matches(modifiers, key) {
           Some(Direction::Down)
         } else {
           None
@@ -2870,60 +2929,43 @@ impl App {
         }
         return;
       }
-      if self.keybindings.workspace_last.matches(modifiers, &key) {
+      if self.keybindings.workspace_last.matches(modifiers, key) {
         if let Err(error) = self.compositor.switch_to_last_workspace() {
           eprintln!("shingle: last workspace switch failed: {error}");
         }
         self.save();
         return;
       }
-      if self
-        .keybindings
-        .workspace_move_last
-        .matches(modifiers, &key)
-      {
+      if self.keybindings.workspace_move_last.matches(modifiers, key) {
         if let Err(error) = self.compositor.move_focused_to_last_workspace() {
           eprintln!("shingle: move to last workspace failed: {error}");
         }
         self.save();
         return;
       }
-      if self
-        .keybindings
-        .workspace_send_last
-        .matches(modifiers, &key)
-      {
+      if self.keybindings.workspace_send_last.matches(modifiers, key) {
         if let Err(error) = self.compositor.send_focused_to_last_workspace() {
           eprintln!("shingle: send to last workspace failed: {error}");
         }
         self.save();
         return;
       }
-      if self
-        .keybindings
-        .workspace_send_next
-        .matches(modifiers, &key)
+      if self.keybindings.workspace_send_next.matches(modifiers, key)
         || self
           .keybindings
           .workspace_send_previous
-          .matches(modifiers, &key)
-        || self.keybindings.workspace_send_up.matches(modifiers, &key)
-        || self
-          .keybindings
-          .workspace_send_down
-          .matches(modifiers, &key)
+          .matches(modifiers, key)
+        || self.keybindings.workspace_send_up.matches(modifiers, key)
+        || self.keybindings.workspace_send_down.matches(modifiers, key)
       {
         let vertical =
-          self.keybindings.workspace_send_up.matches(modifiers, &key)
-            || self
-              .keybindings
-              .workspace_send_down
-              .matches(modifiers, &key);
+          self.keybindings.workspace_send_up.matches(modifiers, key)
+            || self.keybindings.workspace_send_down.matches(modifiers, key);
         let reverse = self
           .keybindings
           .workspace_send_previous
-          .matches(modifiers, &key)
-          || self.keybindings.workspace_send_up.matches(modifiers, &key);
+          .matches(modifiers, key)
+          || self.keybindings.workspace_send_up.matches(modifiers, key);
         let result = if vertical {
           self.compositor.send_focused_vertical(reverse)
         } else {
@@ -2935,16 +2977,16 @@ impl App {
         self.save();
         return;
       }
-      if self.keybindings.workspace_next.matches(modifiers, &key)
-        || self.keybindings.workspace_previous.matches(modifiers, &key)
-        || self.keybindings.workspace_up.matches(modifiers, &key)
-        || self.keybindings.workspace_down.matches(modifiers, &key)
+      if self.keybindings.workspace_next.matches(modifiers, key)
+        || self.keybindings.workspace_previous.matches(modifiers, key)
+        || self.keybindings.workspace_up.matches(modifiers, key)
+        || self.keybindings.workspace_down.matches(modifiers, key)
       {
-        let vertical = self.keybindings.workspace_up.matches(modifiers, &key)
-          || self.keybindings.workspace_down.matches(modifiers, &key);
+        let vertical = self.keybindings.workspace_up.matches(modifiers, key)
+          || self.keybindings.workspace_down.matches(modifiers, key);
         let reverse =
-          self.keybindings.workspace_previous.matches(modifiers, &key)
-            || self.keybindings.workspace_up.matches(modifiers, &key);
+          self.keybindings.workspace_previous.matches(modifiers, key)
+            || self.keybindings.workspace_up.matches(modifiers, key);
         let result = if vertical {
           self.compositor.switch_workspace_vertical(reverse)
         } else {
@@ -2956,31 +2998,22 @@ impl App {
         self.save();
         return;
       }
-      if self
-        .keybindings
-        .workspace_move_next
-        .matches(modifiers, &key)
+      if self.keybindings.workspace_move_next.matches(modifiers, key)
         || self
           .keybindings
           .workspace_move_previous
-          .matches(modifiers, &key)
-        || self.keybindings.workspace_move_up.matches(modifiers, &key)
-        || self
-          .keybindings
-          .workspace_move_down
-          .matches(modifiers, &key)
+          .matches(modifiers, key)
+        || self.keybindings.workspace_move_up.matches(modifiers, key)
+        || self.keybindings.workspace_move_down.matches(modifiers, key)
       {
         let vertical =
-          self.keybindings.workspace_move_up.matches(modifiers, &key)
-            || self
-              .keybindings
-              .workspace_move_down
-              .matches(modifiers, &key);
+          self.keybindings.workspace_move_up.matches(modifiers, key)
+            || self.keybindings.workspace_move_down.matches(modifiers, key);
         let reverse = self
           .keybindings
           .workspace_move_previous
-          .matches(modifiers, &key)
-          || self.keybindings.workspace_move_up.matches(modifiers, &key);
+          .matches(modifiers, key)
+          || self.keybindings.workspace_move_up.matches(modifiers, key);
         let result = if vertical {
           self.compositor.move_focused_vertical(reverse)
         } else {
@@ -2996,7 +3029,7 @@ impl App {
         .keybindings
         .workspace_switch
         .iter()
-        .position(|binding| binding.matches(modifiers, &key))
+        .position(|binding| binding.matches(modifiers, key))
       {
         if let Err(error) = self.compositor.switch_workspace(index) {
           eprintln!("shingle: workspace switch failed: {error}");
@@ -3008,7 +3041,7 @@ impl App {
         .keybindings
         .workspace_move
         .iter()
-        .position(|binding| binding.matches(modifiers, &key))
+        .position(|binding| binding.matches(modifiers, key))
       {
         if let Err(error) = self.compositor.move_focused_to_workspace(index) {
           eprintln!("shingle: workspace move failed: {error}");
@@ -3016,50 +3049,48 @@ impl App {
         self.save();
         return;
       }
-      if self.keybindings.close.matches(modifiers, &key)
+      if self.keybindings.close.matches(modifiers, key)
         || self
           .keybindings
           .close_alternatives
           .iter()
-          .any(|binding| binding.matches(modifiers, &key))
+          .any(|binding| binding.matches(modifiers, key))
       {
         self.compositor.close_focused();
         return;
       }
-      if self.keybindings.reload.matches(modifiers, &key) {
+      if self.keybindings.reload.matches(modifiers, key) {
         self.reload_config();
         return;
       }
-      if self.keybindings.quit.matches(modifiers, &key) {
+      if self.keybindings.quit.matches(modifiers, key) {
         self.quit = true;
         self.save();
         return;
       }
       if self.run_matching_symbol_command(
         modifiers,
-        &event.logical_key,
+        event.symbol.as_deref(),
         pressed,
-        event.repeat,
+        repeat,
       ) {
         return;
       }
-      if self.run_matching_command(modifiers, &key, pressed, event.repeat) {
+      if self.run_matching_command(modifiers, key, pressed, repeat) {
         return;
       }
-      if self.keybindings.lock.matches(modifiers, &key) {
+      if self.keybindings.lock.matches(modifiers, key) {
         self.compositor.request_lock();
         return;
       }
-      if self.keybindings.idle_toggle.matches(modifiers, &key) {
+      if self.keybindings.idle_toggle.matches(modifiers, key) {
         self.compositor.toggle_idle();
         return;
       }
     }
-    if let Some(scancode) = event.physical_key.to_scancode() {
-      self
-        .compositor
-        .keyboard_key(self.devices.keyboard, scancode, pressed);
-    }
+    self
+      .compositor
+      .keyboard_key(self.devices.keyboard, event.code, pressed);
   }
 
   fn animation_matches(&self, snapshot: &SurfaceSnapshot) -> bool {
@@ -4041,10 +4072,10 @@ impl ApplicationHandler for App {
     if self.window.as_ref().map(|window| window.id()) != Some(window_id) {
       return;
     }
-    if let WindowEvent::ModifiersChanged(modifiers) = &event {
-      // Track host modifiers even while the keyboard is disabled, so they
-      // are correct again the moment it is re-enabled.
-      self.modifiers = modifiers.state();
+    // Keyboard state is tracked even while the keyboard device is disabled,
+    // so modifiers are correct again the moment it is re-enabled.
+    if self.host_keyboard_event(&event) {
+      return;
     }
     if window_event_device(&event).is_some_and(|kind| {
       !self.compositor.input_device_enabled(self.devices.get(kind))
@@ -4079,15 +4110,6 @@ impl ApplicationHandler for App {
           eprintln!("shingle: render failed: {error}");
           event_loop.exit();
         }
-      }
-      WindowEvent::KeyboardInput { event, .. } => self.keyboard_input(event),
-      WindowEvent::ModifiersChanged(_) => {
-        if self.switcher.as_ref().is_some_and(|state| {
-          !modifiers_held(state.modifiers, self.config_modifiers())
-        }) {
-          self.finish_switcher();
-        }
-        self.update_modifiers();
       }
       WindowEvent::CursorMoved { position, .. } => {
         if self.pending_warp.is_some_and(|pending| {
@@ -4452,39 +4474,6 @@ fn render_output_transform(
   }
 }
 
-/// Converts winit logical keys to XKB keysym names for symbol bindings.
-fn xkb_symbol(key: &winit::keyboard::Key) -> Option<String> {
-  use winit::keyboard::{Key, NamedKey};
-  match key {
-    Key::Character(text) if text == " " => Some("space".into()),
-    Key::Character(text) if !text.is_empty() => Some(text.to_string()),
-    Key::Named(key) => {
-      let name = match key {
-        NamedKey::Enter => "Return",
-        NamedKey::Escape => "Escape",
-        NamedKey::Backspace => "BackSpace",
-        NamedKey::Tab => "Tab",
-        NamedKey::Space => "space",
-        NamedKey::Delete => "Delete",
-        NamedKey::Insert => "Insert",
-        NamedKey::Home => "Home",
-        NamedKey::End => "End",
-        NamedKey::PageUp => "Prior",
-        NamedKey::PageDown => "Next",
-        NamedKey::ArrowLeft => "Left",
-        NamedKey::ArrowRight => "Right",
-        NamedKey::ArrowUp => "Up",
-        NamedKey::ArrowDown => "Down",
-        NamedKey::CapsLock => "Caps_Lock",
-        _ => return None,
-      };
-      Some(name.into())
-    }
-    _ => None,
-  }
-}
-
-/// Converts winit physical keys to the names used by Wayfire and our config.
 /// Returns the seat device a host window event comes from, if it is input.
 fn window_event_device(event: &WindowEvent) -> Option<InputDeviceKind> {
   match event {
@@ -4501,44 +4490,6 @@ fn window_event_device(event: &WindowEvent) -> Option<InputDeviceKind> {
     WindowEvent::Touch(_) => Some(InputDeviceKind::Touch),
     _ => None,
   }
-}
-
-fn binding_key_name(key: winit::keyboard::PhysicalKey) -> String {
-  use winit::keyboard::KeyCode;
-  let winit::keyboard::PhysicalKey::Code(code) = key else {
-    return String::new();
-  };
-  let name = match code {
-    KeyCode::Backquote => "grave".to_owned(),
-    KeyCode::ArrowLeft => "left".to_owned(),
-    KeyCode::ArrowRight => "right".to_owned(),
-    KeyCode::ArrowUp => "up".to_owned(),
-    KeyCode::ArrowDown => "down".to_owned(),
-    KeyCode::Numpad0 => "kp0".to_owned(),
-    KeyCode::Numpad1 => "kp1".to_owned(),
-    KeyCode::Numpad2 => "kp2".to_owned(),
-    KeyCode::Numpad3 => "kp3".to_owned(),
-    KeyCode::Numpad4 => "kp4".to_owned(),
-    KeyCode::Numpad5 => "kp5".to_owned(),
-    KeyCode::Numpad6 => "kp6".to_owned(),
-    KeyCode::Numpad7 => "kp7".to_owned(),
-    KeyCode::Numpad8 => "kp8".to_owned(),
-    KeyCode::Numpad9 => "kp9".to_owned(),
-    KeyCode::NumpadAdd => "kpplus".to_owned(),
-    KeyCode::NumpadSubtract => "kpminus".to_owned(),
-    KeyCode::NumpadMultiply => "kpasterisk".to_owned(),
-    KeyCode::NumpadDivide => "kpslash".to_owned(),
-    KeyCode::NumpadDecimal => "kpdot".to_owned(),
-    KeyCode::NumpadComma => "kpcomma".to_owned(),
-    KeyCode::NumpadEnter => "kpenter".to_owned(),
-    KeyCode::NumpadEqual => "kpequal".to_owned(),
-    _ => format!("{code:?}").to_lowercase(),
-  };
-  name
-    .strip_prefix("key")
-    .filter(|suffix| suffix.chars().count() == 1)
-    .unwrap_or(&name)
-    .to_owned()
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -4905,78 +4856,5 @@ mod tests {
     apply_opening_animation(&mut complete, "zoom", 1.0);
     assert_eq!(complete.geometry, geometry);
     assert_eq!(complete.color[3], 1.0);
-  }
-
-  #[test]
-  fn physical_keys_match_wayfire_shortcut_names() {
-    use winit::keyboard::{KeyCode, PhysicalKey};
-    for (code, expected) in [
-      (KeyCode::ArrowLeft, "left"),
-      (KeyCode::ArrowRight, "right"),
-      (KeyCode::ArrowUp, "up"),
-      (KeyCode::ArrowDown, "down"),
-      (KeyCode::Numpad0, "kp0"),
-      (KeyCode::Numpad7, "kp7"),
-      (KeyCode::NumpadEnter, "kpenter"),
-      (KeyCode::NumpadAdd, "kpplus"),
-      (KeyCode::NumpadDivide, "kpslash"),
-      (KeyCode::Backquote, "grave"),
-    ] {
-      assert_eq!(binding_key_name(PhysicalKey::Code(code)), expected);
-    }
-
-    let keys = Keybindings::default();
-    assert!(keys.workspace_next.matches(
-      ConfigModifiers {
-        super_key: true,
-        alt: true,
-        ..ConfigModifiers::default()
-      },
-      &binding_key_name(PhysicalKey::Code(KeyCode::ArrowRight)),
-    ));
-    assert!(keys.grid_slot_top_left[0].matches(
-      ConfigModifiers {
-        super_key: true,
-        ..ConfigModifiers::default()
-      },
-      &binding_key_name(PhysicalKey::Code(KeyCode::Numpad7)),
-    ));
-  }
-
-  #[test]
-  fn xkb_symbol_bindings_match_logical_keys() {
-    use winit::keyboard::{Key, NamedKey};
-    assert_eq!(
-      xkb_symbol(&Key::Character("A".into())).as_deref(),
-      Some("A")
-    );
-    assert_eq!(
-      xkb_symbol(&Key::Named(NamedKey::Enter)).as_deref(),
-      Some("Return")
-    );
-    assert_eq!(
-      xkb_symbol(&Key::Named(NamedKey::PageUp)).as_deref(),
-      Some("Prior")
-    );
-    let binding = shingle_config::Binding::new(
-      "xkb:A",
-      vec![shingle_config::Modifier::Super],
-    );
-    assert!(binding.matches_xkb(
-      ConfigModifiers {
-        super_key: true,
-        ..ConfigModifiers::default()
-      },
-      "A",
-    ));
-    assert!(!binding.matches_xkb(ConfigModifiers::default(), "A"));
-    assert!(!binding.matches_xkb(
-      ConfigModifiers {
-        super_key: true,
-        ..ConfigModifiers::default()
-      },
-      "a",
-    ));
-    assert!(!binding.matches(ConfigModifiers::default(), "a"));
   }
 }

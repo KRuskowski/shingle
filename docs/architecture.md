@@ -7,7 +7,8 @@
 | `shingle-core` | Tiling trees, workspaces, geometry and the serializable session model. No Wayland dependency. |
 | `shingle` | Wayland protocol handling, input routing, output state, IPC and the headless compositor event loop. Also the `shingle` binary. |
 | `shingle-render` | wgpu rendering without a windowing dependency: shared `GpuContext`, per-output `RenderState`, the `draw` pass, and window and offscreen targets. |
-| `shingle-nested` | winit host window and the interactive frontend: overviews, transitions, gestures. |
+| `shingle-frontend` | Frontend logic shared by the nested and (future) native hosts, without winit: Expo, workspace transitions, extra gestures, Scale layout and titles, icon theme, binding helpers and the xkb keyboard. The rest of the frontend moves here in NB-4. |
+| `shingle-nested` | winit host window and, until NB-4, the rest of the interactive frontend: Scale and switcher state, drags, animations, the scene build and binding dispatch. |
 | `shingle-config` | Validated YAML model, Wayfire INI and i3 imports, XKB keymap generation. |
 | `shingle-session` | Atomic session persistence and relaunching saved applications. |
 | `shingle-idle` | Idle, DPMS, fullscreen suppression and lock coordination. |
@@ -26,11 +27,16 @@
 | Protocol timestamps (`CLOCK_MONOTONIC`) | `crates/shingle/src/clock.rs` |
 | In-process Wayland test client | `crates/shingle/src/test_client.rs` |
 | Shared state and workspace transitions | `crates/shingle/src/state.rs` |
-| Keymap, focus, input routing | `crates/shingle/src/input.rs` |
+| Keymap sent to clients, focus, input routing | `crates/shingle/src/input.rs` |
 | Seat device registry, per-device holds and gating, `input/*` IPC | `crates/shingle/src/input_device.rs` |
 | XDG roles, map lifecycle, geometry, window rules | `crates/shingle/src/shell.rs` |
 | IPC transport, dispatch, method list, events | `crates/shingle/src/ipc.rs` |
 | Host input, visual state, frontend dispatch | `crates/shingle-nested/src/main.rs` |
+| Host keyboard focus changes | `crates/shingle-nested/src/host_keyboard.rs` |
+| xkb keyboard state, key names, keysyms, modifier masks | `crates/shingle-frontend/src/keyboard.rs` |
+| Evdev code to Wayfire key name table | `crates/shingle-frontend/src/keyboard/names.rs` |
+| Scale layout and title filter | `crates/shingle-frontend/src/scale.rs` |
+| Expo, vswitch transitions, touch gestures | `crates/shingle-frontend/src/expo.rs`, `workspace_transition.rs`, `extra_gestures.rs` |
 | GPU device, pipelines, textures, gamma and effects | `crates/shingle-render/src/gpu.rs` |
 | Composite pass and tile geometry | `crates/shingle-render/src/draw.rs` |
 | Window and offscreen render targets | `crates/shingle-render/src/target.rs` |
@@ -41,5 +47,5 @@
 ## Design rules
 
 - The tiling tree in `shingle-core` is the source of truth for layout and is what sessions persist. Temporary visual geometry (Scale thumbnails, Expo, vswitch slides, window rotation) must never be written back into it.
-- Scale's snapshot selection lives in `shingle`, while its interactive state and wgpu thumbnail transforms live in `shingle-nested`.
+- Scale's snapshot selection lives in `shingle`, while its interactive state and wgpu thumbnail transforms live in the frontend (`shingle-frontend`, and `shingle-nested` until NB-4).
 - Wayfire-facing names stay as they are: `WAYFIRE_SOCKET`, IPC method and event names, and INI section names.
