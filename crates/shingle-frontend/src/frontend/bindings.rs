@@ -228,7 +228,7 @@ impl Frontend {
         if let Some(command) = binding.command {
           match launch_command(
             &command,
-            self.compositor.socket_name(),
+            &self.compositor.client_environment(),
             self.discard_command_output,
           ) {
             Ok(child) => self.session_children.push(child),
@@ -255,7 +255,7 @@ impl Frontend {
     if command.should_run(pressed, repeat, locked) {
       match launch_command(
         &command.command,
-        self.compositor.socket_name(),
+        &self.compositor.client_environment(),
         self.discard_command_output,
       ) {
         Ok(child) => self.session_children.push(child),

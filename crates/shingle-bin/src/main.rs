@@ -82,15 +82,8 @@ fn start(
   selection: &Selection,
   options: Options,
 ) -> Result<(), Box<dyn Error>> {
-  if let Some(path) = &options.ipc {
-    // Every client Shingle starts, from the restored session and autostart
-    // onwards, finds IPC through this, as Wayfire's IPC plugin sets it
-    // before autostart runs. Nothing else runs yet, so changing the
-    // environment cannot race another thread.
-    unsafe {
-      std::env::set_var("WAYFIRE_SOCKET", path);
-    }
-  }
+  // Clients find IPC as WAYFIRE_SOCKET through the compositor's client
+  // environment, not through Shingle's own environment.
   let config = ShingleConfig::load(options.config.as_deref())?;
   match selection.backend {
     Backend::Nested => shingle_nested::run(

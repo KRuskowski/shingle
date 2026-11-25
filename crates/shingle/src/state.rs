@@ -8,6 +8,7 @@ use shingle_core::{
   Gaps, LaunchIdentity, OutputId, Rect, Shingle, WindowId, WorkspaceId,
 };
 use shingle_idle::{Command, DpmsState, IdleCoordinator, LockState};
+use shingle_session::ClientEnvironment;
 use wayland_protocols::{
   ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1,
   wp::fractional_scale::v1::server::wp_fractional_scale_v1::WpFractionalScaleV1,
@@ -176,6 +177,9 @@ pub(crate) struct CompositorState {
   pub(crate) ext_toplevels: crate::ext_toplevel::ExtToplevels,
   pub(crate) launch_templates: HashMap<ClientId, LaunchIdentity>,
   pub(crate) socket_name: std::ffi::OsString,
+  /// Where Wayfire IPC is served, once [`crate::Compositor::enable_ipc`]
+  /// ran; children find it as `WAYFIRE_SOCKET`.
+  pub(crate) ipc_socket: Option<std::path::PathBuf>,
   pub(crate) ipc_children: Vec<std::process::Child>,
   pub(crate) next_surface: u64,
   pub(crate) next_serial: u32,
@@ -309,6 +313,7 @@ impl CompositorState {
       ext_toplevels: Default::default(),
       launch_templates: HashMap::new(),
       socket_name: socket_name.to_owned(),
+      ipc_socket: None,
       ipc_children: Vec::new(),
       next_surface: 1,
       next_serial: 1,
@@ -582,6 +587,12 @@ impl CompositorState {
 
   pub(crate) fn now(&self) -> Duration {
     self.started.elapsed()
+  }
+
+  /// The environment of every process Shingle starts. There is no X
+  /// server yet, so `DISPLAY` is removed (XW-2 fills it in).
+  pub(crate) fn client_environment(&self) -> ClientEnvironment {
+    ClientEnvironment::new(&self.socket_name, None, self.ipc_socket.as_deref())
   }
 
   pub(crate) fn serial(&mut self) -> u32 {

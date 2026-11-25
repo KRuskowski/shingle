@@ -9,18 +9,25 @@
 //! logout and login. [`launch_autostart`] then runs the configured autostart
 //! commands, skipping those the session already relaunched.
 //!
+//! Every process Shingle starts, here or elsewhere, gets its environment
+//! from one [`ClientEnvironment`].
+//!
 //! Pre-rename Tilefire sessions and `TILEFIRE_LAUNCH_ID` are still read;
 //! see README.md#upgrading-from-tilefire.
 
 #![warn(missing_docs)]
 
+mod environment;
+
 use std::{
   collections::{BTreeMap, BTreeSet},
-  ffi::OsStr,
+  ffi::{OsStr, OsString},
   fs, io,
   path::{Path, PathBuf},
   process::{Child, Command, Stdio},
 };
+
+pub use environment::ClientEnvironment;
 
 use shingle_core::{
   LaunchIdentity, NodeSnapshot, SessionSnapshot, Shingle, ShingleError,
@@ -199,12 +206,12 @@ pub struct RestoreReport {
 }
 
 impl RestoreReport {
-  /// Runs [`launch_saved`] for `snapshot` against this process's
-  /// `WAYLAND_DISPLAY`, discarding the clients' output. See
-  /// [`SessionStore::restore`] for why that is rarely the right display.
+  /// Runs [`launch_saved`] for `snapshot` in this process's own
+  /// environment, `WAYLAND_DISPLAY` included, discarding the clients'
+  /// output. See [`SessionStore::restore`] for why that is rarely the right
+  /// display.
   pub fn launch(session: Shingle, snapshot: &SessionSnapshot) -> Self {
-    let display = std::env::var_os("WAYLAND_DISPLAY");
-    let report = launch_saved(snapshot, display.as_deref(), true);
+    let report = launch_saved(snapshot, None, true);
     Self {
       session,
       launched: report.launched,
@@ -221,8 +228,8 @@ pub struct LaunchReport {
   pub failed: Vec<SessionError>,
 }
 
-/// Runs `command` through `/bin/sh -c` with `WAYLAND_DISPLAY` set to
-/// `display`, for autostart, `command` bindings and IPC `run`.
+/// Runs `command` through `/bin/sh -c` in `environment`, for autostart,
+/// `command` bindings, IPC binding commands and IPC `run`.
 ///
 /// The child inherits stdin and, unless `discard_output` is set, stdout and
 /// stderr. It is not waited for; the caller owns the returned [`Child`] and
@@ -234,17 +241,35 @@ pub struct LaunchReport {
 /// shell still returns `Ok`.
 pub fn launch_command(
   command: &str,
-  display: &OsStr,
+  environment: &ClientEnvironment,
   discard_output: bool,
 ) -> io::Result<Child> {
   let mut process = Command::new("/bin/sh");
-  process
-    .arg("-c")
-    .arg(command)
-    .env("WAYLAND_DISPLAY", display);
+  process.arg("-c").arg(command);
+  environment.apply(&mut process);
   if discard_output {
     process.stdout(Stdio::null()).stderr(Stdio::null());
   }
+  process.spawn()
+}
+
+/// Runs `program` with `arguments`, without a shell, in `environment`: the
+/// `--spawn` client and the lock client.
+///
+/// The child inherits stdin, stdout and stderr. It is not waited for; the
+/// caller owns the returned [`Child`] and must reap it.
+///
+/// # Errors
+///
+/// When `program` cannot be spawned.
+pub fn launch_program(
+  program: &OsStr,
+  arguments: &[OsString],
+  environment: &ClientEnvironment,
+) -> io::Result<Child> {
+  let mut process = Command::new(program);
+  process.args(arguments);
+  environment.apply(&mut process);
   process.spawn()
 }
 
@@ -268,7 +293,7 @@ pub struct AutostartReport {
 pub fn launch_autostart(
   commands: &[String],
   restored: Option<&SessionSnapshot>,
-  display: &OsStr,
+  environment: &ClientEnvironment,
   discard_output: bool,
 ) -> AutostartReport {
   let mut report = AutostartReport {
@@ -281,7 +306,7 @@ pub fn launch_autostart(
     {
       continue;
     }
-    match launch_command(command, display, discard_output) {
+    match launch_command(command, environment, discard_output) {
       Ok(child) => report.children.push(child),
       Err(source) => report.failed.push(SessionError::Autostart {
         command: command.clone(),
@@ -314,14 +339,15 @@ fn was_restored(command: &str, snapshot: &SessionSnapshot) -> bool {
 /// that created them) are launched once, for the first window in tile
 /// order. Each child gets the saved arguments without a shell, the saved
 /// working directory, a null stdin, `SHINGLE_LAUNCH_ID` (empty if the saved
-/// window has none) and, when `display` is given, `WAYLAND_DISPLAY`. Launch
-/// IDs are only filled in by [`SessionStore::load`].
+/// window has none) and, when `environment` is given, that environment;
+/// otherwise the calling process's own. Launch IDs are only filled in by
+/// [`SessionStore::load`].
 ///
 /// Spawn failures are collected, not returned early, so one missing program
 /// does not stop the rest of the session.
 pub fn launch_saved(
   snapshot: &SessionSnapshot,
-  display: Option<&OsStr>,
+  environment: Option<&ClientEnvironment>,
   discard_output: bool,
 ) -> LaunchReport {
   let identities = snapshot
@@ -343,7 +369,7 @@ pub fn launch_saved(
     {
       continue;
     }
-    match launch_window(id, identity, display, discard_output) {
+    match launch_window(id, identity, environment, discard_output) {
       Ok(child) => launched.push(LaunchedWindow { id, child }),
       Err(error) => failed.push(error),
     }
@@ -395,7 +421,7 @@ fn collect_order(node: &NodeSnapshot, order: &mut Vec<WindowId>) {
 fn launch_window(
   id: WindowId,
   identity: &LaunchIdentity,
-  display: Option<&OsStr>,
+  environment: Option<&ClientEnvironment>,
   discard_output: bool,
 ) -> Result<Child, SessionError> {
   let Some((program, args)) = identity.command.split_first() else {
@@ -412,8 +438,8 @@ fn launch_window(
     "SHINGLE_LAUNCH_ID",
     identity.launch_id.as_deref().unwrap_or(""),
   );
-  if let Some(display) = display {
-    command.env("WAYLAND_DISPLAY", display);
+  if let Some(environment) = environment {
+    environment.apply(&mut command);
   }
   if let Some(directory) = &identity.working_directory {
     command.current_dir(directory);
@@ -428,7 +454,115 @@ fn launch_window(
 
 #[cfg(test)]
 mod tests {
+  use std::sync::atomic::{AtomicU32, Ordering};
+
+  use shingle_core::{OutputId, Rect};
+
   use super::*;
+
+  /// A fresh directory under the temporary directory.
+  fn temp_dir() -> PathBuf {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let path = std::env::temp_dir().join(format!(
+      "shingle-session-test-{}-{}",
+      std::process::id(),
+      NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&path).unwrap();
+    path
+  }
+
+  /// A shell command that writes the client variables to `path`.
+  fn dump_to(path: &Path) -> String {
+    format!(
+      "printf '%s|%s|%s|%s' \"${{DISPLAY-unset}}\" \
+       \"${{WAYFIRE_SOCKET-unset}}\" \"$WAYLAND_DISPLAY\" \
+       \"${{SHINGLE_LAUNCH_ID-unset}}\" > {}",
+      path.display()
+    )
+  }
+
+  /// An environment as a nested Shingle serving IPC builds it.
+  fn environment() -> ClientEnvironment {
+    ClientEnvironment::new(
+      OsStr::new("wayland-7"),
+      None,
+      Some(Path::new("/run/shingle-ipc")),
+    )
+  }
+
+  fn wait_and_read(mut child: Child, path: &Path) -> String {
+    assert!(child.wait().unwrap().success());
+    fs::read_to_string(path).unwrap()
+  }
+
+  #[test]
+  fn launch_command_runs_in_the_client_environment() {
+    let directory = temp_dir();
+    let out = directory.join("out");
+    let child = launch_command(&dump_to(&out), &environment(), true).unwrap();
+    assert_eq!(
+      wait_and_read(child, &out),
+      "unset|/run/shingle-ipc|wayland-7|unset"
+    );
+    fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[test]
+  fn launch_program_runs_in_the_client_environment() {
+    let directory = temp_dir();
+    let out = directory.join("out");
+    let arguments = ["-c".into(), dump_to(&out).into()];
+    let child =
+      launch_program(OsStr::new("/bin/sh"), &arguments, &environment())
+        .unwrap();
+    assert_eq!(
+      wait_and_read(child, &out),
+      "unset|/run/shingle-ipc|wayland-7|unset"
+    );
+    assert!(
+      launch_program(
+        OsStr::new("/nonexistent/shingle-test-program"),
+        &[],
+        &environment()
+      )
+      .is_err()
+    );
+    fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[test]
+  fn autostart_and_saved_clients_run_in_the_client_environment() {
+    let directory = temp_dir();
+    let autostart = directory.join("autostart");
+    let report =
+      launch_autostart(&[dump_to(&autostart)], None, &environment(), true);
+    assert!(report.failed.is_empty());
+    let child = report.children.into_iter().next().unwrap();
+    assert_eq!(
+      wait_and_read(child, &autostart),
+      "unset|/run/shingle-ipc|wayland-7|unset"
+    );
+
+    let saved = directory.join("saved");
+    let output = OutputId::from("HEADLESS-1");
+    let mut core = Shingle::new();
+    core
+      .add_output(output.clone(), Rect::new(0, 0, 640, 480))
+      .unwrap();
+    let mut identity = LaunchIdentity::new("saved");
+    identity.command = vec!["/bin/sh".into(), "-c".into(), dump_to(&saved)];
+    identity.launch_id = Some("restore-1".into());
+    core.attach_window(&output, identity).unwrap();
+    let report = launch_saved(&core.snapshot(), Some(&environment()), true);
+    assert!(report.failed.is_empty());
+    let child = report.launched.into_iter().next().unwrap().child;
+    assert_eq!(
+      wait_and_read(child, &saved),
+      "unset|/run/shingle-ipc|wayland-7|restore-1"
+    );
+    fs::remove_dir_all(directory).unwrap();
+  }
 
   #[test]
   fn session_path_prefers_shingle_location() {

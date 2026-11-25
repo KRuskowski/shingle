@@ -33,7 +33,9 @@ use shingle_config::{
 };
 use shingle_core::WindowId as TileWindowId;
 use shingle_render::{GpuTexture, RenderRect};
-use shingle_session::{SessionStore, launch_autostart, launch_saved};
+use shingle_session::{
+  SessionStore, launch_autostart, launch_program, launch_saved,
+};
 
 use crate::{
   extra_gestures,
@@ -151,8 +153,11 @@ pub struct Frontend {
 
 impl Frontend {
   /// Starts the frontend: restores the saved session or creates a new
-  /// compositor, launches restored and autostart clients, prints
-  /// `WAYLAND_DISPLAY` and starts `spawn`, if given, as a client.
+  /// compositor, serves Wayfire IPC at `ipc` if given, launches restored
+  /// and autostart clients, prints `WAYLAND_DISPLAY` and starts `spawn`, if
+  /// given, as a client. Every client is started in
+  /// [`Compositor::client_environment`], so IPC is enabled first for them
+  /// to find it as `WAYFIRE_SOCKET`.
   ///
   /// The host registers its seat devices afterwards with
   /// [`Frontend::compositor_mut`].
@@ -160,6 +165,7 @@ impl Frontend {
     config: ShingleConfig,
     spawn: Vec<std::ffi::OsString>,
     config_path: Option<std::path::PathBuf>,
+    ipc: Option<&std::path::Path>,
   ) -> Result<Self, Box<dyn Error>> {
     let store = if let Some(path) = &config.session.path {
       SessionStore::new(path)
@@ -174,11 +180,14 @@ impl Frontend {
     };
     let (compositor, mut session_children, restored_snapshot) =
       if let Some((core, snapshot)) = restored {
-        let compositor =
+        let mut compositor =
           Compositor::with_core(Config::from(config.clone()), core)?;
+        if let Some(path) = ipc {
+          compositor.enable_ipc(path)?;
+        }
         let report = launch_saved(
           &snapshot,
-          Some(compositor.socket_name()),
+          Some(&compositor.client_environment()),
           discard_output,
         );
         for error in &report.failed {
@@ -191,16 +200,16 @@ impl Frontend {
           .collect();
         (compositor, children, Some(snapshot))
       } else {
-        (
-          Compositor::new(Config::from(config.clone()))?,
-          Vec::new(),
-          None,
-        )
+        let mut compositor = Compositor::new(Config::from(config.clone()))?;
+        if let Some(path) = ipc {
+          compositor.enable_ipc(path)?;
+        }
+        (compositor, Vec::new(), None)
       };
     let autostart = launch_autostart(
       &config.autostart,
       restored_snapshot.as_ref(),
-      compositor.socket_name(),
+      &compositor.client_environment(),
       discard_output,
     );
     for error in &autostart.failed {
@@ -219,10 +228,8 @@ impl Frontend {
       frontend.compositor.socket_name().to_string_lossy()
     );
     if let Some((program, args)) = spawn.split_first() {
-      let child = std::process::Command::new(program)
-        .args(args)
-        .env("WAYLAND_DISPLAY", frontend.compositor.socket_name())
-        .spawn()?;
+      let environment = frontend.compositor.client_environment();
+      let child = launch_program(program, args, &environment)?;
       frontend.session_children.push(child);
     }
     Ok(frontend)

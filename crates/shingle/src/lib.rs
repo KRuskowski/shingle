@@ -7,9 +7,10 @@
 //! a [`Compositor`] and drives it:
 //!
 //! 1. Build it with [`Compositor::new`], or [`Compositor::with_core`] to
-//!    restore a saved session, and export [`Compositor::socket_name`] as
-//!    `WAYLAND_DISPLAY` to clients. Optionally start IPC with
-//!    [`Compositor::enable_ipc`].
+//!    restore a saved session. Optionally start IPC with
+//!    [`Compositor::enable_ipc`]. Start every client in
+//!    [`Compositor::client_environment`], which exports
+//!    [`Compositor::socket_name`] as `WAYLAND_DISPLAY`.
 //! 2. Register every seat device with [`Compositor::add_input_device`] and
 //!    pass the returned [`InputDeviceId`] with each keyboard, pointer,
 //!    gesture and touch event. Coordinates are in the output layout's
@@ -113,6 +114,7 @@ pub use shingle_core::{Direction, StackingMode, WindowId};
 use shingle_core::{Gaps, Rect, Shingle, WorkspaceId};
 use shingle_idle::{Config as IdleConfig, IdleCoordinator};
 pub use shingle_idle::{DpmsState, LockState};
+pub use shingle_session::ClientEnvironment;
 use wayland_server::{
   Display, ListeningSocket,
   backend::{ClientData, ClientId, DisconnectReason},
@@ -439,8 +441,7 @@ pub struct RuntimeBinding {
   pub id: u64,
   /// The parsed key combination.
   pub binding: shingle_config::Binding,
-  /// Shell command to spawn, with `WAYLAND_DISPLAY` set to this
-  /// compositor.
+  /// Shell command to spawn in [`Compositor::client_environment`].
   pub command: Option<String>,
   /// IPC method to call, such as `wm-actions/toggle_fullscreen`.
   pub call_method: Option<String>,
@@ -869,8 +870,8 @@ impl Compositor {
   /// Builds a compositor with an empty window model, listening on the first
   /// free `wayland-N` socket (N from 0 to 31) in `XDG_RUNTIME_DIR`.
   ///
-  /// It does not set `WAYLAND_DISPLAY` itself; the host exports
-  /// [`Compositor::socket_name`] to the clients it starts.
+  /// It does not set `WAYLAND_DISPLAY` itself; the host starts its clients
+  /// in [`Compositor::client_environment`].
   ///
   /// # Errors
   ///
@@ -1039,11 +1040,25 @@ impl Compositor {
   }
 
   /// Enables Wayfire-style length-prefixed JSON IPC on a local socket.
+  /// From then on [`Compositor::client_environment`] exports `path` as
+  /// `WAYFIRE_SOCKET`, so enable IPC before starting any client.
   pub fn enable_ipc(&mut self, path: &std::path::Path) -> Result<(), Error> {
     let server = ipc::IpcServer::new(path)
       .map_err(|error| Error::Ipc(error.to_string()))?;
     self.ipc = Some(server);
+    self.state.ipc_socket = Some(path.to_owned());
     Ok(())
+  }
+
+  /// The environment for every process the host starts as a client of
+  /// this compositor: `WAYLAND_DISPLAY` is [`Compositor::socket_name`],
+  /// `WAYFIRE_SOCKET` is the IPC socket once [`Compositor::enable_ipc`]
+  /// ran, `DISPLAY` is removed until Shingle runs its own X server, and
+  /// nothing of the host session's `WAYLAND_SOCKET`, `DISPLAY` or
+  /// `WAYFIRE_SOCKET` gets through. IPC `stipc/run` and IPC binding
+  /// commands use it too. See [`ClientEnvironment`].
+  pub fn client_environment(&self) -> ClientEnvironment {
+    self.state.client_environment()
   }
 
   /// Reports a frontend plugin's actual activation state to IPC watchers.
@@ -2865,6 +2880,59 @@ pub(crate) mod tests {
     )
     .expect("the default config builds a compositor");
     (compositor, path)
+  }
+
+  #[test]
+  fn client_environment_names_this_compositor_and_its_ipc() {
+    let (mut compositor, path) = test_compositor();
+    let environment = compositor.client_environment();
+    assert_eq!(
+      environment.value("WAYLAND_DISPLAY"),
+      Some(compositor.socket_name())
+    );
+    assert_eq!(environment.value("WAYFIRE_SOCKET"), None);
+    assert_eq!(environment.value("DISPLAY"), None);
+    assert!(
+      environment
+        .variables()
+        .iter()
+        .any(|(name, value)| name == "WAYFIRE_SOCKET" && value.is_none()),
+      "a host WAYFIRE_SOCKET is removed"
+    );
+    let ipc = path.with_extension("ipc");
+    compositor.enable_ipc(&ipc).unwrap();
+    let environment = compositor.client_environment();
+    assert_eq!(environment.value("WAYFIRE_SOCKET"), Some(ipc.as_os_str()));
+    assert_eq!(environment.value("DISPLAY"), None);
+  }
+
+  #[test]
+  fn stipc_run_starts_the_command_in_the_client_environment() {
+    let (mut compositor, path) = test_compositor();
+    let ipc = path.with_extension("ipc");
+    compositor.enable_ipc(&ipc).unwrap();
+    let out = path.with_extension("env");
+    let command = format!(
+      "printf '%s|%s|%s' \"${{DISPLAY-unset}}\" \"$WAYFIRE_SOCKET\" \
+       \"$WAYLAND_DISPLAY\" > {}",
+      out.display()
+    );
+    let reply = ipc::respond(
+      &mut compositor.state,
+      &serde_json::json!({"method": "stipc/run", "data": {"cmd": command}}),
+    );
+    assert_eq!(reply["result"], "ok", "{reply}");
+    let mut child = compositor.state.ipc_children.pop().expect("a child");
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+      std::fs::read_to_string(&out).unwrap(),
+      format!(
+        "unset|{}|{}",
+        ipc.display(),
+        compositor.socket_name().to_string_lossy()
+      )
+    );
+    std::fs::remove_file(out).unwrap();
   }
 
   #[test]

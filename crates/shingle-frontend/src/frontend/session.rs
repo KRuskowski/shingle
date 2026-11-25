@@ -22,10 +22,8 @@ impl Frontend {
     let program = std::env::var_os("SHINGLE_LOCK")
       .or_else(|| std::env::var_os("TILEFIRE_LOCK"))
       .unwrap_or_else(|| "shingle-lock".into());
-    match std::process::Command::new(program)
-      .env("WAYLAND_DISPLAY", self.compositor.socket_name())
-      .spawn()
-    {
+    let environment = self.compositor.client_environment();
+    match shingle_session::launch_program(&program, &[], &environment) {
       Ok(child) => self.lock_client = Some(child),
       Err(error) => {
         eprintln!("shingle: failed to start lock client: {error}")

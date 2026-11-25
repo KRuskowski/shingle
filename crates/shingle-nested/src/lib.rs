@@ -191,8 +191,9 @@ impl App {
     config: ShingleConfig,
     spawn: Vec<OsString>,
     config_path: Option<PathBuf>,
+    ipc_path: Option<&Path>,
   ) -> Result<Self, Box<dyn Error>> {
-    let mut frontend = Frontend::new(config, spawn, config_path)?;
+    let mut frontend = Frontend::new(config, spawn, config_path, ipc_path)?;
     let devices = SeatDevices::register(frontend.compositor_mut());
     Ok(Self {
       frontend,
@@ -545,9 +546,9 @@ fn window_event_device(event: &WindowEvent) -> Option<InputDeviceKind> {
 /// quits, the window is closed or a SIGINT or SIGTERM arrives.
 ///
 /// `config` was loaded from `config_path`, which config reloads read again.
-/// With `ipc_path`, Wayfire IPC is served there; the caller exports it as
-/// `WAYFIRE_SOCKET` before any client starts. `spawn`, if not empty, is a
-/// program and its arguments to start as a client.
+/// With `ipc_path`, Wayfire IPC is served there, and every client finds it
+/// as `WAYFIRE_SOCKET`. `spawn`, if not empty, is a program and its
+/// arguments to start as a client.
 pub fn run(
   config: ShingleConfig,
   config_path: Option<PathBuf>,
@@ -557,10 +558,7 @@ pub fn run(
   // Connect to the host first, so that no client is started when there is
   // no session to show it in.
   let event_loop = EventLoop::new()?;
-  let mut app = App::new(config, spawn, config_path)?;
-  if let Some(path) = ipc_path {
-    app.frontend.compositor_mut().enable_ipc(path)?;
-  }
+  let mut app = App::new(config, spawn, config_path, ipc_path)?;
   event_loop.run_app(&mut app)?;
   Ok(())
 }

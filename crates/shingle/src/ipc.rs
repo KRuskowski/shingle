@@ -1585,7 +1585,8 @@ fn stipc_key_binding(
     return true;
   }
   if let Some(command) = &binding.command {
-    match shingle_session::launch_command(command, &state.socket_name, false) {
+    let environment = state.client_environment();
+    match shingle_session::launch_command(command, &environment, false) {
       Ok(child) => state.ipc_children.push(child),
       Err(error) => eprintln!("shingle: runtime command failed: {error}"),
     }
@@ -1721,7 +1722,8 @@ fn run_command(state: &mut CompositorState, data: &Value) -> Value {
   if command.trim().is_empty() {
     return json_error("command cannot be empty");
   }
-  match shingle_session::launch_command(command, &state.socket_name, false) {
+  let environment = state.client_environment();
+  match shingle_session::launch_command(command, &environment, false) {
     Ok(child) => {
       let pid = child.id();
       state.ipc_children.push(child);

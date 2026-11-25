@@ -1,22 +1,19 @@
 //! The headless backend: the compositor without display or input devices,
 //! serving clients and IPC until SIGINT, SIGTERM or a quit request.
 
-use std::{
-  error::Error,
-  ffi::OsString,
-  path::Path,
-  process::{Child, Command},
-};
+use std::{error::Error, ffi::OsString, path::Path, process::Child};
 
-use shingle::{Compositor, Config};
+use shingle::{ClientEnvironment, Compositor, Config};
 use shingle_config::ShingleConfig;
-use shingle_session::{SessionStore, launch_autostart, launch_saved};
+use shingle_session::{
+  SessionStore, launch_autostart, launch_program, launch_saved,
+};
 
 /// Runs Shingle headless with `config` and saves the session when it ends.
 ///
-/// With `ipc_path`, Wayfire IPC is served there; the caller exports it as
-/// `WAYFIRE_SOCKET` before any client starts. `spawn`, if not empty, is a
-/// program and its arguments to start as a client.
+/// With `ipc_path`, Wayfire IPC is served there, and every client finds it
+/// as `WAYFIRE_SOCKET`. `spawn`, if not empty, is a program and its
+/// arguments to start as a client.
 pub fn run(
   yaml: ShingleConfig,
   ipc_path: Option<&Path>,
@@ -44,11 +41,11 @@ pub fn run(
     compositor.enable_ipc(path)?;
   }
   let discard_output = yaml.behavior.discard_command_output;
+  let environment = compositor.client_environment();
   let mut session_children = snapshot
     .as_ref()
     .map(|snapshot| {
-      let report =
-        launch_saved(snapshot, Some(compositor.socket_name()), discard_output);
+      let report = launch_saved(snapshot, Some(&environment), discard_output);
       for error in &report.failed {
         eprintln!("shingle: session restore launch failed: {error}");
       }
@@ -62,7 +59,7 @@ pub fn run(
   let autostart = launch_autostart(
     &yaml.autostart,
     snapshot.as_ref(),
-    compositor.socket_name(),
+    &environment,
     discard_output,
   );
   for error in &autostart.failed {
@@ -73,7 +70,7 @@ pub fn run(
     "WAYLAND_DISPLAY={}",
     compositor.socket_name().to_string_lossy()
   );
-  if let Some(child) = spawn_client(&spawn, compositor.socket_name())? {
+  if let Some(child) = spawn_client(&spawn, &environment)? {
     session_children.push(child);
   }
   let _session_children = session_children;
@@ -82,20 +79,16 @@ pub fn run(
   Ok(())
 }
 
-/// Starts `spawn`'s program, if any, with its arguments as a client of the
-/// Wayland socket `display`, as the nested backend does.
+/// Starts `spawn`'s program, if any, with its arguments in the client
+/// `environment`, as the nested backend does.
 fn spawn_client(
   spawn: &[OsString],
-  display: &std::ffi::OsStr,
+  environment: &ClientEnvironment,
 ) -> std::io::Result<Option<Child>> {
   let Some((program, arguments)) = spawn.split_first() else {
     return Ok(None);
   };
-  Command::new(program)
-    .args(arguments)
-    .env("WAYLAND_DISPLAY", display)
-    .spawn()
-    .map(Some)
+  launch_program(program, arguments, environment).map(Some)
 }
 
 #[cfg(test)]
@@ -104,13 +97,14 @@ mod tests {
 
   use super::*;
 
+  /// The environment of a compositor on `wayland-9` without IPC.
+  fn environment() -> ClientEnvironment {
+    ClientEnvironment::new(OsStr::new("wayland-9"), None, None)
+  }
+
   #[test]
   fn nothing_to_spawn() {
-    assert!(
-      spawn_client(&[], OsStr::new("wayland-9"))
-        .unwrap()
-        .is_none()
-    );
+    assert!(spawn_client(&[], &environment()).unwrap().is_none());
   }
 
   #[test]
@@ -118,11 +112,14 @@ mod tests {
     let spawn = [
       "sh",
       "-c",
-      r#"test "$WAYLAND_DISPLAY" = wayland-9 && test "$0" = x"#,
+      concat!(
+        r#"test "$WAYLAND_DISPLAY" = wayland-9 && test "$0" = x"#,
+        r#" && test -z "${DISPLAY+set}${WAYFIRE_SOCKET+set}""#,
+      ),
       "x",
     ]
     .map(OsString::from);
-    let mut child = spawn_client(&spawn, OsStr::new("wayland-9"))
+    let mut child = spawn_client(&spawn, &environment())
       .expect("sh starts")
       .expect("a child");
     assert!(child.wait().expect("sh exits").success());
@@ -131,6 +128,6 @@ mod tests {
   #[test]
   fn missing_program_is_an_error() {
     let spawn = [OsString::from("/nonexistent/shingle-test-program")];
-    assert!(spawn_client(&spawn, OsStr::new("wayland-9")).is_err());
+    assert!(spawn_client(&spawn, &environment()).is_err());
   }
 }
