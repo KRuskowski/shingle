@@ -9,6 +9,12 @@ Rust/wgpu Wayland compositor built around Wayfire's tiling behaviour, compatible
 - docs/architecture.md: crate map and where each area lives.
 - docs/development.md: build, test, formatting and real-client test rules.
 
+## Pointers
+
+- IPC method inventory: crates/shingle/src/ipc.rs:379 (`SUPPORTED_METHODS`); dispatch: crates/shingle/src/ipc.rs:2431 (`respond`).
+- Unfinished input-device slice (roadmap item 1): crates/shingle/src/input.rs:43, crates/shingle/src/input.rs:130, crates/shingle/src/input.rs:153.
+- Tilefire migration fallbacks: crates/shingle-config/src/lib.rs:1560, crates/shingle-session/src/lib.rs:34, crates/shingle-auth/src/lib.rs:46, crates/shingle-nested/src/main.rs:622.
+
 ## Commands
 
 ```sh
