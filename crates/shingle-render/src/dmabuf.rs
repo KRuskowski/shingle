@@ -917,7 +917,6 @@ impl VulkanQuery<'_> {
         .instance
         .get_physical_device_properties2(self.physical_device, &mut properties);
     }
-    let _ = properties;
     (drm.has_render == vk::TRUE).then(|| {
       (
         u32::try_from(drm.render_major).unwrap_or(0),
@@ -944,7 +943,6 @@ impl ModifierQuery for VulkanQuery<'_> {
           &mut properties,
         );
       }
-      let _ = properties;
       list.drm_format_modifier_count as usize
     };
     if count == 0 {
@@ -965,7 +963,6 @@ impl ModifierQuery for VulkanQuery<'_> {
           &mut properties,
         );
       }
-      let _ = properties;
       list.drm_format_modifier_count as usize
     };
     modifiers.truncate(written);
@@ -1003,7 +1000,6 @@ impl ModifierQuery for VulkanQuery<'_> {
       )
     };
     let extent = properties.image_format_properties.max_extent;
-    let _ = properties;
     result.ok()?;
     let importable = external_properties
       .external_memory_properties
