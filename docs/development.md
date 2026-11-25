@@ -39,13 +39,16 @@ cargo build --config 'patch."https://github.com/KRuskowski/gloomy".gloomy-core.p
   --config 'patch."https://github.com/KRuskowski/gloomy".gloomy-app.path="../gloomy/crates/gloomy-app"'
 ```
 
-## Running nested
+## Running
 
 ```sh
-cargo run -p shingle-nested -- --config data/shingle.yaml --spawn foot
+cargo run --bin shingle -- --config data/shingle.yaml --spawn foot
+cargo run --bin shingle -- --help
 ```
 
-This opens Shingle in a window inside the current session, prints its private `WAYLAND_DISPLAY` and passes it to `--spawn` children. Locking runs `shingle-lock` from `PATH`; set `SHINGLE_LOCK` to use another executable.
+Inside a Wayland or X11 session this selects the nested backend and opens Shingle in a window, prints its private `WAYLAND_DISPLAY` and passes it to `--spawn` children. `--headless` runs without a window; `--backend native` (and a start with none of `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` and `DISPLAY` set) reports that the native backend is not built yet and exits with status 1. Bad options and unknown backends exit with status 2. The selection rules are in crates/shingle-bin/src/backend.rs and the [README](../README.md#running). Locking runs `shingle-lock` from `PATH`; set `SHINGLE_LOCK` to use another executable.
+
+When testing nested from a session whose `XDG_RUNTIME_DIR` is replaced by a private one, set `WAYLAND_DISPLAY` to the host socket's absolute path so the window still reaches the host, and set `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `HOME` to private directories too.
 
 ## Real-client tests
 

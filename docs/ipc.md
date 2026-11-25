@@ -1,12 +1,12 @@
 # Wayfire IPC
 
-The nested frontend serves Wayfire-compatible IPC: JSON messages with a native-endian `u32` length prefix over a Unix socket. Replies carry Wayfire's `result` or `error` fields.
+Shingle serves Wayfire-compatible IPC with every backend: JSON messages with a native-endian `u32` length prefix over a Unix socket. Replies carry Wayfire's `result` or `error` fields.
 
 ```sh
-cargo run -p shingle-nested -- --ipc /tmp/shingle-ipc.socket
+cargo run --bin shingle -- --ipc /tmp/shingle-ipc.socket
 ```
 
-The socket path is exported as `WAYFIRE_SOCKET` to every spawned process, so existing Wayfire scripts work unchanged. Library users can start the same server with `Compositor::enable_ipc(path)`.
+The socket path is exported as `WAYFIRE_SOCKET` before any client starts, so restored and autostarted clients, `--spawn` programs and everything launched later see it, and existing Wayfire scripts work unchanged. Library users can start the same server with `Compositor::enable_ipc(path)`.
 
 `list-methods` returns a sorted inventory of the 77 supported methods. Numeric vswitch activators such as `binding_4` are matched dynamically and are not part of that count. The method table lives in `SUPPORTED_METHODS` in `crates/shingle/src/ipc.rs`.
 
