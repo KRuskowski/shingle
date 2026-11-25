@@ -1492,8 +1492,12 @@ pub(crate) fn grid_slot(
   let bottom = height - y < edge;
   let far_left = x <= corner;
   let far_right = width - x <= corner;
-  let far_top = y <= corner;
-  let far_bottom = height - y <= corner;
+  // As in Wayfire's calc_slot (plugins/grid/wayfire/plugins/grid.hpp), the
+  // top and bottom bands end strictly inside their thresholds. calc_slot
+  // measures the bottom from `g.x + g.height`; the workarea's own top is
+  // used here, which is the same for a workarea at y = 0.
+  let far_top = y < corner;
+  let far_bottom = height - y < corner;
   if (left && far_top) || (far_left && top) {
     Some("top_left")
   } else if (right && far_top) || (far_right && top) {
@@ -2720,6 +2724,21 @@ mod tests {
 
   fn presence(state: &CompositorState, window: WindowId) -> WindowPresence {
     state.core.window_info(window).unwrap().presence
+  }
+
+  #[test]
+  fn grid_corners_end_strictly_inside_the_quarter_threshold() {
+    use shingle_core::Rect;
+    let area = Rect::new(0, 0, 1000, 600);
+    let slot = |x, y| super::grid_slot(area, x, y, 10, 50);
+    // Wayfire's calc_slot: is_far_top is `y < quarter_snap_threshold`, and
+    // is_far_bottom likewise, while left and right use `<=`.
+    assert_eq!(slot(2.0, 49.0), Some("top_left"));
+    assert_eq!(slot(2.0, 50.0), Some("left"));
+    assert_eq!(slot(998.0, 550.0), Some("right"));
+    assert_eq!(slot(998.0, 551.0), Some("bottom_right"));
+    assert_eq!(slot(50.0, 2.0), Some("top_left"));
+    assert_eq!(slot(51.0, 2.0), Some("top"));
   }
 
   #[test]
