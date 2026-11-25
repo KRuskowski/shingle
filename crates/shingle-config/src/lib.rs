@@ -1862,14 +1862,12 @@ impl Default for PointerBindings {
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InputConfig {
-  /// XKB rules name. `[input] xkb_rules`; default `evdev`. Not used by
-  /// [`InputConfig::keymap`], which always includes evdev keycodes.
+  /// XKB rules name. `[input] xkb_rules`; default `evdev`.
   pub rules: String,
   /// Path of a complete XKB keymap file; when non-empty it replaces the
   /// generated keymap. `[input] xkb_file` (Shingle-specific); default empty.
   pub xkb_file: String,
-  /// XKB keyboard model. `[input] xkb_model`; default `pc105`. Not used by
-  /// [`InputConfig::keymap`].
+  /// XKB keyboard model. `[input] xkb_model`; default `pc105`.
   pub model: String,
   /// Comma-separated XKB layouts, the first being group 1. `[input]
   /// xkb_layout`; default `us`.
@@ -1944,49 +1942,56 @@ impl InputConfig {
   ///
   /// # Errors
   ///
-  /// [`ConfigError::Read`] if `xkb_file` is set but cannot be read. The file's
-  /// contents are not compiled or checked here.
+  /// [`ConfigError::Read`] if `xkb_file` is set but cannot be read; the
+  /// file's contents are not compiled or checked here. Otherwise as for
+  /// [`InputConfig::keymap`].
   pub fn load_keymap(&self) -> Result<String, ConfigError> {
     if self.xkb_file.is_empty() {
-      return Ok(self.keymap());
+      return self.keymap();
     }
     let path = PathBuf::from(&self.xkb_file);
     fs::read_to_string(&path)
       .map_err(|source| ConfigError::Read { path, source })
   }
 
-  /// Builds an XKB keymap with comma-separated layouts and variants.
-  pub fn keymap(&self) -> String {
-    let variants = self.variant.split(',').collect::<Vec<_>>();
-    let mut symbols = "pc".to_string();
-    for (index, layout) in self.layout.split(',').enumerate() {
-      symbols.push('+');
-      symbols.push_str(layout.trim());
-      if let Some(variant) = variants.get(index).map(|value| value.trim())
-        && !variant.is_empty()
-      {
-        symbols.push_str(&format!("({variant})"));
-      }
-      if index > 0 {
-        symbols.push_str(&format!(":{}", index + 1));
-      }
-    }
-    symbols.push_str("+inet(evdev)");
-    for option in self.options.split(',').filter(|option| !option.is_empty()) {
-      if let Some((name, value)) = option.split_once(':') {
-        symbols.push_str(&format!("+{name}({value})"));
-      } else {
-        symbols.push_str(&format!("+{option}"));
-      }
-    }
-    format!(
-      "xkb_keymap {{\
-       \n  xkb_keycodes \"default\" {{ include \"evdev+aliases(qwerty)\" }};\
-       \n  xkb_types \"complete\" {{ include \"complete\" }};\
-       \n  xkb_compatibility \"complete\" {{ include \"complete\" }};\
-       \n  xkb_symbols \"default\" {{ include \"{symbols}\" }};\
-       \n}};\n"
+  /// Compiles the XKB keymap that `rules`, `model`, `layout`, `variant` and
+  /// `options` name, as Wayfire does with `xkb_map_new_from_names` in
+  /// `reload_input_options` (src/core/seat/keyboard.cpp), and returns it as
+  /// keymap text with no includes. Spaces around the comma-separated
+  /// layouts, variants and options are ignored.
+  ///
+  /// # Errors
+  ///
+  /// [`ConfigError::Invalid`] if libxkbcommon cannot compile the names, for
+  /// example for an unknown layout.
+  pub fn keymap(&self) -> Result<String, ConfigError> {
+    use xkbcommon::xkb;
+    let list = |value: &str| {
+      value
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(",")
+    };
+    let options = list(&self.options);
+    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    let keymap = xkb::Keymap::new_from_names(
+      &context,
+      self.rules.trim(),
+      self.model.trim(),
+      &list(&self.layout),
+      &list(&self.variant),
+      (!options.is_empty()).then_some(options),
+      xkb::KEYMAP_COMPILE_NO_FLAGS,
     )
+    .ok_or_else(|| {
+      ConfigError::Invalid(format!(
+        "no XKB keymap for rules {:?}, model {:?}, layout {:?}, variant {:?} \
+         and options {:?}",
+        self.rules, self.model, self.layout, self.variant, self.options
+      ))
+    })?;
+    Ok(keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1))
   }
 }
 
@@ -2819,8 +2824,40 @@ mod tests {
       variant: ",dvorak,".into(),
       ..Default::default()
     };
-    let keymap = input.keymap();
-    assert!(keymap.contains("pc+us+de(dvorak):2+cz:3+inet(evdev)"));
+    use xkbcommon::xkb;
+    let keymap = input.keymap().unwrap();
+    assert!(!keymap.contains("include"));
+    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    let keymap = xkb::Keymap::new_from_string(
+      &context,
+      keymap,
+      xkb::KEYMAP_FORMAT_TEXT_V1,
+      xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+    .expect("the keymap compiles");
+    let layouts = (0..keymap.num_layouts())
+      .map(|index| keymap.layout_get_name(index).to_owned())
+      .collect::<Vec<_>>();
+    assert_eq!(layouts, ["English (US)", "German (Dvorak)", "Czech"]);
+  }
+
+  #[test]
+  fn xkb_keymap_follows_rules_and_model() {
+    let default = InputConfig::default().keymap().unwrap();
+    let base = InputConfig {
+      rules: "base".into(),
+      ..Default::default()
+    }
+    .keymap()
+    .unwrap();
+    let chromebook = InputConfig {
+      model: "chromebook".into(),
+      ..Default::default()
+    }
+    .keymap()
+    .unwrap();
+    assert_ne!(base, default, "the rules choose the keycodes");
+    assert_ne!(chromebook, default, "the model adds symbols");
   }
 
   #[test]

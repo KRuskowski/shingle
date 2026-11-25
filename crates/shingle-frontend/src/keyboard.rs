@@ -266,7 +266,7 @@ mod tests {
       options: options.into(),
       ..InputConfig::default()
     };
-    Keyboard::new(&config.keymap()).expect("the keymap compiles")
+    Keyboard::new(&config.keymap().unwrap()).expect("the keymap compiles")
   }
 
   fn tap(keyboard: &mut Keyboard, code: u32) -> Key {
@@ -463,7 +463,7 @@ mod tests {
       ..InputConfig::default()
     };
     keyboard
-      .set_keymap(&de.keymap())
+      .set_keymap(&de.keymap().unwrap())
       .expect("the keymap compiles");
     assert_eq!(keyboard.binding_modifiers(), SUPER);
     assert_eq!(keyboard.modifiers().locked, LOCK);

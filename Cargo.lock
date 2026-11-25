@@ -3065,6 +3065,7 @@ dependencies = [
  "shingle-core",
  "shingle-idle",
  "thiserror 2.0.21",
+ "xkbcommon",
 ]
 
 [[package]]

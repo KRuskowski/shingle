@@ -2943,7 +2943,8 @@ pub(crate) mod tests {
       layout: "us,de".into(),
       ..shingle_config::InputConfig::default()
     }
-    .keymap();
+    .keymap()
+    .unwrap();
     compositor.set_keymap(&keymap).expect("the keymap compiles");
     assert_eq!(compositor.keyboard_layout_index(), 0);
     let reply = ipc::respond(

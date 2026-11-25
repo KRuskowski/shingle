@@ -101,7 +101,8 @@ mod tests {
   };
 
   fn keyboard() -> Keyboard {
-    Keyboard::new(&InputConfig::default().keymap()).expect("keymap compiles")
+    Keyboard::new(&InputConfig::default().keymap().unwrap())
+      .expect("keymap compiles")
   }
 
   #[test]
