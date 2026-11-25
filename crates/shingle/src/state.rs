@@ -1053,12 +1053,9 @@ impl CompositorState {
     for command in commands {
       match command {
         Command::StartLockClient => self.events.push(Event::StartLockClient),
-        Command::RequestDpmsOff => {
-          self.events.push(Event::DpmsChanged(DpmsState::Off))
-        }
-        Command::RequestDpmsOn => {
-          self.events.push(Event::DpmsChanged(DpmsState::On))
-        }
+        // Every DPMS command changes `dpms_state`, which emit_idle_changes
+        // below reports as the one Event::DpmsChanged.
+        Command::RequestDpmsOff | Command::RequestDpmsOn => {}
         Command::NotifyIdle => self.events.push(Event::Idle),
         Command::NotifyResume => self.events.push(Event::Resume),
       }

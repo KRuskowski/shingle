@@ -2958,6 +2958,28 @@ pub(crate) mod tests {
     assert_eq!(compositor.keyboard_layout_index(), 0);
   }
 
+  #[test]
+  fn each_dpms_change_is_reported_once() {
+    let (mut compositor, _) = test_compositor();
+    let dpms_events = |compositor: &mut Compositor| {
+      compositor
+        .drain_events()
+        .into_iter()
+        .filter_map(|event| match event {
+          Event::DpmsChanged(state) => Some(state),
+          _ => None,
+        })
+        .collect::<Vec<_>>()
+    };
+    compositor.drain_events();
+    compositor.set_dpms(DpmsState::Off);
+    assert_eq!(dpms_events(&mut compositor), [DpmsState::Off]);
+    compositor.set_dpms(DpmsState::Off);
+    assert_eq!(dpms_events(&mut compositor), []);
+    compositor.activity();
+    assert_eq!(dpms_events(&mut compositor), [DpmsState::On]);
+  }
+
   /// Dispatches the compositor until `done` holds or a second has passed.
   pub(crate) fn dispatch_until(
     compositor: &mut Compositor,
