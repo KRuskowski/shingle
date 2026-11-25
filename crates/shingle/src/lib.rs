@@ -446,13 +446,24 @@ impl Compositor {
   }
 
   pub fn with_core(config: Config, core: Shingle) -> Result<Self, Error> {
-    let display =
-      Display::new().map_err(|error| Error::Display(error.to_string()))?;
     let socket = ListeningSocket::bind_auto("wayland", 0..32)?;
     let socket_name = socket
       .socket_name()
       .expect("bind_auto always returns a socket name")
       .to_owned();
+    Self::with_socket(config, core, socket, socket_name)
+  }
+
+  /// Builds a compositor around an already bound Wayland socket, whose
+  /// `WAYLAND_DISPLAY` name is `socket_name`.
+  fn with_socket(
+    config: Config,
+    core: Shingle,
+    socket: ListeningSocket,
+    socket_name: OsString,
+  ) -> Result<Self, Error> {
+    let display =
+      Display::new().map_err(|error| Error::Display(error.to_string()))?;
     let disconnected = Arc::new(Mutex::new(Vec::new()));
     let state =
       CompositorState::new(config, core, disconnected.clone(), &socket_name)?;
@@ -728,8 +739,22 @@ impl Compositor {
     Some(())
   }
 
+  /// Asks the compositor to shut down. The frontend sees this through
+  /// [`Compositor::shutdown_requested`].
   pub fn request_quit(&mut self) {
     self.state.shutdown = true;
+  }
+
+  /// Returns whether the compositor was asked to shut down, by SIGINT or
+  /// SIGTERM or by [`Compositor::request_quit`].
+  ///
+  /// The compositor blocks SIGINT and SIGTERM on the thread that created it
+  /// and reads them from a signalfd while the event loop is dispatched, so
+  /// they never terminate the process on their own. A frontend checks this
+  /// after each [`Compositor::poll`] or [`Compositor::dispatch_pending`],
+  /// then saves its session and exits.
+  pub fn shutdown_requested(&self) -> bool {
+    self.state.shutdown
   }
 
   pub fn apply_config(&mut self, config: Config) -> Result<(), Error> {
@@ -1826,6 +1851,85 @@ impl ClientData for ClientDataImpl {
   fn disconnected(&self, client: ClientId, _reason: DisconnectReason) {
     if let Ok(mut clients) = self.disconnected.lock() {
       clients.push(client);
+    }
+  }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+  use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicU32, Ordering},
+  };
+
+  use super::*;
+
+  /// Builds a compositor whose Wayland socket lives in the temporary
+  /// directory, so tests need no `XDG_RUNTIME_DIR`. Returns the socket path
+  /// for clients to connect to.
+  pub(crate) fn test_compositor() -> (Compositor, PathBuf) {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let name = format!(
+      "shingle-test-{}-{}",
+      std::process::id(),
+      NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let path = std::env::temp_dir().join(&name);
+    let socket = ListeningSocket::bind_absolute(path.clone())
+      .expect("the temporary directory accepts a test socket");
+    let compositor = Compositor::with_socket(
+      Config::default(),
+      Shingle::new(),
+      socket,
+      name.into(),
+    )
+    .expect("the default config builds a compositor");
+    (compositor, path)
+  }
+
+  /// Dispatches the compositor until `done` holds or a second has passed.
+  pub(crate) fn dispatch_until(
+    compositor: &mut Compositor,
+    mut done: impl FnMut(&Compositor) -> bool,
+  ) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while std::time::Instant::now() < deadline {
+      if done(compositor) {
+        return true;
+      }
+      compositor
+        .poll(Some(Duration::from_millis(10)))
+        .expect("dispatch succeeds");
+    }
+    done(compositor)
+  }
+
+  #[test]
+  fn shutdown_is_not_requested_initially() {
+    let (mut compositor, _) = test_compositor();
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    assert!(!compositor.shutdown_requested());
+  }
+
+  #[test]
+  fn request_quit_requests_shutdown() {
+    let (mut compositor, _) = test_compositor();
+    compositor.request_quit();
+    assert!(compositor.shutdown_requested());
+  }
+
+  #[test]
+  fn sigterm_and_sigint_request_shutdown() {
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+      let (mut compositor, _) = test_compositor();
+      // SAFETY: raise() directs the signal at this thread, which the
+      // compositor's signal source has blocked, so the signal stays pending
+      // for the signalfd instead of terminating the test process.
+      assert_eq!(unsafe { libc::raise(signal) }, 0);
+      assert!(
+        dispatch_until(&mut compositor, Compositor::shutdown_requested),
+        "signal {signal} did not request shutdown"
+      );
     }
   }
 }

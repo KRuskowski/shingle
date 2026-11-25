@@ -24,3 +24,6 @@ wayland-protocols-misc.workspace = true
 wayland-server.workspace = true
 xcursor.workspace = true
 xkbcommon.workspace = true
+
+[dev-dependencies]
+libc = "0.2"

@@ -4524,6 +4524,12 @@ impl ApplicationHandler for App {
       event_loop.exit();
       return;
     }
+    // SIGINT and SIGTERM reach the compositor's event loop, not winit's.
+    // `exiting` saves the session.
+    if self.compositor.shutdown_requested() {
+      event_loop.exit();
+      return;
+    }
     self.reload_if_changed();
     self.process_workspace_switch_timeout();
     self.process_extra_gestures();
