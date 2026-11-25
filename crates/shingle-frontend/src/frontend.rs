@@ -14,6 +14,8 @@ mod scale;
 mod scene;
 mod session;
 mod switcher;
+#[cfg(test)]
+mod tests;
 
 use std::{
   collections::{HashMap, HashSet},

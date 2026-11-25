@@ -3071,12 +3071,16 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "image",
+ "pollster 0.4.0",
  "resvg",
+ "rustix 1.1.6",
  "shingle",
  "shingle-config",
  "shingle-core",
  "shingle-render",
  "shingle-session",
+ "wayland-client",
+ "wayland-protocols 0.32.13",
  "wayland-server",
  "xkbcommon",
 ]

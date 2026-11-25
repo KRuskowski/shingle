@@ -17,6 +17,8 @@ pub mod keyboard;
 pub mod render_target;
 pub mod scale;
 pub mod scale_title;
+#[cfg(test)]
+mod test_client;
 pub mod workspace_transition;
 
 pub use frontend::Frontend;

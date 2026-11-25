@@ -17,5 +17,11 @@ shingle-session = { path = "../shingle-session" }
 wayland-server.workspace = true
 xkbcommon.workspace = true
 
+[dev-dependencies]
+pollster.workspace = true
+rustix.workspace = true
+wayland-client = "0.31"
+wayland-protocols.workspace = true
+
 [lints]
 workspace = true
