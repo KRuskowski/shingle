@@ -48,11 +48,11 @@ The work is split into seven workspaces, each with acceptance criteria in the de
 2. XW-2 `shingle-xwayland-server`: done; Shingle binds its X display, supervises Xwayland (eager or lazy, with the restart rule) and brings its XWM up; `DISPLAY`, the `stipc` display methods, `xwayland-ready` and the startup script work. See [status.md](status.md#with-real-clients).
 3. XW-3 `shingle-xwayland-windows`: done; `xwayland_shell_v1` pairs X windows with surfaces, and managed X11 toplevels are Shingle windows with configure, `_NET_WM_STATE`, close, IPC (class, title, PID) and session identity. See [status.md](status.md#with-real-clients).
 4. XW-4 `shingle-xwayland-behaviour`: done; ICCCM focus and the `FocusIn` guard, `_NET_ACTIVE_WINDOW`, `_NET_WM_STATE` both ways, `WM_CHANGE_STATE`, move, resize and close requests, X stacking, transients and dialogs, override-redirect windows in the Unmanaged layer and the root cursor; Scale, Expo, the switchers, rules and session restore checked with X windows. See [status.md](status.md#with-real-clients).
-5. XW-5 `shingle-xwayland-selection`: clipboard and primary selection in both directions, with INCR.
+5. XW-5 `shingle-xwayland-selection`: done; the clipboard and primary selection are bridged between X and Wayland in both directions, with INCR and without blocking the compositor, and wlr-data-control clients see X selections. See [status.md](status.md#with-real-clients).
 6. XW-6 `shingle-xwayland-dnd`: Xdnd drag and drop (later).
 7. XW-7 `shingle-xwayland-hidpi`: optional zero-scaling HiDPI mode.
 
-XW-5 is next.
+XW-6 is next, when drag and drop between X and Wayland is wanted; XW-7 waits for the multi-output item.
 
 ## 5. Multi-output
 
