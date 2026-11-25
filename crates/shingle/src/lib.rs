@@ -52,7 +52,7 @@ mod xdg_output;
 use std::{
   collections::{HashMap, HashSet},
   ffi::{OsStr, OsString},
-  os::fd::{AsFd, AsRawFd},
+  os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
   sync::{Arc, Mutex},
   time::Duration,
 };
@@ -61,7 +61,6 @@ use calloop::{
   EventLoop, Interest, Mode, PostAction,
   generic::{FdWrapper, Generic},
   signals::{Signal, Signals},
-  timer::{TimeoutAction, Timer},
 };
 pub use input::Modifiers;
 pub use input_device::InputDeviceKind;
@@ -495,12 +494,18 @@ impl Compositor {
         },
       )
       .map_err(|error| Error::EventLoop(error.to_string()))?;
+    // The housekeeping tick (idle timeouts, IPC) is a timerfd rather than a
+    // calloop timer. calloop keeps timers in its poll timeout, which would
+    // not make the epoll descriptor readable for a backend polling it
+    // through `AsFd`.
     handle
       .insert_source(
-        Timer::from_duration(Duration::from_millis(50)),
-        |_, _, state| {
+        Generic::new(tick_timer()?, Interest::READ, Mode::Level),
+        |_, timer, state| {
+          let mut expirations = [0; 8];
+          let _ = rustix::io::read(timer.as_fd(), &mut expirations);
           state.idle_pending = true;
-          TimeoutAction::ToDuration(Duration::from_millis(50))
+          Ok(PostAction::Continue)
         },
       )
       .map_err(|error| Error::EventLoop(error.to_string()))?;
@@ -1831,6 +1836,45 @@ impl Compositor {
   }
 }
 
+/// The event loop's descriptor. It becomes readable whenever
+/// [`Compositor::dispatch_pending`] has work: client requests, new
+/// connections, SIGINT or SIGTERM, and a 50 ms housekeeping tick that runs
+/// idle timeouts and serves IPC clients. A backend with its own event loop
+/// polls this descriptor and calls `dispatch_pending` when it is readable,
+/// instead of calling [`Compositor::poll`] with a timeout.
+impl AsFd for Compositor {
+  fn as_fd(&self) -> BorrowedFd<'_> {
+    self.event_loop.as_fd()
+  }
+}
+
+/// Creates the timerfd behind the 50 ms housekeeping tick.
+fn tick_timer() -> Result<OwnedFd, Error> {
+  use rustix::time::{
+    Itimerspec, TimerfdClockId, TimerfdFlags, TimerfdTimerFlags, Timespec,
+    timerfd_create, timerfd_settime,
+  };
+  let timer = timerfd_create(
+    TimerfdClockId::Monotonic,
+    TimerfdFlags::NONBLOCK | TimerfdFlags::CLOEXEC,
+  )
+  .map_err(std::io::Error::from)?;
+  let period = Timespec {
+    tv_sec: 0,
+    tv_nsec: 50_000_000,
+  };
+  timerfd_settime(
+    &timer,
+    TimerfdTimerFlags::empty(),
+    &Itimerspec {
+      it_interval: period,
+      it_value: period,
+    },
+  )
+  .map_err(std::io::Error::from)?;
+  Ok(timer)
+}
+
 fn parse_output_transform(
   value: &str,
 ) -> wayland_server::protocol::wl_output::Transform {
@@ -1902,6 +1946,37 @@ pub(crate) mod tests {
         .expect("dispatch succeeds");
     }
     done(compositor)
+  }
+
+  /// Returns whether `fd` becomes readable within `timeout`.
+  fn readable(fd: BorrowedFd<'_>, timeout: Duration) -> bool {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    let timeout = Timespec {
+      tv_sec: timeout.as_secs() as i64,
+      tv_nsec: i64::from(timeout.subsec_nanos()),
+    };
+    let mut fds = [PollFd::from_borrowed_fd(fd, PollFlags::IN)];
+    poll(&mut fds, Some(&timeout)).expect("poll succeeds") > 0
+  }
+
+  #[test]
+  fn event_loop_fd_is_readable_for_a_connecting_client() {
+    let (mut compositor, path) = test_compositor();
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    let _client = std::os::unix::net::UnixStream::connect(&path)
+      .expect("the test socket accepts clients");
+    assert!(readable(compositor.as_fd(), Duration::ZERO));
+  }
+
+  #[test]
+  fn event_loop_fd_is_readable_for_the_housekeeping_tick() {
+    let (mut compositor, _) = test_compositor();
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    assert!(readable(compositor.as_fd(), Duration::from_millis(500)));
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    // Dispatching consumes the expiration, so the descriptor does not stay
+    // readable and spin a backend's loop.
+    assert!(!readable(compositor.as_fd(), Duration::ZERO));
   }
 
   #[test]
