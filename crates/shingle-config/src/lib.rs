@@ -286,7 +286,9 @@ impl ShingleConfig {
   /// (creating the directory if needed), synced, then renamed over `path`, so a
   /// reader such as a [`ConfigWatcher`] sees either the old or the new file,
   /// never a partial one. The temporary file is removed if writing or renaming
-  /// fails. The directory itself is not synced after the rename.
+  /// fails. The directory is synced after the rename, so the new file
+  /// survives a crash; if that sync fails, the error is returned although
+  /// `path` already holds the new contents.
   ///
   /// # Errors
   ///
@@ -347,7 +349,9 @@ impl ShingleConfig {
       io::Write::write_all(&mut file, yaml.as_bytes())?;
       file.sync_all()?;
       drop(file);
-      fs::rename(&temporary_path, path)
+      fs::rename(&temporary_path, path)?;
+      // Make the rename itself durable, as Shingle::save_atomic does.
+      fs::File::open(parent)?.sync_all()
     })();
     if let Err(source) = result {
       let _ = fs::remove_file(&temporary_path);
@@ -2426,6 +2430,31 @@ mod tests {
     assert!(i3.scale.include_minimized);
     assert!(i3.scale.close_on_new_view);
     assert_eq!(i3.scale.minimized_alpha, 0.4);
+  }
+
+  #[test]
+  fn save_yaml_syncs_the_directory_after_the_rename() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = std::env::temp_dir()
+      .join(format!("shingle-config-sync-{}", std::process::id()));
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("shingle.yaml");
+    ShingleConfig::default().save_yaml(&path).unwrap();
+    // Without read permission the directory cannot be opened to sync it,
+    // although files in it can still be created and renamed.
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o300)).unwrap();
+    let readable = fs::File::open(&directory).is_ok();
+    let result = ShingleConfig::default().save_yaml(&path);
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_dir_all(&directory).unwrap();
+    if readable {
+      // Running as root: permissions do not apply.
+      return;
+    }
+    let Err(ConfigError::Write { source, .. }) = result else {
+      panic!("the directory was not opened for syncing: {result:?}");
+    };
+    assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
   }
 
   #[test]
