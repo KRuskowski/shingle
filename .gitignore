@@ -1,2 +1,4 @@
 /target/
 /.claude/.cc-writes/
+__pycache__/
+*.pyc
