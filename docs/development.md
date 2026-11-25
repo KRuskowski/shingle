@@ -62,4 +62,4 @@ Unit tests do not cover protocol behaviour end to end. For any protocol, IPC or 
 
 ## Behavioural reference
 
-Wayfire's source is the reference for compatible behaviour. A checkout lives at `/home/karl/dev/wayfire`.
+Wayfire's source (https://github.com/WayfireWM/wayfire) is the reference for compatible behaviour. Keep a checkout next to this repository, at `../wayfire`.
