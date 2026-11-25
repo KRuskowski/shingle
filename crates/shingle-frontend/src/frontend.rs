@@ -760,6 +760,48 @@ impl Frontend {
     result
   }
 
+  /// Pauses or resumes the seat session, as the native host does when
+  /// libseat disables the seat for a VT switch and enables it again.
+  ///
+  /// Pausing forgets every held key and stops key repeat, ends the
+  /// switcher as if its modifiers were released, abandons drags, window
+  /// rotation, Expo's pointer and touch gestures, and then calls
+  /// [`Compositor::set_session_active`], which releases what clients hold
+  /// and drops seat input until the session resumes. Nothing that was held
+  /// before the pause continues after it, because the keys and buttons may
+  /// have been released on the other VT. Resuming reactivates the
+  /// compositor and asks for a frame.
+  pub fn set_session_active(&mut self, host: &mut dyn Host, active: bool) {
+    if active {
+      self.compositor.set_session_active(true);
+      self.request_redraw();
+    } else {
+      self.key_repeat.cancel();
+      self.keyboard.release_all();
+      self.finish_switcher();
+      self.rotation_drag = None;
+      if let Some(state) = &mut self.expo {
+        state.cancel_pointer();
+      }
+      self.expo_touch = None;
+      self.gestures.cancel();
+      self.abandon_drag();
+      self.compositor.set_session_active(false);
+    }
+    self.flush(host);
+  }
+
+  /// The keyboard LEDs the shared keyboard state lights, after adopting
+  /// locks and the layout that IPC may have changed. The native host
+  /// passes them to every libinput keyboard.
+  pub fn keyboard_leds(&mut self) -> crate::keyboard::Leds {
+    self.keyboard.sync_locked(
+      self.compositor.locked_modifiers(),
+      self.compositor.keyboard_layout_index(),
+    );
+    self.keyboard.leds()
+  }
+
   /// Saves the session. Hosts call this when their event loop ends.
   pub fn shutdown(&mut self) {
     self.save();

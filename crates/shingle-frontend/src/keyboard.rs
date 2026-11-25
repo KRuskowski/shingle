@@ -72,6 +72,17 @@ pub struct Key {
   pub modifiers_changed: bool,
 }
 
+/// Which keyboard LEDs are lit.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Leds {
+  /// Caps Lock.
+  pub caps_lock: bool,
+  /// Num Lock.
+  pub num_lock: bool,
+  /// Scroll Lock.
+  pub scroll_lock: bool,
+}
+
 /// XKB state for one seat keyboard.
 pub struct Keyboard {
   keymap: xkb::Keymap,
@@ -204,6 +215,16 @@ impl Keyboard {
     self.state = xkb::State::new(&self.keymap);
     self.state.update_mask(0, 0, locked, 0, 0, group);
     std::mem::take(&mut self.held).into_iter().collect()
+  }
+
+  /// Returns the LEDs the state lights, by the keymap's standard LED
+  /// names.
+  pub fn leds(&self) -> Leds {
+    Leds {
+      caps_lock: self.state.led_name_is_active(xkb::LED_NAME_CAPS),
+      num_lock: self.state.led_name_is_active(xkb::LED_NAME_NUM),
+      scroll_lock: self.state.led_name_is_active(xkb::LED_NAME_SCROLL),
+    }
   }
 
   /// Returns whether key `code` is down.
@@ -384,6 +405,29 @@ mod tests {
     assert_eq!(tap(&mut keyboard, KEY_A).text.as_deref(), Some("A"));
     tap(&mut keyboard, KEY_CAPSLOCK);
     assert_eq!(keyboard.modifiers().locked, 0);
+  }
+
+  #[test]
+  fn leds_follow_locks_from_keys_and_from_outside() {
+    let mut keyboard = keyboard("us", "", "");
+    assert_eq!(keyboard.leds(), Leds::default());
+    tap(&mut keyboard, KEY_CAPSLOCK);
+    assert_eq!(
+      keyboard.leds(),
+      Leds {
+        caps_lock: true,
+        ..Leds::default()
+      }
+    );
+    // Num Lock set through IPC, Caps Lock cleared.
+    keyboard.sync_locked(MOD2, 0);
+    assert_eq!(
+      keyboard.leds(),
+      Leds {
+        num_lock: true,
+        ..Leds::default()
+      }
+    );
   }
 
   #[test]

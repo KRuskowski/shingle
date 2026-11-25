@@ -542,6 +542,52 @@ fn ctrl_alt_function_keys_switch_vt_when_the_host_can() {
 }
 
 #[test]
+fn pausing_the_session_ends_held_state_and_resuming_redraws() {
+  let (mut fixture, [alpha, ..]) = three_windows();
+  fixture.key(KEY_LEFTALT, true);
+  fixture.tap(KEY_TAB, &[]);
+  assert!(fixture.frontend.switcher.is_some());
+  fixture.key(KEY_A, true);
+  assert!(fixture.frontend.next_deadline().is_some(), "A repeats");
+  fixture
+    .frontend
+    .set_session_active(&mut fixture.host, false);
+  fixture.process();
+  assert!(fixture.frontend.switcher.is_none(), "the switcher ends");
+  assert!(fixture.frontend.next_deadline().is_none(), "repeat stops");
+  assert!(!fixture.frontend.keyboard.binding_modifiers().alt);
+  // Keys pressed while paused are tracked but reach nobody.
+  fixture.key(KEY_LEFTMETA, true);
+  fixture.key(KEY_LEFTMETA, false);
+
+  // A drag in progress is abandoned where the window is.
+  fixture.frontend.set_session_active(&mut fixture.host, true);
+  let (x, y) = fixture.center(alpha);
+  fixture.move_pointer(x, y);
+  fixture.key(KEY_LEFTMETA, true);
+  fixture.button(BTN_LEFT, true);
+  assert!(fixture.frontend.drag.is_some());
+  let tiles = fixture.tiles();
+  fixture
+    .frontend
+    .set_session_active(&mut fixture.host, false);
+  assert!(fixture.frontend.drag.is_none());
+  assert_eq!(fixture.tiles(), tiles, "nothing is dropped");
+  let redraws = fixture.host.redraws;
+  fixture.frontend.set_session_active(&mut fixture.host, true);
+  assert!(fixture.host.redraws > redraws, "resuming asks for a frame");
+}
+
+#[test]
+fn keyboard_leds_follow_caps_lock() {
+  const KEY_CAPSLOCK: u32 = 58;
+  let mut fixture = Fixture::new(ShingleConfig::default());
+  assert!(!fixture.frontend.keyboard_leds().caps_lock);
+  fixture.tap(KEY_CAPSLOCK, &[]);
+  assert!(fixture.frontend.keyboard_leds().caps_lock);
+}
+
+#[test]
 fn touch_taps_commit_scale() {
   let (mut fixture, [alpha, ..]) = three_windows();
   fixture.tap(KEY_P, &[KEY_LEFTMETA]);
