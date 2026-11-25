@@ -1,6 +1,6 @@
-# Tilefire
+# Shingle
 
-Tilefire is a Rust tiling Wayland compositor inspired by Wayfire. Its primary
+Shingle is a Rust tiling Wayland compositor inspired by Wayfire. Its primary
 model is a persistent tiling tree rather than a collection of independent
 window positions. Rendering uses wgpu, and the nested frontend uses winit so
 it can be tested without replacing the running compositor.
@@ -13,7 +13,7 @@ restore, idle/DPMS, session locking, screencopy, zoom, color inversion, window
 opacity, opening/closing animations, Scale window overviews, and an Expo
 workspace overview.
 
-Tilefire is not yet a drop-in replacement for Wayfire on physical hardware.
+Shingle is not yet a drop-in replacement for Wayfire on physical hardware.
 Direct DRM/libinput, DMA-BUF, XWayland, and complete multi-output support remain
 unfinished. Several Wayfire visual effects and plugins are also missing. Scale
 has entry, layout, and exit transitions plus configurable title overlays. Expo
@@ -38,29 +38,29 @@ cargo fmt --all
 
 ## Run without replacing Wayfire
 
-Start a nested Tilefire window inside the current graphical session:
+Start a nested Shingle window inside the current graphical session:
 
 ```sh
-cargo run -p tilefire-nested -- --config data/tilefire.yaml
+cargo run -p shingle-nested -- --config data/shingle.yaml
 ```
 
 The process prints its private `WAYLAND_DISPLAY` socket. Applications started
 with `--spawn` receive that socket automatically:
 
 ```sh
-cargo run -p tilefire-nested -- \
-  --config data/tilefire.yaml --spawn foot
+cargo run -p shingle-nested -- \
+  --config data/shingle.yaml --spawn foot
 ```
 
-The host compositor remains running. Locking uses `tilefire-lock` from `PATH`;
-the `TILEFIRE_LOCK` environment variable can select another executable.
+The host compositor remains running. Locking uses `shingle-lock` from `PATH`;
+the `SHINGLE_LOCK` environment variable can select another executable.
 
 ## Configuration
 
-Tilefire reads YAML by default from
-`$XDG_CONFIG_HOME/tilefire/tilefire.yaml`, or
-`~/.config/tilefire/tilefire.yaml` when `XDG_CONFIG_HOME` is unset. The example
-in `data/tilefire.yaml` includes the available settings and default shortcuts.
+Shingle reads YAML by default from
+`$XDG_CONFIG_HOME/shingle/shingle.yaml`, or
+`~/.config/shingle/shingle.yaml` when `XDG_CONFIG_HOME` is unset. The example
+in `data/shingle.yaml` includes the available settings and default shortcuts.
 
 Wayfire INI and i3-style configuration can be imported. Files ending in `.ini`,
 and files beginning with an INI section, are treated as Wayfire configuration;
@@ -70,15 +70,15 @@ and files beginning with an INI section, are treated as Wayfire configuration;
 WCM provides a graphical configuration editor:
 
 ```sh
-cargo run -p tilefire-wcm -- --config data/tilefire.yaml
+cargo run -p shingle-wcm -- --config data/shingle.yaml
 ```
 
 It also validates and converts configuration without opening a window:
 
 ```sh
-cargo run -p tilefire-wcm -- --config data/tilefire.yaml --check
-cargo run -p tilefire-wcm -- \
-  --config wayfire.ini --output tilefire.yaml --export-yaml
+cargo run -p shingle-wcm -- --config data/shingle.yaml --check
+cargo run -p shingle-wcm -- \
+  --config wayfire.ini --output shingle.yaml --export-yaml
 ```
 
 ### Resource limits
@@ -91,7 +91,7 @@ rejected before mapping or GPU upload. The limit is also editable in WCM.
 
 `wp_alpha_modifier_v1` applies client-requested alpha multipliers on surface
 commit, including cached synchronized-subsurface commits. The multiplier ranges
-from zero (transparent) to `UINT32_MAX` (opaque) and is combined with Tilefire's
+from zero (transparent) to `UINT32_MAX` (opaque) and is combined with Shingle's
 window-opacity setting. Destroying the modifier schedules a return to full alpha.
 
 ### Presentation timing
@@ -147,7 +147,7 @@ export, or exported toplevel revokes only the relationships that depend on it.
 ### Primary selection
 
 `behavior.disable_primary_selection` matches Wayfire's workaround for disabling
-middle-click copy and paste. When enabled at startup, Tilefire does not
+middle-click copy and paste. When enabled at startup, Shingle does not
 advertise `zwp_primary_selection_device_manager_v1`. Changing the option requires
 a compositor restart so existing clients and new clients see the same protocol
 availability. The option can be imported and edited through WCM.
@@ -300,7 +300,7 @@ The corresponding i3 variables are `$vswitch_duration_ms`, `$vswitch_gap`, and
 
 ### Workspace tools
 
-Tilefire advertises `ext-workspace-v1` for workspace bars and switchers. Clients
+Shingle advertises `ext-workspace-v1` for workspace bars and switchers. Clients
 receive stable IDs, display names, grid coordinates, output membership, and
 active state. Activation requests use the protocol's atomic commit operation and
 share the normal workspace-switch path. Grid changes rebuild the client's
@@ -317,7 +317,7 @@ The nested frontend can expose Wayfire-style length-prefixed JSON over a local
 Unix socket:
 
 ```sh
-cargo run -p tilefire-nested -- --ipc /tmp/tilefire-ipc.socket
+cargo run -p shingle-nested -- --ipc /tmp/shingle-ipc.socket
 ```
 
 It exports `WAYFIRE_SOCKET` for spawned processes. Supported `window-rules`
@@ -468,18 +468,18 @@ not implemented.
 
 ## Code organization
 
-- `tilefire-core`: tiling trees, workspaces, geometry, and serializable state.
-- `tilefire`: Wayland protocols, input routing, output state, and the headless
+- `shingle-core`: tiling trees, workspaces, geometry, and serializable state.
+- `shingle`: Wayland protocols, input routing, output state, and the headless
   compositor event loop.
-- `tilefire-render`: wgpu textures, transforms, effects, and render tiles.
-- `tilefire-nested`: winit host window and interactive compositor frontend.
-- `tilefire-config`: validated YAML plus Wayfire INI and i3 imports.
-- `tilefire-session`: atomic session persistence and application launching.
-- `tilefire-idle`: idle, DPMS, fullscreen suppression, and lock coordination.
-- `tilefire-auth`: PAM authentication used by the lock client.
-- `tilefire-lock`: `ext-session-lock-v1` client with swaylock-style options.
-- `tilefire-wcm`: Gloomy-based graphical configuration manager.
+- `shingle-render`: wgpu textures, transforms, effects, and render tiles.
+- `shingle-nested`: winit host window and interactive compositor frontend.
+- `shingle-config`: validated YAML plus Wayfire INI and i3 imports.
+- `shingle-session`: atomic session persistence and application launching.
+- `shingle-idle`: idle, DPMS, fullscreen suppression, and lock coordination.
+- `shingle-auth`: PAM authentication used by the lock client.
+- `shingle-lock`: `ext-session-lock-v1` client with swaylock-style options.
+- `shingle-wcm`: Gloomy-based graphical configuration manager.
 
-Scale-specific snapshot selection lives in `tilefire`; interactive state and
-wgpu thumbnail transforms live in `tilefire-nested`. This separation keeps the
+Scale-specific snapshot selection lives in `shingle`; interactive state and
+wgpu thumbnail transforms live in `shingle-nested`. This separation keeps the
 persistent tiling model independent of temporary overview geometry.

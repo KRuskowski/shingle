@@ -3061,6 +3061,123 @@ dependencies = [
 ]
 
 [[package]]
+name = "shingle"
+version = "0.1.0"
+dependencies = [
+ "calloop 0.14.5",
+ "rustix 1.1.6",
+ "serde_json",
+ "shingle-config",
+ "shingle-core",
+ "shingle-idle",
+ "shingle-session",
+ "thiserror 2.0.21",
+ "wayland-protocols 0.32.13",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr 0.3.12",
+ "wayland-server",
+ "xcursor",
+ "xkbcommon",
+]
+
+[[package]]
+name = "shingle-auth"
+version = "0.1.0"
+dependencies = [
+ "nonstick",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
+name = "shingle-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "shingle-core",
+ "shingle-idle",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "shingle-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "shingle-idle"
+version = "0.1.0"
+
+[[package]]
+name = "shingle-lock"
+version = "0.1.0"
+dependencies = [
+ "calloop 0.14.5",
+ "calloop-wayland-source 0.4.1",
+ "libc",
+ "pollster 0.4.0",
+ "rustix 1.1.6",
+ "shingle-auth",
+ "shingle-render",
+ "tempfile",
+ "thiserror 2.0.21",
+ "wayland-client",
+ "wayland-protocols 0.32.13",
+ "xkbcommon",
+ "zeroize",
+]
+
+[[package]]
+name = "shingle-nested"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "image",
+ "pollster 0.4.0",
+ "resvg",
+ "shingle",
+ "shingle-config",
+ "shingle-core",
+ "shingle-render",
+ "shingle-session",
+ "wayland-server",
+ "winit 0.30.13",
+]
+
+[[package]]
+name = "shingle-render"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "thiserror 2.0.21",
+ "wgpu 30.0.2",
+ "winit 0.30.13",
+]
+
+[[package]]
+name = "shingle-session"
+version = "0.1.0"
+dependencies = [
+ "shingle-core",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "shingle-wcm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gloomy-app",
+ "gloomy-core",
+ "shingle-config",
+ "winit 0.29.15",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3354,123 +3471,6 @@ dependencies = [
  "quick-error",
  "weezl",
  "zune-jpeg",
-]
-
-[[package]]
-name = "tilefire"
-version = "0.1.0"
-dependencies = [
- "calloop 0.14.5",
- "rustix 1.1.6",
- "serde_json",
- "thiserror 2.0.21",
- "tilefire-config",
- "tilefire-core",
- "tilefire-idle",
- "tilefire-session",
- "wayland-protocols 0.32.13",
- "wayland-protocols-misc",
- "wayland-protocols-wlr 0.3.12",
- "wayland-server",
- "xcursor",
- "xkbcommon",
-]
-
-[[package]]
-name = "tilefire-auth"
-version = "0.1.0"
-dependencies = [
- "nonstick",
- "thiserror 2.0.21",
- "zeroize",
-]
-
-[[package]]
-name = "tilefire-config"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_yaml",
- "thiserror 2.0.21",
- "tilefire-core",
- "tilefire-idle",
-]
-
-[[package]]
-name = "tilefire-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "tilefire-idle"
-version = "0.1.0"
-
-[[package]]
-name = "tilefire-lock"
-version = "0.1.0"
-dependencies = [
- "calloop 0.14.5",
- "calloop-wayland-source 0.4.1",
- "libc",
- "pollster 0.4.0",
- "rustix 1.1.6",
- "tempfile",
- "thiserror 2.0.21",
- "tilefire-auth",
- "tilefire-render",
- "wayland-client",
- "wayland-protocols 0.32.13",
- "xkbcommon",
- "zeroize",
-]
-
-[[package]]
-name = "tilefire-nested"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "image",
- "pollster 0.4.0",
- "resvg",
- "tilefire",
- "tilefire-config",
- "tilefire-core",
- "tilefire-render",
- "tilefire-session",
- "wayland-server",
- "winit 0.30.13",
-]
-
-[[package]]
-name = "tilefire-render"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "thiserror 2.0.21",
- "wgpu 30.0.2",
- "winit 0.30.13",
-]
-
-[[package]]
-name = "tilefire-session"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.21",
- "tilefire-core",
-]
-
-[[package]]
-name = "tilefire-wcm"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "gloomy-app",
- "gloomy-core",
- "tilefire-config",
- "winit 0.29.15",
 ]
 
 [[package]]
