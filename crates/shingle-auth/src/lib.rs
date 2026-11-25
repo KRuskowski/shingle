@@ -6,20 +6,82 @@
 //! stack does, including any failure delay a module imposes, so the lock
 //! client runs it on a worker thread (crates/shingle-lock/src/main.rs:661).
 //!
+//! nonstick takes PAM answers as `OsString`s and frees them itself, so the
+//! copy of the password handed to PAM cannot be zeroed here. The lock
+//! client therefore installs [`ZeroOnFree`] as its global allocator, which
+//! zeroes every heap block before freeing it, that copy included.
+//!
 //! The service file shipped for this is data/pam/shingle. The pre-rename
 //! `tilefire` service and `TILEFIRE_PAM_SERVICE` variable are still honoured;
 //! see README.md#upgrading-from-tilefire.
 
 #![warn(missing_docs)]
 
-use std::ffi::{OsStr, OsString};
+use std::{
+  alloc::{GlobalAlloc, Layout},
+  ffi::{OsStr, OsString},
+};
 
 use nonstick::{
   AuthnFlags, ConversationAdapter, ErrorCode, Result as PamResult, Transaction,
   TransactionBuilder,
 };
 use thiserror::Error;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
+
+/// A global allocator that zeroes every block before `inner` frees it.
+///
+/// [`Authenticator::authenticate`] has to give PAM the password as an
+/// `OsString`, which nonstick copies to the C heap and then drops
+/// unzeroed. With this as the global allocator that drop, and every
+/// reallocation of a growing password buffer, wipes the memory first. The
+/// lock client installs it over [`std::alloc::System`]:
+///
+/// ```no_run
+/// use shingle_auth::ZeroOnFree;
+///
+/// #[global_allocator]
+/// static ALLOCATOR: ZeroOnFree<std::alloc::System> =
+///   ZeroOnFree::new(std::alloc::System);
+/// # fn main() {}
+/// ```
+///
+/// Reallocation goes through allocate, copy and free, so the old block is
+/// zeroed as well.
+pub struct ZeroOnFree<A> {
+  inner: A,
+}
+
+impl<A> ZeroOnFree<A> {
+  /// Wraps `inner`, which does the actual allocation.
+  pub const fn new(inner: A) -> Self {
+    Self { inner }
+  }
+}
+
+// SAFETY: Allocation is delegated to `inner` unchanged; dealloc only writes
+// zeros to the block it is given, which the caller guarantees is live and
+// `layout.size()` bytes long, before handing it to `inner`.
+unsafe impl<A: GlobalAlloc> GlobalAlloc for ZeroOnFree<A> {
+  unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+    // SAFETY: Forwarded with the caller's guarantees.
+    unsafe { self.inner.alloc(layout) }
+  }
+
+  unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+    // SAFETY: Forwarded with the caller's guarantees.
+    unsafe { self.inner.alloc_zeroed(layout) }
+  }
+
+  unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+    // SAFETY: The caller guarantees that `ptr` is a live block of
+    // `layout.size()` bytes from this allocator.
+    unsafe {
+      std::slice::from_raw_parts_mut(ptr, layout.size()).zeroize();
+      self.inner.dealloc(ptr, layout);
+    }
+  }
+}
 
 /// A password that is zeroed in memory when dropped.
 ///
@@ -157,7 +219,59 @@ impl ConversationAdapter for LockConversation {
 
 #[cfg(test)]
 mod tests {
+  use std::{alloc::System, sync::Mutex};
+
   use super::*;
+
+  /// Allocates from the system and records each block's bytes as it is
+  /// freed.
+  #[derive(Default)]
+  struct Recorder {
+    freed: Mutex<Vec<Vec<u8>>>,
+  }
+
+  // SAFETY: Allocation goes to `System`; dealloc reads the live block
+  // before freeing it.
+  unsafe impl GlobalAlloc for Recorder {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+      // SAFETY: Forwarded with the caller's guarantees.
+      unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+      // SAFETY: The block is live and `layout.size()` bytes long.
+      let bytes =
+        unsafe { std::slice::from_raw_parts(ptr, layout.size()) }.to_vec();
+      self.freed.lock().unwrap().push(bytes);
+      // SAFETY: Forwarded with the caller's guarantees.
+      unsafe { System.dealloc(ptr, layout) }
+    }
+  }
+
+  #[test]
+  fn freed_and_reallocated_blocks_are_zeroed_first() {
+    let allocator = ZeroOnFree::new(Recorder::default());
+    let secret = b"hunter2";
+    let layout = Layout::array::<u8>(secret.len()).unwrap();
+    // SAFETY: The layout is non-empty, the block is written within its
+    // size and freed once with the same layout.
+    unsafe {
+      let block = allocator.alloc(layout);
+      assert!(!block.is_null());
+      block.copy_from_nonoverlapping(secret.as_ptr(), secret.len());
+      let grown = allocator.realloc(block, layout, 64);
+      assert!(!grown.is_null());
+      assert_eq!(std::slice::from_raw_parts(grown, secret.len()), secret);
+      allocator.dealloc(grown, Layout::array::<u8>(64).unwrap());
+    }
+    let freed = allocator.inner.freed.lock().unwrap();
+    assert_eq!(freed.len(), 2, "the old block and the grown one");
+    assert!(
+      freed
+        .iter()
+        .all(|block| block.iter().all(|&byte| byte == 0))
+    );
+  }
 
   #[test]
   fn default_service_is_shingle() {

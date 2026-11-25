@@ -16,7 +16,7 @@ use calloop::{
   signals::{Signal, Signals},
 };
 use calloop_wayland_source::WaylandSource;
-use shingle_auth::{Authenticator, Password};
+use shingle_auth::{Authenticator, Password, ZeroOnFree};
 use shingle_render::{OffscreenRenderer, RenderRect, RenderTile};
 use shm::{BufferData, ShmBuffer};
 use thiserror::Error;
@@ -37,6 +37,12 @@ use wayland_protocols::ext::session_lock::v1::client::{
 };
 use xkbcommon::xkb;
 use zeroize::{Zeroize, Zeroizing};
+
+// Zeroes every freed heap block, including the password copy that nonstick
+// drops after handing it to PAM and old buffers of a growing password.
+#[global_allocator]
+static ALLOCATOR: ZeroOnFree<std::alloc::System> =
+  ZeroOnFree::new(std::alloc::System);
 
 const MAX_PASSWORD_BYTES: usize = 4096;
 
