@@ -153,13 +153,17 @@ impl SessionStore {
   /// so pass this snapshot, not a fresh one, to [`launch_saved`] for the
   /// relaunched clients to find their tiles again.
   ///
+  /// A corrupt file (not UTF-8, not JSON, or not a valid snapshot) is
+  /// renamed aside to `NAME.corrupt-SECONDS` next to it, with `.N` added
+  /// if that name is taken, a warning naming both paths is printed to
+  /// stderr, and `Ok(None)` is returned, so the compositor starts with an
+  /// empty session and the next save writes a fresh file. The corrupt file
+  /// is never deleted or overwritten.
+  ///
   /// # Errors
   ///
-  /// [`SessionError::Io`] if the file exists but cannot be read and
-  /// [`SessionError::Core`] if it is not a valid snapshot. A corrupt file is
-  /// left in place, not renamed or deleted, and since the frontend
-  /// propagates this error it then refuses to start until the file is
-  /// removed or `session.restore` is turned off.
+  /// [`SessionError::Io`] if the file exists but cannot be read, or is
+  /// corrupt and cannot be renamed aside.
   pub fn load(
     &self,
   ) -> Result<Option<(Shingle, SessionSnapshot)>, SessionError> {
@@ -168,12 +172,40 @@ impl SessionStore {
       Err(error) if error.kind() == io::ErrorKind::NotFound => {
         return Ok(None);
       }
+      Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+        return self.set_aside(&error.into());
+      }
       Err(error) => return Err(error.into()),
     };
-    let mut snapshot = SessionSnapshot::from_json(&json)?;
-    assign_restore_ids(&mut snapshot);
-    let session = Shingle::from_snapshot(snapshot.clone())?;
-    Ok(Some((session, snapshot)))
+    let parsed = SessionSnapshot::from_json(&json).and_then(|mut snapshot| {
+      assign_restore_ids(&mut snapshot);
+      let session = Shingle::from_snapshot(snapshot.clone())?;
+      Ok((session, snapshot))
+    });
+    match parsed {
+      Ok(loaded) => Ok(Some(loaded)),
+      Err(error) => self.set_aside(&error.into()),
+    }
+  }
+
+  /// Renames the corrupt session file aside and reports it; see
+  /// [`Self::load`].
+  fn set_aside(
+    &self,
+    error: &SessionError,
+  ) -> Result<Option<(Shingle, SessionSnapshot)>, SessionError> {
+    let seconds = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map_or(0, |elapsed| elapsed.as_secs());
+    let aside = move_aside(&self.path, seconds)?;
+    eprintln!(
+      "shingle: session file {} is corrupt ({}); moved it to {} and \
+       starting with an empty session",
+      self.path.display(),
+      error_chain(error),
+      aside.display()
+    );
+    Ok(None)
   }
 
   /// [`Self::load`] followed by [`RestoreReport::launch`].
@@ -193,6 +225,51 @@ impl SessionStore {
     };
     Ok(Some(RestoreReport::launch(session, &snapshot)))
   }
+}
+
+/// Moves `path` to `PATH.corrupt-SECONDS`, or `PATH.corrupt-SECONDS.N` for
+/// the first free `N`, without replacing an existing file, and returns the
+/// new path.
+fn move_aside(path: &Path, seconds: u64) -> io::Result<PathBuf> {
+  let mut base = path.as_os_str().to_owned();
+  base.push(format!(".corrupt-{seconds}"));
+  for attempt in 0..1000_u32 {
+    let mut candidate = base.clone();
+    if attempt > 0 {
+      candidate.push(format!(".{attempt}"));
+    }
+    let candidate = PathBuf::from(candidate);
+    // A hard link fails if the name exists, so nothing is overwritten.
+    match fs::hard_link(path, &candidate) {
+      Ok(()) => {
+        fs::remove_file(path)?;
+        return Ok(candidate);
+      }
+      Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+      // File systems without hard links: check first, then rename.
+      Err(_) if !candidate.exists() => {
+        fs::rename(path, &candidate)?;
+        return Ok(candidate);
+      }
+      Err(_) => {}
+    }
+  }
+  Err(io::Error::new(
+    io::ErrorKind::AlreadyExists,
+    "no free name to move the corrupt session file to",
+  ))
+}
+
+/// `error` with its sources, for a one-line message.
+fn error_chain(error: &dyn std::error::Error) -> String {
+  let mut text = error.to_string();
+  let mut source = error.source();
+  while let Some(cause) = source {
+    text.push_str(": ");
+    text.push_str(&cause.to_string());
+    source = cause.source();
+  }
+  text
 }
 
 /// A loaded session and the clients started for it.
@@ -561,6 +638,53 @@ mod tests {
       wait_and_read(child, &saved),
       "unset|/run/shingle-ipc|wayland-7|restore-1"
     );
+    fs::remove_dir_all(directory).unwrap();
+  }
+
+  /// The files in `directory` whose names start with `prefix`.
+  fn files_starting(directory: &Path, prefix: &str) -> Vec<PathBuf> {
+    let mut files = fs::read_dir(directory)
+      .unwrap()
+      .map(|entry| entry.unwrap().path())
+      .filter(|path| {
+        path
+          .file_name()
+          .and_then(|name| name.to_str())
+          .is_some_and(|name| name.starts_with(prefix))
+      })
+      .collect::<Vec<_>>();
+    files.sort();
+    files
+  }
+
+  #[test]
+  fn a_corrupt_session_is_set_aside_and_the_session_starts_empty() {
+    let directory = temp_dir();
+    let path = directory.join("session.json");
+    let store = SessionStore::new(&path);
+    for contents in [&b"{ not json"[..], b"{\"version\": 999}", b"\xff\xfe"] {
+      fs::write(&path, contents).unwrap();
+      assert!(store.load().unwrap().is_none());
+      assert!(!path.exists(), "the corrupt file is moved away");
+    }
+    // Three corrupt files, none overwritten, none deleted.
+    let aside = files_starting(&directory, "session.json.corrupt-");
+    assert_eq!(aside.len(), 3, "{aside:?}");
+    let mut contents = aside
+      .iter()
+      .map(|path| fs::read(path).unwrap())
+      .collect::<Vec<_>>();
+    contents.sort();
+    let mut expected = vec![
+      b"{ not json".to_vec(),
+      b"{\"version\": 999}".to_vec(),
+      vec![0xff, 0xfe],
+    ];
+    expected.sort();
+    assert_eq!(contents, expected);
+    // A good session saved afterwards loads again.
+    store.save(&Shingle::new()).unwrap();
+    assert!(store.load().unwrap().is_some());
     fs::remove_dir_all(directory).unwrap();
   }
 
