@@ -1,6 +1,9 @@
 //! The frontend state machine: input dispatch, overviews, drags,
 //! animations, the scene build and session handling.
 
+mod session;
+mod switcher;
+
 use std::{
   collections::{HashMap, HashSet},
   error::Error,
@@ -26,10 +29,7 @@ use shingle_session::{
 };
 
 use crate::{
-  bindings::{
-    binding_modifiers, grid_slot, modifier_matches, modifiers_empty,
-    modifiers_held,
-  },
+  bindings::{grid_slot, modifier_matches, modifiers_held},
   expo, extra_gestures,
   host::{Axis, Gesture, Host, InputEvent, Touch, TouchPhase},
   icon_theme,
@@ -41,6 +41,8 @@ use crate::{
   },
   scale_title, workspace_transition,
 };
+
+use switcher::{SwitcherKind, SwitcherState};
 
 /// `BTN_LEFT`.
 const BTN_LEFT: u32 = 0x110;
@@ -84,20 +86,6 @@ struct ClosingAnimation {
   started: Instant,
   geometry: RenderRect,
   buffer: BufferSnapshot,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SwitcherKind {
-  Fast,
-  Regular,
-}
-
-struct SwitcherState {
-  kind: SwitcherKind,
-  windows: Vec<TileWindowId>,
-  selected: usize,
-  modifiers: ConfigModifiers,
-  original_opacity: HashMap<TileWindowId, f32>,
 }
 
 struct ScaleTitle {
@@ -640,141 +628,6 @@ impl Frontend {
     self.drop_preview = None;
     self.workspace_switch_started = None;
     self.save();
-  }
-
-  fn start_lock_client(&mut self) {
-    if self
-      .lock_client
-      .as_mut()
-      .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
-    {
-      return;
-    }
-    // TILEFIRE_LOCK is the pre-rename name and is still honoured.
-    let program = std::env::var_os("SHINGLE_LOCK")
-      .or_else(|| std::env::var_os("TILEFIRE_LOCK"))
-      .unwrap_or_else(|| "shingle-lock".into());
-    match std::process::Command::new(program)
-      .env("WAYLAND_DISPLAY", self.compositor.socket_name())
-      .spawn()
-    {
-      Ok(child) => self.lock_client = Some(child),
-      Err(error) => {
-        eprintln!("shingle: failed to start lock client: {error}")
-      }
-    }
-  }
-
-  fn save(&self) {
-    if let Err(error) = self.store.save(self.compositor.core()) {
-      eprintln!("shingle: failed to save session: {error}");
-    }
-  }
-
-  fn reload_config(&mut self) {
-    self.config_watcher.mark_loaded();
-    let result = (|| {
-      let config = ShingleConfig::load(self.config_path.as_deref())?;
-      let keymap = config.input.load_keymap()?;
-      self.compositor.apply_config(config.clone().into())?;
-      self.compositor.set_keymap(&keymap)?;
-      self.keyboard.set_keymap(&keymap)?;
-      self
-        .compositor
-        .set_repeat(config.input.repeat_rate, config.input.repeat_delay);
-      self
-        .key_repeat
-        .configure(config.input.repeat_rate, config.input.repeat_delay);
-      Ok::<ShingleConfig, Box<dyn Error>>(config)
-    })();
-    match result {
-      Ok(config) => {
-        self.finish_switcher();
-        self.cancel_scale();
-        self.clear_expo();
-        self.workspace_transition = None;
-        self.last_workspace =
-          self.compositor.current_workspace_index().unwrap_or(0);
-        self.scale_exit = None;
-        self.scale_titles.clear();
-        self.scale_icons.clear();
-        self.scale_filter.clear();
-        self.scale_filter_texture = None;
-        self.switcher_inactive_alpha = config.fast_switcher.inactive_alpha;
-        self.scale_config = config.scale.clone();
-        self.scale_title_filter = config.scale_title_filter.clone();
-        self.expo_config = config.expo.clone();
-        self.vswitch = config.vswitch.clone();
-        self.keybindings = config.keybindings;
-        self.commands = config.commands;
-        self.pointer_bindings = config.pointer;
-        self.minimum_extent = config.tiling.minimum_extent;
-        self.resize = config.resize.clone();
-        self.discard_command_output = config.behavior.discard_command_output;
-        self.zoom = config.zoom.clone();
-        self.alpha = config.alpha.clone();
-        self.left_handed_mode = config.input.left_handed_mode;
-        self.middle_emulation = config.input.middle_emulation;
-        self.compositor.clamp_opacity(self.alpha.min_value);
-        self.animate = config.animate.clone();
-        if self.animate.close_animation == "none" {
-          for surface in self.closing_animations.keys() {
-            self.textures.remove(surface);
-          }
-          self.closing_animations.clear();
-        }
-        if self.animate.minimize_animation == "none" {
-          self.minimize_animations.clear();
-        }
-        if self.animate.open_animation == "none" {
-          self.open_animations.clear();
-        }
-        self.invert_preserve_hue = config.effects.invert_preserve_hue;
-        self.background_color = config.background_color;
-        self.animation_duration =
-          Duration::from_millis(config.tiling.animation_duration);
-        self.preview_base_color = config.tiling.preview_base_color;
-        self.preview_border_color = config.tiling.preview_border_color;
-        self.preview_border_width = config.tiling.preview_border_width;
-        self.grid_snap = config.grid.enable_snap;
-        self.snap_threshold = config.grid.snap_threshold;
-        self.quarter_snap_threshold = config.grid.quarter_snap_threshold;
-        self.enable_snap_off = config.grid.enable_snap_off;
-        self.snap_off_threshold = config.grid.snap_off_threshold;
-        self.join_views = config.grid.join_views;
-        self.gestures.set_config(config.extra_gestures.clone());
-        self.wrot_reset_radius = config.effects.wrot_reset_radius;
-        self.workspace_switch_after = (config.grid.workspace_switch_after >= 0)
-          .then(|| {
-            Duration::from_millis(config.grid.workspace_switch_after as u64)
-          });
-        if self.workspace_switch_after.is_none() {
-          self.workspace_switch_started = None;
-        }
-        self.auto_reload_config = config.behavior.auto_reload;
-        self.config_reload_delay =
-          Duration::from_millis(config.behavior.config_reload_delay);
-        self.request_redraw();
-      }
-      Err(error) => eprintln!("shingle: config reload failed: {error}"),
-    }
-  }
-
-  fn reload_if_changed(&mut self) -> bool {
-    if !self.auto_reload_config
-      || self.last_config_poll.elapsed() < Duration::from_millis(100)
-    {
-      return false;
-    }
-    self.last_config_poll = Instant::now();
-    if !self
-      .config_watcher
-      .poll(self.last_config_poll, self.config_reload_delay)
-    {
-      return false;
-    }
-    self.reload_config();
-    true
   }
 
   /// Sends the shared keyboard's modifier masks to the compositor.
@@ -1346,143 +1199,6 @@ impl Frontend {
       }
     }
     true
-  }
-
-  fn start_switcher(
-    &mut self,
-    reverse: bool,
-    binding: shingle_config::Binding,
-    kind: SwitcherKind,
-  ) {
-    if self.switcher.is_none() {
-      self.compositor.set_show_desktop(false);
-      let mut windows = self.compositor.switchable_windows();
-      windows.retain(|window| {
-        self
-          .compositor
-          .core()
-          .window_info(*window)
-          .is_ok_and(|info| !info.state.minimized)
-      });
-      if windows.is_empty() {
-        return;
-      }
-      let selected = self
-        .compositor
-        .focused_window()
-        .and_then(|focused| {
-          windows.iter().position(|window| *window == focused)
-        })
-        .unwrap_or(0);
-      let original_opacity = windows
-        .iter()
-        .filter_map(|window| {
-          self
-            .compositor
-            .window_opacity(*window)
-            .map(|opacity| (*window, opacity))
-        })
-        .collect();
-      self.switcher = Some(SwitcherState {
-        kind,
-        windows,
-        selected,
-        modifiers: binding_modifiers(&binding),
-        original_opacity,
-      });
-    }
-    self.advance_switcher(reverse);
-    if self
-      .switcher
-      .as_ref()
-      .is_some_and(|state| modifiers_empty(state.modifiers))
-    {
-      self.finish_switcher();
-    }
-  }
-
-  fn advance_switcher(&mut self, reverse: bool) {
-    let Some(state) = &mut self.switcher else {
-      return;
-    };
-    if state.windows.is_empty() {
-      self.switcher = None;
-      return;
-    }
-    state.selected = if reverse {
-      (state.selected + state.windows.len() - 1) % state.windows.len()
-    } else {
-      (state.selected + 1) % state.windows.len()
-    };
-    self.apply_switcher();
-  }
-
-  fn apply_switcher(&mut self) {
-    let Some(state) = &self.switcher else {
-      return;
-    };
-    let selected = state.windows.get(state.selected).copied();
-    let updates = state
-      .original_opacity
-      .iter()
-      .map(|(window, opacity)| (*window, *opacity))
-      .collect::<Vec<_>>();
-    for (window, original) in updates {
-      self.compositor.set_window_opacity(
-        window,
-        if Some(window) == selected || state.kind == SwitcherKind::Regular {
-          original
-        } else {
-          original * self.switcher_inactive_alpha
-        },
-      );
-    }
-    if let Some(selected) = selected
-      && let Err(error) = self.compositor.raise_window(selected)
-    {
-      eprintln!("shingle: fast-switcher raise failed: {error}");
-    }
-    self.request_redraw();
-  }
-
-  fn finish_switcher(&mut self) {
-    let Some(state) = self.switcher.take() else {
-      return;
-    };
-    for (window, opacity) in state.original_opacity {
-      self.compositor.set_window_opacity(window, opacity);
-    }
-    if let Some(window) = state.windows.get(state.selected).copied() {
-      self.compositor.focus_window(window);
-      if let Err(error) = self.compositor.raise_window(window) {
-        eprintln!("shingle: fast-switcher focus failed: {error}");
-      }
-    }
-    self.save();
-    self.request_redraw();
-  }
-
-  fn switcher_window_destroyed(&mut self, window: TileWindowId) {
-    let Some(state) = &mut self.switcher else {
-      return;
-    };
-    state.original_opacity.remove(&window);
-    if let Some(removed) = state
-      .windows
-      .iter()
-      .position(|candidate| *candidate == window)
-    {
-      state.windows.remove(removed);
-      if removed < state.selected {
-        state.selected -= 1;
-      }
-    }
-    if state.windows.is_empty() {
-      self.finish_switcher();
-      return;
-    }
-    state.selected = state.selected.min(state.windows.len() - 1);
-    self.apply_switcher();
   }
 
   fn toggle_inversion(&mut self) {
