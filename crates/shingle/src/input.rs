@@ -32,11 +32,19 @@ const DEFAULT_KEYMAP: &str = r#"xkb_keymap {
   xkb_symbols "us" { include "pc+us+inet(evdev)" };
 };"#;
 
+/// Serialized xkb modifier state, as `wl_keyboard.modifiers` sends it.
+/// The frontend computes it with its own xkb state and passes it to
+/// `Compositor::keyboard_modifiers`; the masks are only meaningful with the
+/// keymap set by `Compositor::set_keymap`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Modifiers {
+  /// Modifiers whose keys are held down.
   pub depressed: u32,
+  /// Modifiers latched until the next key press, such as sticky keys.
   pub latched: u32,
+  /// Locked modifiers, such as Caps Lock and Num Lock.
   pub locked: u32,
+  /// The effective layout (xkb group) index.
   pub group: u32,
 }
 

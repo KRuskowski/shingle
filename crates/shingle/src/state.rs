@@ -40,10 +40,15 @@ use crate::{
   shell::{self, Role},
 };
 
+/// Identifies a `wl_surface` for the frontend. IDs count up from 1 in
+/// creation order and are not reused while the compositor runs (the
+/// counter would have to wrap first), so a frontend can key textures by
+/// them until `Event::SurfaceDestroyed`.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SurfaceId(pub u64);
 
 impl SurfaceId {
+  /// The raw ID.
   pub const fn get(self) -> u64 {
     self.0
   }

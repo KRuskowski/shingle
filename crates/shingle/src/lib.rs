@@ -1,3 +1,43 @@
+//! Shingle's Wayland compositor: protocol handling, input routing, output
+//! state and Wayfire-compatible IPC around the window model in
+//! [`shingle_core`].
+//!
+//! It draws nothing and owns no display or input hardware. A host (the
+//! nested winit frontend today, a native DRM/libinput backend later) owns
+//! a [`Compositor`] and drives it:
+//!
+//! 1. Build it with [`Compositor::new`], or [`Compositor::with_core`] to
+//!    restore a saved session, and export [`Compositor::socket_name`] as
+//!    `WAYLAND_DISPLAY` to clients. Optionally start IPC with
+//!    [`Compositor::enable_ipc`].
+//! 2. Register every seat device with [`Compositor::add_input_device`] and
+//!    pass the returned [`InputDeviceId`] with each keyboard, pointer,
+//!    gesture and touch event. Coordinates are in the output layout's
+//!    logical pixels; a host converts from its own pixels with
+//!    [`Compositor::map_output_point`]. [`Compositor::set_input_time`]
+//!    supplies the device's `CLOCK_MONOTONIC` timestamp.
+//! 3. Run the event loop: either call [`Compositor::poll`] with a timeout,
+//!    or poll the descriptor from [`AsFd`] in the host's own loop and call
+//!    [`Compositor::dispatch_pending`] whenever it is readable.
+//! 4. After dispatching, take [`Compositor::drain_events`] and draw
+//!    [`Compositor::visible_surfaces`] bottom to top. Report each frame
+//!    that reached the screen with [`Compositor::frame_presented`], or
+//!    [`Compositor::frame`] when the host knows nothing more precise, so
+//!    clients get their frame callbacks and presentation feedback.
+//! 5. Call [`Compositor::set_session_active`] when the seat session is
+//!    paused or resumed, and stop once
+//!    [`Compositor::shutdown_requested`] is true.
+//!
+//! Window state lives in [`shingle_core::Shingle`], which the compositor
+//! keeps in step with the XDG roles; [`Compositor::core`] exposes it for
+//! session saving. New toplevels can be held back from mapping by IPC
+//! clients watching Wayfire's `view-pre-map` event until each of them calls
+//! `window-rules/unblock-map` (docs/ipc.md, "Map blocking"); until then
+//! they produce no [`Event::WindowCreated`], are not drawn and take no
+//! tile. The behaviour follows Wayfire's `plugins/ipc-rules/ipc-events.hpp`.
+
+#![warn(missing_docs)]
+
 mod activation;
 mod alpha_modifier;
 mod buffer;
@@ -79,8 +119,13 @@ use wayland_server::{
 pub use state::SurfaceId;
 use state::{ClientDataImpl, CompositorState};
 
+/// The output name used until a backend calls
+/// [`Compositor::set_output_info`]. The core's output ID stays this name
+/// even after that, so sessions and workspaces keep their key.
 pub const OUTPUT_NAME: &str = "HEADLESS-1";
+/// Default logical output width in pixels, used by [`Config::default`].
 pub const OUTPUT_WIDTH: u32 = 1280;
+/// Default logical output height in pixels, used by [`Config::default`].
 pub const OUTPUT_HEIGHT: u32 = 720;
 
 /// Flags of a presented frame, as `wp_presentation_feedback` sends them.
@@ -160,47 +205,116 @@ impl OutputInfo {
   }
 }
 
+/// What a directional workspace switch does at the edge of the grid
+/// (`workspaces.wraparound` in the YAML config).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WorkspaceWraparound {
+  /// Stay on the current workspace, like Wayfire's vswitch with
+  /// `vswitch/wraparound = false`.
   #[default]
   Disabled,
+  /// Wrap within the same row or column, like Wayfire's vswitch with
+  /// `vswitch/wraparound = true`
+  /// (`plugins/vswitch/wayfire/plugins/vswitch.hpp`, `handle_dir`).
   Grid,
+  /// Shingle's `on_end`: treat the grid as one row-major list, so moving
+  /// right from the end of a row goes to the start of the next row, and
+  /// past the last workspace to the first. Vertical moves do not wrap.
   OnEnd,
 }
 
+/// Compositor settings, normally converted from
+/// [`shingle_config::ShingleConfig`] with `From`.
+///
+/// [`Compositor::apply_config`] re-applies most fields at runtime. The
+/// exceptions are only read at startup: `enable_text_input_v3`,
+/// `initial_locked_modifiers`, `disable_primary_selection` and
+/// `security_privileged_protocols`.
 #[derive(Clone, Debug)]
 pub struct Config {
+  /// Output position and logical size before the output transform, so a
+  /// quarter-turn transform swaps width and height. Physical pixels are
+  /// this size times `output_scale`.
   pub output: Rect,
+  /// Background clear colour as RGBA, each component in `0.0..=1.0`.
   pub background_color: [f64; 4],
+  /// Columns of the workspace grid; must be nonzero.
   pub workspace_width: u32,
+  /// Rows of the workspace grid; must be nonzero.
   pub workspace_height: u32,
+  /// Edge behaviour of directional workspace switches.
   pub workspace_wraparound: WorkspaceWraparound,
+  /// Output scale; must be finite and positive. `wl_output.scale` gets it
+  /// rounded up, fractional-scale clients the exact value.
   pub output_scale: f64,
+  /// Output transform, as `wl_output` reports it.
   pub output_transform: wayland_server::protocol::wl_output::Transform,
+  /// Multiplier for pointer axis values; negative or non-finite values are
+  /// ignored and keep the previous speed.
   pub mouse_scroll_speed: f64,
+  /// Inverts pointer axis direction.
   pub mouse_natural_scroll: bool,
+  /// XCursor theme name for compositor-drawn cursors.
   pub cursor_theme: String,
+  /// Nominal XCursor size for compositor-drawn cursors.
   pub cursor_size: u32,
+  /// Advertises text-input-v3, input-method v1/v2 and input panels. Read
+  /// only when the globals are created.
   pub enable_text_input_v3: bool,
+  /// xkb locked-modifier mask applied at startup: bit 1 (Lock) for Caps
+  /// Lock and bit 4 (Mod2) for Num Lock.
   pub initial_locked_modifiers: u32,
+  /// Idle, lock and DPMS timeouts for the [`IdleCoordinator`].
   pub idle: IdleConfig,
+  /// Inner and outer tiling gaps.
   pub gaps: Gaps,
+  /// Smallest width or height in logical pixels a tile or interactively
+  /// resized floating window may get.
   pub minimum_extent: u32,
+  /// Interactive resize limits (Wayfire's `resize` plugin options).
   pub resize: shingle_config::ResizeConfig,
+  /// Wayfire's `simple-tile/keep_fullscreen_on_adjacent`: directional
+  /// focus from a fullscreen view makes the newly focused view fullscreen.
   pub keep_fullscreen_on_adjacent: bool,
+  /// Wayfire's `simple-tile/tile_by_default`: which new views tile.
   pub tile_by_default: shingle_config::ViewMatcher,
+  /// Wayfire's `place/mode` for new floating views: `center`, `cascade`,
+  /// `random` or `maximize`.
   pub placement_mode: String,
+  /// Which pointer buttons focus the view under the pointer, and whether
+  /// that click is also passed to the client.
   pub focus: shingle_config::FocusConfig,
+  /// xdg-activation focus-stealing rules.
   pub activation: shingle_config::ActivationConfig,
+  /// Keyboard-shortcuts-inhibit options (`shortcuts-inhibit/*`).
   pub shortcuts: shingle_config::ShortcutConfig,
+  /// Wayfire's `workarounds/all_dialogs_modal`: focusing a parent focuses
+  /// its topmost child dialog instead (`src/core/seat/seat.cpp`,
+  /// `focus_view`).
   pub all_dialogs_modal: bool,
+  /// Wayfire's `workarounds/keep_last_toplevel_activated`: a layer surface
+  /// taking keyboard focus leaves the last toplevel activated.
   pub keep_last_toplevel_activated: bool,
+  /// Largest shared-memory buffer width or height accepted, in pixels
+  /// (`workarounds/max_buffer_size`); larger buffers are rejected when
+  /// the client creates them.
   pub max_buffer_size: u32,
+  /// `server` asks clients for server-side decorations; anything else
+  /// means client-side.
   pub preferred_decoration_mode: String,
+  /// Ignores clients' xdg-decoration mode requests and always sends the
+  /// preferred mode.
   pub force_preferred_decoration_mode: bool,
+  /// Wayfire's `workarounds/focus_main_surface_instead_of_popup`: keyboard
+  /// focus goes to a popup's main surface, for Qt clipboard bugs.
   pub focus_main_surface_instead_of_popup: bool,
+  /// Does not advertise primary selection. Read only at startup.
   pub disable_primary_selection: bool,
+  /// Global interface names hidden from clients that connect through a
+  /// security-context-v1 listener (Wayfire's
+  /// `security-context-v1/privileged_protocols`). Read only at startup.
   pub security_privileged_protocols: HashSet<String>,
+  /// Window rules evaluated on view events.
   pub window_rules: Vec<shingle_config::WindowRule>,
 }
 
@@ -297,191 +411,387 @@ impl From<shingle_config::ShingleConfig> for Config {
   }
 }
 
+/// When a binding registered with `command/register-binding` fires, from
+/// its optional `mode` field (Wayfire's `plugins/single_plugins/command.cpp`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeBindingMode {
+  /// On press only; key repeat does not fire it again.
   Normal,
+  /// On press and on every key repeat.
   Repeat,
+  /// On release.
   Release,
 }
 
+/// A key binding an IPC client registered with `command/register-binding`.
+///
+/// Exactly one of three actions runs when it fires: `command` is spawned
+/// by the frontend, `call_method` is dispatched as an IPC request with
+/// `call_data`, and with neither the registering client gets a
+/// `command-binding` event (see [`Compositor::trigger_runtime_binding`]).
+/// Bindings of the third kind are removed when their client disconnects.
 #[derive(Clone, Debug)]
 pub struct RuntimeBinding {
+  /// The `binding-id` returned to the client; counts up from 1 per IPC
+  /// server.
   pub id: u64,
+  /// The parsed key combination.
   pub binding: shingle_config::Binding,
+  /// Shell command to spawn, with `WAYLAND_DISPLAY` set to this
+  /// compositor.
   pub command: Option<String>,
+  /// IPC method to call, such as `wm-actions/toggle_fullscreen`.
   pub call_method: Option<String>,
+  /// The `data` object for `call_method`.
   pub call_data: Option<serde_json::Value>,
+  /// Press, repeat or release.
   pub mode: RuntimeBindingMode,
+  /// Wayfire's `exec-always`: also fires while the session is locked.
   pub exec_always: bool,
   pub(crate) client_id: Option<u64>,
 }
 
+/// The Wayland role of a surface, as [`SurfaceSnapshot`] reports it.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SurfaceRole {
+  /// No role yet, or a role Shingle does not draw by itself (such as a
+  /// drag icon).
   Unassigned,
+  /// An `xdg_toplevel`; its snapshot carries the [`WindowId`].
   Toplevel,
+  /// An `xdg_popup`, placed relative to its parent surface.
   Popup,
+  /// A `wl_subsurface`, placed relative to its parent surface.
   Subsurface,
+  /// A wlr-layer-shell surface or an input-method panel.
   LayerShell,
+  /// A client cursor, a cursor-shape image or the default arrow from
+  /// [`Compositor::set_default_cursor`].
   Cursor,
+  /// An `ext_session_lock_surface_v1`, covering the whole output.
   SessionLock,
 }
 
+/// A copy of a surface's committed shared-memory buffer.
+///
+/// Pixels are copied out of the client's pool at commit time, so the
+/// buffer is released to the client at once and the snapshot stays valid.
 #[derive(Clone, Debug)]
 pub struct BufferSnapshot {
+  /// Buffer width in buffer pixels.
   pub width: u32,
+  /// Buffer height in buffer pixels.
   pub height: u32,
+  /// wp_viewporter source rectangle `[x, y, width, height]` in buffer
+  /// pixels (already multiplied by the buffer scale), or `None` for the
+  /// whole buffer.
   pub source: Option<[f64; 4]>,
+  /// `wl_surface.set_buffer_scale`; the buffer size is a multiple of it.
   pub scale: i32,
+  /// `wl_surface.set_buffer_transform`.
   pub transform: wayland_server::protocol::wl_output::Transform,
+  /// Tightly packed 8-bit RGBA rows, top to bottom. ARGB/XRGB formats are
+  /// swizzled, X formats get opaque alpha, and colour stays premultiplied
+  /// as `wl_shm` defines it.
   pub rgba: Arc<[u8]>,
+  /// Rectangles in buffer pixels that changed in this commit, clipped to
+  /// the buffer. A new buffer committed without damage is fully damaged.
   pub damage: Vec<Rect>,
+  /// `wl_surface.offset` (or `attach` x) of this commit, in surface-local
+  /// coordinates; zero when the commit carried none.
   pub offset_x: i32,
+  /// `wl_surface.offset` (or `attach` y) of this commit.
   pub offset_y: i32,
 }
 
 impl BufferSnapshot {
+  /// Bytes per row of `rgba`.
   pub fn stride(&self) -> u32 {
     self.width * 4
   }
 }
 
+/// One square image from `xdg_toplevel_icon_v1.add_buffer`.
 #[derive(Clone, Debug)]
 pub struct ToplevelIconBuffer {
+  /// Width and height in buffer pixels; icon buffers must be square.
   pub width: u32,
+  /// The scale the image is meant for.
   pub scale: i32,
+  /// Tightly packed RGBA rows, converted as in [`BufferSnapshot::rgba`].
   pub rgba: Arc<[u8]>,
 }
 
+/// A toplevel's icon from xdg-toplevel-icon-v1.
 #[derive(Clone, Debug)]
 pub struct ToplevelIcon {
+  /// An icon-theme name, which a frontend prefers when it can resolve it.
   pub name: Option<String>,
+  /// Pixel icons at one or more sizes and scales.
   pub buffers: Vec<ToplevelIconBuffer>,
 }
 
+/// What a frontend needs to draw one surface.
 #[derive(Clone, Debug)]
 pub struct SurfaceSnapshot {
+  /// Stable for the surface's lifetime. Cursor-shape images use synthetic
+  /// IDs near `u64::MAX`.
   pub id: SurfaceId,
+  /// The window, for toplevels only.
   pub window: Option<WindowId>,
+  /// The parent toplevel of a toplevel, or the parent surface of a popup
+  /// or subsurface.
   pub parent: Option<SurfaceId>,
+  /// The surface's role.
   pub role: SurfaceRole,
+  /// The toplevel's app ID; `None` for other roles.
   pub app_id: Option<String>,
+  /// The toplevel's title; `None` for other roles.
   pub title: Option<String>,
+  /// The toplevel's xdg-toplevel-icon, if it set one.
   pub icon: Option<ToplevelIcon>,
+  /// Where the surface is drawn, in output-layout logical pixels. For a
+  /// toplevel this is its tile, floating, maximized (workarea) or
+  /// fullscreen (output) rectangle; for popups and subsurfaces it follows
+  /// the parent.
   pub geometry: Rect,
+  /// Combined alpha in `0.0..=1.0`: the window's opacity (`wf/alpha`) times
+  /// the surface's wp-alpha-modifier value. Popups and subsurfaces inherit
+  /// their toplevel's opacity.
   pub opacity: f32,
+  /// The committed buffer, or `None` when nothing is attached.
   pub buffer: Option<BufferSnapshot>,
 }
 
+/// Something the frontend may need to react to, collected while the
+/// compositor dispatches and returned by [`Compositor::drain_events`] in
+/// the order it happened.
+///
+/// The window events also feed the Wayfire IPC event stream; the IPC name
+/// is given where there is one. Changes made through [`Compositor`]
+/// methods are reported here too, not only client-initiated ones.
 #[derive(Clone, Debug)]
 pub enum Event {
+  /// A toplevel mapped (IPC `view-mapped`): it has a buffer and, when map
+  /// blocking applies, every `view-pre-map` watcher has unblocked it. Only
+  /// now does it enter its tiling tree; it is focused if it is on the
+  /// current workspace, and show-desktop ends.
   WindowCreated {
+    /// The new window.
     window: WindowId,
+    /// Its toplevel surface.
     surface: SurfaceId,
   },
+  /// A mapped toplevel's role or surface was destroyed (IPC
+  /// `view-unmapped`). Toplevels that never mapped, including views still
+  /// blocked, produce no event. Attaching a null buffer does not count:
+  /// the window keeps its tile and is only no longer drawn.
   WindowDestroyed {
+    /// The window that is gone.
     window: WindowId,
+    /// Its former toplevel surface.
     surface: SurfaceId,
   },
+  /// A window was moved to another workspace (IPC
+  /// `view-workspace-changed`). Workspaces are 1-based row-major indices.
   WindowMoved {
+    /// The moved window.
     window: WindowId,
+    /// The 1-based workspace it left.
     from: u32,
+    /// The 1-based workspace it is now on.
     workspace: u32,
   },
+  /// A toplevel was configured to a new rectangle (IPC
+  /// `view-geometry-changed`). Not emitted for the first configure.
   GeometryChanged {
+    /// The reconfigured window.
     window: WindowId,
+    /// The previously configured rectangle in logical pixels.
     old_geometry: Rect,
   },
+  /// `xdg_toplevel.set_app_id` (IPC `view-app-id-changed`).
   AppIdChanged {
+    /// The window.
     window: WindowId,
+    /// Its toplevel surface.
     surface: SurfaceId,
+    /// The new app ID.
     app_id: String,
   },
+  /// `xdg_toplevel.set_title` (IPC `view-title-changed`).
   TitleChanged {
+    /// The window.
     window: WindowId,
+    /// Its toplevel surface.
     surface: SurfaceId,
+    /// The new title.
     title: String,
   },
+  /// The window's xdg-toplevel-icon was set or cleared; the next
+  /// [`SurfaceSnapshot::icon`] has the result.
   IconChanged {
+    /// The window.
     window: WindowId,
   },
+  /// A window was tiled or floated, or its Wayfire tiled-edges mask
+  /// changed (IPC `view-tiled`). Edge masks use Wayfire's bits: 1 left,
+  /// 2 right, 4 top, 8 bottom; 15 is a full tile, 0 floating.
   TilingChanged {
+    /// The window.
     window: WindowId,
+    /// Its toplevel surface.
     surface: SurfaceId,
+    /// Whether it is now part of the tiled layout (tiled or snapped).
     tiled: bool,
+    /// The previous tiled-edges mask.
     old_edges: u32,
+    /// The new tiled-edges mask.
     new_edges: u32,
   },
+  /// The window's `wf/alpha` opacity changed.
   OpacityChanged {
+    /// The window.
     window: WindowId,
+    /// The new opacity in `0.0..=1.0`.
     opacity: f32,
   },
+  /// A floating window was snapped into a grid slot.
   SnappingChanged {
+    /// The window.
     window: WindowId,
+    /// Whether it is now snapped.
     snapped: bool,
   },
+  /// IPC `view-minimized`. Emitted on every request, even when the state
+  /// did not change.
   MinimizedChanged {
+    /// The window.
     window: WindowId,
+    /// The requested state.
     minimized: bool,
   },
+  /// IPC `view-fullscreen`. Emitted on every request, even when the state
+  /// did not change, and when snapping ends fullscreen.
   FullscreenChanged {
+    /// The window.
     window: WindowId,
+    /// The requested state.
     fullscreen: bool,
   },
+  /// Emitted on every maximize request, and when snapping ends it.
   MaximizedChanged {
+    /// The window.
     window: WindowId,
+    /// The requested state.
     maximized: bool,
   },
+  /// IPC `view-sticky`. Emitted on every request, even when the state did
+  /// not change.
   StickyChanged {
+    /// The window.
     window: WindowId,
+    /// The requested state.
     sticky: bool,
   },
+  /// The window's stacking layer changed (IPC `view-always-on-top` or
+  /// `view-always-on-bottom`, depending on the layer involved). Only
+  /// emitted for a real change.
   StackingChanged {
+    /// The window.
     window: WindowId,
+    /// The layer it left.
     previous: StackingMode,
+    /// The layer it is now in.
     current: StackingMode,
   },
+  /// The window was raised or lowered within its layer.
   StackingOrderChanged {
+    /// The window.
     window: WindowId,
   },
+  /// Keyboard focus moved (IPC `view-focused`). `None` when focus went to
+  /// a non-window surface such as a layer surface, or nowhere.
   FocusChanged {
+    /// The newly focused window.
     window: Option<WindowId>,
   },
+  /// Show-desktop was turned on (`true`) or off. Turning it on minimizes
+  /// the current workspace's windows; mapping or unminimizing a window,
+  /// or switching workspace, turns it off, as in Wayfire's
+  /// `plugins/wm-actions/wm-actions.cpp`.
   ShowDesktopChanged(bool),
+  /// A client asked for an interactive move (`xdg_toplevel.move`), or
+  /// [`Compositor::begin_move_window`] was called. The frontend runs the
+  /// drag.
   BeginMove {
+    /// The window to move.
     window: WindowId,
   },
+  /// A client asked for an interactive resize (`xdg_toplevel.resize`).
   BeginResize {
+    /// The window to resize.
     window: WindowId,
+    /// The raw `xdg_toplevel.resize_edge` value.
     edges: u32,
   },
+  /// A `wl_surface.commit` was applied, with the surface's new state.
+  /// Emitted for every surface, including ones not currently visible.
   SurfaceCommitted(Box<SurfaceSnapshot>),
+  /// A `wl_surface` was destroyed; drop anything cached for it.
   SurfaceDestroyed {
+    /// The destroyed surface.
     surface: SurfaceId,
   },
+  /// The output's rectangle, scale or transform changed (IPC
+  /// `output-layout-changed`).
   OutputChanged {
+    /// The output rectangle in logical pixels after the transform.
     output: Rect,
   },
+  /// IPC `scale/toggle` (`false`, current workspace) or `scale/toggle_all`
+  /// (`true`, all workspaces). The frontend runs Scale.
   ToggleScale(bool),
+  /// IPC `expo/toggle`.
   ToggleExpo,
+  /// IPC `invert/toggle`.
   InvertToggle,
+  /// A client warped the pointer with wp-pointer-warp-v1. The position is
+  /// in output-layout logical pixels; a host with its own cursor moves it
+  /// there.
   PointerWarp {
+    /// New pointer x.
     x: f64,
+    /// New pointer y.
     y: f64,
   },
+  /// The current workspace changed (IPC `wset-workspace-changed`). Also
+  /// emitted when switching to the workspace that is already current.
   WorkspaceChanged {
+    /// The 1-based row-major index of the new workspace.
     workspace: u32,
   },
+  /// The output should be powered on or off: an idle timeout, activity,
+  /// [`Compositor::set_dpms`] or wlr-output-power-management. A single
+  /// change is currently reported twice in a row.
   DpmsChanged(DpmsState),
+  /// The idle timeout passed without input.
   Idle,
+  /// Input arrived after [`Event::Idle`].
   Resume,
+  /// The lock timeout passed or a lock was requested; the frontend starts
+  /// the lock client, which then locks with ext-session-lock-v1.
   StartLockClient,
+  /// The session lock state changed. While not unlocked, only lock
+  /// surfaces are drawn and only they can receive input.
   LockStateChanged(LockState),
   /// A seat input device was enabled or disabled over IPC. Held input has
   /// already been released when a device is disabled. A native backend
   /// mirrors this in libinput's send-events mode.
   InputDeviceChanged {
+    /// The device.
     id: InputDeviceId,
+    /// Its new state.
     enabled: bool,
   },
   /// `stipc/feed_key` pressed or released evdev key `code` on seat
@@ -489,36 +799,60 @@ pub enum Event {
   /// after [`Compositor::set_stipc_key_events`]; the frontend feeds it
   /// through its own key handling, so bindings fire as for a real key.
   StipcKey {
+    /// The keyboard STIPC feeds.
     device: InputDeviceId,
+    /// The evdev key code.
     code: u32,
+    /// Press or release.
     pressed: bool,
   },
 }
 
+/// Why a [`Compositor`] call failed.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+  /// libwayland could not create the display.
   #[error("failed to create Wayland display: {0}")]
   Display(String),
+  /// No `wayland-N` socket could be bound in `XDG_RUNTIME_DIR` (N from 0
+  /// to 31), or the absolute path given was in use.
   #[error("failed to bind Wayland socket: {0}")]
   Socket(#[from] wayland_server::BindError),
+  /// The calloop event loop or one of its sources (signals, timerfd,
+  /// sockets) failed.
   #[error("failed to create event loop: {0}")]
   EventLoop(String),
+  /// An I/O error while accepting, dispatching or flushing clients.
   #[error("Wayland dispatch failed: {0}")]
   Dispatch(#[from] std::io::Error),
+  /// The window model rejected an operation, for example an unknown
+  /// window or an invalid output rectangle.
   #[error("core state error: {0}")]
   Core(#[from] shingle_core::ShingleError),
+  /// A 0-based workspace index outside the grid.
   #[error("workspace index {0} is outside the configured workspace grid")]
   InvalidWorkspace(usize),
+  /// A workspace grid with zero columns or rows.
   #[error("workspace grid dimensions must be nonzero")]
   InvalidWorkspaceGrid,
+  /// An output scale that is zero, negative, NaN or infinite.
   #[error("output scale must be finite and positive")]
   InvalidOutputScale,
+  /// The XKB keymap did not compile, contained a NUL byte or could not be
+  /// shared with clients.
   #[error("keymap error: {0}")]
   Keymap(String),
+  /// The IPC socket could not be bound, for example because the path
+  /// already exists.
   #[error("IPC error: {0}")]
   Ipc(String),
 }
 
+/// A Wayland compositor with one output, run by a host frontend; see the
+/// crate documentation for the lifecycle.
+///
+/// SIGINT and SIGTERM are blocked on the thread that creates it and read
+/// through a signalfd (see [`Compositor::shutdown_requested`]).
 pub struct Compositor {
   display: Display<CompositorState>,
   state: CompositorState,
@@ -530,10 +864,26 @@ pub struct Compositor {
 }
 
 impl Compositor {
+  /// Builds a compositor with an empty window model, listening on the first
+  /// free `wayland-N` socket (N from 0 to 31) in `XDG_RUNTIME_DIR`.
+  ///
+  /// It does not set `WAYLAND_DISPLAY` itself; the host exports
+  /// [`Compositor::socket_name`] to the clients it starts.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::Socket`] when no socket name is free, [`Error::Display`] or
+  /// [`Error::EventLoop`] when libwayland or calloop cannot be set up, and
+  /// [`Error::Keymap`] when the built-in US keymap cannot be prepared.
   pub fn new(config: Config) -> Result<Self, Error> {
     Self::with_core(config, Shingle::new())
   }
 
+  /// Like [`Compositor::new`], but starts from an existing window model,
+  /// typically a session restored by `shingle-session`. Its saved windows are
+  /// unmapped placeholders; a new toplevel with the same app ID claims one
+  /// ([`Shingle::reconcile_mapped`]) and keeps its tile, workspace and
+  /// flags.
   pub fn with_core(config: Config, core: Shingle) -> Result<Self, Error> {
     let socket = ListeningSocket::bind_auto("wayland", 0..32)?;
     let socket_name = socket
@@ -630,18 +980,30 @@ impl Compositor {
     })
   }
 
+  /// [`Compositor::new`] with [`Config::default`]: a 1280x720 output at scale
+  /// 1 and a 10x1 workspace grid.
   pub fn headless() -> Result<Self, Error> {
     Self::new(Config::default())
   }
 
+  /// The `WAYLAND_DISPLAY` value for clients: a name such as `wayland-1`
+  /// relative to `XDG_RUNTIME_DIR`, or the absolute path given to
+  /// [`Compositor::with_socket_path`].
   pub fn socket_name(&self) -> &OsStr {
     &self.socket_name
   }
 
+  /// Every binding IPC clients have registered with `command/register-binding`,
+  /// ordered by ID. The frontend matches its key events against these and
+  /// calls [`Compositor::trigger_runtime_binding`] or runs the command.
   pub fn runtime_bindings(&self) -> Vec<RuntimeBinding> {
     self.state.runtime_bindings.values().cloned().collect()
   }
 
+  /// Runs a registered binding's compositor-side action: dispatches its
+  /// `call-method` as an IPC request, or sends `command-binding` to the client
+  /// that registered it. Bindings with a `command` do nothing here, because the
+  /// frontend spawns the command itself. Unknown IDs are ignored.
   pub fn trigger_runtime_binding(&mut self, id: u64) {
     ipc::trigger_runtime_binding(&mut self.state, id);
   }
@@ -688,18 +1050,36 @@ impl Compositor {
     self.state.ipc_events.push(event);
   }
 
+  /// The persistent window model: outputs, workspaces, tiling trees and window
+  /// state. This is what a session saves.
   pub fn core(&self) -> &Shingle {
     &self.state.core
   }
 
+  /// The idle, lock and DPMS state machine. Its timeouts advance on the 50 ms
+  /// housekeeping tick.
   pub fn idle(&self) -> &IdleCoordinator {
     &self.state.idle
   }
 
+  /// The output rectangle in layout logical pixels, after the output transform
+  /// (a quarter turn swaps width and height).
   pub fn output(&self) -> Rect {
     self.state.output
   }
 
+  /// Runs one turn of the event loop, waiting up to `timeout` (`None` blocks)
+  /// for client requests, connections, signals or the housekeeping tick, then
+  /// dispatches clients, serves IPC, advances idle timers and flushes replies.
+  /// Returns the number of client requests dispatched.
+  ///
+  /// Events produced during the turn wait in [`Compositor::drain_events`].
+  ///
+  /// # Errors
+  ///
+  /// [`Error::EventLoop`] or [`Error::Dispatch`] when the loop or a client
+  /// socket fails. A single misbehaving client is disconnected with a protocol
+  /// error rather than failing the call.
   pub fn poll(&mut self, timeout: Option<Duration>) -> Result<usize, Error> {
     self.state.reap_ipc_children();
     self
@@ -740,6 +1120,8 @@ impl Compositor {
     Ok(dispatched)
   }
 
+  /// [`Compositor::poll`] without waiting; call it whenever the [`AsFd`]
+  /// descriptor is readable.
   pub fn dispatch_pending(&mut self) -> Result<usize, Error> {
     self.poll(Some(Duration::ZERO))
   }
@@ -800,6 +1182,9 @@ impl Compositor {
     commit_timing::has_pending(&self.state) || fifo::has_pending(&self.state)
   }
 
+  /// Polls until [`Compositor::shutdown_requested`], for hosts that draw
+  /// nothing, such as the `shingle --headless` binary. Nothing drains the
+  /// events, so they accumulate.
   pub fn run(&mut self) -> Result<(), Error> {
     while !self.state.shutdown {
       self.poll(None)?;
@@ -807,12 +1192,28 @@ impl Compositor {
     Ok(())
   }
 
+  /// Takes the events produced since the last call, oldest first. The window
+  /// events among them are also queued for IPC `events/watch` clients at this
+  /// point, so a frontend must drain regularly for IPC events to flow.
   pub fn drain_events(&mut self) -> Vec<Event> {
     let events = self.state.drain_events();
     ipc::record_events(&mut self.state, &events);
     events
   }
 
+  /// The surfaces to draw this frame, bottom to top, each followed by its
+  /// subsurfaces and popups.
+  ///
+  /// The order is: background and bottom layer-shell surfaces; the current
+  /// workspace's windows by stacking layer (always-on-bottom, normal,
+  /// always-on-top) and stacking order, with sticky windows from other
+  /// workspaces at the end of each layer; top and overlay layer surfaces; and
+  /// the cursor. A focused fullscreen window is drawn above the top layer,
+  /// under only the overlay layer. Minimized windows, toplevels without a
+  /// buffer and views still held by map blocking are left out.
+  ///
+  /// While the session is not unlocked only lock surfaces are returned, and
+  /// while DPMS is off nothing is.
   pub fn visible_surfaces(&self) -> Vec<SurfaceSnapshot> {
     self.state.visible_surfaces()
   }
@@ -843,24 +1244,35 @@ impl Compositor {
     self.state.scale_surfaces(all_workspaces, include_minimized)
   }
 
+  /// A snapshot of any live surface, visible or not; `None` once it is
+  /// destroyed.
   pub fn surface(&self, id: SurfaceId) -> Option<SurfaceSnapshot> {
     self.state.surface(id)
   }
 
+  /// Whether the session is locked or a lock is pending or failed: anything
+  /// but [`LockState::Unlocked`].
   pub fn is_locked(&self) -> bool {
     self.state.idle.lock_state() != LockState::Unlocked
   }
 
+  /// Starts locking, as an expired lock timeout would: emits
+  /// [`Event::StartLockClient`] unless a lock is already pending or held. The
+  /// lock is held once the lock client's surface is ready.
   pub fn request_lock(&mut self) {
     let commands = self.state.idle.request_lock(self.state.now());
     self.state.process_idle_commands(commands);
   }
 
+  /// Turns the idle timeouts off or back on, like Wayfire's `idle/toggle`
+  /// binding (`plugins/single_plugins/idle.cpp`).
   pub fn toggle_idle(&mut self) {
     let (_, commands) = self.state.idle.toggle(self.state.now());
     self.state.process_idle_commands(commands);
   }
 
+  /// Asks the focused window on the current workspace to close; see
+  /// [`Compositor::close_window`]. Returns the window asked.
   pub fn close_focused(&mut self) -> Option<WindowId> {
     let current = self
       .state
@@ -876,6 +1288,9 @@ impl Compositor {
     self.close_window(window).map(|_| window)
   }
 
+  /// Sends `xdg_toplevel.close`. The client decides whether and when to close,
+  /// so the window is still there afterwards. Returns `None` if the window has
+  /// no toplevel.
   pub fn close_window(&mut self, window: WindowId) -> Option<()> {
     let resource =
       self
@@ -913,6 +1328,18 @@ impl Compositor {
     self.state.shutdown
   }
 
+  /// Re-applies a reloaded configuration to the running compositor:
+  /// workspace grid, output geometry, scale and transform, gaps, idle timers,
+  /// focus, decoration and input settings and window rules, then reconfigures
+  /// every toplevel. Shrinking the grid moves windows from removed workspaces
+  /// to the nearest remaining one. Fields documented on [`Config`] as read at
+  /// startup keep their old values.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::InvalidWorkspaceGrid`] before anything changes;
+  /// [`Error::InvalidOutputScale`] or [`Error::Core`] for an invalid output
+  /// after the earlier settings have already been applied.
   pub fn apply_config(&mut self, config: Config) -> Result<(), Error> {
     if config.workspace_width == 0 || config.workspace_height == 0 {
       return Err(Error::InvalidWorkspaceGrid);
@@ -981,15 +1408,24 @@ impl Compositor {
     Ok(())
   }
 
+  /// Ends a held session lock, as when the lock client authenticated: turns
+  /// DPMS back on and reports [`Event::Resume`] if the session went idle.
+  /// Does nothing unless the lock is held.
   pub fn unlock(&mut self) {
     self.state.unlock_session();
   }
 
+  /// Turns the output on or off, as a wlr-output-power-management client
+  /// can. Emits [`Event::DpmsChanged`] for a change; while DPMS is off,
+  /// [`Compositor::visible_surfaces`] is empty.
   pub fn set_dpms(&mut self, state: DpmsState) {
     let commands = self.state.idle.set_dpms(state, self.state.now());
     self.state.process_idle_commands(commands);
   }
 
+  /// Records user activity for the idle timers: resets them, turns DPMS back
+  /// on and ends an idle period. Seat input does this by itself; a frontend
+  /// calls it for input the compositor never sees.
   pub fn activity(&mut self) {
     let commands = self.state.idle.activity(self.state.now());
     self.state.process_idle_commands(commands);
@@ -1023,6 +1459,9 @@ impl Compositor {
     );
   }
 
+  /// Whether a pointer-constraints-v1 lock or confinement is active. While
+  /// it is, the nested frontend stops moving the pointer itself and feeds
+  /// [`Compositor::pointer_relative_motion`] instead.
   pub fn pointer_constrained(&self) -> bool {
     pointer_protocols::constrained(&self.state)
   }
@@ -1034,6 +1473,8 @@ impl Compositor {
     pointer_gestures::swipe_begin(&mut self.state, device, fingers);
   }
 
+  /// Moves the active swipe by `(dx, dy)` logical pixels. Ignored unless
+  /// `device` began it.
   pub fn pointer_swipe_update(
     &mut self,
     device: InputDeviceId,
@@ -1043,14 +1484,20 @@ impl Compositor {
     pointer_gestures::swipe_update(&mut self.state, device, dx, dy);
   }
 
+  /// Ends the active swipe; `cancelled` tells clients to undo its effect.
   pub fn pointer_swipe_end(&mut self, device: InputDeviceId, cancelled: bool) {
     pointer_gestures::swipe_end(&mut self.state, device, cancelled);
   }
 
+  /// Begins a touchpad pinch with `fingers` fingers; the same one-gesture rule
+  /// as [`Compositor::pointer_swipe_begin`] applies.
   pub fn pointer_pinch_begin(&mut self, device: InputDeviceId, fingers: u32) {
     pointer_gestures::pinch_begin(&mut self.state, device, fingers);
   }
 
+  /// Updates the active pinch: `(dx, dy)` is the centre's motion in logical
+  /// pixels, `scale` the absolute scale since the start (1.0 unchanged) and
+  /// `rotation` the change in degrees, clockwise.
   pub fn pointer_pinch_update(
     &mut self,
     device: InputDeviceId,
@@ -1069,18 +1516,26 @@ impl Compositor {
     );
   }
 
+  /// Ends the active pinch; `cancelled` tells clients to undo its effect.
   pub fn pointer_pinch_end(&mut self, device: InputDeviceId, cancelled: bool) {
     pointer_gestures::pinch_end(&mut self.state, device, cancelled);
   }
 
+  /// Begins a touchpad hold gesture (fingers resting without moving); the same
+  /// one-gesture rule as [`Compositor::pointer_swipe_begin`] applies.
   pub fn pointer_hold_begin(&mut self, device: InputDeviceId, fingers: u32) {
     pointer_gestures::hold_begin(&mut self.state, device, fingers);
   }
 
+  /// Ends the active hold; `cancelled` means the fingers moved or lifted early.
   pub fn pointer_hold_end(&mut self, device: InputDeviceId, cancelled: bool) {
     pointer_gestures::hold_end(&mut self.state, device, cancelled);
   }
 
+  /// Presses or releases evdev button `button` (`BTN_LEFT` is 0x110). A press
+  /// focuses the window under the pointer when the focus configuration says so,
+  /// and the button goes to the surface under the pointer. A button that
+  /// another device still holds stays down for clients.
   pub fn pointer_button(
     &mut self,
     device: InputDeviceId,
@@ -1090,6 +1545,8 @@ impl Compositor {
     input_device::pointer_button(&mut self.state, device, button, pressed);
   }
 
+  /// Scrolls by continuous axis values, without discrete wheel steps; see
+  /// [`Compositor::pointer_axis_detailed`].
   pub fn pointer_axis(
     &mut self,
     device: InputDeviceId,
@@ -1106,6 +1563,11 @@ impl Compositor {
     );
   }
 
+  /// Scrolls the surface under the pointer. `horizontal` and `vertical` are
+  /// `wl_pointer.axis` values (positive is right and down) and the `_steps`
+  /// are wheel clicks, sent as `axis_discrete` and `axis_value120`. Values are
+  /// multiplied by the configured scroll speed and negated for natural
+  /// scrolling. The axis source is always reported as a wheel.
   pub fn pointer_axis_detailed(
     &mut self,
     device: InputDeviceId,
@@ -1124,10 +1586,13 @@ impl Compositor {
     );
   }
 
+  /// Starts touch point `id` at `(x, y)` in layout logical pixels, on the
+  /// surface under it, which keeps the point until it ends.
   pub fn touch_down(&mut self, device: InputDeviceId, id: i32, x: f64, y: f64) {
     input_device::touch_down(&mut self.state, device, id, x, y);
   }
 
+  /// Moves touch point `id` to `(x, y)` in layout logical pixels.
   pub fn touch_motion(
     &mut self,
     device: InputDeviceId,
@@ -1138,10 +1603,15 @@ impl Compositor {
     input_device::touch_motion(&mut self.state, device, id, x, y);
   }
 
+  /// Ends touch point `id`. The point stays down for clients while another
+  /// touch device holds the same ID.
   pub fn touch_up(&mut self, device: InputDeviceId, id: i32) {
     input_device::touch_up(&mut self.state, device, id);
   }
 
+  /// Cancels touch point `id` with `wl_touch.cancel`, for example when the
+  /// compositor takes over the gesture. The protocol cancels the client's whole
+  /// touch sequence, but only `id` is forgotten here.
   pub fn touch_cancel(&mut self, device: InputDeviceId, id: i32) {
     input_device::touch_cancel(&mut self.state, device, id);
   }
@@ -1196,6 +1666,8 @@ impl Compositor {
     input::set_event_time(&mut self.state, time);
   }
 
+  /// The xkb locked-modifier mask, such as Caps Lock (bit 1) and Num Lock
+  /// (bit 4) in standard keymaps.
   pub fn locked_modifiers(&self) -> u32 {
     self.state.input.modifiers.locked
   }
@@ -1207,14 +1679,29 @@ impl Compositor {
     self.state.input.modifiers.group
   }
 
+  /// Whether compositor shortcuts are inhibited for the focused surface: by a
+  /// keyboard-shortcuts-inhibit-v1 inhibitor, or implicitly for views matching
+  /// `shortcuts-inhibit/inhibit_by_default` and not `ignore_views`. The
+  /// frontend then passes keys to the client instead of matching bindings, as
+  /// Wayfire's `plugins/protocols/shortcuts-inhibit.cpp` does.
   pub fn shortcuts_inhibited(&self) -> bool {
     shortcuts::active(&self.state)
   }
 
+  /// Wayfire's `shortcuts-inhibit/break_grab`: lifts the inhibition for the
+  /// currently focused surface until focus moves elsewhere.
   pub fn break_shortcuts_inhibit(&mut self) {
     shortcuts::break_grab(&mut self.state);
   }
 
+  /// Compiles an XKB keymap in text form, which may use `include` statements,
+  /// and sends the compiled result to every keyboard and input-method grab.
+  /// The active layout index is reset to 0.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::Keymap`] when the keymap does not compile or contains a NUL
+  /// byte; the previous keymap stays in use.
   pub fn set_keymap(&mut self, keymap: &str) -> Result<(), Error> {
     input::set_keymap(&mut self.state, keymap).map_err(Error::Keymap)
   }
@@ -1229,34 +1716,57 @@ impl Compositor {
     self.state.stipc_key_events = enabled;
   }
 
+  /// Sets key repeat for clients via `wl_keyboard.repeat_info`: `rate` in keys
+  /// per second (0 disables repeat) and `delay` in milliseconds.
   pub fn set_repeat(&mut self, rate: u32, delay: u32) {
     input::set_repeat(&mut self.state, rate, delay);
   }
 
+  /// Focuses the surface at `(x, y)` in layout logical pixels, as a click
+  /// does, honouring input regions. A parent with a modal dialog focuses the
+  /// dialog instead. Returns the focused window, or `None` for a non-window
+  /// surface or when nothing can be focused.
   pub fn focus_at(&mut self, x: f64, y: f64) -> Option<WindowId> {
     input::focus_at(&mut self.state, x, y)
   }
 
+  /// The window whose surface, popup or subsurface is topmost at `(x, y)` in
+  /// layout logical pixels, honouring input regions. Layer surfaces and the
+  /// cursor yield `None`.
   pub fn window_at(&self, x: f64, y: f64) -> Option<WindowId> {
     input::window_at(&self.state, x, y)
   }
 
+  /// Starts an interactive move by emitting [`Event::BeginMove`], as if the
+  /// client had called `xdg_toplevel.move`.
   pub fn begin_move_window(&mut self, window: WindowId) {
     self.state.events.push(Event::BeginMove { window });
   }
 
+  /// Gives the window keyboard and pointer focus and raises it. With
+  /// `all_dialogs_modal` (or a modal dialog) the topmost dialog of the window
+  /// gets focus instead, as in Wayfire's `seat_t::focus_view`
+  /// (`src/core/seat/seat.cpp`). Returns the window that got focus, or `None`
+  /// while locked, in show-desktop, or when the window is minimized or
+  /// unknown.
   pub fn focus_window(&mut self, window: WindowId) -> Option<WindowId> {
     input::focus_window(&mut self.state, window)
   }
 
+  /// The window with keyboard focus, or the current workspace's focused tile
+  /// when keyboard focus is on no window. `None` during show-desktop.
   pub fn focused_window(&self) -> Option<WindowId> {
     input::focused_window(&self.state)
   }
 
+  /// The window's `wf/alpha` opacity in `0.0..=1.0`, or `None` for an unknown
+  /// window.
   pub fn window_opacity(&self, window: WindowId) -> Option<f32> {
     shell::window_alpha(&self.state, window)
   }
 
+  /// Sets the window's opacity, clamped to `0.0..=1.0`. Returns `false` for an
+  /// unknown window or a non-finite value.
   pub fn set_window_opacity(&mut self, window: WindowId, opacity: f32) -> bool {
     if !opacity.is_finite() || self.window_opacity(window).is_none() {
       return false;
@@ -1265,6 +1775,11 @@ impl Compositor {
     true
   }
 
+  /// Wayfire's alpha plugin scroll action
+  /// (`plugins/single_plugins/alpha.cpp`, `update_alpha`): lowers the opacity
+  /// of the window at `(x, y)` by `delta * 0.003`, keeping it within
+  /// `min_value..=1.0`. Returns the new opacity, or `None` when there is no
+  /// window there or an argument is not finite.
   pub fn adjust_opacity_at(
     &mut self,
     x: f64,
@@ -1284,12 +1799,15 @@ impl Compositor {
     Some(adjusted)
   }
 
+  /// Raises every window whose opacity is below `min_value` to it, for when
+  /// `alpha/min_value` is increased.
   pub fn clamp_opacity(&mut self, min_value: f32) {
     if min_value.is_finite() {
       shell::clamp_alpha(&mut self.state, min_value.clamp(0.0, 1.0));
     }
   }
 
+  /// Moves the window to the top of its stacking layer.
   pub fn raise_window(&mut self, window: WindowId) -> Result<(), Error> {
     self.state.core.raise_window(window)?;
     self
@@ -1299,6 +1817,7 @@ impl Compositor {
     Ok(())
   }
 
+  /// Moves the window to the bottom of its stacking layer.
   pub fn lower_window(&mut self, window: WindowId) -> Result<(), Error> {
     self.state.core.lower_window(window)?;
     self
@@ -1308,6 +1827,12 @@ impl Compositor {
     Ok(())
   }
 
+  /// Focuses the nearest tiled, unminimized window in `direction` from the
+  /// focused one, like Wayfire's simple-tile `focus_adjacent`
+  /// (`plugins/tile/tile-plugin.cpp`). Maximized state moves to the new
+  /// window; fullscreen ends, and with `keep_fullscreen_on_adjacent` the new
+  /// window becomes fullscreen. Returns the new window, or `None` if there is
+  /// none in that direction.
   pub fn focus_directional(
     &mut self,
     direction: Direction,
@@ -1315,6 +1840,9 @@ impl Compositor {
     input::focus_directional(&mut self.state, direction)
   }
 
+  /// The windows a window switcher cycles through: the current workspace's
+  /// windows plus sticky windows from other workspaces, most recently focused
+  /// first. Empty during show-desktop. Minimized windows are included.
   pub fn switchable_windows(&self) -> Vec<WindowId> {
     if self.state.show_desktop {
       return Vec::new();
@@ -1358,6 +1886,9 @@ impl Compositor {
     windows
   }
 
+  /// Focuses the next window in [`Compositor::switchable_windows`] (the
+  /// previous one with `reverse`), wrapping around. A minimized window is
+  /// restored, which also focuses it.
   pub fn cycle_focus(&mut self, reverse: bool) -> Option<WindowId> {
     let windows = self.switchable_windows();
     if windows.is_empty() {
@@ -1381,6 +1912,8 @@ impl Compositor {
     Some(window)
   }
 
+  /// Switches one workspace right (left with `reverse`), subject to
+  /// [`WorkspaceWraparound`]. Returns the new 0-based index.
   pub fn switch_workspace_relative(
     &mut self,
     reverse: bool,
@@ -1392,6 +1925,8 @@ impl Compositor {
     })
   }
 
+  /// Switches one workspace down (up with `reverse`), subject to
+  /// [`WorkspaceWraparound`]. Returns the new 0-based index.
   pub fn switch_workspace_vertical(
     &mut self,
     reverse: bool,
@@ -1403,6 +1938,9 @@ impl Compositor {
     })
   }
 
+  /// Moves the focused window one workspace right (left with `reverse`) and
+  /// follows it, like vswitch's `with_win_*` bindings. Returns the moved
+  /// window, or `None` when nothing is focused.
   pub fn move_focused_relative(
     &mut self,
     reverse: bool,
@@ -1414,6 +1952,8 @@ impl Compositor {
     })
   }
 
+  /// Moves the focused window one workspace down (up with `reverse`) and
+  /// follows it.
   pub fn move_focused_vertical(
     &mut self,
     reverse: bool,
@@ -1425,6 +1965,8 @@ impl Compositor {
     })
   }
 
+  /// Sends the focused window one workspace right (left with `reverse`)
+  /// without following it, like vswitch's `send_win_*` bindings.
   pub fn send_focused_relative(
     &mut self,
     reverse: bool,
@@ -1436,6 +1978,8 @@ impl Compositor {
     })
   }
 
+  /// Sends the focused window one workspace down (up with `reverse`) without
+  /// following it.
   pub fn send_focused_vertical(
     &mut self,
     reverse: bool,
@@ -1447,6 +1991,8 @@ impl Compositor {
     })
   }
 
+  /// Sends the focused window to the previously active workspace without
+  /// following it. `Ok(None)` when there is no previous workspace.
   pub fn send_focused_to_last_workspace(
     &mut self,
   ) -> Result<Option<WindowId>, Error> {
@@ -1490,6 +2036,8 @@ impl Compositor {
     self.state.relative_workspace_index(direction)
   }
 
+  /// Switches back to the previously active workspace, like vswitch's
+  /// `binding_last`. Returns its 0-based index, or `None` when there is none.
   pub fn switch_to_last_workspace(&mut self) -> Result<Option<usize>, Error> {
     let Some(workspace) = self.state.last_workspace else {
       return Ok(None);
@@ -1499,6 +2047,8 @@ impl Compositor {
     Ok(Some(index))
   }
 
+  /// Moves the focused window to the previously active workspace and follows
+  /// it.
   pub fn move_focused_to_last_workspace(
     &mut self,
   ) -> Result<Option<WindowId>, Error> {
@@ -1511,10 +2061,19 @@ impl Compositor {
     Ok(window)
   }
 
+  /// Makes workspace `index` (0-based, row-major) current. Keyboard focus
+  /// moves to that workspace's focused window, every toplevel is reconfigured
+  /// and [`Event::WorkspaceChanged`] is emitted. Leaving a workspace ends
+  /// show-desktop and remembers it as the last workspace.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::InvalidWorkspace`] when `index` is outside the grid.
   pub fn switch_workspace(&mut self, index: usize) -> Result<(), Error> {
     self.state.switch_workspace(index)
   }
 
+  /// The current workspace as a 0-based row-major index.
   pub fn current_workspace_index(&self) -> Result<usize, Error> {
     let workspace = self.state.core.current_workspace(&self.state.output_id)?;
     Ok(
@@ -1523,10 +2082,13 @@ impl Compositor {
     )
   }
 
+  /// The workspace grid as `(columns, rows)`.
   pub fn workspace_grid_dimensions(&self) -> (u32, u32) {
     (self.state.workspace_width, self.state.workspace_height)
   }
 
+  /// Sends the focused window to workspace `index` (0-based) without
+  /// following it. Returns the window, or `None` when nothing is focused.
   pub fn move_focused_to_workspace(
     &mut self,
     index: usize,
@@ -1534,6 +2096,13 @@ impl Compositor {
     self.state.move_focused_to_workspace(index)
   }
 
+  /// Moves `window` to workspace `index` (0-based), keeping its floating,
+  /// snapped and other persistent state, and emits [`Event::WindowMoved`].
+  ///
+  /// # Errors
+  ///
+  /// [`Error::InvalidWorkspace`] for an index outside the grid and
+  /// [`Error::Core`] for an unknown window.
   pub fn move_window_to_workspace(
     &mut self,
     window: WindowId,
@@ -1542,6 +2111,8 @@ impl Compositor {
     self.state.move_window_to_workspace(window, index)
   }
 
+  /// Finishes a tile drag: moves `source` next to `target` in the tiling tree,
+  /// on the `direction` side, then focuses `source`.
   pub fn drop_window(
     &mut self,
     source: WindowId,
@@ -1551,6 +2122,15 @@ impl Compositor {
     input::drop_window(&mut self.state, source, target, direction)
   }
 
+  /// Grows (positive `delta`) or shrinks the window's edge facing `direction`
+  /// by `delta` logical pixels. Floating windows change their own rectangle,
+  /// limited by `minimum_extent`, the client's min/max size and the resize
+  /// plugin's minimums; tiled windows move the split with their neighbour.
+  /// Returns whether anything changed.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::Core`] for an unknown window or a zero `minimum_extent`.
   pub fn resize_window(
     &mut self,
     window: WindowId,
@@ -1567,6 +2147,12 @@ impl Compositor {
     )
   }
 
+  /// Aspect-preserving interactive resize of a floating window: applies the
+  /// pointer's total motion `(delta_x, delta_y)` since the drag began to
+  /// `original`, the rectangle at its start, on the given edges, and keeps
+  /// `original`'s width-to-height ratio within the size limits. The opposite
+  /// edges stay put as long as no size limit is reached. Returns `false`
+  /// when the window is not floating or the rectangle did not change.
   pub fn resize_floating_from(
     &mut self,
     window: WindowId,
@@ -1587,6 +2173,8 @@ impl Compositor {
     )
   }
 
+  /// Moves a floating window by `(dx, dy)` logical pixels, saturating at the
+  /// `i32` range. Returns `false` for a tiled window or a zero move.
   pub fn move_floating(
     &mut self,
     window: WindowId,
@@ -1615,6 +2203,8 @@ impl Compositor {
     Ok(true)
   }
 
+  /// [`Compositor::move_floating`] for `window` and, with `join_views`, every
+  /// transient child toplevel below it (move's `join_views` option).
   pub fn move_floating_group(
     &mut self,
     window: WindowId,
@@ -1649,14 +2239,20 @@ impl Compositor {
     Ok(changed)
   }
 
+  /// Toggles maximized state and returns the new state. A maximized
+  /// floating window is drawn over the whole workarea.
   pub fn toggle_maximized(&mut self, window: WindowId) -> Result<bool, Error> {
     input::toggle_maximized(&mut self.state, window)
   }
 
+  /// Floats a tiled window (at its saved restore rectangle, or its tile) or
+  /// tiles a floating one, then focuses it. Returns whether it is now tiled.
   pub fn toggle_tiling(&mut self, window: WindowId) -> Result<bool, Error> {
     shell::toggle_tiling(&mut self.state, window)
   }
 
+  /// The current workspace's workarea: the output minus layer-shell exclusive
+  /// zones, in layout logical pixels.
   pub fn workarea(&self) -> Rect {
     self
       .state
@@ -1669,6 +2265,11 @@ impl Compositor {
       .map_or(self.state.output, |tree| tree.workarea())
   }
 
+  /// The grid slot a window dragged to `(x, y)` would snap to, as Wayfire's
+  /// `calc_slot` (`plugins/grid/wayfire/plugins/grid.hpp`) computes it from
+  /// move's `snap_threshold` and `quarter_snap_threshold`. Slot names are
+  /// those of [`Compositor::snap_window`]; the top edge yields `center`,
+  /// which maximizes, as in Wayfire.
   pub fn grid_slot_at(
     &self,
     x: f64,
@@ -1688,6 +2289,12 @@ impl Compositor {
     }
   }
 
+  /// The workspace direction `(dx, dy)` for a window dragged to an edge or
+  /// corner at `(x, y)`, each in `-1..=1`, for move's
+  /// `workspace_switch_after`. `None` away from the edges. Unlike Wayfire,
+  /// whose `calc_slot` turns the top edge into the centre slot and so
+  /// never switches up from it (`plugins/single_plugins/move.cpp`), the top
+  /// edge here means up.
   pub fn workspace_drag_direction_at(
     &self,
     x: f64,
@@ -1714,10 +2321,16 @@ impl Compositor {
     }
   }
 
+  /// The rectangle grid slot `slot` covers in the current workarea, or `None`
+  /// for an unknown slot name.
   pub fn snap_geometry(&self, slot: &str) -> Option<Rect> {
     shell::snap_geometry(self.workarea(), slot)
   }
 
+  /// Snaps a window into grid slot `slot`: `top_left`, `top`, `top_right`,
+  /// `left`, `center`, `right`, `bottom_left`, `bottom` or `bottom_right`. It
+  /// joins the tiled layout with the matching Wayfire tiled-edges mask, and
+  /// maximized or fullscreen state ends. Returns `false` for an unknown slot.
   pub fn snap_window(
     &mut self,
     window: WindowId,
@@ -1726,6 +2339,8 @@ impl Compositor {
     shell::snap_window(&mut self.state, window, slot)
   }
 
+  /// Floats a snapped window again, at its restore rectangle when it has
+  /// one. Returns `false` if it was not snapped.
   pub fn restore_snapped(&mut self, window: WindowId) -> Result<bool, Error> {
     if self.state.core.window_info(window)?.state.snapped.is_none() {
       return Ok(false);
@@ -1734,6 +2349,8 @@ impl Compositor {
     Ok(true)
   }
 
+  /// Minimizes or restores a window. Minimizing moves focus to the next
+  /// window; restoring focuses the window and ends show-desktop.
   pub fn set_minimized(
     &mut self,
     window: WindowId,
@@ -1742,12 +2359,15 @@ impl Compositor {
     shell::set_minimized(&mut self.state, window, minimized)
   }
 
+  /// Minimizes the focused window and returns it.
   pub fn minimize_focused(&mut self) -> Option<WindowId> {
     let window = self.focused_window()?;
     self.set_minimized(window, true).ok()?;
     Some(window)
   }
 
+  /// Sets fullscreen state. A fullscreen window covers the whole output, above
+  /// the top layer-shell layer, while it is focused.
   pub fn set_fullscreen(
     &mut self,
     window: WindowId,
@@ -1756,12 +2376,15 @@ impl Compositor {
     shell::set_fullscreen(&mut self.state, window, fullscreen)
   }
 
+  /// Toggles fullscreen state and returns the new state.
   pub fn toggle_fullscreen(&mut self, window: WindowId) -> Result<bool, Error> {
     let fullscreen = !self.state.core.window_info(window)?.state.fullscreen;
     self.set_fullscreen(window, fullscreen)?;
     Ok(fullscreen)
   }
 
+  /// Sets sticky state: a sticky window shows on every workspace of its
+  /// output.
   pub fn set_sticky(
     &mut self,
     window: WindowId,
@@ -1770,12 +2393,15 @@ impl Compositor {
     shell::set_sticky(&mut self.state, window, sticky)
   }
 
+  /// Toggles sticky state and returns the new state.
   pub fn toggle_sticky(&mut self, window: WindowId) -> Result<bool, Error> {
     let sticky = !self.state.core.window_info(window)?.state.sticky;
     self.set_sticky(window, sticky)?;
     Ok(sticky)
   }
 
+  /// Moves the window to stacking layer `mode` (always-on-bottom, normal or
+  /// always-on-top). Emits [`Event::StackingChanged`] only for a change.
   pub fn set_stacking(
     &mut self,
     window: WindowId,
@@ -1784,6 +2410,8 @@ impl Compositor {
     shell::set_stacking(&mut self.state, window, mode)
   }
 
+  /// Toggles between always-on-top and normal stacking; returns whether the
+  /// window is now always on top.
   pub fn toggle_always_on_top(
     &mut self,
     window: WindowId,
@@ -1801,6 +2429,8 @@ impl Compositor {
     Ok(enabled)
   }
 
+  /// Toggles between always-on-bottom and normal stacking; returns whether the
+  /// window is now always on bottom.
   pub fn toggle_always_on_bottom(
     &mut self,
     window: WindowId,
@@ -1818,6 +2448,8 @@ impl Compositor {
     Ok(enabled)
   }
 
+  /// Turns Wayfire's show-desktop on or off; see
+  /// [`Compositor::toggle_show_desktop`].
   pub fn set_show_desktop(&mut self, show: bool) {
     if show == self.state.show_desktop {
       return;
@@ -1829,6 +2461,10 @@ impl Compositor {
     }
   }
 
+  /// Wayfire's `wm-actions/toggle_showdesktop`
+  /// (`plugins/wm-actions/wm-actions.cpp`): minimizes every unminimized window
+  /// on the current workspace and clears focus, or restores exactly those
+  /// windows and the previous focus. Returns the new state.
   pub fn toggle_show_desktop(&mut self) -> bool {
     if self.state.show_desktop {
       shell::disable_show_desktop(&mut self.state);
@@ -1838,24 +2474,38 @@ impl Compositor {
     self.state.show_desktop
   }
 
+  /// The exact output scale, possibly fractional.
   pub fn output_scale(&self) -> f64 {
     self.state.output_scale
   }
 
+  /// The gamma table to apply to the output: 256 red, then 256 green, then
+  /// 256 blue 16-bit entries, from the active wlr-gamma-control client, or the
+  /// identity ramp without one.
   pub fn gamma_ramp(&self) -> &[u16] {
     gamma_control::ramp(&self.state)
   }
 
+  /// Sets the output scale. Clients get `wl_output.scale` rounded up, the
+  /// exact value through fractional-scale-v1, and a new mode size.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::InvalidOutputScale`] for a zero, negative or non-finite scale.
   pub fn set_output_scale(&mut self, scale: f64) -> Result<(), Error> {
     self.state.set_output_scale(scale)
   }
 
+  /// The output transform, as `wl_output.geometry` reports it.
   pub fn output_transform(
     &self,
   ) -> wayland_server::protocol::wl_output::Transform {
     self.state.output_transform
   }
 
+  /// Changes the output transform. Switching between upright and quarter-turn
+  /// transforms swaps the output's logical width and height; layer surfaces,
+  /// lock surfaces and toplevels are reconfigured.
   pub fn set_output_transform(
     &mut self,
     transform: wayland_server::protocol::wl_output::Transform,
@@ -1863,6 +2513,10 @@ impl Compositor {
     self.state.set_output_transform(transform);
   }
 
+  /// Converts a display size in physical pixels to the output's logical size:
+  /// divided by the scale, rounded, at least 1, and swapped for quarter-turn
+  /// transforms. A host passes its window or mode size and feeds the result
+  /// to [`Compositor::set_output`].
   pub fn logical_output_size(
     &self,
     physical_width: u32,
@@ -1876,6 +2530,10 @@ impl Compositor {
     )
   }
 
+  /// Maps a point in display pixels, on a `display_width` x `display_height`
+  /// surface as the host draws it, to layout logical pixels, undoing the
+  /// output transform and adding the output's position. The inverse of
+  /// [`Compositor::unmap_output_point`].
   pub fn map_output_point(
     &self,
     x: f64,
@@ -1898,6 +2556,9 @@ impl Compositor {
     )
   }
 
+  /// Maps a point in layout logical pixels to display pixels; the inverse of
+  /// [`Compositor::map_output_point`]. Used to place the host cursor after a
+  /// warp.
   pub fn unmap_output_point(
     &self,
     x: f64,
@@ -1916,6 +2577,8 @@ impl Compositor {
     )
   }
 
+  /// Maps a relative motion in display pixels to logical pixels, like
+  /// [`Compositor::map_output_point`] but without the translation.
   pub fn map_output_vector(
     &self,
     x: f64,
@@ -1934,6 +2597,14 @@ impl Compositor {
     )
   }
 
+  /// Sets the output's position and logical size, after the transform.
+  /// Clients get the new geometry and mode, the workarea is recomputed,
+  /// layer, lock and toplevel surfaces are reconfigured and
+  /// [`Event::OutputChanged`] is emitted.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::Core`] for a zero-sized rectangle or one past the `i32` range.
   pub fn set_output(&mut self, output: Rect) -> Result<(), Error> {
     self.state.set_output(output)
   }

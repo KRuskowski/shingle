@@ -37,8 +37,11 @@ use crate::{
 /// The kind of a seat input device.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InputDeviceKind {
+  /// Takes `keyboard_key` and `keyboard_modifiers`.
   Keyboard,
+  /// Takes pointer motion, buttons, axes and touchpad gestures.
   Pointer,
+  /// Takes `touch_*` events.
   Touch,
 }
 
