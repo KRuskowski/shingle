@@ -11,9 +11,15 @@
 //! The crate has no windowing dependency: a host gives it a
 //! `wgpu::Surface` through [`WindowTarget`], or renders into an
 //! [`OffscreenTarget`] for tests and screencopy.
+//!
+//! With [`GpuOptions::dmabuf`] the device is opened for DMA-BUF import
+//! ([`dmabuf`]): [`GpuContext::import_dmabuf`] turns a client's or a
+//! scanout buffer into a texture, and [`draw`] moves imported images in
+//! and out of the foreign queue family around each frame.
 
 #![warn(missing_docs)]
 
+pub mod dmabuf;
 mod draw;
 mod gpu;
 mod renderer;
@@ -24,7 +30,11 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-pub use draw::draw;
+pub use dmabuf::{
+  DmabufCaps, DmabufDescriptor, DmabufUnavailable, DmabufUse, ForeignAccess,
+  ImportError, ImportedTexture,
+};
+pub use draw::{draw, draw_with_access};
 pub use gpu::{AdapterFilter, GpuContext, GpuOptions, TextureFilter};
 pub use renderer::{OffscreenRenderer, Renderer};
 pub use state::RenderState;
@@ -149,12 +159,18 @@ pub fn split_preview(
   }
 }
 
-/// A client or UI texture uploaded with [`GpuContext::create_texture`].
+/// A client or UI texture uploaded with [`GpuContext::create_texture`], or
+/// a DMA-BUF imported with [`GpuContext::import_dmabuf`].
 pub struct GpuTexture {
   texture: wgpu::Texture,
   bind_group: wgpu::BindGroup,
   width: u32,
   height: u32,
+  // Shader flags for every tile that samples it (dmabuf::tile_flags).
+  flags: u32,
+  // The Vulkan image of an imported texture, owned by the foreign queue
+  // family between frames.
+  foreign: Option<dmabuf::ForeignImage>,
 }
 
 impl GpuTexture {

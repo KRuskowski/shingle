@@ -6,8 +6,8 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::{
-  GpuContext, RenderRect, RenderState, RenderTile, TextureTransform,
-  state::Zoom,
+  ForeignAccess, GpuContext, RenderRect, RenderState, RenderTile,
+  TextureTransform, state::Zoom,
 };
 
 #[repr(C)]
@@ -16,6 +16,8 @@ pub(crate) struct Vertex {
   pub(crate) position: [f32; 2],
   uv: [f32; 2],
   color: [f32; 4],
+  // The sampled texture's dmabuf::tile_flags.
+  pub(crate) flags: u32,
 }
 
 impl Vertex {
@@ -27,6 +29,7 @@ impl Vertex {
           0 => Float32x2,
           1 => Float32x2,
           2 => Float32x4,
+          3 => Uint32,
       ],
     };
 }
@@ -34,8 +37,11 @@ impl Vertex {
 /// Clears `view` to `clear` and composites `tiles` over it, in order.
 ///
 /// `size` is the target's size in physical pixels, and the pipeline is
-/// chosen by the format of the view's texture. Returns the submission, so
-/// callers that hand the texture to another device can wait for it.
+/// chosen by the format of the view's texture. Imported DMA-BUF textures
+/// among the tiles are acquired from their foreign queue family before the
+/// frame and released after it ([`ForeignAccess`]). Returns the
+/// submission, so callers that hand the texture to another device can wait
+/// for it.
 pub fn draw(
   gpu: &GpuContext,
   state: &RenderState,
@@ -43,6 +49,21 @@ pub fn draw(
   size: (u32, u32),
   tiles: &[RenderTile<'_>],
   clear: [f64; 4],
+) -> wgpu::SubmissionIndex {
+  draw_with_access(gpu, state, view, size, tiles, clear, ForeignAccess::new())
+}
+
+/// [`draw`] with more imported images in `foreign`, such as an imported
+/// DMA-BUF the view renders into (NB-8's scanout buffers), which `draw`
+/// cannot see. The tiles' imported textures are added to it.
+pub fn draw_with_access(
+  gpu: &GpuContext,
+  state: &RenderState,
+  view: &wgpu::TextureView,
+  size: (u32, u32),
+  tiles: &[RenderTile<'_>],
+  clear: [f64; 4],
+  mut foreign: ForeignAccess,
 ) -> wgpu::SubmissionIndex {
   let device = gpu.device();
   let clear =
@@ -103,7 +124,10 @@ pub fn draw(
       }
     }
   }
-  gpu.queue().submit([encoder.finish()])
+  for texture in tiles.iter().filter_map(|tile| tile.texture) {
+    foreign.add_texture(texture);
+  }
+  foreign.submit(gpu, encoder.finish())
 }
 
 /// Applies the inversion effect to the clear colour, which the shader never
@@ -272,6 +296,7 @@ fn transformed_vertex(
     position: [x, y],
     uv: [u, v],
     color: tile.color,
+    flags: tile.texture.map_or(0, |texture| texture.flags),
   }
 }
 

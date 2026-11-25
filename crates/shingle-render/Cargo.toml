@@ -6,12 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Raw Vulkan for the DMA-BUF capability query and the queue-family
+# ownership barriers; the same version wgpu-hal is built with.
+ash = { version = "0.38", default-features = false, features = ["std"] }
 bytemuck.workspace = true
 thiserror.workspace = true
 wgpu.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true
+rustix.workspace = true
 
 [lints]
 workspace = true
