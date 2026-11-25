@@ -548,7 +548,8 @@ impl Frontend {
         | Event::Resume
         | Event::FocusChanged { .. }
         | Event::GeometryChanged { .. }
-        | Event::LockStateChanged(_) => {}
+        | Event::LockStateChanged(_)
+        | Event::CaptureRequested { .. } => {}
       }
     }
     if save {

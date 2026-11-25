@@ -55,6 +55,10 @@ use wayland_protocols_wlr::{
     zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
     zwlr_output_mode_v1::{self, ZwlrOutputModeV1},
   },
+  screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+  },
 };
 
 use crate::Compositor;
@@ -109,6 +113,8 @@ pub(crate) struct Events {
   pub(crate) control_sends: Vec<(String, OwnedFd)>,
   /// wlr-data-control sources that were cancelled.
   pub(crate) control_cancelled: Vec<ObjectId>,
+  /// Every wlr-screencopy frame event, in order.
+  pub(crate) screencopy: Vec<zwlr_screencopy_frame_v1::Event>,
   synced: bool,
 }
 
@@ -785,6 +791,19 @@ impl Dispatch<ZwlrDataControlSourceV1, ()> for Events {
   }
 }
 
+impl Dispatch<ZwlrScreencopyFrameV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ZwlrScreencopyFrameV1,
+    event: zwlr_screencopy_frame_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.screencopy.push(event);
+  }
+}
+
 /// Implements `Dispatch` for objects whose events the tests ignore.
 macro_rules! ignore_events {
   ($($interface:ty),* $(,)?) => {
@@ -826,4 +845,5 @@ ignore_events!(
   xwayland_shell_v1::XwaylandShellV1,
   xwayland_surface_v1::XwaylandSurfaceV1,
   ZwlrDataControlManagerV1,
+  ZwlrScreencopyManagerV1,
 );

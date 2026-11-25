@@ -126,6 +126,7 @@ use wayland_server::{
   backend::{ClientData, ClientId, DisconnectReason},
 };
 
+pub use screencopy::CaptureId;
 pub use state::SurfaceId;
 use state::{ClientDataImpl, CompositorState};
 pub use xwayland::XwaylandSettings;
@@ -138,6 +139,12 @@ pub const OUTPUT_NAME: &str = "HEADLESS-1";
 pub const OUTPUT_WIDTH: u32 = 1280;
 /// Default logical output height in pixels, used by [`Config::default`].
 pub const OUTPUT_HEIGHT: u32 = 720;
+
+/// The current `CLOCK_MONOTONIC` time, the clock of [`PresentInfo::time`]
+/// and of input event times, for backends that report frames themselves.
+pub fn monotonic_time() -> Duration {
+  clock::monotonic_now()
+}
 
 /// Flags of a presented frame, as `wp_presentation_feedback` sends them.
 pub use wayland_protocols::wp::presentation_time::server::{
@@ -801,6 +808,16 @@ pub enum Event {
     /// Press or release.
     pressed: bool,
   },
+  /// A wlr-screencopy client asked for `region` of the output, in layout
+  /// logical pixels, and frame capture is on
+  /// ([`Compositor::set_frame_capture`]). The frontend draws the frame as
+  /// it shows it and answers with [`Compositor::finish_capture`].
+  CaptureRequested {
+    /// The capture to answer.
+    id: CaptureId,
+    /// The captured rectangle; the client's buffer has its size.
+    region: Rect,
+  },
 }
 
 /// Why a [`Compositor`] call failed.
@@ -1094,6 +1111,13 @@ impl Compositor {
   /// (a quarter turn swaps width and height).
   pub fn output(&self) -> Rect {
     self.state.output
+  }
+
+  /// The output's size in physical pixels: the current mode's, or the
+  /// logical rectangle scaled and transformed back. A backend without a
+  /// display of its own, such as offscreen, draws frames of this size.
+  pub fn output_physical_size(&self) -> (u32, u32) {
+    output::physical_size(&self.state)
   }
 
   /// Runs one turn of the event loop, waiting up to `timeout` (`None` blocks)
@@ -1792,6 +1816,29 @@ impl Compositor {
   /// session is inactive or no keyboard is registered.
   pub fn set_stipc_key_events(&mut self, enabled: bool) {
     self.state.stipc_key_events = enabled;
+  }
+
+  /// Makes wlr-screencopy `copy` and `copy_with_damage` emit
+  /// [`Event::CaptureRequested`] instead of compositing the surfaces'
+  /// CPU pixels, for a frontend that renders: what it draws, with
+  /// inversion, Scale, Expo and animations, is what clients capture, as
+  /// in Wayfire, whose wlroots copies the rendered output. Without it,
+  /// as in the headless backend, the compositor composites on the CPU.
+  pub fn set_frame_capture(&mut self, enabled: bool) {
+    self.state.screencopy.frame_capture = enabled;
+  }
+
+  /// Answers [`Event::CaptureRequested`] `id` with `result`: the region
+  /// as tightly packed RGBA8 rows, top to bottom, which are written into
+  /// the client's buffer before `ready` is sent, or why it could not be
+  /// drawn, which sends `failed`. Pixels of the wrong size also fail. An
+  /// unknown `id`, or one whose frame was destroyed, is ignored.
+  pub fn finish_capture(
+    &mut self,
+    id: CaptureId,
+    result: Result<Vec<u8>, String>,
+  ) {
+    screencopy::finish(&mut self.state, id, result);
   }
 
   /// Sets key repeat for clients via `wl_keyboard.repeat_info`: `rate` in keys
@@ -3069,6 +3116,19 @@ pub(crate) mod tests {
       Compositor::with_socket(config, Shingle::new(), socket, name.into())
         .expect("the config builds a compositor");
     (compositor, path)
+  }
+
+  #[test]
+  fn the_physical_output_size_follows_the_scale() {
+    let (compositor, _path) = test_compositor();
+    assert_eq!(compositor.output_physical_size(), (1280, 720));
+    let (compositor, _path) = test_compositor_with(Config {
+      output: Rect::new(0, 0, 640, 360),
+      output_scale: 2.0,
+      ..Config::default()
+    });
+    assert_eq!(compositor.output_physical_size(), (1280, 720));
+    assert!(monotonic_time() > Duration::ZERO);
   }
 
   #[test]

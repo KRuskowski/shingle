@@ -1,3 +1,12 @@
+//! wlr-screencopy-unstable-v1: output captures for `grim` and friends.
+//!
+//! Without a renderer the compositor composites the visible surfaces'
+//! CPU pixels itself. A frontend that renders turns on frame capture
+//! ([`crate::Compositor::set_frame_capture`]): `copy` then emits
+//! [`crate::Event::CaptureRequested`], the frontend draws the frame as it
+//! shows it, and [`crate::Compositor::finish_capture`] writes it into the
+//! client's buffer (docs/design/dmabuf.md, section 6).
+
 use std::collections::HashMap;
 
 use shingle_core::Rect;
@@ -11,16 +20,32 @@ use wayland_server::{
   protocol::{wl_output, wl_shm},
 };
 
-use crate::state::CompositorState;
+use crate::{buffer::Attachment, state::CompositorState};
+
+/// Identifies a frame capture between [`crate::Event::CaptureRequested`]
+/// and [`crate::Compositor::finish_capture`].
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CaptureId(pub u64);
 
 struct Frame {
   region: Rect,
   used: bool,
 }
 
+/// A copy waiting for the frontend's frame.
+struct PendingCapture {
+  frame: ZwlrScreencopyFrameV1,
+  buffer: wayland_server::protocol::wl_buffer::WlBuffer,
+  attachment: Attachment,
+}
+
 #[derive(Default)]
 pub(crate) struct Screencopy {
   frames: HashMap<ObjectId, Frame>,
+  /// Whether copies go to the frontend instead of the CPU composite.
+  pub(crate) frame_capture: bool,
+  captures: HashMap<CaptureId, PendingCapture>,
+  next_capture: u64,
 }
 
 pub(crate) fn create_global(handle: &DisplayHandle) {
@@ -86,8 +111,57 @@ fn copy_frame(
     return;
   }
   let region = frame.region;
+  if state.screencopy.frame_capture {
+    let id = CaptureId(state.screencopy.next_capture);
+    state.screencopy.next_capture += 1;
+    state.screencopy.captures.insert(
+      id,
+      PendingCapture {
+        frame: resource.clone(),
+        buffer: buffer.clone(),
+        attachment,
+      },
+    );
+    state
+      .events
+      .push(crate::Event::CaptureRequested { id, region });
+    return;
+  }
   let rgba = composite(state, region);
-  match attachment.write_rgba(&rgba) {
+  answer(state, resource, &attachment, Ok(rgba));
+}
+
+/// Answers the capture `id` with the frontend's `result`: tightly packed
+/// RGBA rows of the region, or why there are none. Captures whose frame
+/// or buffer is gone, or that were answered already, are ignored or
+/// failed.
+pub(crate) fn finish(
+  state: &mut CompositorState,
+  id: CaptureId,
+  result: Result<Vec<u8>, String>,
+) {
+  let Some(capture) = state.screencopy.captures.remove(&id) else {
+    return;
+  };
+  if !capture.frame.is_alive() {
+    return;
+  }
+  if !capture.buffer.is_alive() {
+    capture.frame.failed();
+    return;
+  }
+  answer(state, &capture.frame, &capture.attachment, result);
+}
+
+/// Writes `rgba` into `attachment` and sends `ready`, or `failed` when
+/// there are no pixels or they do not fit.
+fn answer(
+  state: &CompositorState,
+  resource: &ZwlrScreencopyFrameV1,
+  attachment: &Attachment,
+  rgba: Result<Vec<u8>, String>,
+) {
+  match rgba.and_then(|rgba| attachment.write_rgba(&rgba)) {
     Ok(()) => {
       let now = state.now();
       let seconds = now.as_secs();
@@ -98,7 +172,10 @@ fn copy_frame(
         now.subsec_nanos(),
       );
     }
-    Err(_) => resource.failed(),
+    Err(error) => {
+      eprintln!("shingle: screencopy failed: {error}");
+      resource.failed();
+    }
   }
 }
 
@@ -319,6 +396,205 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for CompositorState {
     resource: &ZwlrScreencopyFrameV1,
     _data: &(),
   ) {
-    state.screencopy.frames.remove(&resource.id());
+    let id = resource.id();
+    state.screencopy.frames.remove(&id);
+    state
+      .screencopy
+      .captures
+      .retain(|_, capture| capture.frame.id() != id);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::os::fd::{AsFd, OwnedFd};
+
+  use wayland_client::protocol::{wl_buffer, wl_shm};
+  use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::{Event, ZwlrScreencopyFrameV1},
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+  };
+
+  use crate::{
+    CaptureId, Compositor, Event as CompositorEvent, test_client::TestClient,
+    tests::test_compositor,
+  };
+
+  /// A client with a screencopy manager.
+  struct Capturer {
+    client: TestClient,
+    manager: ZwlrScreencopyManagerV1,
+  }
+
+  impl Capturer {
+    fn new(compositor: &mut Compositor, socket: &std::path::Path) -> Self {
+      let client = TestClient::connect(compositor, socket);
+      let manager = client.bind::<ZwlrScreencopyManagerV1>(3);
+      Self { client, manager }
+    }
+
+    /// Captures a region of the output and copies it into a new shm
+    /// buffer of the advertised size. Returns the frame, its buffer and
+    /// the memfd behind it.
+    fn copy(
+      &mut self,
+      compositor: &mut Compositor,
+      region: (i32, i32, i32, i32),
+    ) -> (ZwlrScreencopyFrameV1, wl_buffer::WlBuffer, OwnedFd) {
+      let (x, y, width, height) = region;
+      let output = self
+        .client
+        .bind::<wayland_client::protocol::wl_output::WlOutput>(1);
+      let frame = self.manager.capture_output_region(
+        0,
+        &output,
+        x,
+        y,
+        width,
+        height,
+        &self.client.handle,
+        (),
+      );
+      self.client.roundtrip(compositor);
+      let size = width * height * 4;
+      let fd = rustix::fs::memfd_create(
+        "shingle-screencopy-test",
+        rustix::fs::MemfdFlags::CLOEXEC,
+      )
+      .expect("memfd_create succeeds");
+      rustix::fs::ftruncate(&fd, size as u64).expect("ftruncate succeeds");
+      let shm = self.client.bind::<wl_shm::WlShm>(1);
+      let pool = shm.create_pool(fd.as_fd(), size, &self.client.handle, ());
+      let buffer = pool.create_buffer(
+        0,
+        width,
+        height,
+        width * 4,
+        wl_shm::Format::Argb8888,
+        &self.client.handle,
+        (),
+      );
+      frame.copy(&buffer);
+      self.client.roundtrip(compositor);
+      (frame, buffer, fd)
+    }
+
+    /// Whether the frame events so far end with `ready`, `failed` or
+    /// neither.
+    fn outcome(&self) -> Option<&'static str> {
+      self
+        .client
+        .events
+        .screencopy
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+          Event::Ready { .. } => Some("ready"),
+          Event::Failed => Some("failed"),
+          _ => None,
+        })
+    }
+  }
+
+  /// The capture requests among the compositor's events.
+  fn requests(
+    compositor: &mut Compositor,
+  ) -> Vec<(CaptureId, shingle_core::Rect)> {
+    compositor
+      .drain_events()
+      .into_iter()
+      .filter_map(|event| match event {
+        CompositorEvent::CaptureRequested { id, region } => Some((id, region)),
+        _ => None,
+      })
+      .collect()
+  }
+
+  fn read(fd: &OwnedFd, length: usize) -> Vec<u8> {
+    let mut bytes = vec![0; length];
+    let read = rustix::io::pread(fd, &mut bytes, 0).expect("pread");
+    bytes.truncate(read);
+    bytes
+  }
+
+  #[test]
+  fn without_frame_capture_the_cpu_composite_answers_at_once() {
+    let (mut compositor, socket) = test_compositor();
+    let mut capturer = Capturer::new(&mut compositor, &socket);
+    let (_frame, _buffer, fd) = capturer.copy(&mut compositor, (0, 0, 2, 1));
+    assert_eq!(capturer.outcome(), Some("ready"));
+    assert!(requests(&mut compositor).is_empty());
+    // The default background, 0.1 linear, is 89 in sRGB, as BGRA.
+    assert_eq!(read(&fd, 8), [89, 89, 89, 255, 89, 89, 89, 255]);
+  }
+
+  #[test]
+  fn frame_capture_waits_for_the_frontend_and_writes_its_pixels() {
+    let (mut compositor, socket) = test_compositor();
+    compositor.set_frame_capture(true);
+    let mut capturer = Capturer::new(&mut compositor, &socket);
+    let (_frame, _buffer, fd) = capturer.copy(&mut compositor, (10, 20, 2, 1));
+    assert_eq!(capturer.outcome(), None, "nothing before the frame");
+    let requests = requests(&mut compositor);
+    assert_eq!(requests.len(), 1);
+    let (id, region) = requests[0];
+    assert_eq!(region, shingle_core::Rect::new(10, 20, 2, 1));
+    compositor.finish_capture(id, Ok(vec![255, 0, 0, 255, 0, 0, 255, 128]));
+    capturer.client.roundtrip(&mut compositor);
+    assert_eq!(capturer.outcome(), Some("ready"));
+    // RGBA in, ARGB8888 (BGRA bytes) out.
+    assert_eq!(read(&fd, 8), [0, 0, 255, 255, 255, 0, 0, 128]);
+    // A second answer to the same capture changes nothing.
+    compositor.finish_capture(id, Err("again".into()));
+    capturer.client.roundtrip(&mut compositor);
+    assert_eq!(
+      capturer
+        .client
+        .events
+        .screencopy
+        .iter()
+        .filter(|event| matches!(event, Event::Ready { .. } | Event::Failed))
+        .count(),
+      1
+    );
+  }
+
+  #[test]
+  fn a_failed_or_misfit_frame_fails_the_capture() {
+    let (mut compositor, socket) = test_compositor();
+    compositor.set_frame_capture(true);
+    let mut capturer = Capturer::new(&mut compositor, &socket);
+    let _first = capturer.copy(&mut compositor, (0, 0, 2, 2));
+    let (id, _) = requests(&mut compositor)[0];
+    compositor.finish_capture(id, Err("the GPU timed out".into()));
+    capturer.client.roundtrip(&mut compositor);
+    assert_eq!(capturer.outcome(), Some("failed"));
+    capturer.client.events.screencopy.clear();
+    let _second = capturer.copy(&mut compositor, (0, 0, 2, 2));
+    let (id, _) = requests(&mut compositor)[0];
+    compositor.finish_capture(id, Ok(vec![0; 4]));
+    capturer.client.roundtrip(&mut compositor);
+    assert_eq!(capturer.outcome(), Some("failed"), "4 bytes for 2x2");
+  }
+
+  #[test]
+  fn a_destroyed_frame_or_buffer_is_not_answered_with_pixels() {
+    let (mut compositor, socket) = test_compositor();
+    compositor.set_frame_capture(true);
+    let mut capturer = Capturer::new(&mut compositor, &socket);
+    let (frame, _buffer, _fd) = capturer.copy(&mut compositor, (0, 0, 1, 1));
+    let (gone, _) = requests(&mut compositor)[0];
+    frame.destroy();
+    capturer.client.roundtrip(&mut compositor);
+    compositor.finish_capture(gone, Ok(vec![0; 4]));
+    capturer.client.roundtrip(&mut compositor);
+    assert_eq!(capturer.outcome(), None);
+    let (_frame, buffer, _fd) = capturer.copy(&mut compositor, (0, 0, 1, 1));
+    let (id, _) = requests(&mut compositor)[0];
+    buffer.destroy();
+    capturer.client.roundtrip(&mut compositor);
+    compositor.finish_capture(id, Ok(vec![0; 4]));
+    capturer.client.roundtrip(&mut compositor);
+    assert_eq!(capturer.outcome(), Some("failed"));
   }
 }
