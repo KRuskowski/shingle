@@ -533,6 +533,18 @@ impl Compositor {
     Self::with_socket(config, core, socket, socket_name)
   }
 
+  /// Builds a compositor whose Wayland socket is bound at the absolute
+  /// `path` instead of in `XDG_RUNTIME_DIR`. `socket_name` is then that
+  /// path, which libwayland also accepts as `WAYLAND_DISPLAY`. Tests use it
+  /// to keep their sockets out of the session's runtime directory.
+  pub fn with_socket_path(
+    config: Config,
+    path: &std::path::Path,
+  ) -> Result<Self, Error> {
+    let socket = ListeningSocket::bind_absolute(path.to_path_buf())?;
+    Self::with_socket(config, Shingle::new(), socket, path.into())
+  }
+
   /// Builds a compositor around an already bound Wayland socket, whose
   /// `WAYLAND_DISPLAY` name is `socket_name`.
   fn with_socket(
@@ -2461,6 +2473,26 @@ pub(crate) mod tests {
     let current = cursors(&compositor);
     assert_eq!(current.len(), 1);
     assert_ne!(current, default);
+  }
+
+  #[test]
+  fn with_socket_path_binds_the_given_path() {
+    let path = std::env::temp_dir()
+      .join(format!("shingle-socket-path-{}", std::process::id()));
+    let mut compositor = Compositor::with_socket_path(Config::default(), &path)
+      .expect("the temporary directory accepts a socket");
+    assert_eq!(compositor.socket_name(), path.as_os_str());
+    let client = test_client::TestClient::connect(&mut compositor, &path);
+    assert!(
+      client
+        .events
+        .globals
+        .iter()
+        .any(|(_, interface, _)| interface == "wl_seat")
+    );
+    drop(client);
+    drop(compositor);
+    assert!(!path.exists());
   }
 
   #[test]

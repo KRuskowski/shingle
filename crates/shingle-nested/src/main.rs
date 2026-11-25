@@ -4778,7 +4778,127 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
+  use std::{
+    io::{Read, Write},
+    os::unix::net::UnixStream,
+    path::PathBuf,
+    sync::atomic::{AtomicU32, Ordering},
+  };
+
   use super::*;
+
+  /// The `input/list-devices` reply of `shingle-nested` before the device
+  /// registry, recorded byte for byte from a real run of `master` at
+  /// 7189b50.
+  const NESTED_LIST_DEVICES: &str = concat!(
+    r#"[{"enabled":true,"id":1,"name":"Shingle nested keyboard","#,
+    r#""product":"unknown","type":"keyboard","vendor":"unknown"},"#,
+    r#"{"enabled":true,"id":2,"name":"Shingle nested pointer","#,
+    r#""product":"unknown","type":"pointer","vendor":"unknown"},"#,
+    r#"{"enabled":true,"id":3,"name":"Shingle nested touch","#,
+    r#""product":"unknown","type":"touch","vendor":"unknown"}]"#,
+  );
+
+  /// A compositor with its Wayland and IPC sockets in the temporary
+  /// directory, set up the way `App::new` sets up the nested one.
+  struct IpcFixture {
+    compositor: Compositor,
+    ipc: PathBuf,
+  }
+
+  impl IpcFixture {
+    fn new() -> Self {
+      static NEXT: AtomicU32 = AtomicU32::new(0);
+      let name = format!(
+        "shingle-nested-test-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+      );
+      let base = std::env::temp_dir().join(name);
+      let mut compositor =
+        Compositor::with_socket_path(Config::default(), &base)
+          .expect("the temporary directory accepts a Wayland socket");
+      let ipc = base.with_extension("ipc");
+      compositor
+        .enable_ipc(&ipc)
+        .expect("the temporary directory accepts an IPC socket");
+      Self { compositor, ipc }
+    }
+
+    /// Sends one IPC request and returns the raw reply.
+    fn request(&mut self, request: &str) -> String {
+      let mut stream =
+        UnixStream::connect(&self.ipc).expect("the IPC socket accepts");
+      let length = u32::try_from(request.len()).expect("a short request");
+      stream
+        .write_all(&length.to_ne_bytes())
+        .and_then(|()| stream.write_all(request.as_bytes()))
+        .expect("the request is sent");
+      stream
+        .set_nonblocking(true)
+        .expect("the stream is nonblocking");
+      let mut reply = Vec::new();
+      let deadline = Instant::now() + Duration::from_secs(2);
+      while Instant::now() < deadline {
+        self
+          .compositor
+          .poll(Some(Duration::from_millis(10)))
+          .expect("dispatch succeeds");
+        let mut buffer = [0; 4096];
+        match stream.read(&mut buffer) {
+          Ok(read) => reply.extend_from_slice(&buffer[..read]),
+          Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+          Err(error) => panic!("reading the reply failed: {error}"),
+        }
+        if reply.len() >= 4 {
+          let length = u32::from_ne_bytes(reply[..4].try_into().unwrap());
+          if reply.len() >= 4 + length as usize {
+            return String::from_utf8(reply[4..].to_vec())
+              .expect("the reply is UTF-8");
+          }
+        }
+      }
+      panic!("no IPC reply to {request}");
+    }
+  }
+
+  #[test]
+  fn nested_list_devices_reply_is_unchanged() {
+    let mut fixture = IpcFixture::new();
+    let reply = fixture.request(r#"{"method":"input/list-devices","data":{}}"#);
+    assert_eq!(reply, NESTED_LIST_DEVICES);
+  }
+
+  #[test]
+  fn nested_configure_device_replies_are_unchanged() {
+    let mut fixture = IpcFixture::new();
+    let cases = [
+      (r#"{"id":2,"enabled":false}"#, r#"{"result":"ok"}"#),
+      (
+        r#"{"id":4,"enabled":false}"#,
+        r#"{"error":"Unknown input device!"}"#,
+      ),
+      (
+        r#"{"id":0,"enabled":true}"#,
+        r#"{"error":"Unknown input device!"}"#,
+      ),
+      (r#"{"enabled":true}"#, r#"{"error":"Missing \"id\""}"#),
+    ];
+    for (data, expected) in cases {
+      let request =
+        format!(r#"{{"method":"input/configure-device","data":{data}}}"#);
+      assert_eq!(fixture.request(&request), expected, "{data}");
+    }
+    let reply = fixture.request(r#"{"method":"input/list-devices","data":{}}"#);
+    assert_eq!(
+      reply,
+      NESTED_LIST_DEVICES.replacen(
+        r#""enabled":true,"id":2"#,
+        r#""enabled":false,"id":2"#,
+        1
+      )
+    );
+  }
 
   #[test]
   fn host_input_events_map_to_their_seat_device() {
