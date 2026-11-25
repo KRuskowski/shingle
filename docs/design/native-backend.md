@@ -2,7 +2,7 @@
 
 Status: accepted with the operator's [decisions](#decisions), 2026-11-25. Roadmap item "Native backend" ([roadmap.md](../roadmap.md#3-native-backend)).
 
-Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit). This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-2 is implemented (see [its entry](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor) for where the code differs from this design); the rest is not.
+Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit). This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1 is implemented (see [`shingle-render` without winit](#shingle-render-without-winit)) and so is NB-2 (see [its entry](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor)), each with notes on where the code differs from this design; the rest is not.
 
 Line numbers refer to branch `shingle-native-design` at `d2568d2`. Crate versions and dates were read from crates.io and GitHub on 2026-11-25; crate APIs were read from the crate sources (wgpu, drm, calloop and xkbcommon from `~/.cargo/registry`, the others from their published `.crate` files).
 
@@ -164,7 +164,7 @@ Shingle drives KMS itself with atomic modesetting through `drm` 0.15, and wgpu o
    - modifiers whose plane count is 1 (`gbm::Device::format_modifier_plane_count`).
 
    The plane-count restriction matches the importer, which "currently only supports single-plane DMA-bufs" (device.rs:514). It also excludes compression modifiers (AMD DCC, Intel CCS), which would need a queue-family ownership transfer to `VK_QUEUE_FAMILY_FOREIGN_EXT` that wgpu does not record. The device must be opened with `Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF` (wgpu-types-30.0.2/src/features.rs:1246). That feature also covers the DMA-BUF roadmap item, client DMA-BUF import, which uses the same importer.
-2. **Copy (`DumbScanout`).** Render into a wgpu `Bgra8UnormSrgb` texture (the current `OffscreenRenderer` target, crates/shingle-render/src/lib.rs:1100). Then `copy_texture_to_buffer`, map the buffer, and copy rows into a mapped `create_dumb_buffer` (XRGB8888, linear) framebuffer, using two dumb buffers. This works on any KMS driver with any Vulkan adapter, including lavapipe. It is the fallback when zero-copy is unavailable and is tested by forcing it on the test machine. It costs one GPU readback and one CPU copy of the frame (about 8 MB at 1080p), which is acceptable as a fallback and is logged as such.
+2. **Copy (`DumbScanout`).** Render into a wgpu `Bgra8UnormSrgb` texture. `OffscreenTarget` (crates/shingle-render/src/target.rs) is `Rgba8UnormSrgb`, so this path either adds a BGRA offscreen target or swaps channels while copying rows; `draw` already accepts any target format. Then `copy_texture_to_buffer`, map the buffer, and copy rows into a mapped `create_dumb_buffer` (XRGB8888, linear) framebuffer, using two dumb buffers. This works on any KMS driver with any Vulkan adapter, including lavapipe. It is the fallback when zero-copy is unavailable and is tested by forcing it on the test machine. It costs one GPU readback and one CPU copy of the frame (about 8 MB at 1080p), which is acceptable as a fallback and is logged as such.
 
 The native crate first tries zero-copy. It falls back to copy if the feature is missing, the intersection is empty, the GBM allocation fails or the first `TEST_ONLY` commit fails. `SHINGLE_SCANOUT=copy` forces the fallback.
 
@@ -203,6 +203,17 @@ This replaces the fixed 16 ms `WaitUntil` (main.rs:4540) and the hard-coded `16_
   - `ImportedTarget` wraps a `wgpu::Texture` made from a dma-buf.
 
 Sizes become `(u32, u32)`. `Renderer` and `OffscreenRenderer` stay as thin wrappers until their callers move. The wgpu `drm` feature is removed from the workspace, because Shingle deliberately does not use VK_KHR_display; `drm` 0.15 stays a direct dependency of the native crate.
+
+**As implemented in NB-1.** The code follows the split above, with these differences, each forced by how wgpu works or by keeping behaviour unchanged:
+
+- `GpuContext::new(instance, GpuOptions)` takes the `wgpu::Instance` (from `GpuContext::create_instance()`). A compatible surface has to be created on the same instance before the adapter is chosen, so the context cannot create its own instance. Without an `adapter_filter` the adapter comes from `request_adapter` exactly as before; with one, the first enumerated adapter that passes the filter and supports the surface is used, else `RenderError::NoMatchingAdapter`.
+- The pipeline depends on the target format, which for a window is only known once the surface is configured against the device. `GpuContext` therefore keeps one pipeline per format, built the first time `draw` sees that format (from `view.texture().format()`), so `draw` keeps the planned signature and one context serves window, offscreen and future imported targets.
+- The nearest filter lives in `RenderState`, but a texture's sampler is fixed in its bind group when it is created. `GpuContext` holds a linear and a nearest sampler, `create_texture` takes a `TextureFilter`, and `RenderState::texture_filter()` supplies it. `set_nearest_filter` still returns whether it changed, so callers recreate textures as before.
+- Gamma LUT and inversion live in `GpuContext` as planned, so they apply to every target drawn with it.
+- `WindowTarget::new(&gpu, surface, size)` takes an already created surface (`WindowTarget::create_surface(instance, window)`), and `OffscreenTarget::read_rgba` submits its copy separately from `draw`'s pass. A surface with no formats is now `RenderError::NoSurfaceFormat` instead of a panic.
+- `ImportedTarget` is left to NB-8, the first step with a dma-buf to wrap. `draw` takes any `TextureView`, so it needs no renderer change.
+
+The offscreen pixel tests (crates/shingle-render/tests/offscreen_pixels.rs) compare against reference images rendered by the renderer before the split, and nested screencopy captures before and after were identical ([status.md](../status.md#with-real-clients)).
 
 ### Rejected alternatives
 

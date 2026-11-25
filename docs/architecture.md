@@ -6,7 +6,7 @@
 | --- | --- |
 | `shingle-core` | Tiling trees, workspaces, geometry and the serializable session model. No Wayland dependency. |
 | `shingle` | Wayland protocol handling, input routing, output state, IPC and the headless compositor event loop. Also the `shingle` binary. |
-| `shingle-render` | wgpu textures, transforms, effects and render tiles. |
+| `shingle-render` | wgpu rendering without a windowing dependency: shared `GpuContext`, per-output `RenderState`, the `draw` pass, and window and offscreen targets. |
 | `shingle-nested` | winit host window and the interactive frontend: overviews, transitions, gestures. |
 | `shingle-config` | Validated YAML model, Wayfire INI and i3 imports, XKB keymap generation. |
 | `shingle-session` | Atomic session persistence and relaunching saved applications. |
@@ -31,6 +31,9 @@
 | XDG roles, map lifecycle, geometry, window rules | `crates/shingle/src/shell.rs` |
 | IPC transport, dispatch, method list, events | `crates/shingle/src/ipc.rs` |
 | Host input, visual state, frontend dispatch | `crates/shingle-nested/src/main.rs` |
+| GPU device, pipelines, textures, gamma and effects | `crates/shingle-render/src/gpu.rs` |
+| Composite pass and tile geometry | `crates/shingle-render/src/draw.rs` |
+| Window and offscreen render targets | `crates/shingle-render/src/target.rs` |
 | Native config model and XKB generation | `crates/shingle-config/src/lib.rs` |
 | Wayfire INI import | `crates/shingle-config/src/wayfire.rs` |
 | i3 import | `crates/shingle-config/src/i3.rs` |

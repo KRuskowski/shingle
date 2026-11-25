@@ -18,7 +18,7 @@ Do not claim that Shingle is more stable or uses fewer resources than Wayfire. N
 
 ### Compositor and renderer
 
-- wgpu rendering with a winit nested frontend.
+- wgpu rendering with a winit nested frontend. `shingle-render` itself has no winit dependency: a shared `GpuContext`, a per-output `RenderState`, one `draw` pass, and `WindowTarget` and `OffscreenTarget`, with `Renderer` and `OffscreenRenderer` as thin wrappers (native backend NB-1). The wgpu `drm` feature is no longer enabled.
 - XDG toplevels and popups, layer shell, dialogs, decorations, subsurfaces, viewports, fractional scaling and shared-memory buffers.
 - Tiling, floating windows, exact floating geometry, snapping, focus, stacking, minimize, fullscreen, sticky and show-desktop.
 - Workspace navigation: directional, last, numbered, carry and send actions, with configurable wraparound.
@@ -69,7 +69,9 @@ Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are pla
 
 ### Automated
 
-`cargo test --workspace` runs 199 unit tests (2026-11-25), 88 of them in `shingle-core` and 51 in `shingle`. Coverage of the other crates is uneven.
+`cargo test --workspace` runs TESTCOUNT tests (2026-11-25), 88 of them in `shingle-core` and 51 in `shingle`. Coverage of the other crates is uneven.
+
+`shingle-render` has 15 unit tests and 8 offscreen pixel tests (`crates/shingle-render/tests/offscreen_pixels.rs`). The pixel tests render fixed scenes (solid, translucent, textured, UV-cropped, transformed and rotated tiles; scale, output transform and zoom; gamma ramp and both inversion modes; nearest filtering) and compare the readback with reference images in `crates/shingle-render/tests/golden`, which were rendered by the renderer before the NB-1 split. They need a wgpu adapter and are skipped without one; set `SHINGLE_RENDER_BLESS=1` to regenerate the references.
 
 `cargo clippy --workspace --all-targets -- -D warnings` passes (2026-11-25).
 
@@ -103,6 +105,8 @@ Bug found and fixed: a toplevel was created as soon as it sent `xdg_toplevel.set
 Observed, not fixed (see [roadmap.md](roadmap.md#7-remaining-wayfire-compatibility)): a view blocked in `view-pre-map` already holds its tile, so its neighbours shrink around an empty, unrendered slot until it is released; and clients receive the keymap as `include` statements rather than a compiled keymap. `shingle-nested` still kept running 3 s after SIGTERM.
 
 Not covered: the PAM service fallback (needs `/etc/pam.d/tilefire`), and a clean quit and restart, because no IPC method quits and the quit binding needs the host keyboard; every restart above followed SIGKILL, so it tested the incremental saves. Host input and the clean quit are listed under [Needs operator: host input](#needs-operator-host-input).
+
+Renderer split (NB-1), 2026-11-25: the same isolated setup (private `XDG_RUNTIME_DIR`, config, state, `HOME`, IPC and Wayland sockets, `WAYFIRE_SOCKET` overridden) ran `shingle-nested` from `ca03d41` and from the NB-1 branch, one after the other, each with one raw-protocol `wl_shm` client drawing a fixed pattern at its configured size. `grim` took two wlr-screencopy captures of each instance through its private socket. With `data/shingle.yaml` (853×1440 output) and with a copy using output scale 1.5 and transform 90 (1440×853 captures, background visible), the captures before and after were byte-identical (0 differing bytes of 3,684,960 and 4,913,280). Instances were stopped with SIGKILL. The host tiling changed the nested window width once between runs (854 instead of 853), so only captures of the same size were compared.
 
 Input devices, 2026-11-25 (before the run above): a Python IPC fixture and a minimal raw-protocol Wayland client (one `xdg_toplevel` with `wl_pointer`, `wl_keyboard` and `wl_touch`) ran against `shingle-nested` in a window on the host session, with a private `XDG_RUNTIME_DIR`, Wayland socket, IPC socket and XDG config/state directories. All 38 checks passed:
 

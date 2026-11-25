@@ -16,7 +16,7 @@ Add DRM/KMS and libinput with careful failure handling. The design is [design/na
 
 In short, the interactive frontend moves out of `shingle-nested` into a shared `shingle-frontend` crate, and `shingle-render` loses winit. A single `shingle` binary picks its backend like Wayfire: nested inside a Wayland session, native from a TTY. The native backend uses libseat for the session and VT switching and libinput for input, and drives atomic KMS itself through the `drm` crate, rendering zero-copy into GBM buffers imported into wgpu, with a dumb-buffer copy fallback. Native code is built and unit-tested on this host but only ever run on a dedicated test machine, which is being set up; no VMs. The work is split into ten workspaces, each with acceptance criteria in the design:
 
-1. NB-1 `shingle-render-targets`: shared GPU context and render targets, no winit in `shingle-render`.
+1. NB-1 `shingle-render-targets`: shared GPU context and render targets, no winit in `shingle-render`. Done ([status.md](status.md#compositor-and-renderer)).
 2. NB-2 `shingle-compositor-host-api`: done; see [status.md](status.md#backend-host-api).
 3. NB-3 `shingle-frontend-extract`: new crate with the pure modules and an xkb-based shared keyboard.
 4. NB-4 `shingle-frontend-host`: `App` becomes `Frontend` behind a `Host` trait; nested becomes a thin winit host.
@@ -27,7 +27,7 @@ In short, the interactive frontend moves out of `shingle-nested` into a shared `
 9. NB-9 `shingle-native-outputs`: hotplug and Wayfire-compatible mode configuration.
 10. NB-10 `shingle-native-planes`: cursor plane, VRR, tearing and fences.
 
-NB-1 and NB-5 can start now; NB-2 is done. NB-6 onwards waits for the test machine. The operator's decisions are recorded in the design's [Decisions](design/native-backend.md#decisions) section.
+NB-1 and NB-2 are done; NB-5 is in progress. NB-6 onwards waits for the test machine. The operator's decisions are recorded in the design's [Decisions](design/native-backend.md#decisions) section.
 
 ## 4. DMA-BUF
 
