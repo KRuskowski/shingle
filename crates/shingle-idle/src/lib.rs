@@ -362,15 +362,25 @@ impl IdleCoordinator {
   }
 
   /// Records whether any mapped surface holds a zwp-idle-inhibit-v1
-  /// inhibitor. A change counts as activity but, unlike fullscreen
-  /// suppression, issues no commands: an inhibitor created while DPMS is off
-  /// or idle has been notified leaves that state as it is until the next
-  /// input.
-  pub fn set_idle_inhibited(&mut self, inhibited: bool, now: Timestamp) {
+  /// inhibitor. A change counts as activity. Like fullscreen suppression,
+  /// an inhibitor appearing ends any idle period and turns DPMS back on;
+  /// Wayfire uses one inhibitor mechanism for both (src/core/idle.cpp,
+  /// `idle_inhibitor_t`).
+  pub fn set_idle_inhibited(
+    &mut self,
+    inhibited: bool,
+    now: Timestamp,
+  ) -> Vec<Command> {
     self.advance_to(now);
-    if self.idle_inhibited != inhibited {
-      self.idle_inhibited = inhibited;
-      self.last_activity = self.now;
+    if self.idle_inhibited == inhibited {
+      return Vec::new();
+    }
+    self.idle_inhibited = inhibited;
+    self.last_activity = self.now;
+    if inhibited {
+      self.resume_after_suppression()
+    } else {
+      Vec::new()
     }
   }
 
@@ -538,5 +548,48 @@ impl IdleCoordinator {
     if let Some(candidate) = candidate {
       *next = Some(next.map_or(candidate, |current| current.min(candidate)));
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn seconds(seconds: u64) -> Timestamp {
+    Duration::from_secs(seconds)
+  }
+
+  /// A coordinator that went idle after 10 s and turned DPMS off after 20 s.
+  fn idle_and_off() -> IdleCoordinator {
+    let mut idle = IdleCoordinator::new(
+      Config {
+        idle_timeout: Some(seconds(10)),
+        dpms_timeout: Some(seconds(20)),
+        ..Config::default()
+      },
+      seconds(0),
+    );
+    idle.tick(seconds(10));
+    idle.tick(seconds(20));
+    assert_eq!(idle.dpms_state(), DpmsState::Off);
+    assert!(idle.is_idle());
+    idle
+  }
+
+  #[test]
+  fn an_idle_inhibitor_resumes_like_fullscreen_suppression() {
+    let mut fullscreen = idle_and_off();
+    let suppressed = fullscreen.set_fullscreen(true, seconds(30));
+    let mut inhibited = idle_and_off();
+    let resumed = inhibited.set_idle_inhibited(true, seconds(30));
+    for idle in [&fullscreen, &inhibited] {
+      assert_eq!(idle.dpms_state(), DpmsState::On);
+      assert!(!idle.is_idle());
+      assert_eq!(idle.next_deadline(), None);
+    }
+    assert_eq!(suppressed, [Command::RequestDpmsOn, Command::NotifyResume]);
+    assert_eq!(resumed, suppressed);
+    assert_eq!(inhibited.set_idle_inhibited(true, seconds(31)), []);
+    assert_eq!(inhibited.set_idle_inhibited(false, seconds(32)), []);
   }
 }

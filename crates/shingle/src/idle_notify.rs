@@ -64,7 +64,8 @@ pub(crate) fn sync_inhibitors(state: &mut CompositorState) {
   });
   let inhibited = !state.idle_notifications.inhibitors.is_empty();
   if state.idle.is_idle_inhibited() != inhibited {
-    state.idle.set_idle_inhibited(inhibited, state.now());
+    let commands = state.idle.set_idle_inhibited(inhibited, state.now());
+    state.process_idle_commands(commands);
   }
 }
 
