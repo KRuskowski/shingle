@@ -1,3 +1,5 @@
+//! Expo, Wayfire's workspace overview: selection, zoom and drags.
+
 use std::{
   collections::HashMap,
   time::{Duration, Instant},
@@ -14,14 +16,23 @@ use shingle_render::{RenderRect, animation_progress};
 /// commits this state. Origin rectangles describe the current zoom transition;
 /// the other rectangles are its targets.
 pub struct ExpoState {
+  /// Index of the selected workspace.
   pub selected: usize,
+  /// Index of the workspace selected before the last selection change.
   pub previous_selected: usize,
+  /// Target rectangle of each workspace cell, row-major.
   pub cells: Vec<RenderRect>,
+  /// Rectangle of each workspace cell when the zoom started.
   pub cell_origin: Vec<RenderRect>,
+  /// Windows shown in the overview, in drawing order.
   pub windows: Vec<WindowId>,
+  /// Target thumbnail rectangle of each window.
   pub geometry: HashMap<WindowId, RenderRect>,
+  /// Thumbnail rectangle of each window when the zoom started.
   pub geometry_origin: HashMap<WindowId, RenderRect>,
+  /// When the current zoom animation started.
   pub animation_started: Instant,
+  /// When the current brightness crossfade started.
   pub selection_started: Instant,
   pointer: Option<ExpoPointer>,
 }
@@ -36,6 +47,7 @@ struct ExpoPointer {
 }
 
 impl ExpoState {
+  /// Creates the overview with `selected` active and no pointer press.
   pub fn new(
     selected: usize,
     output: Rect,
@@ -239,10 +251,12 @@ impl ExpoState {
     })
   }
 
+  /// Forgets a press or drag without selecting or dropping anything.
   pub fn cancel_pointer(&mut self) {
     self.pointer = None;
   }
 
+  /// Returns whether a pointer press is in progress.
   pub fn pointer_pressed(&self) -> bool {
     self.pointer.is_some()
   }

@@ -1,3 +1,5 @@
+//! Rasterised window titles for Scale.
+
 use std::sync::OnceLock;
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
@@ -8,10 +10,13 @@ const HORIZONTAL_PADDING: u32 = 8;
 const VERTICAL_PADDING: u32 = 4;
 
 /// A CPU-rasterized, pre-multiplied RGBA title ready for wgpu upload.
-pub(crate) struct RasterTitle {
-  pub(crate) width: u32,
-  pub(crate) height: u32,
-  pub(crate) rgba: Vec<u8>,
+pub struct RasterTitle {
+  /// Width in pixels.
+  pub width: u32,
+  /// Height in pixels.
+  pub height: u32,
+  /// `width * height` pre-multiplied RGBA pixels, row-major.
+  pub rgba: Vec<u8>,
 }
 
 fn font() -> &'static FontRef<'static> {
@@ -40,7 +45,7 @@ fn blend_text(pixel: &mut [u8], color: [f32; 4], coverage: f32) {
 }
 
 /// Rasterizes one clipped title line using the Inter font bundled with Gloomy.
-pub(crate) fn rasterize_title(
+pub fn rasterize_title(
   title: &str,
   font_size: u32,
   max_width: u32,

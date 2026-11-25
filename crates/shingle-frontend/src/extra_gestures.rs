@@ -1,3 +1,5 @@
+//! Wayfire's extra touch gestures: hold to move, two-finger tap to close.
+
 use std::{
   collections::BTreeMap,
   time::{Duration, Instant},
@@ -5,10 +7,23 @@ use std::{
 
 use shingle_config::ExtraGesturesConfig;
 
+/// What a recognised gesture asks the frontend to do, at its centre.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum GestureAction {
-  BeginMove { x: f64, y: f64 },
-  Close { x: f64, y: f64 },
+pub enum GestureAction {
+  /// Start an interactive move of the window at the gesture's centre.
+  BeginMove {
+    /// Centre of the touch points, in output pixels.
+    x: f64,
+    /// Centre of the touch points, in output pixels.
+    y: f64,
+  },
+  /// Close the window at the tap's centre.
+  Close {
+    /// Centre of the tap, in output pixels.
+    x: f64,
+    /// Centre of the tap, in output pixels.
+    y: f64,
+  },
 }
 
 struct TouchPoint {
@@ -16,7 +31,8 @@ struct TouchPoint {
   current: (f64, f64),
 }
 
-pub(crate) struct GestureState {
+/// Touch points and timers of the gesture in progress.
+pub struct GestureState {
   config: ExtraGesturesConfig,
   touches: BTreeMap<u64, TouchPoint>,
   hold_started: Option<Instant>,
@@ -27,7 +43,8 @@ pub(crate) struct GestureState {
 }
 
 impl GestureState {
-  pub(crate) fn new(config: ExtraGesturesConfig) -> Self {
+  /// Creates an idle recogniser with `config`.
+  pub fn new(config: ExtraGesturesConfig) -> Self {
     Self {
       config,
       touches: BTreeMap::new(),
@@ -39,12 +56,14 @@ impl GestureState {
     }
   }
 
-  pub(crate) fn set_config(&mut self, config: ExtraGesturesConfig) {
+  /// Replaces the configuration and cancels any gesture in progress.
+  pub fn set_config(&mut self, config: ExtraGesturesConfig) {
     self.config = config;
     self.cancel();
   }
 
-  pub(crate) fn touch_down(&mut self, id: u64, x: f64, y: f64, now: Instant) {
+  /// Records a new touch point.
+  pub fn touch_down(&mut self, id: u64, x: f64, y: f64, now: Instant) {
     if self.touches.is_empty() {
       self.reset_sequence();
     }
@@ -71,7 +90,8 @@ impl GestureState {
       .then_some(now);
   }
 
-  pub(crate) fn touch_motion(
+  /// Moves a touch point and returns an action if a hold completed.
+  pub fn touch_motion(
     &mut self,
     id: u64,
     x: f64,
@@ -104,7 +124,8 @@ impl GestureState {
     self.poll(now)
   }
 
-  pub(crate) fn poll(&mut self, now: Instant) -> Option<GestureAction> {
+  /// Returns the move action once the configured hold delay has passed.
+  pub fn poll(&mut self, now: Instant) -> Option<GestureAction> {
     let delay = Duration::from_millis(self.config.move_delay);
     if self.move_triggered
       || self.touches.len() != self.config.move_fingers as usize
@@ -120,11 +141,8 @@ impl GestureState {
     Some(GestureAction::BeginMove { x, y })
   }
 
-  pub(crate) fn touch_up(
-    &mut self,
-    id: u64,
-    now: Instant,
-  ) -> Option<GestureAction> {
+  /// Removes a touch point and returns the close action for a quick tap.
+  pub fn touch_up(&mut self, id: u64, now: Instant) -> Option<GestureAction> {
     let (x, y) = self
       .tap_armed
       .map(|(_, center)| center)
@@ -144,7 +162,8 @@ impl GestureState {
     action
   }
 
-  pub(crate) fn cancel(&mut self) {
+  /// Drops all touch points without triggering an action.
+  pub fn cancel(&mut self) {
     self.touches.clear();
     self.reset_sequence();
   }

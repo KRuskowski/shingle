@@ -3066,6 +3066,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "shingle-frontend"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "image",
+ "resvg",
+ "shingle",
+ "shingle-config",
+ "shingle-core",
+ "shingle-render",
+ "xkbcommon",
+]
+
+[[package]]
 name = "shingle-idle"
 version = "0.1.0"
 
@@ -3092,13 +3106,11 @@ dependencies = [
 name = "shingle-nested"
 version = "0.1.0"
 dependencies = [
- "ab_glyph",
- "image",
  "pollster 0.4.0",
- "resvg",
  "shingle",
  "shingle-config",
  "shingle-core",
+ "shingle-frontend",
  "shingle-render",
  "shingle-session",
  "wayland-server",

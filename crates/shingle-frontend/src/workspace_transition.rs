@@ -1,3 +1,5 @@
+//! Vswitch's animated slide between workspaces.
+
 use std::time::{Duration, Instant};
 
 use shingle_core::Rect;
@@ -8,19 +10,26 @@ use crate::expo::interpolate_rect;
 /// Output geometry needed to place workspaces on an animated wall.
 #[derive(Clone, Copy)]
 pub struct TransitionLayout {
+  /// The output the wall is drawn on.
   pub output: Rect,
+  /// Workspaces per row of the wall.
   pub grid_width: u32,
+  /// Gap between neighbouring workspaces, in pixels.
   pub gap: u32,
 }
 
 /// A renderer-only Vswitch transition between two workspace indices.
 pub struct WorkspaceTransition {
+  /// Workspace the slide starts from.
   pub from: usize,
+  /// Workspace the slide ends on.
   pub to: usize,
+  /// When the slide started.
   pub started: Instant,
 }
 
 impl WorkspaceTransition {
+  /// Starts a slide from `from` to `to` now.
   pub fn new(from: usize, to: usize) -> Self {
     Self {
       from,

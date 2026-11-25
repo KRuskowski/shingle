@@ -1,11 +1,16 @@
+//! Freedesktop icon theme lookup for Scale's window icons.
+
 use std::{
   collections::{HashMap, HashSet},
   path::{Component, Path, PathBuf},
 };
 
-pub(crate) struct RasterIcon {
-  pub(crate) width: u32,
-  pub(crate) rgba: Vec<u8>,
+/// A decoded square icon in RGBA.
+pub struct RasterIcon {
+  /// Width and height in pixels.
+  pub width: u32,
+  /// `width * width` RGBA pixels, row-major.
+  pub rgba: Vec<u8>,
 }
 
 struct IconDirectory {
@@ -18,7 +23,9 @@ struct IconDirectory {
   kind: String,
 }
 
-pub(crate) fn load(name: &str, size: u32) -> Option<RasterIcon> {
+/// Loads icon `name` at about `size` pixels from the configured theme,
+/// falling back to `hicolor`. Returns `None` for names with a path.
+pub fn load(name: &str, size: u32) -> Option<RasterIcon> {
   if name.is_empty() || name.contains('/') || name.contains("..") {
     return None;
   }

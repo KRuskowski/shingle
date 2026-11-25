@@ -1,9 +1,3 @@
-mod expo;
-mod extra_gestures;
-mod icon_theme;
-mod scale_title;
-mod workspace_transition;
-
 use std::{
   collections::{HashMap, HashSet},
   error::Error,
@@ -22,6 +16,18 @@ use shingle_config::{
   PointerBindings, ShingleConfig, ViewProperties,
 };
 use shingle_core::WindowId as TileWindowId;
+use shingle_frontend::{
+  bindings::{
+    binding_modifiers, grid_slot, modifier_matches, modifiers_empty,
+    modifiers_held,
+  },
+  expo, extra_gestures, icon_theme,
+  scale::{
+    ScaleState, fit_scale_tile, interpolate_scale_rect, rect_contains,
+    scale_cells, scale_columns, scale_filter_matches, scale_geometry_at,
+  },
+  scale_title, workspace_transition,
+};
 use shingle_render::{
   GpuTexture, PreviewDirection, RenderRect, RenderTile, Renderer,
   TextureTransform, animation_progress, preview_tiles, split_preview,
@@ -91,24 +97,6 @@ struct SwitcherState {
   selected: usize,
   modifiers: ConfigModifiers,
   original_opacity: HashMap<TileWindowId, f32>,
-}
-
-/// Transient overview state.
-/// Original layouts and compositor opacity stay intact.
-///
-/// `initial_focus` is restored on cancellation. `geometry` contains only the
-/// renderer's thumbnail rectangles, never replacement tiling geometry.
-struct ScaleState {
-  windows: Vec<TileWindowId>,
-  selected: usize,
-  cells: Vec<RenderRect>,
-  geometry: HashMap<TileWindowId, RenderRect>,
-  animation_origin: HashMap<TileWindowId, RenderRect>,
-  opacity_origin: HashMap<TileWindowId, f32>,
-  animation_started: Instant,
-  all_workspaces: bool,
-  initial_focus: Option<TileWindowId>,
-  initial_workspace: usize,
 }
 
 struct ScaleTitle {
@@ -3940,192 +3928,6 @@ impl App {
   }
 }
 
-/// Normalizes metadata and queries consistently for Scale's title filter.
-fn normalize_filter_text(text: &str, case_sensitive: bool) -> String {
-  let text = text
-    .chars()
-    .map(|character| {
-      if character.is_whitespace() {
-        ' '
-      } else {
-        character
-      }
-    })
-    .collect::<String>();
-  if case_sensitive {
-    text
-  } else {
-    text.to_lowercase()
-  }
-}
-
-/// Returns whether a title or app ID contains the active filter.
-fn scale_filter_matches(
-  snapshot: &SurfaceSnapshot,
-  filter: &str,
-  case_sensitive: bool,
-) -> bool {
-  if filter.is_empty() {
-    return true;
-  }
-  let filter = normalize_filter_text(filter, case_sensitive);
-  [snapshot.title.as_deref(), snapshot.app_id.as_deref()]
-    .into_iter()
-    .flatten()
-    .any(|value| normalize_filter_text(value, case_sensitive).contains(&filter))
-}
-
-/// Returns the smallest square-like column count that can hold `count` items.
-fn scale_columns(count: usize) -> usize {
-  if count == 0 {
-    0
-  } else {
-    (count as f64).sqrt().ceil() as usize
-  }
-}
-
-/// Lays out row-major cells with output offsets, margins, and inter-cell gaps.
-fn scale_cells(
-  output: shingle_core::Rect,
-  count: usize,
-  spacing: u32,
-  outer_margin: u32,
-) -> Vec<RenderRect> {
-  let columns = scale_columns(count);
-  if columns == 0 {
-    return Vec::new();
-  }
-  let rows = count.div_ceil(columns);
-  let horizontal_spacing = spacing.saturating_mul((columns - 1) as u32);
-  let vertical_spacing = spacing.saturating_mul((rows - 1) as u32);
-  let available_width = output
-    .width
-    .saturating_sub(outer_margin.saturating_mul(2))
-    .saturating_sub(horizontal_spacing);
-  let available_height = output
-    .height
-    .saturating_sub(outer_margin.saturating_mul(2))
-    .saturating_sub(vertical_spacing);
-  let width = available_width / columns as u32;
-  let height = available_height / rows as u32;
-  (0..count)
-    .map(|index| {
-      let column = index % columns;
-      let row = index / columns;
-      let dx = outer_margin.saturating_add(
-        (column as u32).saturating_mul(width.saturating_add(spacing)),
-      );
-      let dy = outer_margin.saturating_add(
-        (row as u32).saturating_mul(height.saturating_add(spacing)),
-      );
-      RenderRect {
-        x: output
-          .x
-          .saturating_add(i32::try_from(dx).unwrap_or(i32::MAX)),
-        y: output
-          .y
-          .saturating_add(i32::try_from(dy).unwrap_or(i32::MAX)),
-        width,
-        height,
-      }
-    })
-    .collect()
-}
-
-/// Interpolates renderer-only rectangles for a Scale transition.
-fn interpolate_scale_rect(
-  origin: RenderRect,
-  target: RenderRect,
-  progress: f32,
-) -> RenderRect {
-  let progress = f64::from(progress.clamp(0.0, 1.0));
-  let interpolate = |start: f64, end: f64| start + (end - start) * progress;
-  RenderRect {
-    x: interpolate(f64::from(origin.x), f64::from(target.x)).round() as i32,
-    y: interpolate(f64::from(origin.y), f64::from(target.y)).round() as i32,
-    width: interpolate(f64::from(origin.width), f64::from(target.width)).round()
-      as u32,
-    height: interpolate(f64::from(origin.height), f64::from(target.height))
-      .round() as u32,
-  }
-}
-
-/// Captures the currently displayed thumbnail rectangles at a point in time.
-fn scale_geometry_at(
-  state: &ScaleState,
-  now: Instant,
-  duration: Duration,
-) -> HashMap<TileWindowId, RenderRect> {
-  let progress = animation_progress(state.animation_started, now, duration);
-  state
-    .windows
-    .iter()
-    .filter_map(|window| {
-      let target = *state.geometry.get(window)?;
-      let origin = state
-        .animation_origin
-        .get(window)
-        .copied()
-        .unwrap_or(target);
-      Some((*window, interpolate_scale_rect(origin, target, progress)))
-    })
-    .collect()
-}
-
-/// Centers a thumbnail in its cell while preserving the original aspect ratio.
-///
-/// Upscaling is capped at the original size unless `allow_zoom` is enabled.
-fn fit_scale_tile(
-  cell: RenderRect,
-  original: RenderRect,
-  allow_zoom: bool,
-) -> RenderRect {
-  if original.width == 0
-    || original.height == 0
-    || cell.width == 0
-    || cell.height == 0
-  {
-    return RenderRect {
-      x: cell
-        .x
-        .saturating_add(i32::try_from(cell.width / 2).unwrap_or(i32::MAX)),
-      y: cell
-        .y
-        .saturating_add(i32::try_from(cell.height / 2).unwrap_or(i32::MAX)),
-      width: 0,
-      height: 0,
-    };
-  }
-  let mut factor = (f64::from(cell.width) / f64::from(original.width))
-    .min(f64::from(cell.height) / f64::from(original.height));
-  if !allow_zoom {
-    factor = factor.min(1.0);
-  }
-  let width = ((f64::from(original.width) * factor).round() as u32)
-    .max(1)
-    .min(cell.width);
-  let height = ((f64::from(original.height) * factor).round() as u32)
-    .max(1)
-    .min(cell.height);
-  RenderRect {
-    x: cell.x.saturating_add(
-      i32::try_from((cell.width - width) / 2).unwrap_or(i32::MAX),
-    ),
-    y: cell.y.saturating_add(
-      i32::try_from((cell.height - height) / 2).unwrap_or(i32::MAX),
-    ),
-    width,
-    height,
-  }
-}
-
-fn rect_contains(rect: RenderRect, x: f64, y: f64) -> bool {
-  x >= f64::from(rect.x)
-    && y >= f64::from(rect.y)
-    && x < f64::from(rect.x) + f64::from(rect.width)
-    && y < f64::from(rect.y) + f64::from(rect.height)
-}
-
 fn apply_buffer(tile: &mut RenderTile<'_>, buffer: &BufferSnapshot) {
   tile.transform = match buffer.transform {
     wayland_server::protocol::wl_output::Transform::Normal => {
@@ -4650,73 +4452,6 @@ fn render_output_transform(
   }
 }
 
-fn grid_slot(
-  bindings: &Keybindings,
-  modifiers: ConfigModifiers,
-  key: &str,
-) -> Option<&'static str> {
-  for (slot, bindings) in [
-    ("top_left", &bindings.grid_slot_top_left),
-    ("top", &bindings.grid_slot_top),
-    ("top_right", &bindings.grid_slot_top_right),
-    ("left", &bindings.grid_slot_left),
-    ("center", &bindings.grid_slot_center),
-    ("right", &bindings.grid_slot_right),
-    ("bottom_left", &bindings.grid_slot_bottom_left),
-    ("bottom", &bindings.grid_slot_bottom),
-    ("bottom_right", &bindings.grid_slot_bottom_right),
-  ] {
-    if bindings
-      .iter()
-      .any(|binding| binding.matches(modifiers, key))
-    {
-      return Some(slot);
-    }
-  }
-  None
-}
-
-fn binding_modifiers(binding: &shingle_config::Binding) -> ConfigModifiers {
-  ConfigModifiers {
-    super_key: binding.modifiers.contains(&shingle_config::Modifier::Super),
-    control: binding
-      .modifiers
-      .contains(&shingle_config::Modifier::Control),
-    alt: binding.modifiers.contains(&shingle_config::Modifier::Alt),
-    shift: binding.modifiers.contains(&shingle_config::Modifier::Shift),
-  }
-}
-
-fn modifiers_empty(modifiers: ConfigModifiers) -> bool {
-  modifiers == ConfigModifiers::default()
-}
-
-fn modifiers_held(expected: ConfigModifiers, actual: ConfigModifiers) -> bool {
-  (!expected.super_key || actual.super_key)
-    && (!expected.control || actual.control)
-    && (!expected.alt || actual.alt)
-    && (!expected.shift || actual.shift)
-}
-
-fn modifier_matches(text: &str, actual: ConfigModifiers) -> bool {
-  let normalized = text.replace("><", "> <").replace(['<', '>'], "");
-  let mut expected = ConfigModifiers::default();
-  let mut found = false;
-  for modifier in normalized.split_whitespace() {
-    for modifier in modifier.split(['+', '|']) {
-      match modifier {
-        "super" | "mod4" | "logo" => expected.super_key = true,
-        "ctrl" | "control" => expected.control = true,
-        "alt" | "mod1" => expected.alt = true,
-        "shift" => expected.shift = true,
-        _ => return false,
-      }
-      found = true;
-    }
-  }
-  found && actual == expected
-}
-
 /// Converts winit logical keys to XKB keysym names for symbol bindings.
 fn xkb_symbol(key: &winit::keyboard::Key) -> Option<String> {
   use winit::keyboard::{Key, NamedKey};
@@ -5173,142 +4908,6 @@ mod tests {
   }
 
   #[test]
-  fn scale_cells_respect_output_offsets_margins_and_spacing() {
-    assert_eq!(
-      scale_cells(shingle_core::Rect::new(100, 50, 800, 600), 1, 50, 20),
-      vec![RenderRect {
-        x: 120,
-        y: 70,
-        width: 760,
-        height: 560,
-      }]
-    );
-    assert_eq!(
-      scale_cells(shingle_core::Rect::new(0, 0, 800, 600), 4, 20, 10),
-      vec![
-        RenderRect {
-          x: 10,
-          y: 10,
-          width: 380,
-          height: 280,
-        },
-        RenderRect {
-          x: 410,
-          y: 10,
-          width: 380,
-          height: 280,
-        },
-        RenderRect {
-          x: 10,
-          y: 310,
-          width: 380,
-          height: 280,
-        },
-        RenderRect {
-          x: 410,
-          y: 310,
-          width: 380,
-          height: 280,
-        },
-      ]
-    );
-  }
-
-  #[test]
-  fn scale_cells_handle_odd_counts() {
-    let cells = scale_cells(shingle_core::Rect::new(0, 0, 900, 600), 5, 0, 0);
-    assert_eq!(scale_columns(5), 3);
-    assert_eq!(cells.len(), 5);
-    assert!(
-      cells
-        .iter()
-        .all(|cell| cell.width == 300 && cell.height == 300)
-    );
-    assert_eq!(cells[4].x, 300);
-    assert_eq!(cells[4].y, 300);
-    assert!(
-      scale_cells(shingle_core::Rect::new(0, 0, 900, 600), 0, 0, 0).is_empty()
-    );
-  }
-
-  #[test]
-  fn scale_transition_interpolates_and_clamps_geometry() {
-    let origin = RenderRect {
-      x: 0,
-      y: 0,
-      width: 100,
-      height: 100,
-    };
-    let target = RenderRect {
-      x: 100,
-      y: 50,
-      width: 200,
-      height: 50,
-    };
-    assert_eq!(interpolate_scale_rect(origin, target, 0.0), origin);
-    assert_eq!(
-      interpolate_scale_rect(origin, target, 0.5),
-      RenderRect {
-        x: 50,
-        y: 25,
-        width: 150,
-        height: 75,
-      }
-    );
-    assert_eq!(interpolate_scale_rect(origin, target, 1.0), target);
-    assert_eq!(interpolate_scale_rect(origin, target, 2.0), target);
-  }
-
-  #[test]
-  fn scale_tiles_preserve_aspect_and_control_upscaling() {
-    let cell = RenderRect {
-      x: 10,
-      y: 20,
-      width: 100,
-      height: 100,
-    };
-    let original = RenderRect {
-      x: 0,
-      y: 0,
-      width: 200,
-      height: 100,
-    };
-    assert_eq!(
-      fit_scale_tile(cell, original, false),
-      RenderRect {
-        x: 10,
-        y: 45,
-        width: 100,
-        height: 50,
-      }
-    );
-
-    let small = RenderRect {
-      width: 40,
-      height: 20,
-      ..original
-    };
-    assert_eq!(
-      fit_scale_tile(cell, small, false),
-      RenderRect {
-        x: 40,
-        y: 60,
-        width: 40,
-        height: 20,
-      }
-    );
-    assert_eq!(
-      fit_scale_tile(cell, small, true),
-      RenderRect {
-        x: 10,
-        y: 45,
-        width: 100,
-        height: 50,
-      }
-    );
-  }
-
-  #[test]
   fn physical_keys_match_wayfire_shortcut_names() {
     use winit::keyboard::{KeyCode, PhysicalKey};
     for (code, expected) in [
@@ -5379,26 +4978,5 @@ mod tests {
       "a",
     ));
     assert!(!binding.matches(ConfigModifiers::default(), "a"));
-  }
-
-  #[test]
-  fn scale_filter_matches_title_and_app_id() {
-    let snapshot = SurfaceSnapshot {
-      id: SurfaceId(1),
-      window: None,
-      parent: None,
-      role: SurfaceRole::Toplevel,
-      app_id: Some("org.example.Editor".into()),
-      title: Some("Alpha\tEditor".into()),
-      icon: None,
-      geometry: shingle_core::Rect::new(0, 0, 100, 100),
-      opacity: 1.0,
-      buffer: None,
-    };
-    assert!(scale_filter_matches(&snapshot, "alpha editor", false));
-    assert!(scale_filter_matches(&snapshot, "ORG.EXAMPLE", false));
-    assert!(!scale_filter_matches(&snapshot, "alpha editor", true));
-    assert!(!scale_filter_matches(&snapshot, "missing", false));
-    assert_eq!(normalize_filter_text("Café\tEditor", false), "café editor");
   }
 }
