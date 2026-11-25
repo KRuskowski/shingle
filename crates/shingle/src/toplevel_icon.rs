@@ -9,11 +9,7 @@ use wayland_server::{
   backend::{ClientId, ObjectId},
 };
 
-use crate::{
-  Event, ToplevelIcon, ToplevelIconBuffer,
-  shell::{Role, XdgKind},
-  state::CompositorState,
-};
+use crate::{Event, ToplevelIcon, ToplevelIconBuffer, state::CompositorState};
 
 struct IconBuffer {
   source: ObjectId,
@@ -43,14 +39,13 @@ pub(crate) fn commit(state: &mut CompositorState, object: &ObjectId) {
   let Some(surface) = state.surfaces.get(object) else {
     return;
   };
-  let Role::Xdg {
-    kind: Some(XdgKind::Toplevel(toplevel)),
-    ..
-  } = &surface.role
-  else {
+  let Some(toplevel) = surface.role.toplevel() else {
     return;
   };
-  let resource = Resource::id(&toplevel.resource);
+  // xdg-toplevel-icon names the xdg_toplevel.
+  let Some(resource) = toplevel.handle.xdg().map(Resource::id) else {
+    return;
+  };
   let Some(icon) = state.icons.pending.remove(&resource) else {
     return;
   };
@@ -69,18 +64,8 @@ pub(crate) fn for_surface(
   object: &ObjectId,
 ) -> Option<ToplevelIcon> {
   let surface = state.surfaces.get(object)?;
-  let Role::Xdg {
-    kind: Some(XdgKind::Toplevel(toplevel)),
-    ..
-  } = &surface.role
-  else {
-    return None;
-  };
-  state
-    .icons
-    .assigned
-    .get(&Resource::id(&toplevel.resource))
-    .cloned()
+  let toplevel = surface.role.toplevel()?.handle.xdg()?;
+  state.icons.assigned.get(&Resource::id(toplevel)).cloned()
 }
 
 pub(crate) fn toplevel_destroyed(

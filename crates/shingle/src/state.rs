@@ -663,12 +663,11 @@ impl CompositorState {
             })
       })
       .collect::<Vec<_>>();
-    sticky.sort_by_key(|surface| match &surface.role {
-      Role::Xdg {
-        kind: Some(shell::XdgKind::Toplevel(toplevel)),
-        ..
-      } => toplevel.window(),
-      _ => None,
+    sticky.sort_by_key(|surface| {
+      surface
+        .role
+        .toplevel()
+        .and_then(|toplevel| toplevel.window())
     });
     for mode in [
       shingle_core::StackingMode::AlwaysOnBottom,
@@ -696,11 +695,8 @@ impl CompositorState {
         }
       }
       for surface in &sticky {
-        let matches_mode = match &surface.role {
-          Role::Xdg {
-            kind: Some(shell::XdgKind::Toplevel(toplevel)),
-            ..
-          } => toplevel.window().is_some_and(|window| {
+        let matches_mode = match surface.role.toplevel() {
+          Some(toplevel) => toplevel.window().is_some_and(|window| {
             self
               .core
               .window_info(window)
@@ -767,13 +763,13 @@ impl CompositorState {
     snapshots: &mut Vec<SurfaceSnapshot>,
   ) {
     let unmapped = self.surfaces.get(object).is_some_and(|surface| {
-      matches!(&surface.role, Role::Xdg {
-          kind: Some(shell::XdgKind::Toplevel(toplevel)), ..
-      } if toplevel.window().is_some_and(|window| {
+      surface.role.toplevel().is_some_and(|toplevel| {
+        toplevel.window().is_some_and(|window| {
           self.core.window_info(window).is_ok_and(|info| {
-              info.presence != shingle_core::WindowPresence::Mapped
+            info.presence != shingle_core::WindowPresence::Mapped
           })
-      }))
+        })
+      })
     });
     if unmapped {
       return;
@@ -824,13 +820,7 @@ impl CompositorState {
       .iter()
       .filter_map(|(object, surface)| {
         surface.buffer.as_ref()?;
-        let Role::Xdg {
-          kind: Some(shell::XdgKind::Toplevel(toplevel)),
-          ..
-        } = &surface.role
-        else {
-          return None;
-        };
+        let toplevel = surface.role.toplevel()?;
         let window = toplevel.window()?;
         let info = self.core.window_info(window).ok()?;
         if info.presence != shingle_core::WindowPresence::Mapped

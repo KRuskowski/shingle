@@ -55,8 +55,21 @@ pub(crate) enum Role {
 }
 
 impl Role {
-  /// Returns the xdg_toplevel role data if this is a toplevel surface.
+  /// Returns the toplevel role data if this surface is a toplevel, whatever
+  /// shell it came from.
   pub(crate) fn toplevel(&self) -> Option<&ToplevelRole> {
+    match self {
+      Role::Xdg {
+        kind: Some(XdgKind::Toplevel(toplevel)),
+        ..
+      } => Some(toplevel),
+      _ => None,
+    }
+  }
+
+  /// Returns the toplevel role data mutably if this surface is a toplevel,
+  /// whatever shell it came from.
+  pub(crate) fn toplevel_mut(&mut self) -> Option<&mut ToplevelRole> {
     match self {
       Role::Xdg {
         kind: Some(XdgKind::Toplevel(toplevel)),
@@ -88,9 +101,79 @@ pub(crate) enum XdgKind {
   },
 }
 
+/// The protocol object behind a toplevel.
+///
+/// Everything else about a toplevel lives in [`ToplevelRole`] and is the
+/// same for every shell, so tiling, rules, Scale, Expo, IPC and sessions
+/// never look at this. Only configure, close and destruction differ per
+/// shell, and they go through the methods here. XWayland's managed windows
+/// become a second variant in XW-3 (docs/design/xwayland.md).
+#[derive(Clone)]
+pub(crate) enum ToplevelHandle {
+  /// An `xdg_toplevel`.
+  Xdg(XdgToplevel),
+}
+
+impl ToplevelHandle {
+  /// The `xdg_toplevel`, for xdg-only protocols such as xdg-dialog,
+  /// xdg-foreign and xdg-toplevel-icon.
+  pub(crate) fn xdg(&self) -> Option<&XdgToplevel> {
+    match self {
+      ToplevelHandle::Xdg(toplevel) => Some(toplevel),
+    }
+  }
+
+  /// Asks the client to close the toplevel.
+  pub(crate) fn close(&self) {
+    match self {
+      ToplevelHandle::Xdg(toplevel) => toplevel.close(),
+    }
+  }
+}
+
+/// The window states a toplevel is configured with, whatever its shell.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ToplevelStates {
+  /// In a tiling tree, so tiled on all four edges.
+  pub(crate) tiled: bool,
+  /// Shown as the active window.
+  pub(crate) activated: bool,
+  pub(crate) maximized: bool,
+  pub(crate) fullscreen: bool,
+}
+
+impl ToplevelStates {
+  /// The `xdg_toplevel.configure` state array, in native byte order.
+  pub(crate) fn xdg_states(self) -> Vec<u8> {
+    let mut states = if self.tiled {
+      vec![
+        xdg_toplevel::State::TiledLeft,
+        xdg_toplevel::State::TiledRight,
+        xdg_toplevel::State::TiledTop,
+        xdg_toplevel::State::TiledBottom,
+      ]
+    } else {
+      Vec::new()
+    };
+    if self.activated {
+      states.push(xdg_toplevel::State::Activated);
+    }
+    if self.maximized {
+      states.push(xdg_toplevel::State::Maximized);
+    }
+    if self.fullscreen {
+      states.push(xdg_toplevel::State::Fullscreen);
+    }
+    states
+      .into_iter()
+      .flat_map(|state| (state as u32).to_ne_bytes())
+      .collect()
+  }
+}
+
 #[derive(Clone)]
 pub(crate) struct ToplevelRole {
-  pub(crate) resource: XdgToplevel,
+  pub(crate) handle: ToplevelHandle,
   pub(crate) window: WindowId,
   pub(crate) identity: LaunchIdentity,
   pub(crate) app_id: String,
@@ -139,11 +222,8 @@ pub(crate) fn snapshot_metadata(
   Option<String>,
   Option<String>,
 ) {
-  match &surface.role {
-    Role::Xdg {
-      kind: Some(XdgKind::Toplevel(toplevel)),
-      ..
-    } => (
+  if let Some(toplevel) = surface.role.toplevel() {
+    return (
       SurfaceRole::Toplevel,
       toplevel.window(),
       toplevel.parent.and_then(|parent| {
@@ -160,7 +240,9 @@ pub(crate) fn snapshot_metadata(
       }),
       Some(toplevel.app_id.clone()),
       Some(toplevel.title.clone()),
-    ),
+    );
+  }
+  match &surface.role {
     Role::Xdg {
       kind: Some(XdgKind::Popup(popup)),
       ..
@@ -199,11 +281,10 @@ pub(crate) fn opacity(state: &CompositorState, object: &ObjectId) -> f32 {
     let Some(surface) = state.surfaces.get(&current) else {
       return modifier;
     };
+    if let Some(toplevel) = surface.role.toplevel() {
+      return modifier * toplevel.opacity;
+    }
     match &surface.role {
-      Role::Xdg {
-        kind: Some(XdgKind::Toplevel(toplevel)),
-        ..
-      } => return modifier * toplevel.opacity,
       Role::Xdg {
         kind: Some(XdgKind::Popup(popup)),
         ..
@@ -219,45 +300,42 @@ pub(crate) fn surface_geometry(
   object: &ObjectId,
 ) -> Option<Rect> {
   let surface = state.surfaces.get(object)?;
-  match &surface.role {
-    Role::Xdg {
-      kind: Some(XdgKind::Toplevel(toplevel)),
-      ..
-    } => {
-      if toplevel.window().is_some_and(|window| {
+  if let Some(toplevel) = surface.role.toplevel() {
+    return if toplevel.window().is_some_and(|window| {
+      state
+        .core
+        .window_info(window)
+        .is_ok_and(|info| info.state.fullscreen)
+    }) {
+      Some(state.output)
+    } else if !toplevel.tiled
+      && toplevel.window().is_some_and(|window| {
         state
           .core
           .window_info(window)
-          .is_ok_and(|info| info.state.fullscreen)
-      }) {
-        Some(state.output)
-      } else if !toplevel.tiled
-        && toplevel.window().is_some_and(|window| {
-          state
-            .core
-            .window_info(window)
-            .is_ok_and(|info| info.state.maximized)
+          .is_ok_and(|info| info.state.maximized)
+      })
+    {
+      toplevel
+        .window()
+        .and_then(|window| state.core.window_location(window).ok())
+        .and_then(|location| {
+          state.core.tree(&location.output, location.workspace).ok()
         })
-      {
+        .map_or(state.output, |tree| tree.workarea())
+        .into()
+    } else if !toplevel.tiled {
+      Some(toplevel.floating_geometry)
+    } else {
+      Some(
         toplevel
           .window()
-          .and_then(|window| state.core.window_location(window).ok())
-          .and_then(|location| {
-            state.core.tree(&location.output, location.workspace).ok()
-          })
-          .map_or(state.output, |tree| tree.workarea())
-          .into()
-      } else if !toplevel.tiled {
-        Some(toplevel.floating_geometry)
-      } else {
-        Some(
-          toplevel
-            .window()
-            .and_then(|window| state.core.window_layout(window).ok())
-            .map_or(state.output, |layout| layout.geometry),
-        )
-      }
-    }
+          .and_then(|window| state.core.window_layout(window).ok())
+          .map_or(state.output, |layout| layout.geometry),
+      )
+    };
+  }
+  match &surface.role {
     Role::Xdg {
       kind: Some(XdgKind::Popup(popup)),
       ..
@@ -380,10 +458,11 @@ pub(crate) fn validate_commit(surface: &Surface) -> Result<(), ()> {
 
 fn finish_map(state: &mut CompositorState, window: WindowId) {
   let Some(surface) = state.surfaces.values().find_map(|surface| {
-    matches!(&surface.role, Role::Xdg {
-            kind: Some(XdgKind::Toplevel(toplevel)), ..
-        } if toplevel.window() == Some(window))
-    .then_some(surface.id)
+    surface
+      .role
+      .toplevel()
+      .is_some_and(|toplevel| toplevel.window() == Some(window))
+      .then_some(surface.id)
   }) else {
     return;
   };
@@ -423,11 +502,8 @@ fn request_map(state: &mut CompositorState, object: &ObjectId) {
   let Some((window, has_buffer, mapped, created)) = state
     .surfaces
     .get(object)
-    .and_then(|surface| match &surface.role {
-      Role::Xdg {
-        kind: Some(XdgKind::Toplevel(toplevel)),
-        ..
-      } => toplevel.window().map(|window| {
+    .and_then(|surface| match surface.role.toplevel() {
+      Some(toplevel) => toplevel.window().map(|window| {
         (
           window,
           surface.buffer.is_some(),
@@ -522,15 +598,14 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
   }
   let pending = state.surfaces.get_mut(object).and_then(|surface| {
     surface.buffer.as_ref()?;
-    match &mut surface.role {
-      Role::Xdg {
-        kind: Some(XdgKind::Toplevel(toplevel)),
-        ..
-      } => toplevel.created_rules_pending.take().and_then(|created| {
-        toplevel
-          .window()
-          .map(|window| (created, window, toplevel.identity.clone()))
-      }),
+    match surface.role.toplevel_mut() {
+      Some(toplevel) => {
+        toplevel.created_rules_pending.take().and_then(|created| {
+          toplevel
+            .window()
+            .map(|window| (created, window, toplevel.identity.clone()))
+        })
+      }
       _ => None,
     }
   });
@@ -616,16 +691,12 @@ fn detach_toplevel(
   surface: SurfaceId,
   role: &Role,
 ) {
-  if let Role::Xdg {
-    kind: Some(XdgKind::Toplevel(toplevel)),
-    ..
-  } = role
-  {
-    crate::dialog::toplevel_destroyed(state, &Resource::id(&toplevel.resource));
-    crate::toplevel_icon::toplevel_destroyed(
-      state,
-      &Resource::id(&toplevel.resource),
-    );
+  if let Some(toplevel) = role.toplevel() {
+    if let Some(xdg_toplevel) = toplevel.handle.xdg() {
+      let id = Resource::id(xdg_toplevel);
+      crate::dialog::toplevel_destroyed(state, &id);
+      crate::toplevel_icon::toplevel_destroyed(state, &id);
+    }
     if let Some(window) = toplevel.window() {
       let mapped = state
         .core
@@ -654,24 +725,16 @@ pub(crate) fn set_toplevel_parent(
   parent: Option<WindowId>,
 ) {
   if let Some(surface) = state.surfaces.get_mut(object)
-    && let Role::Xdg {
-      kind: Some(XdgKind::Toplevel(toplevel)),
-      ..
-    } = &mut surface.role
+    && let Some(toplevel) = surface.role.toplevel_mut()
   {
     toplevel.parent = parent;
   }
-  let window =
-    state
-      .surfaces
-      .get(object)
-      .and_then(|surface| match &surface.role {
-        Role::Xdg {
-          kind: Some(XdgKind::Toplevel(toplevel)),
-          ..
-        } => toplevel.window(),
-        _ => None,
-      });
+  let window = state.surfaces.get(object).and_then(|surface| {
+    surface
+      .role
+      .toplevel()
+      .and_then(|toplevel| toplevel.window())
+  });
   if let Some(window) = window {
     let _ = state.core.set_window_parent(window, parent);
   }
@@ -700,13 +763,7 @@ pub(crate) fn reconfigure_all(state: &mut CompositorState) {
     .surfaces
     .iter()
     .filter_map(|(object, surface)| {
-      let Role::Xdg {
-        kind: Some(XdgKind::Toplevel(toplevel)),
-        ..
-      } = &surface.role
-      else {
-        return None;
-      };
+      let toplevel = surface.role.toplevel()?;
       Some((object.clone(), toplevel.window()))
     })
     .collect::<Vec<_>>();
@@ -731,13 +788,8 @@ pub(crate) fn reconfigure_all(state: &mut CompositorState) {
     let (tiled, floating_geometry) = state
       .surfaces
       .get(&object)
-      .and_then(|surface| match &surface.role {
-        Role::Xdg {
-          kind: Some(XdgKind::Toplevel(toplevel)),
-          ..
-        } => Some((toplevel.tiled, toplevel.floating_geometry)),
-        _ => None,
-      })
+      .and_then(|surface| surface.role.toplevel())
+      .map(|toplevel| (toplevel.tiled, toplevel.floating_geometry))
       .unwrap_or((true, state.output));
     let geometry = if fullscreen {
       state.output
@@ -753,29 +805,12 @@ pub(crate) fn reconfigure_all(state: &mut CompositorState) {
     } else {
       floating_geometry
     };
-    let mut states = if tiled {
-      vec![
-        xdg_toplevel::State::TiledLeft as u32,
-        xdg_toplevel::State::TiledRight as u32,
-        xdg_toplevel::State::TiledTop as u32,
-        xdg_toplevel::State::TiledBottom as u32,
-      ]
-    } else {
-      Vec::new()
+    let states = ToplevelStates {
+      tiled,
+      activated: focused,
+      maximized,
+      fullscreen,
     };
-    if focused {
-      states.push(xdg_toplevel::State::Activated as u32);
-    }
-    if maximized {
-      states.push(xdg_toplevel::State::Maximized as u32);
-    }
-    if fullscreen {
-      states.push(xdg_toplevel::State::Fullscreen as u32);
-    }
-    let states = states
-      .into_iter()
-      .flat_map(u32::to_ne_bytes)
-      .collect::<Vec<_>>();
     configure_toplevel(state, &object, geometry, states);
   }
   sync_fullscreen_idle(state);
@@ -804,34 +839,41 @@ fn sync_fullscreen_idle(state: &mut CompositorState) {
   state.process_idle_commands(commands);
 }
 
+/// Sends a toplevel its geometry and states in its own shell's terms, and
+/// reports a changed geometry.
 fn configure_toplevel(
   state: &mut CompositorState,
   object: &ObjectId,
   geometry: Rect,
-  states: Vec<u8>,
+  states: ToplevelStates,
 ) {
   let serial = state.serial();
   let Some(surface) = state.surfaces.get_mut(object) else {
     return;
   };
-  let Role::Xdg {
-    resource,
-    kind: Some(XdgKind::Toplevel(toplevel)),
-    serials,
-    ..
-  } = &mut surface.role
-  else {
+  let Some(toplevel) = surface.role.toplevel_mut() else {
     return;
   };
   let previous = toplevel.configured_geometry.replace(geometry);
   let window = toplevel.window();
-  toplevel.resource.configure(
-    geometry.width.min(i32::MAX as u32) as i32,
-    geometry.height.min(i32::MAX as u32) as i32,
-    states,
-  );
-  resource.configure(serial);
-  serials.insert(serial);
+  match toplevel.handle.clone() {
+    ToplevelHandle::Xdg(xdg_toplevel) => {
+      xdg_toplevel.configure(
+        geometry.width.min(i32::MAX as u32) as i32,
+        geometry.height.min(i32::MAX as u32) as i32,
+        states.xdg_states(),
+      );
+      // The xdg_surface half of the configure, which the client
+      // acknowledges with this serial.
+      if let Role::Xdg {
+        resource, serials, ..
+      } = &mut surface.role
+      {
+        resource.configure(serial);
+        serials.insert(serial);
+      }
+    }
+  }
   if let (Some(window), Some(old_geometry)) = (window, previous)
     && old_geometry != geometry
   {
@@ -879,11 +921,7 @@ fn update_app_id(
   let Some(surface) = state.surfaces.get_mut(object) else {
     return;
   };
-  let Role::Xdg {
-    kind: Some(XdgKind::Toplevel(toplevel)),
-    ..
-  } = &mut surface.role
-  else {
+  let Some(toplevel) = surface.role.toplevel_mut() else {
     return;
   };
   toplevel.app_id = app_id.clone();
@@ -904,11 +942,7 @@ fn update_title(state: &mut CompositorState, object: &ObjectId, title: String) {
   let Some(surface) = state.surfaces.get_mut(object) else {
     return;
   };
-  let Role::Xdg {
-    kind: Some(XdgKind::Toplevel(toplevel)),
-    ..
-  } = &mut surface.role
-  else {
+  let Some(toplevel) = surface.role.toplevel_mut() else {
     return;
   };
   toplevel.title = title.clone();
@@ -933,21 +967,17 @@ pub(crate) fn materialize_toplevel(
   state: &mut CompositorState,
   object: &ObjectId,
 ) -> Option<WindowId> {
-  let (existing, identity, parent) =
-    state
-      .surfaces
-      .get(object)
-      .and_then(|surface| match &surface.role {
-        Role::Xdg {
-          kind: Some(XdgKind::Toplevel(toplevel)),
-          ..
-        } => Some((
-          toplevel.window(),
-          toplevel.identity.clone(),
-          toplevel.parent,
-        )),
-        _ => None,
-      })?;
+  let (existing, identity, parent) = state
+    .surfaces
+    .get(object)
+    .and_then(|surface| surface.role.toplevel())
+    .map(|toplevel| {
+      (
+        toplevel.window(),
+        toplevel.identity.clone(),
+        toplevel.parent,
+      )
+    })?;
   if let Some(window) = existing {
     return Some(window);
   }
@@ -996,10 +1026,7 @@ pub(crate) fn materialize_toplevel(
     .ok()
     .and_then(|info| info.parent);
   if let Some(surface) = state.surfaces.get_mut(object)
-    && let Role::Xdg {
-      kind: Some(XdgKind::Toplevel(toplevel)),
-      ..
-    } = &mut surface.role
+    && let Some(toplevel) = surface.role.toplevel_mut()
   {
     toplevel.window = window;
     toplevel.parent = restored_parent;
@@ -1016,6 +1043,23 @@ pub(crate) fn materialize_toplevel(
   Some(window)
 }
 
+/// Asks the client of `window`'s toplevel to close it, in its own shell's
+/// terms. Returns `None` if the window has no toplevel. The client decides
+/// whether and when to close, so the window is still there afterwards.
+pub(crate) fn close_window(
+  state: &CompositorState,
+  window: WindowId,
+) -> Option<()> {
+  let toplevel = state.surfaces.values().find_map(|surface| {
+    surface
+      .role
+      .toplevel()
+      .filter(|toplevel| toplevel.window() == Some(window))
+  })?;
+  toplevel.handle.close();
+  Some(())
+}
+
 pub(crate) fn size_constraints(
   state: &CompositorState,
   window: WindowId,
@@ -1023,11 +1067,8 @@ pub(crate) fn size_constraints(
   state
     .surfaces
     .values()
-    .find_map(|surface| match &surface.role {
-      Role::Xdg {
-        kind: Some(XdgKind::Toplevel(toplevel)),
-        ..
-      } if toplevel.window() == Some(window) => {
+    .find_map(|surface| match surface.role.toplevel() {
+      Some(toplevel) if toplevel.window() == Some(window) => {
         Some((toplevel.min_size, toplevel.max_size))
       }
       _ => None,
@@ -1187,11 +1228,10 @@ pub(crate) fn window_alpha(
   state
     .surfaces
     .values()
-    .find_map(|surface| match &surface.role {
-      Role::Xdg {
-        kind: Some(XdgKind::Toplevel(toplevel)),
-        ..
-      } if toplevel.window() == Some(window) => Some(toplevel.opacity),
+    .find_map(|surface| match surface.role.toplevel() {
+      Some(toplevel) if toplevel.window() == Some(window) => {
+        Some(toplevel.opacity)
+      }
       _ => None,
     })
 }
@@ -1200,11 +1240,10 @@ pub(crate) fn clamp_alpha(state: &mut CompositorState, minimum: f32) {
   let windows = state
     .surfaces
     .values()
-    .filter_map(|surface| match &surface.role {
-      Role::Xdg {
-        kind: Some(XdgKind::Toplevel(toplevel)),
-        ..
-      } => toplevel.window().filter(|_| toplevel.opacity < minimum),
+    .filter_map(|surface| match surface.role.toplevel() {
+      Some(toplevel) => {
+        toplevel.window().filter(|_| toplevel.opacity < minimum)
+      }
       _ => None,
     })
     .collect::<Vec<_>>();
@@ -1221,10 +1260,7 @@ pub(crate) fn set_alpha(
   let opacity = alpha.clamp(0.0, 1.0);
   let mut changed = false;
   for surface in state.surfaces.values_mut() {
-    if let Role::Xdg {
-      kind: Some(XdgKind::Toplevel(toplevel)),
-      ..
-    } = &mut surface.role
+    if let Some(toplevel) = surface.role.toplevel_mut()
       && toplevel.window() == Some(window)
       && toplevel.opacity != opacity
     {
@@ -1277,10 +1313,7 @@ pub(crate) fn snap_window_to_geometry(
   state.core.set_tiled_edges(window, edges)?;
   let mut attached = None;
   for surface in state.surfaces.values_mut() {
-    if let Role::Xdg {
-      kind: Some(XdgKind::Toplevel(toplevel)),
-      ..
-    } = &mut surface.role
+    if let Some(toplevel) = surface.role.toplevel_mut()
       && toplevel.window() == Some(window)
       && !toplevel.tiled
     {
@@ -1292,14 +1325,11 @@ pub(crate) fn snap_window_to_geometry(
   if attached.is_some() || previous.tiled_edges != edges {
     let surface = attached.or_else(|| {
       state.surfaces.values().find_map(|surface| {
-        matches!(
-            &surface.role,
-            Role::Xdg {
-                kind: Some(XdgKind::Toplevel(toplevel)),
-                ..
-            } if toplevel.window() == Some(window)
-        )
-        .then_some(surface.id)
+        surface
+          .role
+          .toplevel()
+          .is_some_and(|toplevel| toplevel.window() == Some(window))
+          .then_some(surface.id)
       })
     });
     if let Some(surface) = surface {
@@ -1438,10 +1468,7 @@ pub(crate) fn sync_floating_geometry(
   geometry: Rect,
 ) {
   for surface in state.surfaces.values_mut() {
-    if let Role::Xdg {
-      kind: Some(XdgKind::Toplevel(toplevel)),
-      ..
-    } = &mut surface.role
+    if let Some(toplevel) = surface.role.toplevel_mut()
       && toplevel.window() == Some(window)
     {
       toplevel.floating_geometry = geometry;
@@ -1459,10 +1486,7 @@ pub(crate) fn set_floating_geometry(
   state.core.set_floating(window, Some(geometry))?;
   let mut detached = None;
   for surface in state.surfaces.values_mut() {
-    if let Role::Xdg {
-      kind: Some(XdgKind::Toplevel(toplevel)),
-      ..
-    } = &mut surface.role
+    if let Some(toplevel) = surface.role.toplevel_mut()
       && toplevel.window() == Some(window)
     {
       toplevel.floating_geometry = geometry;
@@ -1490,18 +1514,14 @@ pub(crate) fn toggle_tiling(
   window: WindowId,
 ) -> Result<bool, crate::Error> {
   let Some((object, tiled)) =
-    state
-      .surfaces
-      .iter()
-      .find_map(|(object, surface)| match &surface.role {
-        Role::Xdg {
-          kind: Some(XdgKind::Toplevel(toplevel)),
-          ..
-        } if toplevel.window() == Some(window) => {
+    state.surfaces.iter().find_map(|(object, surface)| {
+      match surface.role.toplevel() {
+        Some(toplevel) if toplevel.window() == Some(window) => {
           Some((object.clone(), toplevel.tiled))
         }
         _ => None,
-      })
+      }
+    })
   else {
     return Err(shingle_core::ShingleError::WindowNotFound(window.0).into());
   };
@@ -1526,10 +1546,7 @@ pub(crate) fn toggle_tiling(
   let old_edges = state.core.window_info(window)?.state.tiled_edges;
   state.core.set_floating(window, geometry)?;
   if let Some(surface) = state.surfaces.get_mut(&object)
-    && let Role::Xdg {
-      kind: Some(XdgKind::Toplevel(toplevel)),
-      ..
-    } = &mut surface.role
+    && let Some(toplevel) = surface.role.toplevel_mut()
   {
     toplevel.tiled = !tiled;
     if let Some(geometry) = geometry {
@@ -1824,7 +1841,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
           surface.role = Role::Xdg {
             resource: resource.clone(),
             kind: Some(XdgKind::Toplevel(Box::new(ToplevelRole {
-              resource: toplevel,
+              handle: ToplevelHandle::Xdg(toplevel),
               window: WindowId(0),
               identity,
               app_id,
@@ -1970,7 +1987,7 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
       let matches = surface
         .role
         .toplevel()
-        .is_some_and(|toplevel| &toplevel.resource == resource);
+        .is_some_and(|toplevel| toplevel.handle.xdg() == Some(resource));
       matches.then_some(object.clone())
     });
     let Some(object) = object else {
@@ -1988,16 +2005,14 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
       }
       xdg_toplevel::Request::SetParent { parent } => {
         let parent_window = parent.and_then(|parent| {
-          state
-            .surfaces
-            .values()
-            .find_map(|surface| match &surface.role {
-              Role::Xdg {
-                kind: Some(XdgKind::Toplevel(toplevel)),
-                ..
-              } if toplevel.resource == parent => toplevel.window(),
+          state.surfaces.values().find_map(|surface| {
+            match surface.role.toplevel() {
+              Some(toplevel) if toplevel.handle.xdg() == Some(&parent) => {
+                toplevel.window()
+              }
               _ => None,
-            })
+            }
+          })
         });
         set_toplevel_parent(state, &object, parent_window);
         crate::foreign::clear_import_tracking(state, &object);
@@ -2041,10 +2056,7 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
           return;
         }
         if let Some(surface) = state.surfaces.get_mut(&object)
-          && let Role::Xdg {
-            kind: Some(XdgKind::Toplevel(toplevel)),
-            ..
-          } = &mut surface.role
+          && let Some(toplevel) = surface.role.toplevel_mut()
         {
           if matches!(request, xdg_toplevel::Request::SetMaxSize { .. }) {
             toplevel.max_size = (width, height);
@@ -2526,6 +2538,89 @@ mod tests {
 
   /// The IPC client id the map-blocking tests subscribe as.
   const SUBSCRIBER: u64 = 7;
+
+  #[test]
+  fn toplevel_states_encode_as_xdg_states_in_order() {
+    use wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+
+    let decode = |bytes: Vec<u8>| {
+      bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_ne_bytes(*chunk))
+        .collect::<Vec<_>>()
+    };
+    assert!(super::ToplevelStates::default().xdg_states().is_empty());
+    let all = super::ToplevelStates {
+      tiled: true,
+      activated: true,
+      maximized: true,
+      fullscreen: true,
+    };
+    assert_eq!(
+      decode(all.xdg_states()),
+      [
+        State::TiledLeft,
+        State::TiledRight,
+        State::TiledTop,
+        State::TiledBottom,
+        State::Activated,
+        State::Maximized,
+        State::Fullscreen,
+      ]
+      .map(|state| state as u32)
+    );
+    let floating = super::ToplevelStates {
+      activated: true,
+      fullscreen: true,
+      ..Default::default()
+    };
+    assert_eq!(
+      decode(floating.xdg_states()),
+      [State::Activated as u32, State::Fullscreen as u32]
+    );
+  }
+
+  #[test]
+  fn toplevel_and_toplevel_mut_find_the_xdg_toplevel_role() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let toplevel = client.toplevel(&mut compositor, "role");
+    let object = wayland_client::Proxy::id(&toplevel.surface).protocol_id();
+    let surface = compositor
+      .state
+      .surfaces
+      .values_mut()
+      .find(|surface| {
+        wayland_server::Resource::id(&surface.resource).protocol_id() == object
+      })
+      .expect("the toplevel surface");
+    assert_eq!(surface.role.toplevel().unwrap().app_id, "role");
+    surface.role.toplevel_mut().unwrap().title = "changed".into();
+    assert_eq!(surface.role.toplevel().unwrap().title, "changed");
+    assert!(surface.role.popup().is_none());
+    assert!(super::Role::None.toplevel().is_none());
+    assert!(super::Role::Cursor.toplevel_mut().is_none());
+  }
+
+  #[test]
+  fn close_window_asks_the_xdg_toplevel_to_close() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let toplevel = client.toplevel(&mut compositor, "closing");
+    client.attach_buffer(&mut compositor, &toplevel.surface, 64, 64);
+    let window = windows_with(&compositor.state, "closing")[0];
+    assert!(super::close_window(&compositor.state, WindowId(999)).is_none());
+    assert!(client.events.closes.is_empty());
+    assert!(super::close_window(&compositor.state, window).is_some());
+    client.roundtrip(&mut compositor);
+    assert_eq!(
+      client.events.closes,
+      [wayland_client::Proxy::id(&toplevel.toplevel)]
+    );
+    assert_eq!(presence(&compositor.state, window), WindowPresence::Mapped);
+  }
 
   /// Lists the tiles `simple-tile/get-layout` reports for the first
   /// workspace, as `(view-id, width)` in layout order.

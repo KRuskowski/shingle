@@ -10,11 +10,7 @@ use wayland_server::{
   backend::ObjectId,
 };
 
-use crate::{
-  input,
-  shell::{self, Role, XdgKind},
-  state::CompositorState,
-};
+use crate::{input, shell, state::CompositorState};
 
 struct Manager {
   resource: ZwlrForeignToplevelManagerV1,
@@ -96,11 +92,8 @@ pub(crate) fn windows(
   state
     .surfaces
     .values()
-    .filter_map(|surface| match &surface.role {
-      Role::Xdg {
-        kind: Some(XdgKind::Toplevel(toplevel)),
-        ..
-      } => toplevel.window().map(|window| {
+    .filter_map(|surface| match surface.role.toplevel() {
+      Some(toplevel) => toplevel.window().map(|window| {
         let leaf = shell::leaf_state(state, window);
         (
           window,
@@ -207,22 +200,7 @@ fn send_state(resource: &ZwlrForeignToplevelHandleV1, info: &ForeignWindow) {
 }
 
 fn close_window(state: &mut CompositorState, window: WindowId) {
-  if let Some(resource) =
-    state
-      .surfaces
-      .values()
-      .find_map(|surface| match &surface.role {
-        Role::Xdg {
-          kind: Some(XdgKind::Toplevel(toplevel)),
-          ..
-        } if toplevel.window() == Some(window) => {
-          Some(toplevel.resource.clone())
-        }
-        _ => None,
-      })
-  {
-    resource.close();
-  }
+  shell::close_window(state, window);
 }
 
 impl GlobalDispatch<ZwlrForeignToplevelManagerV1, ()> for CompositorState {

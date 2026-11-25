@@ -13,7 +13,7 @@ use crate::{
   decoration::Mode as DecorationMode,
   input,
   input_device::{self, InputDeviceId, InputDeviceKind, stipc_device},
-  shell::{self, Role, XdgKind},
+  shell,
   state::CompositorState,
 };
 
@@ -739,13 +739,10 @@ fn view_json(state: &CompositorState, window: WindowId) -> Value {
     return Value::Null;
   };
   let surface = state.surfaces.values().find(|surface| {
-    matches!(
-        &surface.role,
-        Role::Xdg {
-            kind: Some(XdgKind::Toplevel(toplevel)),
-            ..
-        } if toplevel.window() == Some(window)
-    )
+    surface
+      .role
+      .toplevel()
+      .is_some_and(|toplevel| toplevel.window() == Some(window))
   });
   let (geometry_value, app_id, title, min_size, max_size) = surface
     .map_or_else(
@@ -759,13 +756,10 @@ fn view_json(state: &CompositorState, window: WindowId) -> Value {
         )
       },
       |surface| {
-        let role = match &surface.role {
-          Role::Xdg {
-            kind: Some(XdgKind::Toplevel(toplevel)),
-            ..
-          } => toplevel,
-          _ => unreachable!(),
-        };
+        let role = surface
+          .role
+          .toplevel()
+          .expect("the surface was found as a toplevel");
         (
           geometry(
             shell::surface_geometry(state, &Resource::id(&surface.resource))
@@ -1335,11 +1329,7 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
   }
   state.core = restored;
   for surface in state.surfaces.values_mut() {
-    let Role::Xdg {
-      kind: Some(XdgKind::Toplevel(toplevel)),
-      ..
-    } = &mut surface.role
-    else {
+    let Some(toplevel) = surface.role.toplevel_mut() else {
       continue;
     };
     let Some(window) = toplevel.window() else {
@@ -1400,13 +1390,9 @@ fn set_show_maximized(state: &mut CompositorState, data: &Value) -> Value {
     return json_error("missing or invalid show-maximized field");
   };
   let tiled = state.surfaces.values().any(|surface| {
-    matches!(
-        &surface.role,
-        Role::Xdg {
-            kind: Some(XdgKind::Toplevel(toplevel)),
-            ..
-        } if toplevel.window() == Some(window) && toplevel.tiled
-    )
+    surface.role.toplevel().is_some_and(|toplevel| {
+      toplevel.window() == Some(window) && toplevel.tiled
+    })
   }) && state
     .core
     .window_info(window)
@@ -1849,11 +1835,10 @@ fn get_view_alpha(state: &CompositorState, data: &Value) -> Value {
   let opacity = state
     .surfaces
     .values()
-    .find_map(|surface| match &surface.role {
-      Role::Xdg {
-        kind: Some(XdgKind::Toplevel(toplevel)),
-        ..
-      } if toplevel.window() == Some(window) => Some(toplevel.opacity),
+    .find_map(|surface| match surface.role.toplevel() {
+      Some(toplevel) if toplevel.window() == Some(window) => {
+        Some(toplevel.opacity)
+      }
       _ => None,
     })
     .unwrap_or(1.0);
@@ -2611,21 +2596,7 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
     },
     "window-rules/close-view" => match find_view(state, data) {
       Ok(window) => {
-        let resource =
-          state
-            .surfaces
-            .values()
-            .find_map(|surface| match &surface.role {
-              Role::Xdg {
-                kind: Some(XdgKind::Toplevel(toplevel)),
-                ..
-              } if toplevel.window() == Some(window) => {
-                Some(toplevel.resource.clone())
-              }
-              _ => None,
-            });
-        if let Some(resource) = resource {
-          resource.close();
+        if shell::close_window(state, window).is_some() {
           json_ok()
         } else {
           json_error("view is not mapped")

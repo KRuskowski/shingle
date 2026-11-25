@@ -9,11 +9,7 @@ use wayland_server::{
   backend::ObjectId,
 };
 
-use crate::{
-  input,
-  shell::{Role, XdgKind},
-  state::CompositorState,
-};
+use crate::{input, state::CompositorState};
 
 struct PendingToken {
   resource: XdgActivationTokenV1,
@@ -128,11 +124,7 @@ impl Dispatch<XdgActivationV1, ()> for CompositorState {
         if surface.buffer.is_none() {
           return;
         }
-        let Role::Xdg {
-          kind: Some(XdgKind::Toplevel(toplevel)),
-          ..
-        } = &surface.role
-        else {
+        let Some(toplevel) = surface.role.toplevel() else {
           return;
         };
         if committed

@@ -1294,22 +1294,7 @@ impl Compositor {
   /// so the window is still there afterwards. Returns `None` if the window has
   /// no toplevel.
   pub fn close_window(&mut self, window: WindowId) -> Option<()> {
-    let resource =
-      self
-        .state
-        .surfaces
-        .values()
-        .find_map(|surface| match &surface.role {
-          shell::Role::Xdg {
-            kind: Some(shell::XdgKind::Toplevel(toplevel)),
-            ..
-          } if toplevel.window() == Some(window) => {
-            Some(toplevel.resource.clone())
-          }
-          _ => None,
-        })?;
-    resource.close();
-    Some(())
+    shell::close_window(&self.state, window)
   }
 
   /// Asks the compositor to shut down. The frontend sees this through
@@ -1386,12 +1371,11 @@ impl Compositor {
       .state
       .surfaces
       .values()
-      .filter_map(|surface| match &surface.role {
-        shell::Role::Xdg {
-          kind: Some(shell::XdgKind::Toplevel(toplevel)),
-          ..
-        } => toplevel.window(),
-        _ => None,
+      .filter_map(|surface| {
+        surface
+          .role
+          .toplevel()
+          .and_then(|toplevel| toplevel.window())
       })
       .collect::<Vec<_>>();
     for window in windows {
@@ -1864,11 +1848,8 @@ impl Compositor {
       .state
       .surfaces
       .values()
-      .filter_map(|surface| match &surface.role {
-        shell::Role::Xdg {
-          kind: Some(shell::XdgKind::Toplevel(toplevel)),
-          ..
-        } => toplevel.window().filter(|window| {
+      .filter_map(|surface| match surface.role.toplevel() {
+        Some(toplevel) => toplevel.window().filter(|window| {
           self.state.core.window_info(*window).is_ok_and(|info| {
             info.state.sticky
               && info.location.output == self.state.output_id
@@ -2219,11 +2200,10 @@ impl Compositor {
       let mut pending = vec![window];
       while let Some(parent) = pending.pop() {
         for child in self.state.surfaces.values().filter_map(|surface| {
-          match &surface.role {
-            shell::Role::Xdg {
-              kind: Some(shell::XdgKind::Toplevel(toplevel)),
-              ..
-            } if toplevel.parent == Some(parent) => toplevel.window(),
+          match surface.role.toplevel() {
+            Some(toplevel) if toplevel.parent == Some(parent) => {
+              toplevel.window()
+            }
             _ => None,
           }
         }) {

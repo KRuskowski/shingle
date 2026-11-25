@@ -11,10 +11,7 @@ use wayland_server::{
   backend::{ClientId, ObjectId},
 };
 
-use crate::{
-  shell::{self, Role, XdgKind},
-  state::CompositorState,
-};
+use crate::{shell, state::CompositorState};
 
 struct Export {
   surface: ObjectId,
@@ -52,15 +49,10 @@ fn handle(state: &ForeignHandles) -> Option<String> {
 }
 
 fn toplevel(state: &CompositorState, object: &ObjectId) -> bool {
-  state.surfaces.get(object).is_some_and(|surface| {
-    matches!(
-      surface.role,
-      Role::Xdg {
-        kind: Some(XdgKind::Toplevel(_)),
-        ..
-      }
-    )
-  })
+  state
+    .surfaces
+    .get(object)
+    .is_some_and(|surface| surface.role.toplevel().is_some())
 }
 
 /// Stops tracking a relationship replaced by ordinary xdg_toplevel parenting.
@@ -276,12 +268,11 @@ impl Dispatch<ZxdgImportedV2, ()> for CompositorState {
         .exports
         .get(&export)
         .and_then(|export| state.surfaces.get(&export.surface))
-        .and_then(|surface| match &surface.role {
-          Role::Xdg {
-            kind: Some(XdgKind::Toplevel(toplevel)),
-            ..
-          } => toplevel.window(),
-          _ => None,
+        .and_then(|surface| {
+          surface
+            .role
+            .toplevel()
+            .and_then(|toplevel| toplevel.window())
         });
       shell::set_toplevel_parent(state, &child, parent);
       state.foreign.imported_parents.insert(child, id);

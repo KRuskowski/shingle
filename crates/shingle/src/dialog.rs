@@ -10,10 +10,7 @@ use wayland_server::{
   backend::{ClientId, ObjectId},
 };
 
-use crate::{
-  shell::{Role, XdgKind},
-  state::CompositorState,
-};
+use crate::state::CompositorState;
 
 struct Dialog {
   toplevel: ObjectId,
@@ -35,12 +32,9 @@ pub(crate) fn is_modal(state: &CompositorState, window: WindowId) -> bool {
     state
       .surfaces
       .values()
-      .find_map(|surface| match &surface.role {
-        Role::Xdg {
-          kind: Some(XdgKind::Toplevel(toplevel)),
-          ..
-        } if toplevel.window() == Some(window) => {
-          Some(Resource::id(&toplevel.resource))
+      .find_map(|surface| match surface.role.toplevel() {
+        Some(toplevel) if toplevel.window() == Some(window) => {
+          toplevel.handle.xdg().map(Resource::id)
         }
         _ => None,
       });

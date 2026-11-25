@@ -1541,11 +1541,10 @@ pub(crate) fn window_for_object(
   object: &ObjectId,
 ) -> Option<WindowId> {
   let surface = state.surfaces.get(object)?;
+  if let Some(toplevel) = surface.role.toplevel() {
+    return toplevel.window();
+  }
   match &surface.role {
-    Role::Xdg {
-      kind: Some(XdgKind::Toplevel(toplevel)),
-      ..
-    } => toplevel.window(),
     Role::Xdg {
       kind: Some(XdgKind::Popup(popup)),
       ..
