@@ -1341,13 +1341,21 @@ impl Compositor {
   ///
   /// # Errors
   ///
-  /// [`Error::InvalidWorkspaceGrid`] before anything changes;
-  /// [`Error::InvalidOutputScale`] or [`Error::Core`] for an invalid output
-  /// after the earlier settings have already been applied.
+  /// [`Error::InvalidWorkspaceGrid`], [`Error::InvalidOutputScale`] or
+  /// [`Error::Core`] for an invalid output rectangle, before anything
+  /// changes.
   pub fn apply_config(&mut self, config: Config) -> Result<(), Error> {
     if config.workspace_width == 0 || config.workspace_height == 0 {
       return Err(Error::InvalidWorkspaceGrid);
     }
+    if !config.output_scale.is_finite() || config.output_scale <= 0.0 {
+      return Err(Error::InvalidOutputScale);
+    }
+    let mut output = config.output;
+    if output_transform::is_quarter_turn(config.output_transform) {
+      std::mem::swap(&mut output.width, &mut output.height);
+    }
+    output.validate()?;
     self.state.background_color = config.background_color;
     self.state.workspace_wraparound = config.workspace_wraparound;
     self.state.tile_by_default = config.tile_by_default;
@@ -1402,10 +1410,6 @@ impl Compositor {
     self.state.process_idle_commands(commands);
     self.state.set_output_transform(config.output_transform);
     self.state.set_output_scale(config.output_scale)?;
-    let mut output = config.output;
-    if output_transform::is_quarter_turn(config.output_transform) {
-      std::mem::swap(&mut output.width, &mut output.height);
-    }
     self.state.set_output(output)?;
     shell::reconfigure_all(&mut self.state);
     Ok(())
@@ -3006,6 +3010,37 @@ pub(crate) mod tests {
     shell::set_maximized(&mut compositor.state, window, true).unwrap();
     compositor.set_minimized(window, true).unwrap();
     assert_eq!(changes(&mut compositor), 0);
+  }
+
+  #[test]
+  fn an_invalid_reloaded_output_changes_nothing() {
+    use wayland_server::protocol::wl_output;
+    let (mut compositor, _) = test_compositor();
+    let grid = compositor.workspace_grid_dimensions();
+    let background = compositor.state.background_color;
+    for (scale, output) in [
+      (f64::NAN, Rect::new(0, 0, 800, 600)),
+      (1.0, Rect::new(0, 0, 0, 600)),
+      (1.0, Rect::new(i32::MAX, 0, 800, 600)),
+    ] {
+      let config = Config {
+        workspace_width: 4,
+        workspace_height: 2,
+        background_color: [1.0, 0.0, 0.0, 1.0],
+        output_transform: wl_output::Transform::_90,
+        output_scale: scale,
+        output,
+        ..Config::default()
+      };
+      assert!(compositor.apply_config(config).is_err());
+      assert_eq!(compositor.workspace_grid_dimensions(), grid);
+      assert_eq!(compositor.state.background_color, background);
+      assert_eq!(
+        compositor.state.output_transform,
+        wl_output::Transform::Normal
+      );
+      assert_eq!(compositor.output_scale(), 1.0);
+    }
   }
 
   #[test]
