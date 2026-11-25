@@ -1,8 +1,8 @@
 # XWayland design
 
-Status: proposed, 2026-11-25, awaiting the operator's answers to the [open questions](#open-questions). Roadmap item "XWayland" ([roadmap.md](../roadmap.md#4-xwayland)). XW-1 is done (2026-11-25); its deviations from this design are listed in [its entry](#xw-1-shingle-toplevel-handle-shell-neutral-toplevel-and-client-environment).
+Status: accepted, 2026-11-25; the operator's answers to the former open questions are under [Decisions](#decisions). Roadmap item "XWayland" ([roadmap.md](../roadmap.md#4-xwayland)). XW-1 and XW-2 are done (2026-11-25); their deviations from this design are listed in their entries ([XW-1](#xw-1-shingle-toplevel-handle-shell-neutral-toplevel-and-client-environment), [XW-2](#xw-2-shingle-xwayland-server-sockets-process-configuration-and-xwm-bring-up)).
 
-Shingle has no XWayland, so X11 applications cannot run under it. `stipc/get_display` returns an empty `xwayland` value (crates/shingle/src/ipc.rs:2676). This document decides how Shingle starts and supervises `Xwayland`, how its own X window manager (XWM) turns X11 windows into Shingle windows, and how input, selections and scaling work for them. It is the brief for the implementation workspaces in [section 8](#8-implementation-plan). Nothing here is implemented yet.
+Shingle has no XWayland, so X11 applications cannot run under it. `stipc/get_display` returns an empty `xwayland` value (crates/shingle/src/ipc.rs:2676). This document decides how Shingle starts and supervises `Xwayland`, how its own X window manager (XWM) turns X11 windows into Shingle windows, and how input, selections and scaling work for them. It is the brief for the implementation workspaces in [section 8](#8-implementation-plan). Sections 1 and 2 up to the XWM bring-up are implemented (XW-2); the rest is not yet.
 
 Line numbers refer to branch `shingle-xwayland-design`, cut from `master` at `8df73d6`.
 
@@ -70,11 +70,11 @@ Binding first, as wlroots does, makes `DISPLAY` known before any client starts, 
 **Spawning.** `XwaylandServer::start` creates two socket pairs, `wl` and `wm`, plus a `displayfd` pipe, and execs:
 
 ```text
-Xwayland :N -rootless -core -terminate [DELAY]
+Xwayland :N -rootless -core [-terminate DELAY]
   -listenfd X_FD0 -listenfd X_FD1 -displayfd READY_FD -wm WM_FD
 ```
 
-This is wlroots' argv (xwayland/server.c:50-90). `-terminate` is always passed. `DELAY` is 10 in lazy mode and absent otherwise, as wlroots' `wlr_xwayland_create` sets `terminate_delay = lazy ? 10 : 0` (xwayland/xwayland.c:147), which Wayfire calls at src/view/xwayland.cpp:258. The child environment has `WAYLAND_SOCKET` set to the child's end of `wl`, and the listen, `wm` and `displayfd` descriptors are the only ones without close-on-exec. The binary is `Xwayland` from `PATH`; `SHINGLE_XWAYLAND` overrides it, as `WLR_XWAYLAND` does in wlroots (server.c:124). Unlike wlroots, Shingle does not double-fork: it keeps the `Child` and watches it through a pidfd (`rustix::process::pidfd_open`) registered as a calloop `Generic` source, as the display and socket descriptors already are (crates/shingle/src/lib.rs:579-597). The compositor end of `wl` becomes a Wayland client through `DisplayHandle::insert_client`, the same call the accept paths use (crates/shingle/src/lib.rs:2074, 2099), with `ClientDataImpl` (crates/shingle/src/state.rs:52) gaining `xwayland: bool`.
+This is wlroots' argv (xwayland/server.c:50-90). `-terminate 10` is passed in lazy mode only (this text first said `-terminate` was always passed; see the [XW-2 entry](#xw-2-shingle-xwayland-server-sockets-process-configuration-and-xwm-bring-up) for why that was wrong). The delay is 10 as wlroots' `wlr_xwayland_create` sets `terminate_delay = lazy ? 10 : 0` (xwayland/xwayland.c:147), which Wayfire calls at src/view/xwayland.cpp:258. The child environment has `WAYLAND_SOCKET` set to the child's end of `wl`, and the listen, `wm` and `displayfd` descriptors are the only ones without close-on-exec. The binary is `Xwayland` from `PATH`; `SHINGLE_XWAYLAND` overrides it, as `WLR_XWAYLAND` does in wlroots (server.c:124). Unlike wlroots, Shingle does not double-fork: it keeps the `Child` and watches it through a pidfd (`rustix::process::pidfd_open`) registered as a calloop `Generic` source, as the display and socket descriptors already are (crates/shingle/src/lib.rs:579-597). The compositor end of `wl` becomes a Wayland client through `DisplayHandle::insert_client`, the same call the accept paths use (crates/shingle/src/lib.rs:2074, 2099), with `ClientDataImpl` (crates/shingle/src/state.rs:52) gaining `xwayland: bool`.
 
 **Readiness.** The `displayfd` pipe is a calloop source. When Xwayland writes the display number, the server is ready. Shingle then connects the XWM on the compositor end of `wm` ([2](#2-x-window-manager)), runs `xwayland.startup_script` through `launch_command` with the client environment (Wayfire runs `core/xwayland_startup_script` on ready, src/view/xwayland.cpp:236-255), and pushes the IPC event `xwayland-ready`. That event is Shingle's own: Wayfire has no IPC event for it.
 
@@ -86,7 +86,7 @@ This is wlroots' argv (xwayland/server.c:50-90). `-terminate` is always passed. 
 | `lazy` | `lazy` | Bind, and register both listen descriptors in calloop. On the first readable event, remove the watches and start, as wlroots' `server_start_lazy` and `xwayland_socket_connected` do (server.c:413, 425). Xwayland then accepts the waiting client itself. |
 | `false` | `false` | Bind nothing. `DISPLAY` is removed from child environments, `stipc/get_display` reports `""`, and X11 clients fail to connect. |
 
-The YAML model gains `ShingleConfig.xwayland: XwaylandConfig { mode, startup_script }` in crates/shingle-config/src/lib.rs, validated like `behavior.preferred_decoration_mode` (lib.rs:256), with WCM fields. The Wayfire importer maps `("core", "xwayland")` and `("core", "xwayland_startup_script")` next to `("core", "preferred_decoration_mode")` (crates/shingle-config/src/wayfire.rs:468). As in Wayfire, which reads the option once in `init_desktop_apis` (src/view/view-impl.cpp:166), a changed mode takes effect only after a restart. `apply_config` (crates/shingle/src/lib.rs:916) keeps the running server and logs that the change needs one, the same rule `behavior.disable_primary_selection` follows ([features.md](../features.md)). Shingle's default is an [open question](#open-questions).
+The YAML model gains `ShingleConfig.xwayland: XwaylandConfig { mode, startup_script }` in crates/shingle-config/src/lib.rs, validated like `behavior.preferred_decoration_mode` (lib.rs:256), with WCM fields. The Wayfire importer maps `("core", "xwayland")` and `("core", "xwayland_startup_script")` next to `("core", "preferred_decoration_mode")` (crates/shingle-config/src/wayfire.rs:468). As in Wayfire, which reads the option once in `init_desktop_apis` (src/view/view-impl.cpp:166), a changed mode takes effect only after a restart. `apply_config` (crates/shingle/src/lib.rs:916) keeps the running server and logs that the change needs one, the same rule `behavior.disable_primary_selection` follows ([features.md](../features.md)). Shingle's default is `lazy` ([Decisions](#decisions)).
 
 **Exporting `DISPLAY`.** `Compositor::client_environment()` (XW-1; it returns a `ClientEnvironment`, see the XW-1 deviations) returns `WAYLAND_DISPLAY`, plus `DISPLAY=:N` (or `DISPLAY` removed, when there is no server) and `_JAVA_AWT_WM_NONREPARENTING=1`, which Wayfire sets for every child (src/core/core.cpp:539). Every spawn site listed in [What exists today](#what-exists-today) takes this list instead of a bare socket name: `launch_saved`, `launch_autostart` and `launch_command` (crates/shingle-session/src/lib.rs:129-192), `--spawn`, the lock client, `stipc/run` and headless `--spawn`. Shingle never calls `set_var("DISPLAY")` on itself, because nested's winit may still read the host's `DISPLAY` (crates/shingle-bin/src/backend.rs:29).
 
@@ -100,7 +100,7 @@ The YAML model gains `ShingleConfig.xwayland: XwaylandConfig { mode, startup_scr
 1. Destroy the XWM.
 2. Unmap and detach every X11 window as if its surface had been destroyed, which leaves session placeholders exactly as a disconnecting Wayland client does (`detach_toplevel`, crates/shingle/src/shell.rs:614).
 3. Restart only if the server ran for more than 5 s, lazily in `lazy` mode and eagerly otherwise, as wlroots' `handle_client_destroy` does (server.c:198-222). The rule avoids a crash loop.
-4. If it ran 5 s or less, log the failure, keep the sockets and lock, and stay without X until the next connection in lazy mode or the next restart.
+4. If it ran 5 s or less, log the failure, keep the sockets and lock, and stay without X until Shingle restarts. In lazy mode the sockets are not watched again either, as in wlroots, so an X client then waits in the listen backlog until it gives up.
 
 A lazy server that exits after its 10 s idle delay is restarted lazily by the same rule. On SIGTERM, shutdown stops the XWM and Xwayland before Wayland clients are destroyed, as Wayfire does (src/core/core.cpp:352-354). It then removes the sockets and the lock.
 
@@ -124,13 +124,13 @@ The XWM is a Rust port of the wlroots behaviour Wayfire relies on, in `crates/sh
 
 **Bring-up**, when the XWM connects:
 
-1. Intern the atoms in one pipelined batch: wlroots' list at xwm.c:22-108, minus `WL_SURFACE_ID` and the Xdnd atoms until [XW-6](#xw-6-shingle-xwayland-dnd-drag-and-drop-later).
+1. Intern the atoms in one pipelined batch: wlroots' list at xwm.c:22-108, minus `WL_SURFACE_ID` and the Xdnd atoms until [XW-6](#xw-6-shingle-xwayland-dnd-drag-and-drop-later). Require Composite and XFixes, and send XFixes `QueryVersion(6, 0)` and `SetClientDisconnectMode(Terminate)`, as wlroots' `xwm_create` does, so that the XWM's own connection does not keep a lazy server from exiting (added in XW-2).
 2. `composite::redirect_subwindows(root, Manual)` (xwm.c:2803).
 3. Select `SubstructureRedirect | SubstructureNotify | PropertyChange` on the root.
 4. Create the WM check window, and own `WM_S0` and `_NET_WM_CM_S0`.
 5. Set `_NET_SUPPORTING_WM_CHECK`, and set `_NET_SUPPORTED` to wlroots' list (xwm.c:2807-2827).
-6. Set the root cursor from the configured xcursor theme (`left_ptr`, through Render `CreateCursor`), as Wayfire's `xwayland_update_default_cursor` does (src/view/xwayland.cpp:283).
-7. Select XFixes selection events for the [selection bridge](#5-input-selection-and-dnd).
+6. (XW-4) Set the root cursor from the configured xcursor theme (`left_ptr`, through Render `CreateCursor`), as Wayfire's `xwayland_update_default_cursor` does (src/view/xwayland.cpp:283).
+7. (XW-5) Select XFixes selection events for the [selection bridge](#5-input-selection-and-dnd).
 
 **Window model.** `XWindow` is pure data: the X id, override-redirect, geometry, the parsed properties below, the association serial and the associated surface. Each property has a parser in `xwm/props.rs` and unit tests on byte buffers.
 
@@ -416,7 +416,7 @@ Geometry details:
 | `xdotool` | trixie has 1:3.20160805.1-5.1 | **No** |
 | `wmctrl`, `xsel`, `python3-xlib`, `python3-xcffib`, `foot` | | **No** |
 
-Development headers `libx11-dev` and `libxcb1-dev` are installed, though `RustConnection` does not need them. trixie's `xdotool` predates `windowstate`, so it could not set `_NET_WM_STATE` anyway. Instead, the client side of the tests is a small x11rb program in the workspace (below), so nothing has to be installed. Whether to install `xdotool` for keyboard and pointer scripting is an [open question](#open-questions); STIPC's `feed_key`, `feed_button` and `move_cursor` already cover that inside Shingle.
+Development headers `libx11-dev` and `libxcb1-dev` are installed, though `RustConnection` does not need them. trixie's `xdotool` predates `windowstate`, so it could not set `_NET_WM_STATE` anyway. Instead, the client side of the tests is a small x11rb program in the workspace (below), so nothing has to be installed. The operator decided not to install `xdotool` ([Decisions](#decisions)); STIPC's `feed_key`, `feed_button` and `move_cursor` already cover that inside Shingle.
 
 ### Layer 1: unit tests, no X server
 
@@ -449,9 +449,11 @@ In `shingle`, with the in-process test client and a fake XWM:
 
 ### Layer 2: real clients in a private namespace
 
-A Python harness, `tools/xwayland_test/run.py`, starts headless Shingle (`--headless`, no host contact at all) for protocol-level checks, or nested Shingle for pixel checks, under `unshare --user --map-root-user --mount --net`:
+A Python harness, `tools/xwayland_test/run.py`, starts headless Shingle (`--headless`, no host contact at all) for protocol-level checks, or nested Shingle for pixel checks, under `unshare --user --map-root-user --mount --net --pid --fork --mount-proc`:
 
 - **X sockets.** A private directory is bind-mounted over `/tmp/.X11-unix`, so neither the host's `X0`/`X1` nor its abstract sockets are visible.
+- **Signals.** The PID namespace confines every signal the harness sends to processes it started, and it checks each PID before signalling it (positive, above 1, and the expected program, such as `Xwayland`), because `kill(-1)` from a mapped-root user namespace without a PID namespace reaches every process of the operator's user; the first XW-2 run did exactly that.
+- **Devices.** Empty tmpfs mounts cover `/dev/dri` and `/dev/input`, so neither Xwayland nor anything else in the namespace can open the host's GPU or input devices.
 - **Other directories.** There are private `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `HOME` and `--ipc` paths, and `/tmp/.X<N>-lock` lives in a private `/tmp` bind as well.
 - **Nested runs.** `WAYLAND_DISPLAY` is set to the host socket's absolute path ([development.md](../development.md#running)). Pathname Unix sockets still connect across network namespaces. No host input is sent; input comes only from STIPC.
 
@@ -542,6 +544,19 @@ Acceptance:
 - Xwayland's log confirms the shm path, and the compile-time cost of a second `x11rb` in nested builds is recorded.
 - With `mode: false` nothing is bound and `DISPLAY` is absent.
 
+Done, 2026-11-25 (branch `shingle-xwayland-server`). Results are in [status.md](../status.md#with-real-clients): the namespace harness passed 47/47 checks, and Xwayland's log confirms its shared-memory path without `-shm` (`Failed to initialize glamor, falling back to sw`). Building x11rb 0.14 with the features used takes about 2.6 s in a debug build. Where the code differs from the text above, the code was followed:
+
+- **`-terminate` only in lazy mode.** Xwayland's `-terminate` fires when every remaining client has asked XFixes to be ignored (`XFixesShouldDisconnectClient`, dix/dispatch.c). Without that request from the XWM, a lazy server never exited when idle; the first harness run showed it still running 40 s after its last client. The XWM now sends `SetClientDisconnectMode(Terminate)` as wlroots does. With it, a bare `-terminate` made an eager server exit as soon as its last X client left, so eager mode passes no `-terminate`, which matches wlroots with `terminate_delay` 0.
+- **No restart after a short run, in either mode.** Step 4 of "Crash and exit" now says so; wlroots does not re-arm the lazy watch either.
+- **Ownership.** `Compositor` owns the glue (`xwayland::Xwayland` in crates/shingle/src/xwayland.rs, holding the `XwaylandServer`, the `Xwm` and the calloop tokens), because starting needs the display handle and the event loop. `CompositorState.xwayland` mirrors what IPC and the client environment need (display, PID) and the flags the sources set. Each source is removed before its descriptor closes.
+- **Exit detection** is the pidfd alone. A closed Xwayland Wayland connection is only logged (`ClientDataImpl.xwayland`); Xwayland exits with it, and the pidfd follows.
+- **XWM events are read every turn**, not only when the socket is readable, because x11rb may buffer events while it waits for a reply. Bring-up uses checked requests for the Composite redirect and the root event mask, so a second window manager fails bring-up; a failed bring-up stops the server.
+- **`xwayland.mode` is an enum** (`shingle_config::XwaylandMode`), written in YAML as `true`, `false` or `lazy` (booleans or strings), rather than a validated string.
+- **Library default.** `shingle::Config::default()` disables XWayland, so tests and embedders bind nothing in `/tmp`; the configuration file's default is `lazy` and reaches the compositor through `From<ShingleConfig>`. `XwaylandSettings` also carries the socket directory and the program, which tests point at a temporary directory and a bash stand-in for Xwayland. The startup script's output follows `behavior.discard_command_output`.
+- **Root cursor and XFixes selection events** (bring-up steps 6 and 7) are left to XW-4 and XW-5, as the plan already put the cursor in XW-4.
+- **The probe client** (`examples/xw_probe.rs`) is not written yet: XW-2's checks need only `xdpyinfo` and `xprop`. XW-3 adds it.
+- **`DISPLAY` is printed** by headless and nested next to `WAYLAND_DISPLAY` when an X display is bound.
+
 ### XW-3 `shingle-xwayland-windows`: association and managed toplevels
 
 Add `xwayland_shell_v1`, `Role::Xwayland`, `Pairing` and `try_map`. Build `XWindow` property reading and classification, and the MapRequest, ConfigureRequest, PropertyNotify, UnmapNotify and DestroyNotify handling. Managed windows become `ToplevelRole`s with `ToplevelHandle::X11`. Add X configure, states and close, `_NET_CLIENT_LIST`, X11 identity via XRes and `capture_pid`, and the `view_json` sources. Override-redirect windows are tracked but not drawn yet.
@@ -588,15 +603,22 @@ Acceptance: a drag from an X client (`xedit`, or the probe client acting as an X
 
 ### XW-7 `shingle-xwayland-hidpi`: zero-scaling mode (optional)
 
-An `xwayland.zero_scaling` option ([6](#rejected-alternatives-5)). Whether to do it at all is an [open question](#open-questions).
+An `xwayland.zero_scaling` option ([6](#rejected-alternatives-5)). It is deferred until after the multi-output item ([Decisions](#decisions)).
 
 Acceptance: at output scale 2, `xdpyinfo` reports the physical size and `xlogo` is drawn sharp (pixel check through `grim`), with input and override-redirect positions correct.
 
 XW-1 has no dependencies and can start right away, in parallel with the remaining items ahead of XWayland in the roadmap. XW-2 needs XW-1 for the client environment. XW-3 needs XW-2, and XW-4 needs XW-3. XW-5 needs XW-3 (selections need a focused X window to be useful, though not XW-4's focus rules) and can run in parallel with XW-4. XW-6 and XW-7 come last, in either order.
 
-## Open questions
+## Decisions
 
-These need the operator's decision. The design proceeds with the stated default until they are answered.
+The operator answered the former open questions on 2026-11-25, approving the proposed defaults:
+
+1. **Shingle's default `xwayland.mode` is `lazy`.** The Wayfire importer keeps Wayfire's `true` when the option is missing.
+2. **No extra X tools are installed.** Tests use the in-tree probe client and STIPC.
+3. **XW-7 is deferred** until after the multi-output item.
+4. **Override-redirect windows stay out of `list-views`.**
+
+The questions as they were posed:
 
 1. **Shingle's default `xwayland.mode`.** Wayfire's default is `true`, which is eager (metadata/core.xml:48-63). The proposal is `lazy` for Shingle's own default: nested test runs would not start an X server they do not use, and `DISPLAY` is known either way. The Wayfire importer would keep Wayfire's meaning, so an imported config without the key gets `true`. The alternative is `true` everywhere, which matches Wayfire exactly.
 2. **Installing test tools.** Should `xdotool` (and perhaps `wmctrl`) be installed for manual checks, or is the in-tree probe client plus STIPC enough? The design assumes nothing is installed.

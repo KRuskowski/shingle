@@ -157,6 +157,10 @@ Shingle advertises `ext-workspace-v1` for workspace bars and switchers. Clients 
 
 `behavior.disable_primary_selection` matches Wayfire's workaround for disabling middle-click copy and paste. When enabled at startup, Shingle does not advertise `zwp_primary_selection_device_manager_v1`. Changing the option requires a compositor restart so existing clients and new clients see the same protocol availability. The option can be imported and edited through WCM.
 
+### XWayland
+
+Shingle binds its own X display `:N` (the first free one, with `/tmp/.X<N>-lock`, `/tmp/.X11-unix/X<N>` and the abstract socket of that name) when it starts and runs a rootless `Xwayland` for it, with its own X window manager. `xwayland.mode` takes Wayfire's `[core] xwayland` values: `true` starts Xwayland with the compositor; `lazy`, Shingle's default, starts it on the first X11 connection and lets it exit 10 s after its last X client; `false` binds nothing and removes `DISPLAY` from children. The Wayfire importer keeps Wayfire's default, `true`, when the option is missing. A changed mode takes effect after a restart. Xwayland is restarted when it exits after running more than 5 s (at once when eager, on the next connection when lazy), and not otherwise. `xwayland.startup_script` (`[core] xwayland_startup_script`) runs in the client environment whenever Xwayland is ready. `SHINGLE_XWAYLAND` names another Xwayland binary. Both options can be imported and edited in WCM. X11 windows are not managed yet (XW-3 in [design/xwayland.md](design/xwayland.md)).
+
 ### Sandboxed clients
 
 `wp_security_context_manager_v1` accepts listener sockets from sandbox engines. Committed engine, app, and instance metadata is attached to every accepted client. Sandboxed clients cannot nest security contexts. Every advertised protocol global uses the same configurable visibility policy.

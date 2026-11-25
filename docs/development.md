@@ -48,9 +48,9 @@ cargo run --bin shingle -- --config data/shingle.yaml --spawn foot
 cargo run --bin shingle -- --help
 ```
 
-Inside a Wayland or X11 session this selects the nested backend and opens Shingle in a window, prints its private `WAYLAND_DISPLAY` and passes it to `--spawn` children. Every child Shingle starts gets the client environment (crates/shingle-session/src/environment.rs): Shingle's own `WAYLAND_DISPLAY` and, with `--ipc`, `WAYFIRE_SOCKET`; the host's `DISPLAY`, `WAYLAND_SOCKET` and `WAYFIRE_SOCKET` are removed. `--headless` runs without a window; `--backend native` (and a start with none of `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` and `DISPLAY` set) reports that the native backend is not built yet and exits with status 1. Bad options and unknown backends exit with status 2. The selection rules are in crates/shingle-bin/src/backend.rs and the [README](../README.md#running). Locking runs `shingle-lock` from `PATH`; set `SHINGLE_LOCK` to use another executable.
+Inside a Wayland or X11 session this selects the nested backend and opens Shingle in a window, prints its private `WAYLAND_DISPLAY` and passes it to `--spawn` children. Every child Shingle starts gets the client environment (crates/shingle-session/src/environment.rs): Shingle's own `WAYLAND_DISPLAY`, its own `DISPLAY` and, with `--ipc`, `WAYFIRE_SOCKET`; the host's `DISPLAY`, `WAYLAND_SOCKET` and `WAYFIRE_SOCKET` never get through. With the default `xwayland.mode: lazy`, Shingle binds the next free X display in `/tmp/.X11-unix` when it starts (`:2` beside the host session's `:0` and `:1`). `--headless` runs without a window; `--backend native` (and a start with none of `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` and `DISPLAY` set) reports that the native backend is not built yet and exits with status 1. Bad options and unknown backends exit with status 2. The selection rules are in crates/shingle-bin/src/backend.rs and the [README](../README.md#running). Locking runs `shingle-lock` from `PATH`; set `SHINGLE_LOCK` to use another executable.
 
-When testing nested from a session whose `XDG_RUNTIME_DIR` is replaced by a private one, set `WAYLAND_DISPLAY` to the host socket's absolute path so the window still reaches the host, and set `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `HOME` to private directories too.
+When testing nested from a session whose `XDG_RUNTIME_DIR` is replaced by a private one, set `WAYLAND_DISPLAY` to the host socket's absolute path so the window still reaches the host, and set `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `HOME` to private directories too. Outside the XWayland harness, also set `xwayland: {mode: false}` in the test config, so that nothing is bound in the host's `/tmp`.
 
 ## Real-client tests
 
@@ -59,6 +59,8 @@ Unit tests do not cover protocol behaviour end to end. For any protocol, IPC or 
 - Never stop or replace the host Wayfire session.
 - Use a private `XDG_RUNTIME_DIR`, Wayland socket and IPC socket for each run.
 - Exercise real protocol calls and check the resulting state changes; a successful build or import proves nothing.
+- A harness that signals processes runs in a PID namespace (`unshare --pid --fork --mount-proc`) and checks every PID before signalling it: never signal a PID taken from a reply without checking it is positive, greater than 1 and the expected process, because `kill(-1)` reaches every process of the user.
+- X11 clients run only inside `tools/xwayland_test/run.py`'s namespace, never against the host's X displays.
 - Afterwards remove temporary fixture sources, binaries outside `target/`, sockets and logs. Leave `target/` itself in place.
 - Record the result in [status.md](status.md), separately from what was only unit-tested.
 

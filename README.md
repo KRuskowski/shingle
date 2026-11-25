@@ -2,7 +2,7 @@
 
 Shingle is a tiling Wayland compositor written in Rust, built around Wayfire's tiling behaviour and compatible with Wayfire's configuration and IPC. Windows live in a persistent tiling tree rather than as independent positions, so the exact layout survives logout and login. Rendering uses wgpu.
 
-Shingle currently runs **nested** inside another Wayland or X11 session, or headless. It is not yet a replacement for Wayfire on real hardware: there is no DRM/KMS or libinput backend, no DMA-BUF, no XWayland, and multi-output support is incomplete. See [docs/status.md](docs/status.md).
+Shingle currently runs **nested** inside another Wayland or X11 session, or headless. It is not yet a replacement for Wayfire on real hardware: there is no DRM/KMS or libinput backend, no DMA-BUF, X11 windows do not map yet (Xwayland itself runs), and multi-output support is incomplete. See [docs/status.md](docs/status.md).
 
 ## Quick start
 
@@ -42,7 +42,7 @@ cargo run -p shingle-wcm -- \
 
 ## Scripting
 
-Shingle serves Wayfire-compatible IPC and exports `WAYFIRE_SOCKET` to the programs it starts, so Wayfire scripts work unchanged. Those programs never inherit the host session's `DISPLAY`, `WAYLAND_SOCKET` or `WAYFIRE_SOCKET`. See [docs/ipc.md](docs/ipc.md).
+Shingle serves Wayfire-compatible IPC and exports `WAYFIRE_SOCKET` to the programs it starts, so Wayfire scripts work unchanged. Those programs get Shingle's own `DISPLAY` and never inherit the host session's `DISPLAY`, `WAYLAND_SOCKET` or `WAYFIRE_SOCKET`. See [docs/ipc.md](docs/ipc.md).
 
 ## Upgrading from Tilefire
 

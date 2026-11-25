@@ -8,7 +8,7 @@ cargo run --bin shingle -- --ipc /tmp/shingle-ipc.socket
 
 The socket path is exported as `WAYFIRE_SOCKET` to every client Shingle starts, from restored and autostarted clients and `--spawn` programs to everything launched later, so existing Wayfire scripts work unchanged. Without `--ipc`, `WAYFIRE_SOCKET` is removed from their environment, so a nested Shingle never hands its children the host compositor's socket. Shingle's own environment is not changed; the children's comes from `Compositor::client_environment` (`shingle_session::ClientEnvironment`). Library users can start the same server with `Compositor::enable_ipc(path)`, before starting any client.
 
-`list-methods` returns a sorted inventory of the 77 supported methods. Numeric vswitch activators such as `binding_4` are matched dynamically and are not part of that count. The method table lives in `SUPPORTED_METHODS` in `crates/shingle/src/ipc.rs`.
+`list-methods` returns a sorted inventory of the 79 supported methods. Numeric vswitch activators such as `binding_4` are matched dynamically and are not part of that count. The method table lives in `SUPPORTED_METHODS` in `crates/shingle/src/ipc.rs`.
 
 ## Methods
 
@@ -23,7 +23,7 @@ The socket path is exported as `WAYFIRE_SOCKET` to every client Shingle starts, 
 | `command` | `register-binding`, `unregister-binding`, `clear-bindings` |
 | `input` | `list-devices`, `configure-device` |
 | `scale`, `expo`, `invert` | `scale/toggle`, `scale/toggle_all`, `expo/toggle`, `invert/toggle` |
-| `stipc` | `feed_key`, `feed_button`, `move_cursor`, `touch`, `touch_release`, `ping`, `run`, `get_display`, `layout_views` |
+| `stipc` | `feed_key`, `feed_button`, `move_cursor`, `touch`, `touch_release`, `ping`, `run`, `get_display`, `get_xwayland_display`, `get_xwayland_pid`, `layout_views` |
 | (none) | `list-methods` |
 
 ## Views and outputs
@@ -95,6 +95,7 @@ Each device tracks the keys, buttons and touch points it holds. Disabling or rem
 - Top/bottom stacking events distinguish state changes from ordinary z-ordering.
 - Keyboard modifier events carry the current layout state.
 - Scale, Expo and inversion emit Wayfire-compatible plugin activation events when their nested frontend state actually changes.
+- `xwayland-ready` is Shingle's own (Wayfire has no such event): `{"event": "xwayland-ready", "display": ":N", "pid": P}`, sent each time Xwayland has started and Shingle's X window manager is connected, after `xwayland.startup_script` was launched. A catch-all watch includes it.
 
 ### Map blocking
 
@@ -109,6 +110,6 @@ A blocked new view takes no tile until it is released, as Wayfire's tile plugin 
 - `feed_key` and `feed_button` accept common evdev key and button names, including `S-` prefixes and `press`, `release` or `full` click modes.
 - STIPC input goes through the first registered seat device of each kind, so it is dropped while that device is disabled, and also when no device of that kind is registered (see [Input devices](#input-devices)). The methods still reply `ok`.
 - `move_cursor` moves the pointer. `touch` sends down for a new finger and motion for an active one; `touch_release` lifts it.
-- `run` launches a shell command in the client environment (the compositor's `WAYLAND_DISPLAY` and `WAYFIRE_SOCKET`, no inherited `DISPLAY`), returns its PID, and reaps exited children while polling.
-- `get_display` reports the Wayland socket and an empty XWayland display, since XWayland is not implemented.
+- `run` launches a shell command in the client environment (the compositor's `WAYLAND_DISPLAY`, `WAYFIRE_SOCKET` and its own `DISPLAY`, never the host's), returns its PID, and reaps exited children while polling.
+- `get_display` reports the Wayland socket and Shingle's X display (`"xwayland": ":N"`), which is bound at startup, so it is known before a lazy Xwayland starts; it is `""` with `xwayland.mode: false`. `get_xwayland_display` returns `{"result": "ok", "display": ":N"}` and `get_xwayland_pid` `{"result": "ok", "pid": P}`, with -1 while no Xwayland runs, as in Wayfire.
 - `layout_views` validates and applies a batch of exact view rectangles, with optional output-name checks. Invalid input causes no partial update.

@@ -31,7 +31,7 @@ Add DMA-BUF import and remove unnecessary CPU texture copies.
 
 ## 4. XWayland
 
-Run X11 applications through a rootless `Xwayland` with Shingle's own X window manager. The design is [design/xwayland.md](design/xwayland.md), proposed on 2026-11-25 and waiting on the operator's [open questions](design/xwayland.md#open-questions).
+Run X11 applications through a rootless `Xwayland` with Shingle's own X window manager. The design is [design/xwayland.md](design/xwayland.md), from 2026-11-25; the operator has decided its open questions ([Decisions](design/xwayland.md#decisions)).
 
 In short:
 
@@ -40,19 +40,19 @@ In short:
 - **XWM.** The XWM uses `x11rb` 0.14 (pure Rust) in a new `shingle-xwayland` crate and ports the ICCCM/EWMH subset of wlroots' XWM, which Wayfire uses. Surfaces are associated only through `xwayland_shell_v1`, which needs Xwayland 23.1 or newer.
 - **Window model.** X11 toplevels share `ToplevelRole` with xdg toplevels through a `ToplevelHandle` enum. Tiling, rules, Scale, Expo, IPC and sessions work unchanged: `app-id` comes from the `WM_CLASS` class, and the PID from XRes. Override-redirect windows are drawn unmanaged above the Top layer.
 - **Selections and scaling.** Clipboard and primary selection are bridged both ways. Scaling matches Wayfire: X11 clients are blurry above scale 1.
-- **Testing.** Real-client tests run inside a user, mount and network namespace with a private `/tmp/.X11-unix`.
+- **Testing.** Real-client tests run inside a user, mount, network and PID namespace with a private `/tmp/.X11-unix`.
 
 The work is split into seven workspaces, each with acceptance criteria in the design:
 
 1. XW-1 `shingle-toplevel-handle`: done; the toplevel role is shell-neutral and every child gets one client environment, which stopped the host `DISPLAY` and `WAYFIRE_SOCKET` leaks. See [status.md](status.md#the-shingle-binary) and [status.md](status.md#with-real-clients).
-2. XW-2 `shingle-xwayland-server`: the `shingle-xwayland` crate, display sockets, the server process, the restart rule, configuration and import, the XWM bring-up, and the `stipc` display methods.
+2. XW-2 `shingle-xwayland-server`: done; Shingle binds its X display, supervises Xwayland (eager or lazy, with the restart rule) and brings its XWM up; `DISPLAY`, the `stipc` display methods, `xwayland-ready` and the startup script work. See [status.md](status.md#with-real-clients).
 3. XW-3 `shingle-xwayland-windows`: `xwayland_shell_v1`, serial pairing, and managed X11 toplevels as Shingle windows with configure, close, IPC and session identity.
 4. XW-4 `shingle-xwayland-behaviour`: ICCCM focus, override-redirect windows, `_NET_WM_STATE`, move and resize requests, transients and dialogs, and checks with Scale, Expo, rules and session restore.
 5. XW-5 `shingle-xwayland-selection`: clipboard and primary selection in both directions, with INCR.
 6. XW-6 `shingle-xwayland-dnd`: Xdnd drag and drop (later).
 7. XW-7 `shingle-xwayland-hidpi`: optional zero-scaling HiDPI mode.
 
-XW-2 is next. The design's open questions are still unanswered, so it proceeds with their stated defaults.
+XW-3 is next.
 
 ## 5. Multi-output
 
