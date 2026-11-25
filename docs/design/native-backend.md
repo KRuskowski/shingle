@@ -2,7 +2,7 @@
 
 Status: accepted with the operator's [decisions](#decisions), 2026-11-25. Roadmap item "Native backend" ([roadmap.md](../roadmap.md#2-native-backend)).
 
-Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit) or headless. This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1 to NB-5 and the single `shingle` binary are implemented (see [The `shingle` binary](#the-shingle-binary), [`shingle-render` without winit](#shingle-render-without-winit) and the entries for [NB-2](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor), [NB-3](#nb-3-shingle-frontend-extract-create-the-shared-crate-with-the-pure-modules), [NB-4](#nb-4-shingle-frontend-host-move-app-into-frontend) and [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)), each with notes on where the code differs from this design; the rest is not.
+Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit) or headless. This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1 to NB-5 and the single `shingle` binary are implemented (see [The `shingle` binary](#the-shingle-binary), [`shingle-render` without winit](#shingle-render-without-winit) and the entries for [NB-2](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor), [NB-3](#nb-3-shingle-frontend-extract-create-the-shared-crate-with-the-pure-modules), [NB-4](#nb-4-shingle-frontend-host-move-app-into-frontend) and [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)), each with notes on where the code differs from this design. NB-6 is built and unit-tested through fakes ([NB-6 as built](#nb-6-as-built)); its hardware checks wait for the test machine ([native-testing.md](../native-testing.md)). The rest is not built.
 
 Line numbers refer to branch `shingle-native-design` at `d2568d2`. Crate versions and dates were read from crates.io and GitHub on 2026-11-25; crate APIs were read from the crate sources (wgpu, drm, calloop and xkbcommon from `~/.cargo/registry`, the others from their published `.crate` files).
 
@@ -480,6 +480,8 @@ What the test machine covers:
 
 A test client that records `wl_keyboard`/`wl_pointer` events checks what clients receive, and pixel checks use Shingle's own wlr-screencopy (crates/shingle/src/screencopy.rs) with `grim`. Test harnesses are Python scripts under `tools/native_test/`, run on the test machine over SSH. Once the machine exists it should be registered as a takt target so workspaces can claim it exclusively.
 
+The steps for NB-6 are in [native-testing.md](../native-testing.md), with `wev` as the recording client and tools/native_test/uinput.py (virtual keyboard, mouse and touchscreen through `python3-evdev`, refusing to run without the test machine's marker file) and tools/native_test/ipc.py for IPC.
+
 ### Rejected test strategies
 
 - **A second seat or another VT on this host.** It shares the GPU and the kernel DRM device with Wayfire, and a VT switch pauses it. Forbidden.
@@ -718,10 +720,90 @@ The single binary of [decision 4](#decisions) was built ahead of the rest of NB-
 - **Crate layout.** The binary is package `shingle-bin` (crates/shingle-bin) with a `[[bin]]` named `shingle`. It cannot live in the `shingle` package: the backends depend on the `shingle` library, so the library cannot depend on them, and the library must not gain winit anyway. It does not live in `shingle-native` either, as this entry first planned, so that the native crate stays a library like `shingle-nested` and the binary is the one place that knows every backend. `shingle-nested` is now a library with one entry point, `shingle_nested::run(config, config_path, ipc_path, spawn)`; its old `main.rs` is its `lib.rs` without argument parsing. The headless loop that was `crates/shingle/src/main.rs` is crates/shingle-bin/src/headless.rs. NB-6 adds `shingle-native` as a dependency of `shingle-bin` and replaces the `Backend::Native` arm of `start` in crates/shingle-bin/src/main.rs.
 - **`shingle-nested` binary.** Removed, not kept as an alias, because this decision drops it once the switch is in place and session files are to name `shingle` only. `shingle --backend nested` is the explicit equivalent, and inside a session plain `shingle` selects nested anyway.
 - **Selection** is the pure function `backend::select(requested, env)` (crates/shingle-bin/src/backend.rs), unit-tested with an injected environment lookup. It follows wlroots' `wlr_backend_autocreate` (backend/backend.c, read on the GitHub mirror's `master`), which Wayfire calls at wayfire/src/main.cpp:422: an explicit choice first, then `WAYLAND_DISPLAY` or `WAYLAND_SOCKET`, then `DISPLAY` select nested, and with none of them native. Shingle's explicit choices are `--backend`/`--headless`, then `SHINGLE_BACKEND`, the counterpart of `WLR_BACKENDS` (one name, not a comma-separated list, since Shingle runs one backend at a time). As in wlroots, an unknown name is an error, not a fallback to detection, and a nested backend that cannot connect to its host is an error rather than a reason to try native. Unlike wlroots, which only checks that `getenv` returns non-NULL, an empty variable counts as unset, so a stray `WAYLAND_DISPLAY=` in a TTY login does not make Shingle try to nest. `WAYLAND_SOCKET` is included because winit's Wayland connection honours it as libwayland does.
-- **Native stub.** With native selected, `shingle` prints that the native backend is not built yet, why it was selected (for example "none of WAYLAND_DISPLAY, WAYLAND_SOCKET or DISPLAY is set") and what to use instead, and exits with status 1 before loading the configuration or starting any client. NB-6's "no seat" refusal over SSH replaces this message for the detected case.
+- **Native stub.** With native selected, `shingle` printed that the native backend is not built yet, why it was selected (for example "none of WAYLAND_DISPLAY, WAYLAND_SOCKET or DISPLAY is set") and what to use instead, and exited with status 1 before loading the configuration or starting any client. NB-6 replaced the stub with `shingle_native::run`; the "no seat" refusal keeps the reason and the advice ([NB-6 as built](#nb-6-as-built)).
 - **Command line** (crates/shingle-bin/src/cli.rs): the union of the old binaries' options, `--backend`, `--headless`, `--config`, `--ipc` and `--spawn PROGRAM [ARG]...`, plus `-h`/`--help` and `--version`. Values may follow `=`. `--spawn` takes the rest of the command line. Repeated `--config` or `--ipc`, conflicting backends, unknown options, positional arguments and unknown backends are usage errors with exit status 2. Headless gained `--ipc` and `--spawn`, which only nested had.
 - **`WAYFIRE_SOCKET`** is now exported before any client starts. Nested used to set it after `Frontend::new`, which had already launched the restored session, autostart and `--spawn`, so those clients did not see it; Wayfire's IPC plugin sets it before autostart. Since XW-1 the binary no longer sets it in its own environment: `Frontend::new` takes the IPC path and enables IPC first, and every child gets it from `Compositor::client_environment` ([xwayland.md](xwayland.md#xw-1-shingle-toplevel-handle-shell-neutral-toplevel-and-client-environment)).
 - The startup line `shingle: using the nested backend (WAYLAND_DISPLAY is set)` goes to standard error; standard output still carries only `WAYLAND_DISPLAY=...`, which fixtures read.
+
+#### NB-6 as built
+
+Done on branch `shingle-native-session`: built, clippy-checked and unit-tested on this host; nothing in it has run on a seat yet. The acceptance items above are steps 1 to 7 of [native-testing.md](../native-testing.md). The API (crates/shingle-native/src):
+
+```rust
+// session.rs
+pub enum SeatEvent { Enable, Disable }
+pub trait Session {
+  fn seat_name(&self) -> &str;
+  fn open_device(&mut self, path: &Path) -> io::Result<OwnedFd>;
+  fn close_device(&mut self, fd: OwnedFd) -> io::Result<()>;
+  fn switch_vt(&mut self, vt: u32) -> io::Result<()>;
+  fn dispatch(&mut self, timeout: Option<Duration>)
+    -> io::Result<Vec<SeatEvent>>;
+  fn acknowledge_disable(&mut self) -> io::Result<()>;
+  fn poll_fd(&self) -> Option<BorrowedFd<'_>>;
+}
+pub struct LibSeatSession; // the real one
+pub fn preflight(env) -> Result<(), NoSeat>;
+pub fn wait_for_enable(session, timeout, now) -> Result<(), NoSeat>;
+pub fn check_backend(backend: Option<&str>, allow_builtin: bool)
+  -> Result<(), NoSeat>;
+
+// input.rs
+pub enum NativeEvent { Added(DeviceDescription), Removed(DeviceKey),
+  Input { device: DeviceKey, time_usec: u64, input: DeviceInput } }
+pub trait InputSource {
+  fn dispatch(&mut self, output_size: (u32, u32))
+    -> io::Result<Vec<NativeEvent>>;
+  fn suspend(&mut self, output_size: (u32, u32)) -> Vec<NativeEvent>;
+  fn resume(&mut self, output_size: (u32, u32))
+    -> io::Result<Vec<NativeEvent>>;
+  fn configure(&mut self, device: &DeviceKey, settings: &[Setting]);
+  fn set_send_events(&mut self, device: &DeviceKey, mode: SendEvents);
+  fn set_leds(&mut self, leds: Leds);
+  fn poll_fd(&self) -> Option<BorrowedFd<'_>>;
+}
+pub struct LibinputSource; // the real one, input/libinput.rs
+pub struct Translator; // DeviceInput -> InputEvent
+pub fn device_settings(config, device) -> Vec<Setting>;
+
+// udev.rs
+pub struct DeviceRegistry; // libinput devices <-> seat devices
+
+// host.rs
+pub struct Backend<S: Session, I: InputSource>;
+impl Backend {
+  pub fn new(frontend, session: Rc<RefCell<S>>, input: I,
+    config: InputConfig, output_size, renderer) -> Result<Self, ..>;
+  pub fn step(&mut self) -> bool;
+  pub fn run(self) -> Result<(), Box<dyn Error>>;
+  pub fn finish(self);
+}
+
+// lib.rs
+pub fn run(config, config_path, ipc_path, spawn, options: Options)
+  -> Result<(), Box<dyn Error>>;
+```
+
+Elsewhere: `Frontend::set_session_active` and `Frontend::keyboard_leds` (crates/shingle-frontend/src/frontend.rs), `Keyboard::leds`, `Compositor::set_device_natural_scroll`, the new `[input]` options, and `--allow-builtin-seat` in crates/shingle-bin/src/cli.rs.
+
+Where the code differs from the plan, and why:
+
+- **Modules.** `session`, `udev`, `input` and `host` as planned, plus `diagnostics`. `udev` holds the registry of hotplugged input devices rather than a udev monitor of its own: input hotplug comes from libinput's udev backend, as [4](#4-input) decides, and the DRM monitor is NB-9's. There is no separate VT trait: `Session::switch_vt` is libseat's `switch_session`, and nothing calls a VT ioctl.
+- **The SSH refusal comes first.** Before libseat is opened, `shingle-bin`'s `plan` calls `shingle_native::preflight`, which refuses a login with `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` and no `XDG_SEAT` with "no seat: started over SSH (...); run from a VT login or start seatd", status 1. Waiting for libseat to fail is not enough: under seatd an SSH client in the seat group can be handed the seat of the active VT. libseat failing and the 5 s enable timeout still give "no seat" messages, as [6](#6-failure-handling) says.
+- **Which libseat backend.** libseat has no call that names the backend it chose. The `libseat` crate passes libseat's log to the `log` crate, so Shingle installs a logger and reads libseat's own "Seat opened with backend 'NAME'" line. `builtin` and also `noop` (neither switches VT) need `--allow-builtin-seat`; when the line is missing, the backend counts as unknown and is allowed. The real check is step 8 of the test plan.
+- **Devices survive a pause.** `libinput_suspend` removes every device and `libinput_resume` adds them again. The registry keeps the seat devices of a suspended device and gives them back to the device that reappears on the same event node with the same capabilities, so IPC ids and IPC-disabled state survive a VT switch; devices that do not come back are unregistered after the resume. wlroots recreates its devices, so in Wayfire both change.
+- **Send-events per libinput device.** A libinput device with several capabilities is several seat devices; it is set to `DISABLED` only when IPC has disabled all of them, and the gate drops the kinds that are disabled. Enabling restores the configured mode, which for a touchpad with `disable_touchpad_while_mouse` is `DISABLED_ON_EXTERNAL_MOUSE`, where Wayfire sets `ENABLED`.
+- **One xkb state per seat.** The frontend keeps one `Keyboard`, as NB-3 allowed. When IPC disables a keyboard, the backend releases the keys that device holds through the now disabled device, which updates the xkb state without dispatching anything; the registry tracks held keys per device and drops libinput's own releases of keys already released, so a disabled keyboard leaves no modifier behind when it is enabled again. A key held on two keyboards at once is released from the xkb state when either is disabled.
+- **The pause is the frontend's too.** `Frontend::set_session_active` pauses the frontend's own state (key repeat, xkb, switcher, drags, rotation, Expo pointer, touch gestures) before calling `Compositor::set_session_active`, so nothing held before a switch continues after it. The order of [3](#3-session-and-seat) is kept without the KMS steps: suspend libinput, pause, acknowledge; on resume, resume libinput, unregister vanished devices, resume, resend the LEDs and draw. Device input in the events of a suspend or resume is dropped.
+- **Natural scrolling** is libinput's, as in Wayfire: `mouse_natural_scroll` for pointers and `natural_scroll` for touchpads, where the device supports it. `Compositor::set_device_natural_scroll(true)` stops the compositor's own inversion, which nested keeps.
+- **Device options** follow Wayfire's `update_options` order. An acceleration profile of `none` changes nothing, as libinput rejects `ACCEL_PROFILE_NONE` when Wayfire passes it; a click method of `none` is set through `input`'s raw bindings, which have no variant for it. Options are applied when a device is added and again when it returns after a pause, not on a config reload, which Wayfire does.
+- **Pointer motion.** Relative motion moves the pointer by libinput's accelerated delta, kept inside the output, and is always passed on for relative-pointer clients. While a client constrains the pointer it does not move. Wheels pass libinput's value (15 per click) with whole clicks from v120 as steps, keeping fractions of high-resolution wheels; finger and continuous scrolls stop on a zero value.
+- **STIPC devices.** Native registers none, so `input/list-devices` lists only libinput devices; STIPC input goes through the registered device of each kind with the lowest id, as NB-5 has it, and is dropped while there is none.
+- **Drawing.** With no KMS, the output is `HEADLESS-1` at 1280x720 (`OUTPUT_SIZE`), drawn into an `OffscreenRenderer` when the frontend asks, at most once per refresh interval, which sends frame callbacks. The default cursor is on.
+- **Diagnostics** from [6](#6-failure-handling) are in already: messages go to standard error and `$XDG_STATE_HOME/shingle/native.log`, and a panic hook logs panics, because the seat daemon puts the VT into graphics mode in NB-6 too.
+- **The loop** polls the seat, libinput and compositor descriptors with a 16 ms tick, like nested, and the next key repeat or frame.
+
+Unit tests cover selection and the refusal (crates/shingle-bin/src/main.rs), the startup decisions (session.rs), event translation and device settings (input.rs), the registry with hotplug and pauses (udev.rs), and in crates/shingle-native/src/host/tests.rs the backend with a fake seat and fake libinput around a real frontend, compositor, IPC socket and Wayland client: libinput timestamps in the client's key, motion, button, axis and touch events, `input/list-devices` following hotplug, configure-device setting the send-events mode and releasing held keys from client and xkb state, Ctrl+Alt+F2 asking the seat to switch without the client seeing F2, a VT switch releasing held keys and buttons and the switch back keeping ids and settings, vanished and disabled devices across a switch, LEDs and SIGTERM saving the session and letting go of the seat. What only hardware can show is listed in [status.md](../status.md#native-backend-seat-and-input).
 
 ### NB-7 `shingle-native-kms`: atomic KMS with copy scanout
 

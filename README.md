@@ -20,7 +20,7 @@ There is one binary, `shingle`, which picks its backend the way Wayfire does:
 | Backend | Selected when |
 | --- | --- |
 | nested, a window in the host session | `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` or `DISPLAY` is set |
-| native, DRM/KMS and libinput | none of them is set, as on a TTY. Not built yet: `shingle` says so and exits with status 1 |
+| native, libseat and libinput | none of them is set, as on a TTY. It takes the seat and its input devices but has no display output yet (no KMS); from an SSH login it refuses with "no seat" and exits with status 1 |
 | headless, no display or input devices | `--headless` |
 
 `--backend nested|native|headless` overrides the choice, and so does the `SHINGLE_BACKEND` environment variable with the same values; the command line wins over the variable. Other options are `--config PATH`, `--ipc PATH` (Wayfire IPC, exported to clients as `WAYFIRE_SOCKET`) and `--spawn PROGRAM [ARG]...`, which starts a client; `shingle --help` lists them all. The separate `shingle-nested` binary is gone: run `shingle`, or `shingle --backend nested` to be explicit.

@@ -7,8 +7,9 @@
 | `shingle-core` | Tiling trees, workspaces, geometry and the serializable session model. No Wayland dependency. |
 | `shingle` | Wayland protocol handling, input routing, output state, IPC and the compositor event loop. Library only; no winit. |
 | `shingle-render` | wgpu rendering without a windowing dependency: shared `GpuContext`, per-output `RenderState`, the `draw` pass, and window and offscreen targets. |
-| `shingle-frontend` | The interactive frontend shared by the nested and (future) native hosts, without winit: `Frontend` with Scale, Expo, the switchers, drags, animations, effects, the scene build, binding dispatch, key repeat and session handling, behind the `Host` trait and `InputEvent`. |
+| `shingle-frontend` | The interactive frontend shared by the nested and native hosts, without winit: `Frontend` with Scale, Expo, the switchers, drags, animations, effects, the scene build, binding dispatch, key repeat and session handling, behind the `Host` trait and `InputEvent`. |
 | `shingle-bin` | The `shingle` binary: argument parsing, backend selection and the headless backend. Its own package because the `shingle` library must not depend on the backends that depend on it. |
+| `shingle-native` | Native backend library: libseat session and VT switching, libinput devices with udev hotplug, and the event loop that runs `Frontend` on a seat, each device interaction behind a trait (`Session`, `InputSource`) with fakes in the tests. No KMS yet. Entry point `shingle_native::run`. |
 | `shingle-nested` | Nested backend library, a thin winit host for `Frontend`: the window and renderer, winit-to-`InputEvent` translation, host focus handling and button emulation. Entry point `shingle_nested::run`. |
 | `shingle-xwayland` | XWayland without `wayland-server`: X display sockets and lock, the supervised Xwayland process with its restart rule, and the X window manager (x11rb) behind an `XConnection` trait: property parsers, classification, `Pairing` of windows and surfaces by serial, the `ConfigureRequest` policy, ICCCM focus and the `FocusIn` guard, client messages, restacking and the root cursor, the clipboard and primary selection bridge with its MIME mapping and non-blocking transfers, and the `xw_probe` test client (examples/). |
 | `shingle-config` | Validated YAML model, Wayfire INI and i3 imports, XKB keymap generation. |
@@ -56,6 +57,11 @@
 | What a start does (print, fail or run a backend) | `crates/shingle-bin/src/main.rs` |
 | Headless backend | `crates/shingle-bin/src/headless.rs` |
 | winit host: window, input translation, button emulation | `crates/shingle-nested/src/lib.rs` |
+| Native seat: `Session`, libseat, startup checks (SSH, enable timeout, backend) | `crates/shingle-native/src/session.rs` |
+| libinput events, translation to `InputEvent`, device options | `crates/shingle-native/src/input.rs`, `input/libinput.rs` |
+| Hotplugged input devices and their seat devices | `crates/shingle-native/src/udev.rs` |
+| Native event loop, pause and resume, `Host` | `crates/shingle-native/src/host.rs`; tests in `host/tests.rs` |
+| Native test plan and tools (test machine only) | `docs/native-testing.md`, `tools/native_test/` |
 | Host keyboard focus changes | `crates/shingle-nested/src/host_keyboard.rs` |
 | xkb keyboard state, key names, keysyms, modifier masks | `crates/shingle-frontend/src/keyboard.rs` |
 | Key repeat timer | `crates/shingle-frontend/src/keyboard/repeat.rs` |
@@ -74,7 +80,8 @@
 - The tiling tree in `shingle-core` is the source of truth for layout and is what sessions persist. Temporary visual geometry (Scale thumbnails, Expo, vswitch slides, window rotation) must never be written back into it.
 - Scale's snapshot selection lives in `shingle`, while its interactive state and wgpu thumbnail transforms live in the frontend (`shingle-frontend`).
 - `shingle` and `shingle-frontend` never depend on winit; only the backend crates and `shingle-bin` link it (`cargo tree -p shingle` lists no winit).
-- `shingle-frontend` never depends on winit, DRM or libinput. A host reaches it only through `Frontend`'s public API, `InputEvent` and the `Host` trait, which the native backend will implement in NB-6.
+- `shingle-frontend` never depends on winit, DRM or libinput. A host reaches it only through `Frontend`'s public API, `InputEvent` and the `Host` trait, which nested and native implement.
+- Native code never touches a device in a unit test: libseat and libinput sit behind `Session` and `InputSource`, and only the test machine runs the real implementations ([native-testing.md](native-testing.md)).
 - Wayfire-facing names stay as they are: `WAYFIRE_SOCKET`, IPC method and event names, and INI section names.
 - Outside xdg request dispatch, code reaches a toplevel only through `Role::toplevel` and `Role::toplevel_mut`, and per-shell behaviour (configure, close, xdg-only protocols) only through `ToplevelHandle`, so X11 windows can share the role (docs/design/xwayland.md).
 - Every process Shingle starts gets its environment from `Compositor::client_environment`. Shingle never changes its own environment for its children.
