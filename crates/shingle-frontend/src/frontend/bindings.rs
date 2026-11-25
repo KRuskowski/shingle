@@ -340,12 +340,21 @@ impl Frontend {
   /// overviews, the switcher, bindings and finally the focused client.
   pub(super) fn keyboard_input(
     &mut self,
-    _host: &mut dyn Host,
+    host: &mut dyn Host,
     device: InputDeviceId,
     event: &Key,
   ) {
     let pressed = event.state != KeyState::Released;
     let repeat = event.state == KeyState::Repeated;
+    // Ctrl+Alt+Fn switches VT before anything else sees the key, even on
+    // the lock screen, as in Wayfire. Hosts that cannot switch get the key
+    // like any other.
+    if event.state == KeyState::Pressed
+      && let Some(vt) = event.symbol.as_deref().and_then(switch_vt_target)
+      && host.switch_vt(vt)
+    {
+      return;
+    }
     let modifiers = event.modifiers;
     let key = event.name.unwrap_or_default();
     let locked = self.compositor.is_locked();
@@ -797,5 +806,31 @@ impl Frontend {
       }
     }
     self.compositor.keyboard_key(device, event.code, pressed);
+  }
+}
+
+/// Returns the VT that keysym `symbol` switches to, for the
+/// `XF86Switch_VT_1` to `XF86Switch_VT_12` keysyms that Ctrl+Alt+F1 to F12
+/// produce.
+fn switch_vt_target(symbol: &str) -> Option<u32> {
+  symbol
+    .strip_prefix("XF86Switch_VT_")?
+    .parse()
+    .ok()
+    .filter(|vt| (1..=12).contains(vt))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn only_switch_vt_keysyms_name_a_vt() {
+    assert_eq!(switch_vt_target("XF86Switch_VT_1"), Some(1));
+    assert_eq!(switch_vt_target("XF86Switch_VT_12"), Some(12));
+    assert_eq!(switch_vt_target("XF86Switch_VT_0"), None);
+    assert_eq!(switch_vt_target("XF86Switch_VT_13"), None);
+    assert_eq!(switch_vt_target("XF86Switch_VT_"), None);
+    assert_eq!(switch_vt_target("F2"), None);
   }
 }
