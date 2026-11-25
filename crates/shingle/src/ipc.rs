@@ -1539,6 +1539,18 @@ fn feed_key(state: &mut CompositorState, data: &Value) -> Value {
   let Some(keyboard) = stipc_device(state, InputDeviceKind::Keyboard) else {
     return json_ok();
   };
+  if state.stipc_key_events {
+    // The frontend tracks keys from a disabled keyboard and dispatches
+    // them only while it is enabled, as for a real key.
+    if input_device::session_active(state) {
+      state.events.push(crate::Event::StipcKey {
+        device: keyboard,
+        code: key,
+        pressed,
+      });
+    }
+    return json_ok();
+  }
   if !input_device::delivers(state, keyboard, InputDeviceKind::Keyboard) {
     return json_ok();
   }
@@ -1551,7 +1563,9 @@ fn feed_key(state: &mut CompositorState, data: &Value) -> Value {
 /// Runs the runtime binding that matches a STIPC key, as Wayfire's input
 /// pipeline does for keys from its STIPC keyboard. Returns whether a binding
 /// matched; a matched key is consumed and not passed to clients, like a
-/// matched key from the nested host keyboard.
+/// matched key from the nested host keyboard. Only compositors without a
+/// frontend get here, such as the headless `shingle` binary; a frontend
+/// takes STIPC keys as [`crate::Event::StipcKey`].
 fn stipc_key_binding(
   state: &mut CompositorState,
   keyboard: InputDeviceId,
@@ -2862,6 +2876,46 @@ mod tests {
     crate::input_device::set_session_active(&mut state, true);
     press(&mut state, "KEY_F9");
     assert_eq!(binding_events(&mut state), [4]);
+  }
+
+  #[test]
+  fn stipc_keys_become_events_for_a_frontend() {
+    let mut state = test_state();
+    state.stipc_key_events = true;
+    add_binding(&mut state, 4, "KEY_F9");
+    call(
+      &mut state,
+      "input/configure-device",
+      json!({"id": 1, "enabled": false}),
+    );
+    state.drain_events();
+    press(&mut state, "KEY_F9");
+    let keys = |state: &mut CompositorState| {
+      state
+        .drain_events()
+        .into_iter()
+        .filter_map(|event| match event {
+          crate::Event::StipcKey {
+            device,
+            code,
+            pressed,
+          } => Some((device, code, pressed)),
+          _ => None,
+        })
+        .collect::<Vec<_>>()
+    };
+    // The frontend matches bindings and gates the disabled keyboard.
+    assert_eq!(
+      keys(&mut state),
+      [(KEYBOARD, 67, true), (KEYBOARD, 67, false)]
+    );
+    assert!(binding_events(&mut state).is_empty());
+    assert!(crate::input_device::held_keys(&state, KEYBOARD).is_empty());
+    crate::input_device::set_session_active(&mut state, false);
+    press(&mut state, "KEY_F9");
+    assert!(keys(&mut state).is_empty(), "dropped while inactive");
+    let reply = call(&mut state, "stipc/feed_key", json!({"key": "KEY_NOPE"}));
+    assert_eq!(reply, json!({"error": "failed to parse evdev key"}));
   }
 
   #[test]

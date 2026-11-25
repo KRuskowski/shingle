@@ -14,7 +14,7 @@ use std::{
 use shingle::{
   Compositor, Config, InputDeviceId, InputDeviceInfo, InputDeviceKind,
 };
-use shingle_config::ShingleConfig;
+use shingle_config::{ConfigFormat, ShingleConfig};
 use shingle_core::WindowId as TileWindowId;
 use shingle_render::{
   GpuTexture, OffscreenRenderer, RenderError, RenderRect, RenderTile,
@@ -227,6 +227,31 @@ impl Fixture {
       }
     }
     panic!("no IPC reply to {request}");
+  }
+
+  /// Feeds evdev key `name` over `stipc/feed_key`, as Wayfire's test
+  /// clients do.
+  fn stipc_key(&mut self, name: &str, pressed: bool) {
+    let request = format!(
+      concat!(
+        r#"{{"method":"stipc/feed_key","#,
+        r#""data":{{"key":"{}","state":{}}}}}"#
+      ),
+      name, pressed
+    );
+    assert_eq!(self.ipc(&request), r#"{"result":"ok"}"#);
+  }
+
+  /// Taps `name` over STIPC with the `held` keys held.
+  fn stipc_tap(&mut self, name: &str, held: &[&str]) {
+    for modifier in held {
+      self.stipc_key(modifier, true);
+    }
+    self.stipc_key(name, true);
+    self.stipc_key(name, false);
+    for modifier in held.iter().rev() {
+      self.stipc_key(modifier, false);
+    }
   }
 
   fn focused(&self) -> Option<TileWindowId> {
@@ -582,6 +607,90 @@ fn quit_saves_and_asks_the_host_to_exit() {
   fixture.tap(KEY_Q, &[KEY_LEFTMETA, KEY_LEFTSHIFT]);
   assert!(fixture.host.exits > 0, "the host is asked to exit");
   assert!(fixture.base.with_extension("session.json").exists());
+}
+
+/// Parses a YAML config, the way `shingle.yaml` is read.
+fn yaml_config(text: &str) -> ShingleConfig {
+  ShingleConfig::parse(text, ConfigFormat::Yaml).expect("the config parses")
+}
+
+#[test]
+fn stipc_keys_fire_key_bindings_from_the_config() {
+  let config = yaml_config(concat!(
+    "keybindings:\n",
+    "  expo_toggle: super+x\n",
+    "expo:\n",
+    "  duration_ms: 0\n",
+  ));
+  let mut fixture = Fixture::new(config);
+  fixture.window("alpha");
+  fixture.stipc_tap("KEY_X", &["KEY_LEFTMETA"]);
+  assert!(fixture.frontend.expo.is_some(), "the YAML binding fired");
+  // Keys reach Expo like keys from the host keyboard.
+  fixture.stipc_tap("KEY_ESC", &[]);
+  assert!(fixture.frontend.expo.is_none());
+  // Super was released: a bare P does nothing, and the default Super+P
+  // opens Scale.
+  fixture.stipc_tap("KEY_P", &[]);
+  assert!(fixture.frontend.scale.is_none(), "no modifier is stuck");
+  fixture.stipc_tap("KEY_P", &["KEY_LEFTMETA"]);
+  assert!(fixture.frontend.scale.is_some());
+}
+
+#[test]
+fn stipc_keys_fire_xkb_command_bindings_in_shingles_layout() {
+  let marker = std::env::temp_dir()
+    .join(format!("shingle-frontend-stipc-xkb-{}", std::process::id()));
+  let _ = std::fs::remove_file(&marker);
+  let config = yaml_config(&format!(
+    concat!(
+      "input:\n",
+      "  layout: de\n",
+      "commands:\n",
+      "  - binding: super+xkb:z\n",
+      "    command: touch {}\n",
+    ),
+    marker.display()
+  ));
+  let mut fixture = Fixture::new(config);
+  // On a German layout the key labelled Z is the physical Y key.
+  fixture.stipc_tap("KEY_Z", &["KEY_LEFTMETA"]);
+  fixture.stipc_tap("KEY_Y", &["KEY_LEFTMETA"]);
+  let deadline = Instant::now() + Duration::from_secs(5);
+  while !marker.exists() && Instant::now() < deadline {
+    fixture.process();
+    thread::sleep(Duration::from_millis(10));
+  }
+  assert!(marker.exists(), "super+xkb:z ran its command");
+  let _ = std::fs::remove_file(&marker);
+}
+
+#[test]
+fn stipc_keys_fire_ipc_bindings_once() {
+  let mut fixture = Fixture::new(ShingleConfig::default());
+  let reply = fixture.ipc(concat!(
+    r#"{"method":"command/register-binding","data":{"#,
+    r#""binding":"KEY_F9","call-method":"invert/toggle","call-data":{}}}"#
+  ));
+  assert!(reply.contains(r#""result":"ok""#), "{reply}");
+  fixture.stipc_tap("KEY_F9", &[]);
+  fixture.process();
+  assert!(fixture.frontend.inverted, "the IPC binding toggled once");
+  fixture.stipc_tap("KEY_F9", &[]);
+  fixture.process();
+  assert!(!fixture.frontend.inverted);
+}
+
+#[test]
+fn stipc_keys_are_dropped_while_the_session_is_inactive() {
+  let mut fixture = Fixture::new(ShingleConfig::default());
+  fixture.window("alpha");
+  fixture.frontend.compositor_mut().set_session_active(false);
+  fixture.stipc_tap("KEY_P", &["KEY_LEFTMETA"]);
+  assert!(fixture.frontend.scale.is_none());
+  fixture.frontend.compositor_mut().set_session_active(true);
+  fixture.stipc_tap("KEY_P", &["KEY_LEFTMETA"]);
+  assert!(fixture.frontend.scale.is_some());
 }
 
 /// Records the tiles of every frame drawn into an offscreen renderer.

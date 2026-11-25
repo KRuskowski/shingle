@@ -484,6 +484,15 @@ pub enum Event {
     id: InputDeviceId,
     enabled: bool,
   },
+  /// `stipc/feed_key` pressed or released evdev key `code` on seat
+  /// keyboard `device`, the keyboard STIPC goes through. Only emitted
+  /// after [`Compositor::set_stipc_key_events`]; the frontend feeds it
+  /// through its own key handling, so bindings fire as for a real key.
+  StipcKey {
+    device: InputDeviceId,
+    code: u32,
+    pressed: bool,
+  },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1208,6 +1217,16 @@ impl Compositor {
 
   pub fn set_keymap(&mut self, keymap: &str) -> Result<(), Error> {
     input::set_keymap(&mut self.state, keymap).map_err(Error::Keymap)
+  }
+
+  /// Makes `stipc/feed_key` emit [`Event::StipcKey`] instead of matching
+  /// IPC bindings and passing the key to clients itself. A frontend with
+  /// its own keyboard state and bindings enables this, so STIPC keys go
+  /// through the same path as keys from a real keyboard, as Wayfire's
+  /// headless STIPC keyboard does. Keys are still dropped while the
+  /// session is inactive or no keyboard is registered.
+  pub fn set_stipc_key_events(&mut self, enabled: bool) {
+    self.state.stipc_key_events = enabled;
   }
 
   pub fn set_repeat(&mut self, rate: u32, delay: u32) {

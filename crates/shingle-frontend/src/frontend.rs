@@ -242,6 +242,8 @@ impl Frontend {
   ) -> Result<Self, Box<dyn Error>> {
     let keymap = config.input.load_keymap()?;
     compositor.set_keymap(&keymap)?;
+    // STIPC keys take the path of real keys, so configured bindings fire.
+    compositor.set_stipc_key_events(true);
     compositor.set_repeat(config.input.repeat_rate, config.input.repeat_delay);
     let mut keyboard = Keyboard::new(&keymap)?;
     keyboard.sync_locked(
@@ -522,6 +524,11 @@ impl Frontend {
             host.input_device_changed(id, enabled);
           }
         }
+        Event::StipcKey {
+          device,
+          code,
+          pressed,
+        } => self.key_event(host, device, code, pressed),
         Event::DpmsChanged(_)
         | Event::OpacityChanged { .. }
         | Event::Idle

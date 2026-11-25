@@ -202,6 +202,9 @@ pub(crate) struct CompositorState {
     HashMap<shingle_core::WindowId, HashMap<String, crate::ipc::ViewProperty>>,
   pub(crate) runtime_bindings:
     std::collections::BTreeMap<u64, crate::RuntimeBinding>,
+  /// Whether `stipc/feed_key` hands keys to the frontend as
+  /// [`Event::StipcKey`] instead of handling them itself.
+  pub(crate) stipc_key_events: bool,
   pub(crate) focus_sequence: u64,
   pub(crate) dispatch_pending: bool,
   pub(crate) accept_pending: bool,
@@ -335,6 +338,7 @@ impl CompositorState {
       focus_recency: HashMap::new(),
       view_properties: HashMap::new(),
       runtime_bindings: Default::default(),
+      stipc_key_events: false,
       focus_sequence: 0,
       dispatch_pending: true,
       accept_pending: false,
