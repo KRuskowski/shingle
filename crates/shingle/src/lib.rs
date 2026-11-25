@@ -1176,7 +1176,7 @@ impl Compositor {
     data_control::sync(&mut self.state, &self.display.handle());
     primary_selection::sync_selection(&mut self.state, &self.display.handle());
     if let Some(xwayland) = &mut self.xwayland {
-      xwayland.flush(&self.event_loop.handle());
+      xwayland.flush(&mut self.state, &self.event_loop.handle());
     }
     self.display.flush_clients()?;
     Ok(dispatched)
@@ -1354,7 +1354,7 @@ impl Compositor {
   /// so the window is still there afterwards. Returns `None` if the window has
   /// no toplevel.
   pub fn close_window(&mut self, window: WindowId) -> Option<()> {
-    shell::close_window(&self.state, window)
+    shell::close_window(&mut self.state, window)
   }
 
   /// Asks the compositor to shut down. The frontend sees this through
@@ -2829,6 +2829,35 @@ impl Compositor {
       }
     }
     Ok(())
+  }
+
+  /// Adds a Wayland client marked as Shingle's Xwayland, for tests of
+  /// `xwayland_shell_v1`, and returns the client's end of its socket.
+  #[cfg(test)]
+  pub(crate) fn connect_test_xwayland(
+    &mut self,
+  ) -> std::os::unix::net::UnixStream {
+    let (client, server) = std::os::unix::net::UnixStream::pair()
+      .expect("a socket pair for the test Xwayland");
+    self
+      .display
+      .handle()
+      .insert_client(
+        server,
+        Arc::new(ClientDataImpl {
+          disconnected: self.state.disconnected.clone(),
+          sandbox: None,
+          privileged_protocols: self
+            .state
+            .security_context
+            .privileged_protocols
+            .clone(),
+          xwayland: true,
+        }),
+      )
+      .expect("the test Xwayland is added");
+    self.state.dispatch_pending = true;
+    client
   }
 
   fn accept_clients(&mut self) -> Result<(), Error> {

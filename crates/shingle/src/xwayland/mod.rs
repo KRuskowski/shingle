@@ -8,8 +8,15 @@
 //! them once per [`crate::Compositor::poll`]. Each source is removed before
 //! its descriptor closes, so a reused descriptor number is never watched
 //! by mistake. See docs/design/xwayland.md, sections 1 and 2.
+//!
+//! [`shell`] is the `xwayland_shell_v1` protocol and [`windows`] turns
+//! managed X windows into Shingle toplevels (sections 3 and 4).
+
+pub(crate) mod shell;
+pub(crate) mod windows;
 
 use std::{
+  collections::HashMap,
   ffi::OsString,
   os::fd::{AsRawFd, BorrowedFd},
   path::PathBuf,
@@ -24,12 +31,13 @@ use calloop::{
 use serde_json::json;
 use shingle_config::XwaylandMode;
 use shingle_xwayland::{
-  DisplaySockets, Readiness, Restart, StartMode, X11Connection, XwaylandServer,
-  Xwm, XwmEvent, server,
+  DisplaySockets, Pairing, Readiness, Restart, StartMode, Window,
+  X11Connection, XwaylandServer, Xwm, server,
 };
 use wayland_server::DisplayHandle;
 
-use crate::state::{ClientDataImpl, CompositorState};
+use crate::state::{ClientDataImpl, CompositorState, SurfaceId};
+use windows::{XRequest, XWindowState};
 
 /// How long Xwayland gets to exit after SIGTERM before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(1);
@@ -86,6 +94,12 @@ pub(crate) struct Status {
   pub(crate) exit_pending: bool,
   /// The window manager connection became readable.
   pub(crate) xwm_pending: bool,
+  /// X windows and surfaces waiting for their partner.
+  pub(crate) pairing: Pairing<SurfaceId>,
+  /// Every X window the window manager reported, mapped or not.
+  pub(crate) windows: HashMap<Window, XWindowState>,
+  /// Requests for the window manager's next flush.
+  pub(crate) requests: Vec<XRequest>,
 }
 
 impl Status {
@@ -211,23 +225,41 @@ impl Xwayland {
     // x11rb may have buffered events while waiting for a reply, which
     // leaves the socket unreadable, so read them every turn.
     state.xwayland.xwm_pending = false;
-    self.dispatch_xwm(handle);
+    self.dispatch_xwm(state, handle);
     if std::mem::take(&mut state.xwayland.exit_pending) {
       self.reap(state, display, handle);
     }
   }
 
-  /// Sends the window manager's queued requests.
+  /// Hands Shingle's queued requests to the window manager and sends
+  /// them.
   pub(crate) fn flush(
     &mut self,
+    state: &mut CompositorState,
     handle: &LoopHandle<'static, CompositorState>,
   ) {
+    let requests = std::mem::take(&mut state.xwayland.requests);
     let Some(xwm) = &mut self.xwm else {
       return;
     };
-    if let Err(error) = xwm.flush() {
+    let mut result = Ok(());
+    for request in requests {
+      result = match request {
+        XRequest::Configure {
+          window,
+          geometry,
+          force,
+        } => xwm.configure(window, geometry, force),
+        XRequest::State { window, state } => xwm.set_state(window, state),
+        XRequest::Close(window) => xwm.close(window),
+      };
+      if result.is_err() {
+        break;
+      }
+    }
+    if let Err(error) = result.and_then(|()| xwm.flush()) {
       eprintln!("shingle: X window manager lost its connection: {error}");
-      self.drop_xwm(handle);
+      self.drop_xwm(state, handle);
     }
   }
 
@@ -238,7 +270,7 @@ impl Xwayland {
     state: &mut CompositorState,
     handle: &LoopHandle<'static, CompositorState>,
   ) {
-    self.drop_xwm(handle);
+    self.drop_xwm(state, handle);
     self.unwatch_sockets(handle);
     remove(handle, &mut self.readiness_source);
     remove(handle, &mut self.exit_source);
@@ -369,24 +401,24 @@ impl Xwayland {
     }
   }
 
-  /// Reads the window manager's events.
-  fn dispatch_xwm(&mut self, handle: &LoopHandle<'static, CompositorState>) {
+  /// Reads the window manager's events and applies them.
+  fn dispatch_xwm(
+    &mut self,
+    state: &mut CompositorState,
+    handle: &LoopHandle<'static, CompositorState>,
+  ) {
     let Some(xwm) = &mut self.xwm else {
       return;
     };
     match xwm.dispatch() {
       Ok(events) => {
         for event in events {
-          match event {
-            XwmEvent::RequestFailed(error) => {
-              eprintln!("shingle: X request failed: {error}");
-            }
-          }
+          windows::apply(state, event);
         }
       }
       Err(error) => {
         eprintln!("shingle: X window manager lost its connection: {error}");
-        self.drop_xwm(handle);
+        self.drop_xwm(state, handle);
       }
     }
   }
@@ -418,7 +450,7 @@ impl Xwayland {
         return;
       }
     };
-    self.drop_xwm(handle);
+    self.drop_xwm(state, handle);
     state.xwayland.pid = None;
     let ran = exited.ran_for.as_secs_f64();
     eprintln!(
@@ -443,10 +475,17 @@ impl Xwayland {
     }
   }
 
-  /// Removes the window manager and its source.
-  fn drop_xwm(&mut self, handle: &LoopHandle<'static, CompositorState>) {
+  /// Removes the window manager and its source. Every X window goes
+  /// away with it, as if its surface had been destroyed.
+  fn drop_xwm(
+    &mut self,
+    state: &mut CompositorState,
+    handle: &LoopHandle<'static, CompositorState>,
+  ) {
     remove(handle, &mut self.xwm_source);
-    self.xwm = None;
+    if self.xwm.take().is_some() {
+      windows::forget_all(state);
+    }
   }
 
   /// Watches both display sockets for a lazy start.

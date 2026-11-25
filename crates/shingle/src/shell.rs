@@ -52,6 +52,8 @@ pub(crate) enum Role {
     serials: BTreeSet<u32>,
     acked: Option<(u32, u32, u32)>,
   },
+  /// A surface of Xwayland's, named by `xwayland_shell_v1`.
+  Xwayland(Box<crate::xwayland::shell::XwaylandRole>),
 }
 
 impl Role {
@@ -63,6 +65,7 @@ impl Role {
         kind: Some(XdgKind::Toplevel(toplevel)),
         ..
       } => Some(toplevel),
+      Role::Xwayland(role) => role.toplevel.as_deref(),
       _ => None,
     }
   }
@@ -75,6 +78,7 @@ impl Role {
         kind: Some(XdgKind::Toplevel(toplevel)),
         ..
       } => Some(toplevel),
+      Role::Xwayland(role) => role.toplevel.as_deref_mut(),
       _ => None,
     }
   }
@@ -106,12 +110,14 @@ pub(crate) enum XdgKind {
 /// Everything else about a toplevel lives in [`ToplevelRole`] and is the
 /// same for every shell, so tiling, rules, Scale, Expo, IPC and sessions
 /// never look at this. Only configure, close and destruction differ per
-/// shell, and they go through the methods here. XWayland's managed windows
-/// become a second variant in XW-3 (docs/design/xwayland.md).
+/// shell, and they go through `configure_toplevel`, `close_window` and
+/// `detach_toplevel` (docs/design/xwayland.md, section 4).
 #[derive(Clone)]
 pub(crate) enum ToplevelHandle {
   /// An `xdg_toplevel`.
   Xdg(XdgToplevel),
+  /// A managed X11 window, by its X id.
+  X11(shingle_xwayland::Window),
 }
 
 impl ToplevelHandle {
@@ -120,13 +126,7 @@ impl ToplevelHandle {
   pub(crate) fn xdg(&self) -> Option<&XdgToplevel> {
     match self {
       ToplevelHandle::Xdg(toplevel) => Some(toplevel),
-    }
-  }
-
-  /// Asks the client to close the toplevel.
-  pub(crate) fn close(&self) {
-    match self {
-      ToplevelHandle::Xdg(toplevel) => toplevel.close(),
+      ToplevelHandle::X11(_) => None,
     }
   }
 }
@@ -190,6 +190,9 @@ pub(crate) struct ToplevelRole {
   /// buffer is a new initial commit, which xdg-shell answers with a
   /// configure.
   pub(crate) unmapped: bool,
+  /// The client's PID, for IPC's `pid`. Only X11 windows have one so far:
+  /// their X client's, from XRes or `_NET_WM_PID`.
+  pub(crate) pid: Option<i32>,
 }
 
 impl ToplevelRole {
@@ -210,10 +213,15 @@ pub(crate) fn create_globals(handle: &DisplayHandle) {
   handle.create_global::<CompositorState, ExtSessionLockManagerV1, ()>(1, ());
   crate::dialog::create_global(handle);
   crate::layer_shell::create_global(handle);
+  crate::xwayland::shell::create_global(handle);
 }
 
 pub(crate) fn has_live_role(surface: &Surface) -> bool {
-  !matches!(surface.role, Role::None | Role::Dead | Role::Cursor)
+  match &surface.role {
+    Role::None | Role::Dead | Role::Cursor => false,
+    Role::Xwayland(role) => role.is_live(),
+    _ => true,
+  }
 }
 
 pub(crate) fn snapshot_metadata(
@@ -702,21 +710,34 @@ fn unmap_toplevel(state: &mut CompositorState, object: &ObjectId) -> bool {
   if !mapped && !state.pending_maps.contains_key(&window) {
     return false;
   }
-  if let Some(surface) = state.surfaces.get_mut(object)
-    && let Role::Xdg {
-      kind: Some(XdgKind::Toplevel(toplevel)),
-      serials,
-      initial_acked,
-      ..
-    } = &mut surface.role
-  {
-    toplevel.window = WindowId(0);
-    toplevel.tiled = true;
-    toplevel.configured_geometry = None;
-    toplevel.created_rules_pending = None;
-    toplevel.unmapped = true;
-    serials.clear();
-    *initial_acked = false;
+  if let Some(surface) = state.surfaces.get_mut(object) {
+    match &mut surface.role {
+      Role::Xdg {
+        kind: Some(XdgKind::Toplevel(toplevel)),
+        serials,
+        initial_acked,
+        ..
+      } => {
+        toplevel.window = WindowId(0);
+        toplevel.tiled = true;
+        toplevel.configured_geometry = None;
+        toplevel.created_rules_pending = None;
+        toplevel.unmapped = true;
+        serials.clear();
+        *initial_acked = false;
+      }
+      // Xwayland does not commit null buffers, but if it did, the next
+      // buffer maps the window again as a new one.
+      Role::Xwayland(role) => {
+        if let Some(toplevel) = &mut role.toplevel {
+          toplevel.window = WindowId(0);
+          toplevel.tiled = true;
+          toplevel.configured_geometry = None;
+          toplevel.created_rules_pending = None;
+        }
+      }
+      _ => {}
+    }
   }
   remove_window(state, id, &role);
   crate::input::sync_focus(state);
@@ -738,6 +759,7 @@ fn reconfigure_remapping(state: &mut CompositorState, object: &ObjectId) {
 
 pub(crate) fn destroy_role(state: &mut CompositorState, surface: &Surface) {
   crate::foreign::surface_destroyed(state, &Resource::id(&surface.resource));
+  crate::xwayland::windows::surface_destroyed(state, surface);
   detach_toplevel(state, surface.id, &surface.role);
 }
 
@@ -751,7 +773,8 @@ fn destroy_role_at(state: &mut CompositorState, object: &ObjectId) {
   detach_toplevel(state, id, &role);
 }
 
-fn detach_toplevel(
+/// Removes a toplevel's window when its role goes away.
+pub(crate) fn detach_toplevel(
   state: &mut CompositorState,
   surface: SurfaceId,
   role: &Role,
@@ -930,6 +953,12 @@ fn configure_toplevel(
   let previous = toplevel.configured_geometry.replace(geometry);
   let window = toplevel.window();
   match toplevel.handle.clone() {
+    ToplevelHandle::X11(x_window) => {
+      // No acknowledgement: X11 has no configure serials.
+      crate::xwayland::windows::configure(
+        state, x_window, window, geometry, states,
+      );
+    }
     ToplevelHandle::Xdg(xdg_toplevel) => {
       xdg_toplevel.configure(
         geometry.width.min(i32::MAX as u32) as i32,
@@ -1011,7 +1040,12 @@ fn update_app_id(
   }
 }
 
-fn update_title(state: &mut CompositorState, object: &ObjectId, title: String) {
+/// Sets a toplevel's title, and its window's once it has one.
+pub(crate) fn update_title(
+  state: &mut CompositorState,
+  object: &ObjectId,
+  title: String,
+) {
   let Some(surface) = state.surfaces.get_mut(object) else {
     return;
   };
@@ -1120,16 +1154,23 @@ pub(crate) fn materialize_toplevel(
 /// terms. Returns `None` if the window has no toplevel. The client decides
 /// whether and when to close, so the window is still there afterwards.
 pub(crate) fn close_window(
-  state: &CompositorState,
+  state: &mut CompositorState,
   window: WindowId,
 ) -> Option<()> {
-  let toplevel = state.surfaces.values().find_map(|surface| {
+  let handle = state.surfaces.values().find_map(|surface| {
     surface
       .role
       .toplevel()
       .filter(|toplevel| toplevel.window() == Some(window))
+      .map(|toplevel| toplevel.handle.clone())
   })?;
-  toplevel.handle.close();
+  match handle {
+    ToplevelHandle::Xdg(toplevel) => toplevel.close(),
+    // WM_DELETE_WINDOW, or KillClient for clients without it.
+    ToplevelHandle::X11(x_window) => {
+      crate::xwayland::windows::close(state, x_window);
+    }
+  }
   Some(())
 }
 
@@ -1947,6 +1988,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
               configured_geometry: None,
               created_rules_pending: None,
               unmapped: false,
+              pid: None,
             }))),
             serials: BTreeSet::new(),
             initial_acked: false,
@@ -2704,9 +2746,11 @@ mod tests {
     let toplevel = client.toplevel(&mut compositor, "closing");
     client.attach_buffer(&mut compositor, &toplevel.surface, 64, 64);
     let window = windows_with(&compositor.state, "closing")[0];
-    assert!(super::close_window(&compositor.state, WindowId(999)).is_none());
+    assert!(
+      super::close_window(&mut compositor.state, WindowId(999)).is_none()
+    );
     assert!(client.events.closes.is_empty());
-    assert!(super::close_window(&compositor.state, window).is_some());
+    assert!(super::close_window(&mut compositor.state, window).is_some());
     client.roundtrip(&mut compositor);
     assert_eq!(
       client.events.closes,

@@ -747,7 +747,7 @@ fn view_json(state: &CompositorState, window: WindowId) -> Value {
       .toplevel()
       .is_some_and(|toplevel| toplevel.window() == Some(window))
   });
-  let (geometry_value, app_id, title, min_size, max_size) = surface
+  let (geometry_value, app_id, title, min_size, max_size, pid) = surface
     .map_or_else(
       || {
         (
@@ -756,6 +756,7 @@ fn view_json(state: &CompositorState, window: WindowId) -> Value {
           String::new(),
           (0, 0),
           (0, 0),
+          None,
         )
       },
       |surface| {
@@ -772,6 +773,7 @@ fn view_json(state: &CompositorState, window: WindowId) -> Value {
           role.title.clone(),
           role.min_size,
           role.max_size,
+          role.pid,
         )
       },
     );
@@ -779,7 +781,7 @@ fn view_json(state: &CompositorState, window: WindowId) -> Value {
   let mapped = info.presence == WindowPresence::Mapped;
   json!({
       "id": window.0,
-      "pid": -1,
+      "pid": pid.map_or(-1, i64::from),
       "title": title,
       "app-id": app_id,
       "base-geometry": geometry_value,

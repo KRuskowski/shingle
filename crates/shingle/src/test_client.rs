@@ -30,6 +30,7 @@ use wayland_protocols::{
     shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
     xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1},
   },
+  xwayland::shell::v1::client::{xwayland_shell_v1, xwayland_surface_v1},
 };
 use wayland_protocols_misc::{
   zwp_input_method_v2::client::{
@@ -117,6 +118,18 @@ impl TestClient {
   pub(crate) fn connect(compositor: &mut Compositor, socket: &Path) -> Self {
     let stream =
       UnixStream::connect(socket).expect("the test socket accepts clients");
+    Self::from_stream(compositor, stream)
+  }
+
+  /// Connects as the test Xwayland
+  /// ([`Compositor::connect_test_xwayland`]) and reads its globals.
+  pub(crate) fn connect_xwayland(compositor: &mut Compositor) -> Self {
+    let stream = compositor.connect_test_xwayland();
+    Self::from_stream(compositor, stream)
+  }
+
+  /// Uses an already connected `stream` and reads the globals.
+  fn from_stream(compositor: &mut Compositor, stream: UnixStream) -> Self {
     let connection =
       Connection::from_socket(stream).expect("the client connects");
     let queue = connection.new_event_queue();
@@ -156,6 +169,27 @@ impl TestClient {
       }
     }
     panic!("the round trip did not finish");
+  }
+
+  /// Flushes, lets the compositor dispatch and reads, without requiring
+  /// the round trip to finish, and returns the protocol error that ended
+  /// the connection, if any.
+  pub(crate) fn protocol_error(
+    &mut self,
+    compositor: &mut Compositor,
+  ) -> Option<wayland_client::backend::protocol::ProtocolError> {
+    for _ in 0..10 {
+      let _ = self.queue.flush();
+      let _ = compositor.dispatch_pending();
+      if let Some(guard) = self.queue.prepare_read() {
+        let _ = guard.read();
+      }
+      let _ = self.queue.dispatch_pending(&mut self.events);
+      if let Some(error) = self.connection.protocol_error() {
+        return Some(error);
+      }
+    }
+    None
   }
 
   /// Binds the first global of interface `I` at `version`.
@@ -580,4 +614,6 @@ ignore_events!(
   wp_fifo_v1::WpFifoV1,
   wp_commit_timing_manager_v1::WpCommitTimingManagerV1,
   wp_commit_timer_v1::WpCommitTimerV1,
+  xwayland_shell_v1::XwaylandShellV1,
+  xwayland_surface_v1::XwaylandSurfaceV1,
 );

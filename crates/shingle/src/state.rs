@@ -1397,6 +1397,7 @@ impl CompositorState {
         }
       }
     }
+    crate::xwayland::windows::committed(self, object);
     shell::committed(self, object);
     crate::toplevel_icon::commit(self, object);
     crate::text_input::surface_commit(self, object);
