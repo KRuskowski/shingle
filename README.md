@@ -42,7 +42,7 @@ cargo run -p shingle-wcm -- \
 
 ## Scripting
 
-Shingle serves Wayfire-compatible IPC and exports `WAYFIRE_SOCKET` to the programs it starts, so Wayfire scripts work unchanged. See [docs/ipc.md](docs/ipc.md).
+Shingle serves Wayfire-compatible IPC and exports `WAYFIRE_SOCKET` to the programs it starts, so Wayfire scripts work unchanged. Those programs never inherit the host session's `DISPLAY`, `WAYLAND_SOCKET` or `WAYFIRE_SOCKET`. See [docs/ipc.md](docs/ipc.md).
 
 ## Upgrading from Tilefire
 

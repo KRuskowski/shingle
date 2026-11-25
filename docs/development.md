@@ -16,6 +16,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 `.cargo/config.toml` limits Cargo to two jobs. Check `/proc/loadavg` before large builds, and run builds and test suites one after another rather than in parallel.
 
+`wayland_toplevels_look_unchanged` (crates/shingle/src/wayland_pins.rs) compares what xdg toplevels look like from outside (IPC replies and events, configures, surface snapshots and sessions) with crates/shingle/testdata/wayland_pins.txt byte for byte. If a change is meant to alter that, rerun it with `SHINGLE_BLESS_PINS=1` and review the diff of the file.
+
 ## Formatting
 
 `rustfmt.toml` sets 80 columns and 2-space indentation:
@@ -46,7 +48,7 @@ cargo run --bin shingle -- --config data/shingle.yaml --spawn foot
 cargo run --bin shingle -- --help
 ```
 
-Inside a Wayland or X11 session this selects the nested backend and opens Shingle in a window, prints its private `WAYLAND_DISPLAY` and passes it to `--spawn` children. `--headless` runs without a window; `--backend native` (and a start with none of `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` and `DISPLAY` set) reports that the native backend is not built yet and exits with status 1. Bad options and unknown backends exit with status 2. The selection rules are in crates/shingle-bin/src/backend.rs and the [README](../README.md#running). Locking runs `shingle-lock` from `PATH`; set `SHINGLE_LOCK` to use another executable.
+Inside a Wayland or X11 session this selects the nested backend and opens Shingle in a window, prints its private `WAYLAND_DISPLAY` and passes it to `--spawn` children. Every child Shingle starts gets the client environment (crates/shingle-session/src/environment.rs): Shingle's own `WAYLAND_DISPLAY` and, with `--ipc`, `WAYFIRE_SOCKET`; the host's `DISPLAY`, `WAYLAND_SOCKET` and `WAYFIRE_SOCKET` are removed. `--headless` runs without a window; `--backend native` (and a start with none of `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` and `DISPLAY` set) reports that the native backend is not built yet and exits with status 1. Bad options and unknown backends exit with status 2. The selection rules are in crates/shingle-bin/src/backend.rs and the [README](../README.md#running). Locking runs `shingle-lock` from `PATH`; set `SHINGLE_LOCK` to use another executable.
 
 When testing nested from a session whose `XDG_RUNTIME_DIR` is replaced by a private one, set `WAYLAND_DISPLAY` to the host socket's absolute path so the window still reaches the host, and set `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `HOME` to private directories too.
 

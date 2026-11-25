@@ -24,13 +24,16 @@
 | Persistent windows and mapped presence | `crates/shingle-core/src/core.rs` |
 | Tiling order, focus, masks and splits | `crates/shingle-core/src/tree.rs` |
 | Session snapshot format | `crates/shingle-core/src/session.rs` |
+| Environment of every child process (`ClientEnvironment`), launching clients | `crates/shingle-session/src/environment.rs`, `crates/shingle-session/src/lib.rs` |
 | Public compositor API and renderer events | `crates/shingle/src/lib.rs` |
 | Protocol timestamps (`CLOCK_MONOTONIC`) | `crates/shingle/src/clock.rs` |
 | In-process Wayland test client | `crates/shingle/src/test_client.rs` |
 | Shared state and workspace transitions | `crates/shingle/src/state.rs` |
 | Keymap sent to clients, focus, input routing | `crates/shingle/src/input.rs` |
 | Seat device registry, per-device holds and gating, `input/*` IPC | `crates/shingle/src/input_device.rs` |
-| XDG roles, map lifecycle, geometry, window rules | `crates/shingle/src/shell.rs` |
+| XDG roles, the shell-neutral toplevel role (`ToplevelRole`, `ToplevelHandle`), map lifecycle, geometry, window rules | `crates/shingle/src/shell.rs` |
+| Launch identity from `/proc` (`capture`, `capture_pid`) | `crates/shingle/src/launch.rs` |
+| Pinned outside view of Wayland toplevels | `crates/shingle/src/wayland_pins.rs`, `crates/shingle/testdata/wayland_pins.txt` |
 | IPC transport, dispatch, method list, events | `crates/shingle/src/ipc.rs` |
 | Host seam: `Host` trait, `InputEvent` | `crates/shingle-frontend/src/host.rs` |
 | `Frontend` struct, public API, input dispatch | `crates/shingle-frontend/src/frontend.rs` |
@@ -62,3 +65,5 @@
 - `shingle` and `shingle-frontend` never depend on winit; only the backend crates and `shingle-bin` link it (`cargo tree -p shingle` lists no winit).
 - `shingle-frontend` never depends on winit, DRM or libinput. A host reaches it only through `Frontend`'s public API, `InputEvent` and the `Host` trait, which the native backend will implement in NB-6.
 - Wayfire-facing names stay as they are: `WAYFIRE_SOCKET`, IPC method and event names, and INI section names.
+- Outside xdg request dispatch, code reaches a toplevel only through `Role::toplevel` and `Role::toplevel_mut`, and per-shell behaviour (configure, close, xdg-only protocols) only through `ToplevelHandle`, so X11 windows can share the role (docs/design/xwayland.md).
+- Every process Shingle starts gets its environment from `Compositor::client_environment`. Shingle never changes its own environment for its children.

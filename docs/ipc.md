@@ -6,7 +6,7 @@ Shingle serves Wayfire-compatible IPC with every backend: JSON messages with a n
 cargo run --bin shingle -- --ipc /tmp/shingle-ipc.socket
 ```
 
-The socket path is exported as `WAYFIRE_SOCKET` before any client starts, so restored and autostarted clients, `--spawn` programs and everything launched later see it, and existing Wayfire scripts work unchanged. Library users can start the same server with `Compositor::enable_ipc(path)`.
+The socket path is exported as `WAYFIRE_SOCKET` to every client Shingle starts, from restored and autostarted clients and `--spawn` programs to everything launched later, so existing Wayfire scripts work unchanged. Without `--ipc`, `WAYFIRE_SOCKET` is removed from their environment, so a nested Shingle never hands its children the host compositor's socket. Shingle's own environment is not changed; the children's comes from `Compositor::client_environment` (`shingle_session::ClientEnvironment`). Library users can start the same server with `Compositor::enable_ipc(path)`, before starting any client.
 
 `list-methods` returns a sorted inventory of the 77 supported methods. Numeric vswitch activators such as `binding_4` are matched dynamically and are not part of that count. The method table lives in `SUPPORTED_METHODS` in `crates/shingle/src/ipc.rs`.
 
@@ -109,6 +109,6 @@ A blocked new view takes no tile until it is released, as Wayfire's tile plugin 
 - `feed_key` and `feed_button` accept common evdev key and button names, including `S-` prefixes and `press`, `release` or `full` click modes.
 - STIPC input goes through the first registered seat device of each kind, so it is dropped while that device is disabled, and also when no device of that kind is registered (see [Input devices](#input-devices)). The methods still reply `ok`.
 - `move_cursor` moves the pointer. `touch` sends down for a new finger and motion for an active one; `touch_release` lifts it.
-- `run` launches a shell command with the compositor's `WAYLAND_DISPLAY`, returns its PID, and reaps exited children while polling.
+- `run` launches a shell command in the client environment (the compositor's `WAYLAND_DISPLAY` and `WAYFIRE_SOCKET`, no inherited `DISPLAY`), returns its PID, and reaps exited children while polling.
 - `get_display` reports the Wayland socket and an empty XWayland display, since XWayland is not implemented.
 - `layout_views` validates and applies a batch of exact view rectangles, with optional output-name checks. Invalid input causes no partial update.
