@@ -1,3 +1,19 @@
+//! Session persistence and relaunching saved applications.
+//!
+//! [`SessionStore`] reads and atomically writes the `shingle_core::Shingle`
+//! model as JSON. On restore, [`launch_saved`] starts one process per saved
+//! launch group with `SHINGLE_LAUNCH_ID` in its environment. When that
+//! client connects, the compositor reads the variable from
+//! `/proc/<pid>/environ` (crates/shingle/src/launch.rs:12) and the core puts
+//! the new window back into the saved tile, so tile order and sizes survive
+//! logout and login. [`launch_autostart`] then runs the configured autostart
+//! commands, skipping those the session already relaunched.
+//!
+//! Pre-rename Tilefire sessions and `TILEFIRE_LAUNCH_ID` are still read;
+//! see README.md#upgrading-from-tilefire.
+
+#![warn(missing_docs)]
+
 use std::{
   collections::{BTreeMap, BTreeSet},
   ffi::OsStr,
@@ -12,18 +28,38 @@ use shingle_core::{
 };
 use thiserror::Error;
 
+/// Errors from loading, saving or relaunching a session.
 #[derive(Debug, Error)]
 pub enum SessionError {
+  /// The session file is not valid JSON, fails the snapshot's validation,
+  /// or could not be written atomically.
   #[error(transparent)]
   Core(#[from] ShingleError),
+  /// Reading the session file, other than it not existing, or creating its
+  /// directory failed.
   #[error("failed to access session state")]
   Io(#[from] io::Error),
+  /// Neither `XDG_STATE_HOME` nor `HOME` is set.
   #[error("session state location is unavailable")]
   StateDirectoryUnavailable,
+  /// A saved window's command could not be spawned, or it has no saved
+  /// command (reported as `ErrorKind::NotFound`). Other windows are still
+  /// launched.
   #[error("failed to launch window {window:?}: {source}")]
-  Launch { window: WindowId, source: io::Error },
+  Launch {
+    /// The saved window that was not relaunched.
+    window: WindowId,
+    /// Why spawning failed.
+    source: io::Error,
+  },
+  /// `/bin/sh` could not be spawned for an autostart command.
   #[error("failed to launch autostart command {command:?}: {source}")]
-  Autostart { command: String, source: io::Error },
+  Autostart {
+    /// The command line as configured.
+    command: String,
+    /// Why spawning failed.
+    source: io::Error,
+  },
 }
 
 /// Picks the session file under `state`.
@@ -44,16 +80,30 @@ fn resolve_session_path(
   }
 }
 
+/// The location of one session file.
 #[derive(Clone, Debug)]
 pub struct SessionStore {
   path: PathBuf,
 }
 
 impl SessionStore {
+  /// Uses `path` as given, as for `session.path` in the config. Nothing is
+  /// read or created until [`Self::load`] or [`Self::save`].
   pub fn new(path: impl Into<PathBuf>) -> Self {
     Self { path: path.into() }
   }
 
+  /// `$XDG_STATE_HOME/shingle/session.json`, falling back to
+  /// `$HOME/.local/state` for the state directory. If that file does not
+  /// exist but `tilefire/session.json` does, the Tilefire file is used for
+  /// both loading and saving until it is moved by hand.
+  ///
+  /// An empty `XDG_STATE_HOME` is used as is, which makes the path
+  /// relative, rather than ignored as the XDG base directory spec asks.
+  ///
+  /// # Errors
+  ///
+  /// [`SessionError::StateDirectoryUnavailable`] if neither variable is set.
   pub fn default_location() -> Result<Self, SessionError> {
     let state = std::env::var_os("XDG_STATE_HOME")
       .map(PathBuf::from)
@@ -67,10 +117,19 @@ impl SessionStore {
     })))
   }
 
+  /// The session file this store reads and writes.
   pub fn path(&self) -> &Path {
     &self.path
   }
 
+  /// Writes `session` atomically, creating the parent directories first. A
+  /// failed save leaves the previous file intact.
+  ///
+  /// # Errors
+  ///
+  /// [`SessionError::Io`] if the directory cannot be created and
+  /// [`SessionError::Core`] if the model fails validation or the write
+  /// fails.
   pub fn save(&self, session: &Shingle) -> Result<(), SessionError> {
     if let Some(parent) = self.path.parent() {
       fs::create_dir_all(parent)?;
@@ -79,6 +138,21 @@ impl SessionStore {
     Ok(())
   }
 
+  /// Reads and validates the saved session. Returns `Ok(None)` when the file
+  /// does not exist, so a first start is not an error.
+  ///
+  /// Every saved window without a launch ID is given
+  /// `shingle-restore-<window id>` in both the returned model and snapshot,
+  /// so pass this snapshot, not a fresh one, to [`launch_saved`] for the
+  /// relaunched clients to find their tiles again.
+  ///
+  /// # Errors
+  ///
+  /// [`SessionError::Io`] if the file exists but cannot be read and
+  /// [`SessionError::Core`] if it is not a valid snapshot. A corrupt file is
+  /// left in place, not renamed or deleted, and since the frontend
+  /// propagates this error it then refuses to start until the file is
+  /// removed or `session.restore` is turned off.
   pub fn load(
     &self,
   ) -> Result<Option<(Shingle, SessionSnapshot)>, SessionError> {
@@ -95,6 +169,17 @@ impl SessionStore {
     Ok(Some((session, snapshot)))
   }
 
+  /// [`Self::load`] followed by [`RestoreReport::launch`].
+  ///
+  /// The relaunched clients connect to the `WAYLAND_DISPLAY` of the calling
+  /// process, which inside a nested compositor is the host session, not
+  /// Shingle. The frontend therefore calls [`Self::load`] and
+  /// [`launch_saved`] with the compositor's own socket instead.
+  ///
+  /// # Errors
+  ///
+  /// As for [`Self::load`]. Launch failures do not fail the call; they are
+  /// collected in [`RestoreReport::failed`].
   pub fn restore(&self) -> Result<Option<RestoreReport>, SessionError> {
     let Some((session, snapshot)) = self.load()? else {
       return Ok(None);
@@ -103,13 +188,20 @@ impl SessionStore {
   }
 }
 
+/// A loaded session and the clients started for it.
 pub struct RestoreReport {
+  /// The restored model, with every saved window waiting for its client.
   pub session: Shingle,
+  /// Processes that were spawned. Their windows have not mapped yet.
   pub launched: Vec<LaunchedWindow>,
+  /// [`SessionError::Launch`] for each launch group that failed to spawn.
   pub failed: Vec<SessionError>,
 }
 
 impl RestoreReport {
+  /// Runs [`launch_saved`] for `snapshot` against this process's
+  /// `WAYLAND_DISPLAY`, discarding the clients' output. See
+  /// [`SessionStore::restore`] for why that is rarely the right display.
   pub fn launch(session: Shingle, snapshot: &SessionSnapshot) -> Self {
     let display = std::env::var_os("WAYLAND_DISPLAY");
     let report = launch_saved(snapshot, display.as_deref(), true);
@@ -121,11 +213,25 @@ impl RestoreReport {
   }
 }
 
+/// The result of [`launch_saved`].
 pub struct LaunchReport {
+  /// Processes that were spawned, one per launch group, in tile order.
   pub launched: Vec<LaunchedWindow>,
+  /// [`SessionError::Launch`] for each launch group that failed to spawn.
   pub failed: Vec<SessionError>,
 }
 
+/// Runs `command` through `/bin/sh -c` with `WAYLAND_DISPLAY` set to
+/// `display`, for autostart, `command` bindings and IPC `run`.
+///
+/// The child inherits stdin and, unless `discard_output` is set, stdout and
+/// stderr. It is not waited for; the caller owns the returned [`Child`] and
+/// must reap it.
+///
+/// # Errors
+///
+/// Only when `/bin/sh` cannot be spawned. A command that fails inside the
+/// shell still returns `Ok`.
 pub fn launch_command(
   command: &str,
   display: &OsStr,
@@ -142,11 +248,23 @@ pub fn launch_command(
   process.spawn()
 }
 
+/// The result of [`launch_autostart`].
 pub struct AutostartReport {
+  /// The shells started, in command order.
   pub children: Vec<Child>,
+  /// [`SessionError::Autostart`] for each command that could not start.
   pub failed: Vec<SessionError>,
 }
 
+/// Runs each autostart command with [`launch_command`], skipping blank ones
+/// and, when a session was `restored`, those that relaunched a saved window.
+///
+/// A command counts as relaunched when a saved window's command is either
+/// `sh -c <command>` (or `/bin/sh -c`) or, with no whitespace inside any
+/// argument, the arguments joined by single spaces, compared after trimming.
+/// So `foot --server` matches a saved `["foot", "--server"]`, but quoting or
+/// a different path to the program does not match and the command runs a
+/// second time.
 pub fn launch_autostart(
   commands: &[String],
   restored: Option<&SessionSnapshot>,
@@ -189,6 +307,18 @@ fn was_restored(command: &str, snapshot: &SessionSnapshot) -> bool {
   })
 }
 
+/// Spawns the saved clients of `snapshot` in tile order: output by output,
+/// workspace by workspace, depth first through each tree.
+///
+/// Windows that share a `launch_group` (by default the PID of the process
+/// that created them) are launched once, for the first window in tile
+/// order. Each child gets the saved arguments without a shell, the saved
+/// working directory, a null stdin, `SHINGLE_LAUNCH_ID` (empty if the saved
+/// window has none) and, when `display` is given, `WAYLAND_DISPLAY`. Launch
+/// IDs are only filled in by [`SessionStore::load`].
+///
+/// Spawn failures are collected, not returned early, so one missing program
+/// does not stop the rest of the session.
 pub fn launch_saved(
   snapshot: &SessionSnapshot,
   display: Option<&OsStr>,
@@ -221,8 +351,12 @@ pub fn launch_saved(
   LaunchReport { launched, failed }
 }
 
+/// A process started for a saved window.
 pub struct LaunchedWindow {
+  /// The first saved window of the process's launch group. Other windows in
+  /// the group are expected from the same process.
   pub id: WindowId,
+  /// The spawned process, which the caller must reap.
   pub child: Child,
 }
 
