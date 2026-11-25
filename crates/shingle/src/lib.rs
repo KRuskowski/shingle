@@ -2952,6 +2952,59 @@ pub(crate) mod tests {
     assert_eq!(compositor.keyboard_layout_index(), 0);
   }
 
+  /// Maps one 64x64 toplevel with `app_id` and returns its window, with the
+  /// events so far drained.
+  fn mapped_window(
+    compositor: &mut Compositor,
+    path: &std::path::Path,
+    app_id: &str,
+  ) -> (crate::test_client::TestClient, WindowId) {
+    let mut client = crate::test_client::TestClient::connect(compositor, path);
+    let toplevel = client.toplevel(compositor, app_id);
+    client.attach_buffer(compositor, &toplevel.surface, 64, 64);
+    let window = compositor
+      .focused_window()
+      .expect("the toplevel is focused");
+    compositor.drain_events();
+    (client, window)
+  }
+
+  #[test]
+  fn setting_a_window_state_it_already_has_reports_nothing() {
+    let (mut compositor, path) = test_compositor();
+    let (_client, window) = mapped_window(&mut compositor, &path, "same");
+    let changes = |compositor: &mut Compositor| {
+      compositor
+        .drain_events()
+        .into_iter()
+        .filter(|event| {
+          matches!(
+            event,
+            Event::FullscreenChanged { .. }
+              | Event::StickyChanged { .. }
+              | Event::MinimizedChanged { .. }
+              | Event::MaximizedChanged { .. }
+          )
+        })
+        .count()
+    };
+    compositor.set_fullscreen(window, false).unwrap();
+    compositor.set_sticky(window, false).unwrap();
+    compositor.set_minimized(window, false).unwrap();
+    shell::set_maximized(&mut compositor.state, window, false).unwrap();
+    assert_eq!(changes(&mut compositor), 0);
+    compositor.set_fullscreen(window, true).unwrap();
+    compositor.set_sticky(window, true).unwrap();
+    shell::set_maximized(&mut compositor.state, window, true).unwrap();
+    compositor.set_minimized(window, true).unwrap();
+    assert_eq!(changes(&mut compositor), 4);
+    compositor.set_fullscreen(window, true).unwrap();
+    compositor.set_sticky(window, true).unwrap();
+    shell::set_maximized(&mut compositor.state, window, true).unwrap();
+    compositor.set_minimized(window, true).unwrap();
+    assert_eq!(changes(&mut compositor), 0);
+  }
+
   #[test]
   fn dragging_to_the_top_edge_maximizes_and_switches_no_workspace() {
     let (compositor, _) = test_compositor();

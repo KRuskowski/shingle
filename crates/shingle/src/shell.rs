@@ -1188,6 +1188,7 @@ pub(crate) fn set_minimized(
   window: WindowId,
   minimized: bool,
 ) -> Result<(), crate::Error> {
+  let changed = state.core.window_info(window)?.state.minimized != minimized;
   state.core.set_minimized(window, minimized)?;
   if !minimized && state.show_desktop {
     disable_show_desktop(state);
@@ -1197,6 +1198,9 @@ pub(crate) fn set_minimized(
     crate::input::sync_focus(state);
   } else {
     crate::input::focus_window(state, window);
+  }
+  if !changed {
+    return Ok(());
   }
   state
     .events
@@ -1212,8 +1216,12 @@ pub(crate) fn set_maximized(
   window: WindowId,
   maximized: bool,
 ) -> Result<(), crate::Error> {
+  let changed = state.core.window_info(window)?.state.maximized != maximized;
   state.core.set_maximized(window, maximized)?;
   reconfigure_all(state);
+  if !changed {
+    return Ok(());
+  }
   state
     .events
     .push(Event::MaximizedChanged { window, maximized });
@@ -1234,8 +1242,12 @@ pub(crate) fn set_fullscreen(
   window: WindowId,
   fullscreen: bool,
 ) -> Result<(), crate::Error> {
+  let changed = state.core.window_info(window)?.state.fullscreen != fullscreen;
   state.core.set_fullscreen(window, fullscreen)?;
   reconfigure_all(state);
+  if !changed {
+    return Ok(());
+  }
   state
     .events
     .push(Event::FullscreenChanged { window, fullscreen });
@@ -1268,9 +1280,12 @@ pub(crate) fn set_sticky(
   window: WindowId,
   sticky: bool,
 ) -> Result<(), crate::Error> {
+  let changed = state.core.window_info(window)?.state.sticky != sticky;
   state.core.set_sticky(window, sticky)?;
   reconfigure_all(state);
-  state.events.push(Event::StickyChanged { window, sticky });
+  if changed {
+    state.events.push(Event::StickyChanged { window, sticky });
+  }
   Ok(())
 }
 
