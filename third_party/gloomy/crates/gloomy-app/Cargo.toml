@@ -1,0 +1,16 @@
+[package]
+name = "gloomy-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gloomy-core = { path = "../gloomy-core" }
+wgpu = "0.20"
+winit = "0.29"
+pollster = "0.3"
+log = "0.4"
+anyhow = "1.0"
+
+[lints]
+workspace = true

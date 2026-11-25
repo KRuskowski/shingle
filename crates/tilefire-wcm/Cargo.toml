@@ -1,0 +1,16 @@
+[package]
+name = "tilefire-wcm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+gloomy-app = { path = "../../third_party/gloomy/crates/gloomy-app" }
+gloomy-core = { path = "../../third_party/gloomy/crates/gloomy-core" }
+tilefire-config = { path = "../tilefire-config" }
+winit = "0.29"
+
+[lints]
+workspace = true

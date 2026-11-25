@@ -1,0 +1,246 @@
+output:
+  x: 0
+  y: 0
+  width: 1280
+  height: 720
+  scale: 1.0
+  transform: normal
+
+background_color: [0.1, 0.1, 0.1, 1.0]
+
+behavior:
+  auto_reload: true
+  config_reload_delay: 20
+  all_dialogs_modal: true
+  discard_command_output: true
+  keep_last_toplevel_activated: true
+  max_buffer_size: 16384
+  preferred_decoration_mode: client
+  force_preferred_decoration_mode: false
+  focus_main_surface_instead_of_popup: false
+  disable_primary_selection: false
+
+security_context:
+  privileged_protocols: >-
+    zwlr_foreign_toplevel_manager_v1,zwlr_screencopy_manager_v1,
+    zwlr_data_control_manager_v1,zwp_keyboard_shortcuts_inhibit_manager_v1
+
+zoom:
+  modifier: super
+  speed: 0.01
+  smoothing_ms: 300
+  interpolation: linear
+
+alpha:
+  modifier: super alt
+  min_value: 0.1
+
+fast_switcher:
+  inactive_alpha: 0.7
+
+scale:
+  duration_ms: 750
+  spacing: 50
+  outer_margin: 0
+  inactive_alpha: 0.75
+  minimized_alpha: 0.45
+  allow_zoom: false
+  middle_click_close: false
+  include_minimized: false
+  close_on_new_view: false
+  title_overlay: all
+  title_font_size: 16
+  title_position: center
+  title_bg_color: [0.1, 0.1, 0.1, 0.9]
+  title_text_color: [0.8, 0.8, 0.8, 1.0]
+
+scale_title_filter:
+  case_sensitive: false
+  share_filter: false
+  overlay: true
+  font_size: 30
+  bg_color: [0.0, 0.0, 0.0, 0.5]
+  text_color: [0.8, 0.8, 0.8, 0.8]
+
+expo:
+  background: [0.1, 0.1, 0.1, 1.0]
+  duration_ms: 300
+  offset: 10
+  keyboard_interaction: true
+  inactive_brightness: 0.7
+  transition_length_ms: 200
+  workspace_bindings: []
+
+animate:
+  enabled_for: type equals "toplevel"
+  open_animation: zoom
+  close_animation: zoom
+  minimize_animation: zoom
+  duration_ms: 400
+
+effects:
+  invert_preserve_hue: false
+  wrot_reset_radius: 25.0
+
+placement:
+  mode: center
+
+focus:
+  buttons: [btn_left, btn_middle, btn_right]
+  button_with_modifiers: false
+  buttons_passthrough: true
+
+activation:
+  check_surface: false
+  only_last_request: false
+  timeout_seconds: 30
+
+shortcuts:
+  inhibit_by_default: none
+  ignore_views: none
+
+grid:
+  enable_snap: true
+  snap_threshold: 10
+  quarter_snap_threshold: 50
+  enable_snap_off: true
+  snap_off_threshold: 10
+  workspace_switch_after: -1
+  join_views: false
+
+extra_gestures:
+  move_fingers: 3
+  move_delay: 750
+  close_fingers: 20
+
+workspaces:
+  width: 10
+  height: 1
+  wraparound: "false"
+
+vswitch:
+  duration_ms: 300
+  gap: 20
+  background: [0.1, 0.1, 0.1, 1.0]
+
+tiling:
+  minimum_extent: 50
+  keep_fullscreen_on_adjacent: true
+  tile_by_default: all
+  animation_duration: 0
+  preview_base_color: [0.5, 0.5, 1.0, 0.5]
+  preview_border_color: [0.25, 0.25, 0.5, 0.8]
+  preview_border_width: 3
+  gaps:
+    top: 0
+    right: 0
+    bottom: 0
+    left: 0
+    inner: 5
+
+resize:
+  min_width: 0
+  min_height: 0
+  corner_threshold: 0.33
+
+idle:
+  idle_seconds: 300
+  dpms_seconds: 600
+  lock_seconds: 420
+  disable_on_fullscreen: true
+  disable_initially: false
+
+session:
+  restore: true
+  path: null
+
+autostart: []
+
+window_rules: []
+
+keybindings:
+  focus_left: super+h
+  focus_right: super+l
+  focus_up: super+k
+  focus_down: super+j
+  focus_next: alt+tab
+  focus_previous: alt+shift+tab
+  toggle_fullscreen: super+f
+  toggle_sticky: super+s
+  scale_toggle: super+p
+  scale_toggle_all: super+shift+p
+  expo_toggle: super+e
+  fast_switcher_next: alt+escape
+  fast_switcher_previous: alt+shift+escape
+  invert_toggle: super+i
+  wrot_reset: super+ctrl+r
+  wrot_reset_one: super+r
+  always_on_top: ""
+  always_on_bottom: ""
+  minimize: super+n
+  bring_to_front: super+b
+  send_to_back: super+shift+b
+  show_desktop: super+d
+  toggle_maximized: super+m
+  toggle_tiling: super+t
+  move_left: super+shift+h
+  move_right: super+shift+l
+  move_up: super+shift+k
+  move_down: super+shift+j
+  resize_left: super+ctrl+h
+  resize_right: super+ctrl+l
+  resize_up: super+ctrl+k
+  resize_down: super+ctrl+j
+  idle_toggle: ""
+  break_grab: ""
+  lock: super+f8
+  close: super+q
+  close_alternatives: [alt+f4]
+  reload: super+shift+r
+  quit: super+shift+q
+  workspace_switch: [super+1, super+2, super+3, super+4, super+5, super+6, super+7, super+8, super+9, super+0]
+  workspace_move: [super+shift+1, super+shift+2, super+shift+3, super+shift+4, super+shift+5, super+shift+6, super+shift+7, super+shift+8, super+shift+9, super+shift+0]
+  workspace_next: super+alt+right
+  workspace_previous: super+alt+left
+  workspace_up: super+alt+up
+  workspace_down: super+alt+down
+  workspace_move_next: super+alt+shift+right
+  workspace_move_previous: super+alt+shift+left
+  workspace_move_up: super+alt+shift+up
+  workspace_move_down: super+alt+shift+down
+  workspace_send_next: ""
+  workspace_send_previous: ""
+  workspace_send_up: ""
+  workspace_send_down: ""
+  workspace_last: super+grave
+  workspace_move_last: super+shift+grave
+  workspace_send_last: ""
+
+commands:
+  - binding: super+enter
+    command: foot
+
+pointer:
+  move_button: super+btn_left
+  resize_button: super+btn_right
+  resize_preserve_aspect_button: ""
+  wrot_activate: super+ctrl+btn_right
+
+input:
+  rules: evdev
+  xkb_file: ""
+  model: pc105
+  layout: us
+  variant: ""
+  options: ""
+  repeat_rate: 40
+  repeat_delay: 400
+  numlock_default: false
+  capslock_default: false
+  mouse_scroll_speed: 1.0
+  mouse_natural_scroll: false
+  left_handed_mode: false
+  middle_emulation: false
+  cursor_theme: default
+  cursor_size: 24
+  enable_text_input_v3: true

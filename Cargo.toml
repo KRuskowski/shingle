@@ -1,0 +1,33 @@
+[workspace]
+members = ["crates/*"]
+exclude = ["third_party/gloomy"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[workspace.dependencies]
+bytemuck = { version = "1.24", features = ["derive"] }
+calloop = { version = "0.14.5", features = ["signals"] }
+nonstick = "0.1.2"
+pollster = "0.4"
+rustix = { version = "1.1", features = ["event", "fs", "mm", "net", "process", "rand", "shm", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9.34"
+thiserror = "2"
+wayland-protocols = { version = "0.32.13", features = ["client", "server", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client", "server"] }
+wayland-protocols-misc = { version = "0.3.12", features = ["client", "server"] }
+wayland-server = "0.31.14"
+wgpu = { version = "30.0.2", default-features = false, features = ["std", "vulkan", "drm", "wgsl"] }
+winit = { version = "0.30.12", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
+xcursor = "0.3"
+xkbcommon = "0.9"
+zeroize = "1.8"

@@ -1,0 +1,2239 @@
+mod config_watcher;
+mod i3;
+mod view_matcher;
+mod wayfire;
+mod window_rule;
+
+pub use config_watcher::ConfigWatcher;
+pub use view_matcher::{ViewMatcher, ViewProperties};
+pub use window_rule::{RuleAction, RuleEvent, WindowRule};
+
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use serde::Deserialize;
+use thiserror::Error;
+use tilefire_core::{Gaps, Rect};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigFormat {
+    Yaml,
+    Wayfire,
+    I3,
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TilefireConfig {
+    pub output: OutputConfig,
+    pub background_color: [f64; 4],
+    pub behavior: BehaviorConfig,
+    pub security_context: SecurityContextConfig,
+    pub zoom: ZoomConfig,
+    pub alpha: AlphaConfig,
+    pub fast_switcher: FastSwitcherConfig,
+    pub animate: AnimateConfig,
+    pub scale: ScaleConfig,
+    pub scale_title_filter: ScaleTitleFilterConfig,
+    pub expo: ExpoConfig,
+    pub effects: EffectsConfig,
+    pub placement: PlacementConfig,
+    pub focus: FocusConfig,
+    pub activation: ActivationConfig,
+    pub shortcuts: ShortcutConfig,
+    pub grid: GridConfig,
+    pub extra_gestures: ExtraGesturesConfig,
+    pub workspaces: WorkspaceConfig,
+    pub vswitch: VswitchConfig,
+    pub tiling: TilingConfig,
+    pub resize: ResizeConfig,
+    pub idle: IdleConfig,
+    pub session: SessionConfig,
+    pub autostart: Vec<String>,
+    pub window_rules: Vec<WindowRule>,
+    pub keybindings: Keybindings,
+    pub commands: Vec<CommandBinding>,
+    pub pointer: PointerBindings,
+    pub input: InputConfig,
+}
+
+impl Default for TilefireConfig {
+    fn default() -> Self {
+        Self {
+            output: OutputConfig::default(),
+            background_color: [0.1, 0.1, 0.1, 1.0],
+            behavior: BehaviorConfig::default(),
+            security_context: SecurityContextConfig::default(),
+            zoom: ZoomConfig::default(),
+            alpha: AlphaConfig::default(),
+            fast_switcher: FastSwitcherConfig::default(),
+            animate: AnimateConfig::default(),
+            scale: ScaleConfig::default(),
+            scale_title_filter: ScaleTitleFilterConfig::default(),
+            expo: ExpoConfig::default(),
+            effects: EffectsConfig::default(),
+            placement: PlacementConfig::default(),
+            focus: FocusConfig::default(),
+            activation: ActivationConfig::default(),
+            shortcuts: ShortcutConfig::default(),
+            grid: GridConfig::default(),
+            extra_gestures: ExtraGesturesConfig::default(),
+            workspaces: WorkspaceConfig::default(),
+            vswitch: VswitchConfig::default(),
+            tiling: TilingConfig::default(),
+            resize: ResizeConfig::default(),
+            idle: IdleConfig::default(),
+            session: SessionConfig::default(),
+            autostart: Vec::new(),
+            window_rules: Vec::new(),
+            keybindings: Keybindings::default(),
+            commands: Vec::new(),
+            pointer: PointerBindings::default(),
+            input: InputConfig::default(),
+        }
+    }
+}
+
+impl TilefireConfig {
+    pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
+        let path = path.map(Path::to_owned).unwrap_or_else(default_path);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && path == default_path() =>
+            {
+                return Ok(Self::default());
+            }
+            Err(source) => {
+                return Err(ConfigError::Read {
+                    path: path.clone(),
+                    source,
+                });
+            }
+        };
+        let format =
+            if path.extension().is_some_and(|extension| extension == "ini")
+                || text.trim_start().starts_with('[')
+            {
+                ConfigFormat::Wayfire
+            } else if path.extension().is_some_and(|extension| {
+                extension == "conf" || extension == "i3"
+            }) {
+                ConfigFormat::I3
+            } else {
+                ConfigFormat::Yaml
+            };
+        Self::parse(&text, format)
+    }
+
+    pub fn parse(
+        text: &str,
+        format: ConfigFormat,
+    ) -> Result<Self, ConfigError> {
+        let config = match format {
+            ConfigFormat::Yaml => serde_yaml::from_str::<Self>(text)?,
+            ConfigFormat::Wayfire => wayfire::parse(text)?,
+            ConfigFormat::I3 => i3::parse(text)?,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn to_yaml(&self) -> Result<String, ConfigError> {
+        self.validate()?;
+        Ok(serde_yaml::to_string(self)?)
+    }
+
+    pub fn save_yaml(&self, path: &Path) -> Result<(), ConfigError> {
+        let yaml = self.to_yaml()?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let file_name =
+            path.file_name().and_then(|name| name.to_str()).ok_or_else(
+                || ConfigError::Invalid("config path must name a file".into()),
+            )?;
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: path.to_owned(),
+            source,
+        })?;
+
+        let mut temporary = None;
+        for attempt in 0..100 {
+            let candidate = parent.join(format!(
+                ".{file_name}.{}.{}.tmp",
+                std::process::id(),
+                attempt
+            ));
+            match fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&candidate)
+            {
+                Ok(file) => {
+                    temporary = Some((candidate, file));
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(source) => {
+                    return Err(ConfigError::Write {
+                        path: path.to_owned(),
+                        source,
+                    });
+                }
+            }
+        }
+        let (temporary_path, mut file) =
+            temporary.ok_or_else(|| ConfigError::Write {
+                path: path.to_owned(),
+                source: io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "could not allocate a temporary config file",
+                ),
+            })?;
+        let result = (|| {
+            io::Write::write_all(&mut file, yaml.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary_path, path)
+        })();
+        if let Err(source) = result {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(ConfigError::Write {
+                path: path.to_owned(),
+                source,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !(1..=20).contains(&self.extra_gestures.move_fingers)
+            || !(1..=20).contains(&self.extra_gestures.close_fingers)
+            || !(1..=10_000).contains(&self.extra_gestures.move_delay)
+        {
+            return Err(ConfigError::Invalid(
+                "extra_gestures finger counts must be 1–20 and move_delay must be 1–10000"
+                    .into(),
+            ));
+        }
+        if !self.effects.wrot_reset_radius.is_finite()
+            || self.effects.wrot_reset_radius <= 0.0
+        {
+            return Err(ConfigError::Invalid(
+                "effects.wrot_reset_radius must be finite and positive".into(),
+            ));
+        }
+        if !matches!(
+            self.placement.mode.as_str(),
+            "center" | "cascade" | "maximize" | "random" | "pointer"
+        ) {
+            return Err(ConfigError::Invalid("unknown placement mode".into()));
+        }
+        if self.output.width == 0 || self.output.height == 0 {
+            return Err(ConfigError::Invalid(
+                "output width and height must be nonzero".into(),
+            ));
+        }
+        if !self.output.scale.is_finite() || self.output.scale <= 0.0 {
+            return Err(ConfigError::Invalid(
+                "output.scale must be finite and positive".into(),
+            ));
+        }
+        if self.behavior.max_buffer_size == 0 {
+            return Err(ConfigError::Invalid(
+                "behavior.max_buffer_size must be nonzero".into(),
+            ));
+        }
+        if !matches!(
+            self.behavior.preferred_decoration_mode.as_str(),
+            "client" | "server"
+        ) {
+            return Err(ConfigError::Invalid(
+                "behavior.preferred_decoration_mode must be client or server"
+                    .into(),
+            ));
+        }
+        if !self.input.mouse_scroll_speed.is_finite()
+            || self.input.mouse_scroll_speed < 0.0
+        {
+            return Err(ConfigError::Invalid(
+                "input.mouse_scroll_speed must be finite and non-negative"
+                    .into(),
+            ));
+        }
+        if !(1..=256).contains(&self.input.cursor_size) {
+            return Err(ConfigError::Invalid(
+                "input.cursor_size must be between 1 and 256".into(),
+            ));
+        }
+        if !self.zoom.speed.is_finite() || self.zoom.speed < 0.0 {
+            return Err(ConfigError::Invalid(
+                "zoom.speed must be finite and non-negative".into(),
+            ));
+        }
+        if !self.alpha.min_value.is_finite()
+            || !(0.0..=1.0).contains(&self.alpha.min_value)
+        {
+            return Err(ConfigError::Invalid(
+                "alpha.min_value must be between 0 and 1".into(),
+            ));
+        }
+        if !self.fast_switcher.inactive_alpha.is_finite()
+            || !(0.0..=1.0).contains(&self.fast_switcher.inactive_alpha)
+        {
+            return Err(ConfigError::Invalid(
+                "fast_switcher.inactive_alpha must be between 0 and 1".into(),
+            ));
+        }
+        if !self.scale.inactive_alpha.is_finite()
+            || !(0.0..=1.0).contains(&self.scale.inactive_alpha)
+        {
+            return Err(ConfigError::Invalid(
+                "scale.inactive_alpha must be between 0 and 1".into(),
+            ));
+        }
+        if !self.scale.minimized_alpha.is_finite()
+            || !(0.0..=1.0).contains(&self.scale.minimized_alpha)
+        {
+            return Err(ConfigError::Invalid(
+                "scale.minimized_alpha must be between 0 and 1".into(),
+            ));
+        }
+        if !self.expo.inactive_brightness.is_finite()
+            || !(0.0..=1.0).contains(&self.expo.inactive_brightness)
+        {
+            return Err(ConfigError::Invalid(
+                "expo.inactive_brightness must be between 0 and 1".into(),
+            ));
+        }
+        if self.expo.background.iter().any(|component| {
+            !component.is_finite() || !(0.0..=1.0).contains(component)
+        }) {
+            return Err(ConfigError::Invalid(
+                "expo.background components must be between 0 and 1".into(),
+            ));
+        }
+        if self.vswitch.background.iter().any(|component| {
+            !component.is_finite() || !(0.0..=1.0).contains(component)
+        }) {
+            return Err(ConfigError::Invalid(
+                "vswitch.background components must be between 0 and 1".into(),
+            ));
+        }
+        if !matches!(
+            self.scale.title_overlay.as_str(),
+            "never" | "mouse" | "all"
+        ) {
+            return Err(ConfigError::Invalid(
+                "scale.title_overlay must be never, mouse, or all".into(),
+            ));
+        }
+        if !matches!(
+            self.scale.title_position.as_str(),
+            "top" | "center" | "bottom"
+        ) {
+            return Err(ConfigError::Invalid(
+                "scale.title_position must be top, center, or bottom".into(),
+            ));
+        }
+        if !(1..=256).contains(&self.scale.title_font_size) {
+            return Err(ConfigError::Invalid(
+                "scale.title_font_size must be between 1 and 256".into(),
+            ));
+        }
+        if !(1..=256).contains(&self.scale_title_filter.font_size) {
+            return Err(ConfigError::Invalid(
+                "scale_title_filter.font_size must be between 1 and 256".into(),
+            ));
+        }
+        for color in [
+            self.scale.title_bg_color,
+            self.scale.title_text_color,
+            self.scale_title_filter.bg_color,
+            self.scale_title_filter.text_color,
+        ] {
+            if color.iter().any(|component| {
+                !component.is_finite() || !(0.0..=1.0).contains(component)
+            }) {
+                return Err(ConfigError::Invalid(
+                    "scale title color components must be between 0 and 1"
+                        .into(),
+                ));
+            }
+        }
+        if !matches!(
+            self.animate.open_animation.as_str(),
+            "none" | "fade" | "zoom"
+        ) {
+            return Err(ConfigError::Invalid(
+                "animate.open_animation must be none, fade, or zoom".into(),
+            ));
+        }
+        if !matches!(
+            self.animate.close_animation.as_str(),
+            "none" | "fade" | "zoom"
+        ) {
+            return Err(ConfigError::Invalid(
+                "animate.close_animation must be none, fade, or zoom".into(),
+            ));
+        }
+        if !matches!(
+            self.animate.minimize_animation.as_str(),
+            "none" | "fade" | "zoom"
+        ) {
+            return Err(ConfigError::Invalid(
+                "animate.minimize_animation must be none, fade, or zoom".into(),
+            ));
+        }
+        if !matches!(self.zoom.interpolation.as_str(), "linear" | "nearest") {
+            return Err(ConfigError::Invalid(
+                "zoom.interpolation must be linear or nearest".into(),
+            ));
+        }
+        if !matches!(
+            self.output.transform.as_str(),
+            "normal"
+                | "90"
+                | "180"
+                | "270"
+                | "flipped"
+                | "90_flipped"
+                | "180_flipped"
+                | "270_flipped"
+                | "flipped-90"
+                | "flipped-180"
+                | "flipped-270"
+                | "flipped90"
+                | "flipped180"
+                | "flipped270"
+        ) {
+            return Err(ConfigError::Invalid(
+                "unknown output transform".into(),
+            ));
+        }
+        if self.background_color.iter().any(|component| {
+            !component.is_finite() || !(0.0..=1.0).contains(component)
+        }) {
+            return Err(ConfigError::Invalid(
+                "background_color components must be between 0 and 1".into(),
+            ));
+        }
+        for color in [
+            self.tiling.preview_base_color,
+            self.tiling.preview_border_color,
+        ] {
+            if color.iter().any(|component| {
+                !component.is_finite() || !(0.0..=1.0).contains(component)
+            }) {
+                return Err(ConfigError::Invalid(
+                    "preview color components must be between 0 and 1".into(),
+                ));
+            }
+        }
+        if self.workspaces.width == 0 || self.workspaces.height == 0 {
+            return Err(ConfigError::Invalid(
+                "workspaces.width and workspaces.height must be nonzero".into(),
+            ));
+        }
+        let workspace_count = u64::from(self.workspaces.width)
+            * u64::from(self.workspaces.height);
+        if self.expo.workspace_bindings.iter().any(|entry| {
+            entry.workspace == 0 || entry.workspace as u64 > workspace_count
+        }) {
+            return Err(ConfigError::Invalid(
+                "Expo workspace bindings must name a configured workspace"
+                    .into(),
+            ));
+        }
+        if !matches!(
+            self.workspaces.wraparound.as_str(),
+            "false" | "true" | "on_end"
+        ) {
+            return Err(ConfigError::Invalid(
+                "workspaces.wraparound must be false, true, or on_end".into(),
+            ));
+        }
+        for rule in &self.window_rules {
+            if let RuleAction::AssignWorkspace { x, y } = rule.action
+                && (x >= self.workspaces.width || y >= self.workspaces.height)
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "window rule workspace {x},{y} is outside the configured grid"
+                )));
+            }
+        }
+        if self.tiling.minimum_extent == 0 {
+            return Err(ConfigError::Invalid(
+                "tiling.minimum_extent must be nonzero".into(),
+            ));
+        }
+        if !self.resize.corner_threshold.is_finite()
+            || !(0.0..=0.5).contains(&self.resize.corner_threshold)
+        {
+            return Err(ConfigError::Invalid(
+                "resize.corner_threshold must be between 0 and 0.5".into(),
+            ));
+        }
+        if self.keybindings.workspace_switch.len() != 10
+            || self.keybindings.workspace_move.len() != 10
+        {
+            return Err(ConfigError::Invalid(
+                "workspace_switch and workspace_move must each contain 10 bindings".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn parse_color(text: &str) -> Result<[f64; 4], ConfigError> {
+    let invalid = || ConfigError::Invalid(format!("invalid color {text:?}"));
+    let text = text.trim();
+    let color = if let Some(hex) = text.strip_prefix('#') {
+        if hex.len() != 6 && hex.len() != 8 {
+            return Err(invalid());
+        }
+        let mut color = [1.0; 4];
+        for (index, component) in
+            color.iter_mut().enumerate().take(hex.len() / 2)
+        {
+            let value = u8::from_str_radix(&hex[index * 2..][..2], 16)
+                .map_err(|_| invalid())?;
+            *component = f64::from(value) / 255.0;
+        }
+        color
+    } else {
+        let components = text.split_whitespace().collect::<Vec<_>>();
+        if components.len() != 4 {
+            return Err(invalid());
+        }
+        let mut color = [0.0; 4];
+        for (component, target) in components.into_iter().zip(&mut color) {
+            *target = component.parse().map_err(|_| invalid())?;
+        }
+        color
+    };
+    if color.iter().any(|component| {
+        !component.is_finite() || !(0.0..=1.0).contains(component)
+    }) {
+        return Err(invalid());
+    }
+    Ok(color)
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OutputConfig {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
+    pub transform: String,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 720,
+            scale: 1.0,
+            transform: "normal".into(),
+        }
+    }
+}
+
+impl OutputConfig {
+    pub fn rect(&self) -> Rect {
+        Rect::new(self.x, self.y, self.width, self.height)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GridConfig {
+    pub enable_snap: bool,
+    pub snap_threshold: u32,
+    pub quarter_snap_threshold: u32,
+    pub enable_snap_off: bool,
+    pub snap_off_threshold: u32,
+    pub workspace_switch_after: i64,
+    pub join_views: bool,
+}
+
+impl Default for GridConfig {
+    fn default() -> Self {
+        Self {
+            enable_snap: true,
+            snap_threshold: 10,
+            quarter_snap_threshold: 50,
+            enable_snap_off: true,
+            snap_off_threshold: 10,
+            workspace_switch_after: -1,
+            join_views: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExtraGesturesConfig {
+    pub move_fingers: u32,
+    pub move_delay: u64,
+    pub close_fingers: u32,
+}
+
+impl Default for ExtraGesturesConfig {
+    fn default() -> Self {
+        Self {
+            move_fingers: 3,
+            move_delay: 750,
+            close_fingers: 20,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PlacementConfig {
+    pub mode: String,
+}
+
+impl Default for PlacementConfig {
+    fn default() -> Self {
+        Self {
+            mode: "center".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FocusConfig {
+    pub buttons: Vec<Binding>,
+    pub button_with_modifiers: bool,
+    pub buttons_passthrough: bool,
+}
+
+impl Default for FocusConfig {
+    fn default() -> Self {
+        Self {
+            buttons: ["btn_left", "btn_middle", "btn_right"]
+                .into_iter()
+                .map(|button| Binding::new(button, Vec::new()))
+                .collect(),
+            button_with_modifiers: false,
+            buttons_passthrough: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ActivationConfig {
+    pub check_surface: bool,
+    pub only_last_request: bool,
+    pub timeout_seconds: u64,
+}
+
+impl Default for ActivationConfig {
+    fn default() -> Self {
+        Self {
+            check_surface: false,
+            only_last_request: false,
+            timeout_seconds: 30,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShortcutConfig {
+    pub inhibit_by_default: ViewMatcher,
+    pub ignore_views: ViewMatcher,
+}
+
+impl Default for ShortcutConfig {
+    fn default() -> Self {
+        Self {
+            inhibit_by_default: "none"
+                .to_owned()
+                .try_into()
+                .expect("none is a valid matcher"),
+            ignore_views: "none"
+                .to_owned()
+                .try_into()
+                .expect("none is a valid matcher"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BehaviorConfig {
+    pub auto_reload: bool,
+    pub config_reload_delay: u64,
+    pub all_dialogs_modal: bool,
+    pub discard_command_output: bool,
+    pub keep_last_toplevel_activated: bool,
+    /// Largest accepted shared-memory buffer width or height in pixels.
+    pub max_buffer_size: u32,
+    /// Preferred XDG decoration mode: `client` or `server`.
+    pub preferred_decoration_mode: String,
+    /// Whether clients must use the preferred decoration mode.
+    pub force_preferred_decoration_mode: bool,
+    /// Focus a popup's main surface for clients with popup-focus bugs.
+    pub focus_main_surface_instead_of_popup: bool,
+    /// Do not advertise primary selection; changes require a restart.
+    pub disable_primary_selection: bool,
+}
+
+impl Default for BehaviorConfig {
+    fn default() -> Self {
+        Self {
+            auto_reload: true,
+            config_reload_delay: 20,
+            all_dialogs_modal: true,
+            discard_command_output: true,
+            keep_last_toplevel_activated: true,
+            max_buffer_size: 16384,
+            preferred_decoration_mode: "client".into(),
+            force_preferred_decoration_mode: false,
+            focus_main_surface_instead_of_popup: false,
+            disable_primary_selection: false,
+        }
+    }
+}
+
+/// Controls protocol visibility for clients created by a sandbox engine.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SecurityContextConfig {
+    pub privileged_protocols: String,
+}
+
+impl Default for SecurityContextConfig {
+    fn default() -> Self {
+        Self {
+            privileged_protocols: concat!(
+                "zwlr_foreign_toplevel_manager_v1,",
+                "zwlr_screencopy_manager_v1,",
+                "zwlr_data_control_manager_v1,",
+                "zwp_keyboard_shortcuts_inhibit_manager_v1",
+            )
+            .into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ZoomConfig {
+    pub modifier: String,
+    pub speed: f64,
+    pub smoothing_ms: u64,
+    pub interpolation: String,
+}
+
+impl Default for ZoomConfig {
+    fn default() -> Self {
+        Self {
+            modifier: "super".into(),
+            speed: 0.01,
+            smoothing_ms: 300,
+            interpolation: "linear".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AlphaConfig {
+    pub modifier: String,
+    pub min_value: f32,
+}
+
+impl Default for AlphaConfig {
+    fn default() -> Self {
+        Self {
+            modifier: "super alt".into(),
+            min_value: 0.1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FastSwitcherConfig {
+    pub inactive_alpha: f32,
+}
+
+impl Default for FastSwitcherConfig {
+    fn default() -> Self {
+        Self {
+            inactive_alpha: 0.7,
+        }
+    }
+}
+
+/// Controls the interactive window overview known as Scale in Wayfire.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScaleConfig {
+    /// Duration of thumbnail entry and layout transitions, in milliseconds.
+    pub duration_ms: u64,
+    /// Horizontal and vertical space between overview cells, in logical pixels.
+    pub spacing: u32,
+    /// Space reserved between the output edges and the overview grid.
+    pub outer_margin: u32,
+    /// Opacity multiplier for unselected, non-minimized windows.
+    pub inactive_alpha: f32,
+    /// Opacity multiplier for unselected minimized windows.
+    pub minimized_alpha: f32,
+    /// Whether thumbnails may grow beyond their original dimensions.
+    pub allow_zoom: bool,
+    /// Whether middle-clicking a thumbnail asks its application to close.
+    pub middle_click_close: bool,
+    /// Whether minimized windows are shown using their retained buffers.
+    pub include_minimized: bool,
+    /// Whether mapping a new window commits the selection and exits Scale.
+    pub close_on_new_view: bool,
+    /// Which thumbnails display titles: `never`, `mouse`, or `all`.
+    pub title_overlay: String,
+    /// Title font size in logical pixels.
+    pub title_font_size: u32,
+    /// Title placement within a thumbnail: `top`, `center`, or `bottom`.
+    pub title_position: String,
+    /// Title background color; rasterization produces pre-multiplied RGBA.
+    pub title_bg_color: [f64; 4],
+    /// Title text color.
+    pub title_text_color: [f64; 4],
+}
+
+impl Default for ScaleConfig {
+    fn default() -> Self {
+        Self {
+            duration_ms: 750,
+            spacing: 50,
+            outer_margin: 0,
+            inactive_alpha: 0.75,
+            minimized_alpha: 0.45,
+            allow_zoom: false,
+            middle_click_close: false,
+            include_minimized: false,
+            close_on_new_view: false,
+            title_overlay: "all".into(),
+            title_font_size: 16,
+            title_position: "center".into(),
+            title_bg_color: [0.1, 0.1, 0.1, 0.9],
+            title_text_color: [0.8, 0.8, 0.8, 1.0],
+        }
+    }
+}
+
+/// Controls the workspace overview known as Expo in Wayfire.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExpoConfig {
+    /// Output and workspace-cell background color.
+    pub background: [f64; 4],
+    /// Duration of workspace-wall entry and exit zooms, in milliseconds.
+    pub duration_ms: u64,
+    /// Gap around and between workspace cells, in logical pixels.
+    pub offset: u32,
+    /// Whether unmodified arrow and keypad keys move the selection.
+    pub keyboard_interaction: bool,
+    /// RGB multiplier for thumbnails on inactive workspaces.
+    pub inactive_brightness: f32,
+    /// Duration of selection brightness crossfades, in milliseconds.
+    pub transition_length_ms: u64,
+    /// Direct workspace selection shortcuts; workspace numbers start at one.
+    pub workspace_bindings: Vec<ExpoWorkspaceBinding>,
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpoWorkspaceBinding {
+    pub workspace: usize,
+    pub binding: Binding,
+}
+
+impl Default for ExpoConfig {
+    fn default() -> Self {
+        Self {
+            background: [0.1, 0.1, 0.1, 1.0],
+            duration_ms: 300,
+            offset: 10,
+            keyboard_interaction: true,
+            inactive_brightness: 0.7,
+            transition_length_ms: 200,
+            workspace_bindings: Vec::new(),
+        }
+    }
+}
+
+/// Controls typing-to-filter and the filter overlay in Scale.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScaleTitleFilterConfig {
+    /// Whether title and app-ID substring matching preserves letter case.
+    pub case_sensitive: bool,
+    /// Whether outputs share filter text once multi-output support is present.
+    pub share_filter: bool,
+    /// Whether the current filter is displayed above the overview.
+    pub overlay: bool,
+    /// Filter overlay font size in logical pixels.
+    pub font_size: u32,
+    /// Filter overlay background color.
+    pub bg_color: [f64; 4],
+    /// Filter overlay text color.
+    pub text_color: [f64; 4],
+}
+
+impl Default for ScaleTitleFilterConfig {
+    fn default() -> Self {
+        Self {
+            case_sensitive: false,
+            share_filter: false,
+            overlay: true,
+            font_size: 30,
+            bg_color: [0.0, 0.0, 0.0, 0.5],
+            text_color: [0.8, 0.8, 0.8, 0.8],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AnimateConfig {
+    pub enabled_for: ViewMatcher,
+    pub open_animation: String,
+    pub close_animation: String,
+    pub minimize_animation: String,
+    pub duration_ms: u64,
+}
+
+impl Default for AnimateConfig {
+    fn default() -> Self {
+        Self {
+            enabled_for: "type equals \"toplevel\""
+                .to_owned()
+                .try_into()
+                .expect("the default animation matcher is valid"),
+            open_animation: "zoom".into(),
+            close_animation: "zoom".into(),
+            minimize_animation: "zoom".into(),
+            duration_ms: 400,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EffectsConfig {
+    pub invert_preserve_hue: bool,
+    pub wrot_reset_radius: f64,
+}
+
+impl Default for EffectsConfig {
+    fn default() -> Self {
+        Self {
+            invert_preserve_hue: false,
+            wrot_reset_radius: 25.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkspaceConfig {
+    pub width: u32,
+    pub height: u32,
+    pub wraparound: String,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            width: 10,
+            height: 1,
+            wraparound: "false".into(),
+        }
+    }
+}
+
+/// Controls Wayfire-style sliding transitions between workspaces.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VswitchConfig {
+    /// Duration of the workspace-wall movement, in milliseconds.
+    pub duration_ms: u64,
+    /// Visual gap between workspaces during the transition.
+    pub gap: u32,
+    /// Color visible in the inter-workspace gap.
+    pub background: [f64; 4],
+}
+
+impl Default for VswitchConfig {
+    fn default() -> Self {
+        Self {
+            duration_ms: 300,
+            gap: 20,
+            background: [0.1, 0.1, 0.1, 1.0],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TilingConfig {
+    pub gaps: Gaps,
+    pub minimum_extent: u32,
+    pub keep_fullscreen_on_adjacent: bool,
+    pub tile_by_default: ViewMatcher,
+    pub animation_duration: u64,
+    pub preview_base_color: [f64; 4],
+    pub preview_border_color: [f64; 4],
+    pub preview_border_width: u32,
+}
+
+impl Default for TilingConfig {
+    fn default() -> Self {
+        Self {
+            gaps: Gaps::default(),
+            minimum_extent: 50,
+            keep_fullscreen_on_adjacent: true,
+            tile_by_default: ViewMatcher::default(),
+            animation_duration: 0,
+            preview_base_color: [0.5, 0.5, 1.0, 0.5],
+            preview_border_color: [0.25, 0.25, 0.5, 0.8],
+            preview_border_width: 3,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResizeConfig {
+    pub min_width: u32,
+    pub min_height: u32,
+    pub corner_threshold: f64,
+}
+
+impl Default for ResizeConfig {
+    fn default() -> Self {
+        Self {
+            min_width: 0,
+            min_height: 0,
+            corner_threshold: 0.33,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IdleConfig {
+    pub idle_seconds: Option<u64>,
+    pub dpms_seconds: Option<u64>,
+    pub lock_seconds: Option<u64>,
+    pub disable_on_fullscreen: bool,
+    pub disable_initially: bool,
+}
+
+impl Default for IdleConfig {
+    fn default() -> Self {
+        Self {
+            idle_seconds: None,
+            dpms_seconds: None,
+            lock_seconds: None,
+            disable_on_fullscreen: true,
+            disable_initially: false,
+        }
+    }
+}
+
+impl IdleConfig {
+    pub fn as_idle_config(&self) -> tilefire_idle::Config {
+        tilefire_idle::Config {
+            idle_timeout: self.idle_seconds.map(Duration::from_secs),
+            dpms_timeout: self.dpms_seconds.map(Duration::from_secs),
+            lock_timeout: self.lock_seconds.map(Duration::from_secs),
+            disable_on_fullscreen: self.disable_on_fullscreen,
+            disable_initially: self.disable_initially,
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SessionConfig {
+    pub restore: bool,
+    pub path: Option<PathBuf>,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            restore: true,
+            path: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandBinding {
+    pub binding: Binding,
+    pub command: String,
+    #[serde(default)]
+    pub repeatable: bool,
+    #[serde(default)]
+    pub on_release: bool,
+    #[serde(default)]
+    pub always: bool,
+}
+
+impl CommandBinding {
+    pub fn should_run(
+        &self,
+        pressed: bool,
+        repeat: bool,
+        locked: bool,
+    ) -> bool {
+        if locked && !self.always {
+            return false;
+        }
+        if self.on_release {
+            !pressed
+        } else {
+            pressed && (self.repeatable || !repeat)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Keybindings {
+    pub focus_left: Binding,
+    pub focus_right: Binding,
+    pub focus_up: Binding,
+    pub focus_down: Binding,
+    pub focus_next: Binding,
+    pub focus_previous: Binding,
+    pub toggle_fullscreen: Binding,
+    pub toggle_sticky: Binding,
+    pub scale_toggle: Binding,
+    pub scale_toggle_all: Binding,
+    pub expo_toggle: Binding,
+    pub fast_switcher_next: Binding,
+    pub fast_switcher_previous: Binding,
+    pub invert_toggle: Binding,
+    pub wrot_reset: Binding,
+    pub wrot_reset_one: Binding,
+    pub always_on_top: Binding,
+    pub always_on_bottom: Binding,
+    pub minimize: Binding,
+    pub bring_to_front: Binding,
+    pub send_to_back: Binding,
+    pub show_desktop: Binding,
+    pub toggle_maximized: Binding,
+    pub toggle_tiling: Binding,
+    pub move_left: Binding,
+    pub move_right: Binding,
+    pub move_up: Binding,
+    pub move_down: Binding,
+    pub resize_left: Binding,
+    pub resize_right: Binding,
+    pub resize_up: Binding,
+    pub resize_down: Binding,
+    pub grid_slot_top_left: Vec<Binding>,
+    pub grid_slot_top: Vec<Binding>,
+    pub grid_slot_top_right: Vec<Binding>,
+    pub grid_slot_left: Vec<Binding>,
+    pub grid_slot_center: Vec<Binding>,
+    pub grid_slot_right: Vec<Binding>,
+    pub grid_slot_bottom_left: Vec<Binding>,
+    pub grid_slot_bottom: Vec<Binding>,
+    pub grid_slot_bottom_right: Vec<Binding>,
+    pub grid_restore: Vec<Binding>,
+    pub idle_toggle: Binding,
+    pub break_grab: Binding,
+    pub lock: Binding,
+    pub close: Binding,
+    pub close_alternatives: Vec<Binding>,
+    pub reload: Binding,
+    pub quit: Binding,
+    pub workspace_switch: Vec<Binding>,
+    pub workspace_move: Vec<Binding>,
+    pub workspace_next: Binding,
+    pub workspace_previous: Binding,
+    pub workspace_up: Binding,
+    pub workspace_down: Binding,
+    pub workspace_move_next: Binding,
+    pub workspace_move_previous: Binding,
+    pub workspace_move_up: Binding,
+    pub workspace_move_down: Binding,
+    pub workspace_send_next: Binding,
+    pub workspace_send_previous: Binding,
+    pub workspace_send_up: Binding,
+    pub workspace_send_down: Binding,
+    pub workspace_last: Binding,
+    pub workspace_move_last: Binding,
+    pub workspace_send_last: Binding,
+}
+
+impl Default for Keybindings {
+    fn default() -> Self {
+        let workspace_switch = (0..10)
+            .map(|index| {
+                Binding::new(
+                    ((index + 1) % 10).to_string(),
+                    vec![Modifier::Super],
+                )
+            })
+            .collect();
+        let workspace_move = (0..10)
+            .map(|index| {
+                Binding::new(
+                    ((index + 1) % 10).to_string(),
+                    vec![Modifier::Super, Modifier::Shift],
+                )
+            })
+            .collect();
+        let grid = |key: &str| Binding::new(key, vec![Modifier::Super]);
+        Self {
+            focus_left: Binding::new("h", vec![Modifier::Super]),
+            focus_right: Binding::new("l", vec![Modifier::Super]),
+            focus_up: Binding::new("k", vec![Modifier::Super]),
+            focus_down: Binding::new("j", vec![Modifier::Super]),
+            focus_next: Binding::new("tab", vec![Modifier::Alt]),
+            focus_previous: Binding::new(
+                "tab",
+                vec![Modifier::Alt, Modifier::Shift],
+            ),
+            toggle_fullscreen: Binding::new("f", vec![Modifier::Super]),
+            toggle_sticky: Binding::new("s", vec![Modifier::Super]),
+            scale_toggle: Binding::new("p", vec![Modifier::Super]),
+            scale_toggle_all: Binding::disabled(),
+            expo_toggle: Binding::new("e", vec![Modifier::Super]),
+            fast_switcher_next: Binding::new("escape", vec![Modifier::Alt]),
+            fast_switcher_previous: Binding::new(
+                "escape",
+                vec![Modifier::Alt, Modifier::Shift],
+            ),
+            invert_toggle: Binding::new("i", vec![Modifier::Super]),
+            wrot_reset: Binding::new(
+                "r",
+                vec![Modifier::Super, Modifier::Control],
+            ),
+            wrot_reset_one: Binding::new("r", vec![Modifier::Super]),
+            always_on_top: Binding::disabled(),
+            always_on_bottom: Binding::disabled(),
+            minimize: Binding::new("n", vec![Modifier::Super]),
+            bring_to_front: Binding::new("b", vec![Modifier::Super]),
+            send_to_back: Binding::new(
+                "b",
+                vec![Modifier::Super, Modifier::Shift],
+            ),
+            show_desktop: Binding::new("d", vec![Modifier::Super]),
+            toggle_maximized: Binding::new("m", vec![Modifier::Super]),
+            toggle_tiling: Binding::new("t", vec![Modifier::Super]),
+            move_left: Binding::new(
+                "h",
+                vec![Modifier::Super, Modifier::Shift],
+            ),
+            move_right: Binding::new(
+                "l",
+                vec![Modifier::Super, Modifier::Shift],
+            ),
+            move_up: Binding::new("k", vec![Modifier::Super, Modifier::Shift]),
+            move_down: Binding::new(
+                "j",
+                vec![Modifier::Super, Modifier::Shift],
+            ),
+            resize_left: Binding::new(
+                "h",
+                vec![Modifier::Super, Modifier::Control],
+            ),
+            resize_right: Binding::new(
+                "l",
+                vec![Modifier::Super, Modifier::Control],
+            ),
+            resize_up: Binding::new(
+                "k",
+                vec![Modifier::Super, Modifier::Control],
+            ),
+            resize_down: Binding::new(
+                "j",
+                vec![Modifier::Super, Modifier::Control],
+            ),
+            grid_slot_top_left: vec![grid("kp7")],
+            grid_slot_top: vec![grid("kp8")],
+            grid_slot_top_right: vec![grid("kp9")],
+            grid_slot_left: vec![grid("left"), grid("kp4")],
+            grid_slot_center: vec![grid("up"), grid("kp5")],
+            grid_slot_right: vec![grid("right"), grid("kp6")],
+            grid_slot_bottom_left: vec![grid("kp1")],
+            grid_slot_bottom: vec![grid("kp2")],
+            grid_slot_bottom_right: vec![grid("kp3")],
+            grid_restore: vec![grid("down"), grid("kp0")],
+            idle_toggle: Binding::disabled(),
+            break_grab: Binding::disabled(),
+            lock: Binding::new("f8", vec![Modifier::Super]),
+            close: Binding::new("q", vec![Modifier::Super]),
+            close_alternatives: vec![Binding::new("f4", vec![Modifier::Alt])],
+            reload: Binding::new("r", vec![Modifier::Super, Modifier::Shift]),
+            quit: Binding::new("q", vec![Modifier::Super, Modifier::Shift]),
+            workspace_switch,
+            workspace_move,
+            workspace_next: Binding::new(
+                "right",
+                vec![Modifier::Super, Modifier::Alt],
+            ),
+            workspace_previous: Binding::new(
+                "left",
+                vec![Modifier::Super, Modifier::Alt],
+            ),
+            workspace_up: Binding::new(
+                "up",
+                vec![Modifier::Super, Modifier::Alt],
+            ),
+            workspace_down: Binding::new(
+                "down",
+                vec![Modifier::Super, Modifier::Alt],
+            ),
+            workspace_move_next: Binding::new(
+                "right",
+                vec![Modifier::Super, Modifier::Alt, Modifier::Shift],
+            ),
+            workspace_move_previous: Binding::new(
+                "left",
+                vec![Modifier::Super, Modifier::Alt, Modifier::Shift],
+            ),
+            workspace_move_up: Binding::new(
+                "up",
+                vec![Modifier::Super, Modifier::Alt, Modifier::Shift],
+            ),
+            workspace_move_down: Binding::new(
+                "down",
+                vec![Modifier::Super, Modifier::Alt, Modifier::Shift],
+            ),
+            workspace_send_next: Binding::disabled(),
+            workspace_send_previous: Binding::disabled(),
+            workspace_send_up: Binding::disabled(),
+            workspace_send_down: Binding::disabled(),
+            workspace_last: Binding::new("grave", vec![Modifier::Super]),
+            workspace_move_last: Binding::new(
+                "grave",
+                vec![Modifier::Super, Modifier::Shift],
+            ),
+            workspace_send_last: Binding::disabled(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PointerBindings {
+    pub move_button: Binding,
+    pub resize_button: Binding,
+    pub resize_preserve_aspect_button: Binding,
+    pub wrot_activate: Binding,
+}
+
+impl Default for PointerBindings {
+    fn default() -> Self {
+        Self {
+            move_button: Binding::new("btn_left", vec![Modifier::Super]),
+            resize_button: Binding::new("btn_right", vec![Modifier::Super]),
+            resize_preserve_aspect_button: Binding::disabled(),
+            wrot_activate: Binding::new(
+                "btn_right",
+                vec![Modifier::Super, Modifier::Control],
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InputConfig {
+    pub rules: String,
+    pub xkb_file: String,
+    pub model: String,
+    pub layout: String,
+    pub variant: String,
+    pub options: String,
+    pub repeat_rate: u32,
+    pub repeat_delay: u32,
+    pub numlock_default: bool,
+    pub capslock_default: bool,
+    pub mouse_scroll_speed: f64,
+    pub mouse_natural_scroll: bool,
+    pub left_handed_mode: bool,
+    pub middle_emulation: bool,
+    pub cursor_theme: String,
+    pub cursor_size: u32,
+    /// Enable the text-input-v3 protocol for editable client surfaces.
+    pub enable_text_input_v3: bool,
+}
+
+impl Default for InputConfig {
+    fn default() -> Self {
+        Self {
+            rules: "evdev".into(),
+            xkb_file: String::new(),
+            model: "pc105".into(),
+            layout: "us".into(),
+            variant: String::new(),
+            options: String::new(),
+            repeat_rate: 40,
+            repeat_delay: 400,
+            numlock_default: false,
+            capslock_default: false,
+            mouse_scroll_speed: 1.0,
+            mouse_natural_scroll: false,
+            left_handed_mode: false,
+            middle_emulation: false,
+            cursor_theme: "default".into(),
+            cursor_size: 24,
+            enable_text_input_v3: true,
+        }
+    }
+}
+
+impl InputConfig {
+    pub fn load_keymap(&self) -> Result<String, ConfigError> {
+        if self.xkb_file.is_empty() {
+            return Ok(self.keymap());
+        }
+        let path = PathBuf::from(&self.xkb_file);
+        fs::read_to_string(&path)
+            .map_err(|source| ConfigError::Read { path, source })
+    }
+
+    /// Builds an XKB keymap with comma-separated layouts and variants.
+    pub fn keymap(&self) -> String {
+        let variants = self.variant.split(',').collect::<Vec<_>>();
+        let mut symbols = "pc".to_string();
+        for (index, layout) in self.layout.split(',').enumerate() {
+            symbols.push('+');
+            symbols.push_str(layout.trim());
+            if let Some(variant) = variants.get(index).map(|value| value.trim())
+                && !variant.is_empty()
+            {
+                symbols.push_str(&format!("({variant})"));
+            }
+            if index > 0 {
+                symbols.push_str(&format!(":{}", index + 1));
+            }
+        }
+        symbols.push_str("+inet(evdev)");
+        for option in
+            self.options.split(',').filter(|option| !option.is_empty())
+        {
+            if let Some((name, value)) = option.split_once(':') {
+                symbols.push_str(&format!("+{name}({value})"));
+            } else {
+                symbols.push_str(&format!("+{option}"));
+            }
+        }
+        format!(
+            "xkb_keymap {{\n  xkb_keycodes \"default\" {{ include \"evdev+aliases(qwerty)\" }};\n  xkb_types \"complete\" {{ include \"complete\" }};\n  xkb_compatibility \"complete\" {{ include \"complete\" }};\n  xkb_symbols \"default\" {{ include \"{symbols}\" }};\n}};\n"
+        )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Binding {
+    pub key: String,
+    pub modifiers: Vec<Modifier>,
+}
+
+impl Binding {
+    pub fn new(key: impl Into<String>, modifiers: Vec<Modifier>) -> Self {
+        Self {
+            key: key.into(),
+            modifiers,
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self::new("", Vec::new())
+    }
+
+    pub fn matches(&self, modifiers: Modifiers, key: &str) -> bool {
+        !self.key.is_empty()
+            && self.key == key
+            && self.modifiers_match(modifiers)
+    }
+
+    /// Matches the case-sensitive name produced by an XKB keysym.
+    pub fn matches_xkb(&self, modifiers: Modifiers, symbol: &str) -> bool {
+        self.key
+            .strip_prefix("xkb:")
+            .is_some_and(|expected| !expected.is_empty() && expected == symbol)
+            && self.modifiers_match(modifiers)
+    }
+
+    fn modifiers_match(&self, modifiers: Modifiers) -> bool {
+        let modifiers = modifiers.as_slice();
+        self.modifiers.len() == modifiers.len()
+            && self
+                .modifiers
+                .iter()
+                .all(|modifier| modifiers.contains(modifier))
+    }
+}
+
+impl From<Binding> for String {
+    fn from(binding: Binding) -> Self {
+        let mut parts = binding
+            .modifiers
+            .iter()
+            .map(|modifier| match modifier {
+                Modifier::Super => "super",
+                Modifier::Control => "ctrl",
+                Modifier::Alt => "alt",
+                Modifier::Shift => "shift",
+            })
+            .collect::<Vec<_>>();
+        parts.push(&binding.key);
+        parts.join("+")
+    }
+}
+
+impl TryFrom<String> for Binding {
+    type Error = ConfigError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.trim().is_empty() || value.trim() == "none" {
+            return Ok(Self::disabled());
+        }
+        let mut parts = value.split('+');
+        let key = parts
+            .next_back()
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| ConfigError::Binding(value.clone()))?;
+        let key = if key
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("xkb:"))
+        {
+            if key.len() == 4 {
+                return Err(ConfigError::Binding(value.clone()));
+            }
+            format!("xkb:{}", &key[4..])
+        } else {
+            key.to_lowercase()
+        };
+        let modifiers = parts
+            .map(|part| match part.to_lowercase().as_str() {
+                "super" | "super_key" | "logo" => Ok(Modifier::Super),
+                "ctrl" | "control" => Ok(Modifier::Control),
+                "alt" => Ok(Modifier::Alt),
+                "shift" => Ok(Modifier::Shift),
+                _ => Err(ConfigError::Binding(value.clone())),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { key, modifiers })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Modifier {
+    Super,
+    Control,
+    Alt,
+    Shift,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Modifiers {
+    pub super_key: bool,
+    pub control: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
+
+impl Modifiers {
+    pub fn as_slice(self) -> Vec<Modifier> {
+        let mut modifiers = Vec::new();
+        if self.control {
+            modifiers.push(Modifier::Control);
+        }
+        if self.alt {
+            modifiers.push(Modifier::Alt);
+        }
+        if self.shift {
+            modifiers.push(Modifier::Shift);
+        }
+        if self.super_key {
+            modifiers.push(Modifier::Super);
+        }
+        modifiers
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("failed to read config {path}: {source}")]
+    Read { path: PathBuf, source: io::Error },
+    #[error("failed to write config {path}: {source}")]
+    Write { path: PathBuf, source: io::Error },
+    #[error("invalid YAML: {0}")]
+    Yaml(#[from] serde_yaml::Error),
+    #[error("invalid config: {0}")]
+    Invalid(String),
+    #[error("invalid keybinding: {0}")]
+    Binding(String),
+}
+
+pub fn default_path() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".config"))
+        })
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("tilefire/tilefire.yaml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vswitch_imports_and_validates_transition_options() {
+        let wayfire = TilefireConfig::parse(
+            concat!(
+                "[vswitch]\n",
+                "duration = 250ms circle\n",
+                "gap = 24\n",
+                "background = #11223380\n",
+            ),
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert_eq!(wayfire.vswitch.duration_ms, 250);
+        assert_eq!(wayfire.vswitch.gap, 24);
+        assert_eq!(wayfire.vswitch.background[3], 128.0 / 255.0);
+
+        let i3 = TilefireConfig::parse(
+            concat!(
+                "set $vswitch_duration_ms 125\n",
+                "set $vswitch_gap 16\n",
+                "set $vswitch_background 0.1 0.2 0.3 0.4\n",
+            ),
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert_eq!(i3.vswitch.duration_ms, 125);
+        assert_eq!(i3.vswitch.gap, 16);
+        assert_eq!(i3.vswitch.background[1], 0.2);
+        assert!(
+            TilefireConfig::parse(
+                "vswitch:\n  background: [0, 0, 0, 2]\n",
+                ConfigFormat::Yaml,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn expo_imports_and_validates_wayfire_i3_and_yaml() {
+        let wayfire = TilefireConfig::parse(
+            concat!(
+                "[expo]\n",
+                "toggle = <super> KEY_E\n",
+                "background = #11223380\n",
+                "duration = 300ms circle\n",
+                "transition_length = 200\n",
+                "offset = 14\n",
+                "keyboard_interaction = false\n",
+                "inactive_brightness = 0.6\n",
+                "select_workspace_2 = <super> KEY_2\n",
+            ),
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert_eq!(wayfire.keybindings.expo_toggle.key, "e");
+        assert_eq!(wayfire.expo.background[3], 128.0 / 255.0);
+        assert_eq!(wayfire.expo.duration_ms, 300);
+        assert_eq!(wayfire.expo.transition_length_ms, 200);
+        assert_eq!(wayfire.expo.offset, 14);
+        assert!(!wayfire.expo.keyboard_interaction);
+        assert_eq!(wayfire.expo.inactive_brightness, 0.6);
+        assert_eq!(wayfire.expo.workspace_bindings.len(), 1);
+        assert_eq!(wayfire.expo.workspace_bindings[0].workspace, 2);
+        assert_eq!(wayfire.expo.workspace_bindings[0].binding.key, "2");
+
+        let i3 = TilefireConfig::parse(
+            concat!(
+                "set $expo_background 0.1 0.2 0.3 0.4\n",
+                "set $expo_duration_ms 250\n",
+                "set $expo_transition_length_ms 150\n",
+                "set $expo_offset 12\n",
+                "set $expo_keyboard_interaction no\n",
+                "set $expo_inactive_brightness 0.5\n",
+                "bindsym Mod4+e expo toggle\n",
+                "bindsym Mod4+2 expo select 2\n",
+            ),
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert_eq!(i3.keybindings.expo_toggle.key, "e");
+        assert_eq!(i3.expo.background[1], 0.2);
+        assert_eq!(i3.expo.duration_ms, 250);
+        assert_eq!(i3.expo.transition_length_ms, 150);
+        assert_eq!(i3.expo.offset, 12);
+        assert!(!i3.expo.keyboard_interaction);
+        assert_eq!(i3.expo.inactive_brightness, 0.5);
+        assert_eq!(i3.expo.workspace_bindings.len(), 1);
+        assert_eq!(i3.expo.workspace_bindings[0].workspace, 2);
+        assert_eq!(i3.expo.workspace_bindings[0].binding.key, "2");
+
+        for yaml in [
+            "expo:\n  inactive_brightness: 1.1\n",
+            "expo:\n  inactive_brightness: nan\n",
+            "expo:\n  background: [0, 0, 0, 2]\n",
+            concat!(
+                "workspaces:\n  width: 1\n  height: 1\n",
+                "expo:\n  workspace_bindings:\n",
+                "    - workspace: 2\n      binding: super+2\n",
+            ),
+            concat!(
+                "expo:\n  workspace_bindings:\n",
+                "    - workspace: 0\n      binding: super+0\n",
+            ),
+        ] {
+            assert!(TilefireConfig::parse(yaml, ConfigFormat::Yaml).is_err());
+        }
+    }
+
+    #[test]
+    fn scale_imports_from_wayfire_and_i3() {
+        let wayfire = TilefireConfig::parse(
+            "[scale]\ntoggle = <super> KEY_O\ntoggle_all = <super> <shift> KEY_O\nspacing = 24\nouter_margin = 12\ninactive_alpha = 0.6\nallow_zoom = true\n",
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert_eq!(wayfire.keybindings.scale_toggle.key, "o");
+        assert_eq!(
+            wayfire.keybindings.scale_toggle.modifiers,
+            [Modifier::Super]
+        );
+        assert_eq!(wayfire.keybindings.scale_toggle_all.key, "o");
+        assert_eq!(
+            wayfire.keybindings.scale_toggle_all.modifiers,
+            [Modifier::Super, Modifier::Shift]
+        );
+        assert_eq!(wayfire.scale.spacing, 24);
+        assert_eq!(wayfire.scale.outer_margin, 12);
+        assert_eq!(wayfire.scale.inactive_alpha, 0.6);
+        assert!(wayfire.scale.allow_zoom);
+
+        let i3 = TilefireConfig::parse(
+            "set $scale_spacing 30\nset $scale_outer_margin 15\nset $scale_inactive_alpha 0.5\nset $scale_allow_zoom yes\nbindsym Mod4+o scale toggle\nbindsym Mod4+Shift+o scale toggle_all\n",
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert_eq!(i3.keybindings.scale_toggle.key, "o");
+        assert_eq!(i3.keybindings.scale_toggle.modifiers, [Modifier::Super]);
+        assert_eq!(i3.keybindings.scale_toggle_all.key, "o");
+        assert_eq!(
+            i3.keybindings.scale_toggle_all.modifiers,
+            [Modifier::Super, Modifier::Shift]
+        );
+        assert_eq!(i3.scale.spacing, 30);
+        assert_eq!(i3.scale.outer_margin, 15);
+        assert_eq!(i3.scale.inactive_alpha, 0.5);
+        assert!(i3.scale.allow_zoom);
+    }
+
+    #[test]
+    fn scale_imports_interaction_and_minimized_options() {
+        let wayfire = TilefireConfig::parse(
+            "[scale]\nmiddle_click_close = true\ninclude_minimized = true\nminimized_alpha = 0.4\nclose_on_new_view = true\n",
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert!(wayfire.scale.middle_click_close);
+        assert!(wayfire.scale.include_minimized);
+        assert!(wayfire.scale.close_on_new_view);
+        assert_eq!(wayfire.scale.minimized_alpha, 0.4);
+        let i3 = TilefireConfig::parse(
+            "set $scale_middle_click_close yes\nset $scale_include_minimized yes\nset $scale_minimized_alpha 0.4\nset $scale_close_on_new_view yes\n",
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert!(i3.scale.middle_click_close);
+        assert!(i3.scale.include_minimized);
+        assert!(i3.scale.close_on_new_view);
+        assert_eq!(i3.scale.minimized_alpha, 0.4);
+    }
+
+    #[test]
+    fn scale_imports_duration() {
+        let wayfire = TilefireConfig::parse(
+            "[scale]\nduration = 250ms\n",
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert_eq!(wayfire.scale.duration_ms, 250);
+        let i3 = TilefireConfig::parse(
+            "set $scale_duration_ms 125\n",
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert_eq!(i3.scale.duration_ms, 125);
+    }
+
+    #[test]
+    fn scale_imports_and_validates_title_options() {
+        let wayfire = TilefireConfig::parse(
+            concat!(
+                "[scale]\n",
+                "title_overlay = mouse\n",
+                "title_font_size = 20\n",
+                "title_position = bottom\n",
+                "bg_color = #11223380\n",
+                "text_color = #ddeeff\n",
+            ),
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert_eq!(wayfire.scale.title_overlay, "mouse");
+        assert_eq!(wayfire.scale.title_font_size, 20);
+        assert_eq!(wayfire.scale.title_position, "bottom");
+        assert_eq!(wayfire.scale.title_bg_color[3], 128.0 / 255.0);
+        assert_eq!(wayfire.scale.title_text_color[0], 221.0 / 255.0);
+
+        let i3 = TilefireConfig::parse(
+            concat!(
+                "set $scale_title_overlay all\n",
+                "set $scale_title_font_size 18\n",
+                "set $scale_title_position top\n",
+                "set $scale_title_bg_color 0.1 0.2 0.3 0.4\n",
+                "set $scale_title_text_color 0.8 0.7 0.6 1\n",
+            ),
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert_eq!(i3.scale.title_overlay, "all");
+        assert_eq!(i3.scale.title_font_size, 18);
+        assert_eq!(i3.scale.title_position, "top");
+        assert_eq!(i3.scale.title_bg_color[1], 0.2);
+        assert_eq!(i3.scale.title_text_color[2], 0.6);
+
+        for yaml in [
+            "scale:\n  title_overlay: sometimes\n",
+            "scale:\n  title_position: left\n",
+            "scale:\n  title_font_size: 0\n",
+            "scale:\n  title_bg_color: [0, 0, 0, 2]\n",
+        ] {
+            assert!(TilefireConfig::parse(yaml, ConfigFormat::Yaml).is_err());
+        }
+    }
+
+    #[test]
+    fn wayfire_and_i3_normalize_arrow_and_keypad_aliases() {
+        let wayfire = TilefireConfig::parse(
+            concat!(
+                "[grid]\n",
+                "slot_tl = <super> KEY_KP7\n",
+                "[vswitch]\n",
+                "binding_right = <super> <alt> KEY_RIGHT\n",
+            ),
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert_eq!(wayfire.keybindings.grid_slot_top_left[0].key, "kp7");
+        assert_eq!(wayfire.keybindings.workspace_next.key, "right");
+
+        let i3 = TilefireConfig::parse(
+            concat!(
+                "bindsym Mod4+KP_7 snap top_left\n",
+                "bindsym Mod4+Alt+Right workspace next\n",
+            ),
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert_eq!(i3.keybindings.grid_slot_top_left[0].key, "kp7");
+        assert_eq!(i3.keybindings.workspace_next.key, "right");
+    }
+
+    #[test]
+    fn scale_filter_imports_and_validates_options() {
+        let wayfire = TilefireConfig::parse(
+            concat!(
+                "[scale-title-filter]\n",
+                "case_sensitive = true\n",
+                "share_filter = true\n",
+                "overlay = false\n",
+                "font_size = 32\n",
+                "bg_color = #11223380\n",
+                "text_color = #ddeeff\n",
+            ),
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert!(wayfire.scale_title_filter.case_sensitive);
+        assert!(wayfire.scale_title_filter.share_filter);
+        assert!(!wayfire.scale_title_filter.overlay);
+        assert_eq!(wayfire.scale_title_filter.font_size, 32);
+        assert_eq!(wayfire.scale_title_filter.bg_color[2], 0.2);
+
+        let i3 = TilefireConfig::parse(
+            concat!(
+                "set $scale_filter_case_sensitive yes\n",
+                "set $scale_filter_share yes\n",
+                "set $scale_filter_overlay no\n",
+                "set $scale_filter_font_size 28\n",
+                "set $scale_filter_bg_color 0.1 0.2 0.3 0.4\n",
+                "set $scale_filter_text_color 0.8 0.7 0.6 1\n",
+            ),
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert!(i3.scale_title_filter.case_sensitive);
+        assert!(i3.scale_title_filter.share_filter);
+        assert!(!i3.scale_title_filter.overlay);
+        assert_eq!(i3.scale_title_filter.font_size, 28);
+        assert_eq!(i3.scale_title_filter.text_color[1], 0.7);
+
+        assert!(
+            TilefireConfig::parse(
+                "scale_title_filter:\n  font_size: 0\n",
+                ConfigFormat::Yaml,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn popup_focus_and_primary_selection_workarounds_are_imported() {
+        let wayfire = TilefireConfig::parse(
+            concat!(
+                "[workarounds]\n",
+                "focus_main_surface_instead_of_popup = true\n",
+                "disable_primary_selection = true\n",
+            ),
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert!(wayfire.behavior.focus_main_surface_instead_of_popup);
+        assert!(wayfire.behavior.disable_primary_selection);
+        let i3 = TilefireConfig::parse(
+            concat!(
+                "set $focus_main_surface_instead_of_popup yes\n",
+                "set $disable_primary_selection yes\n",
+            ),
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert!(i3.behavior.focus_main_surface_instead_of_popup);
+        assert!(i3.behavior.disable_primary_selection);
+        assert!(!TilefireConfig::default().behavior.disable_primary_selection);
+    }
+
+    #[test]
+    fn security_context_privileged_protocols_are_imported() {
+        let wayfire = TilefireConfig::parse(
+            concat!(
+                "[security-context-v1]\n",
+                "privileged_protocols = zwlr_screencopy_manager_v1,",
+                " zwp_virtual_keyboard_manager_v1\n",
+            ),
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert_eq!(
+            wayfire.security_context.privileged_protocols,
+            "zwlr_screencopy_manager_v1, zwp_virtual_keyboard_manager_v1"
+        );
+        let i3 = TilefireConfig::parse(
+            "set $security_privileged_protocols zwlr_screencopy_manager_v1\n",
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert_eq!(
+            i3.security_context.privileged_protocols,
+            "zwlr_screencopy_manager_v1"
+        );
+        let defaults = SecurityContextConfig::default().privileged_protocols;
+        for protocol in [
+            "zwlr_foreign_toplevel_manager_v1",
+            "zwlr_screencopy_manager_v1",
+            "zwlr_data_control_manager_v1",
+            "zwp_keyboard_shortcuts_inhibit_manager_v1",
+        ] {
+            assert!(defaults.split(',').any(|name| name == protocol));
+        }
+        let shipped = TilefireConfig::parse(
+            include_str!("../../../data/tilefire.yaml"),
+            ConfigFormat::Yaml,
+        )
+        .unwrap();
+        assert_eq!(
+            shipped
+                .security_context
+                .privileged_protocols
+                .split(',')
+                .map(str::trim)
+                .collect::<Vec<_>>(),
+            defaults.split(',').collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn text_input_v3_enablement_is_imported() {
+        let wayfire = TilefireConfig::parse(
+            "[input-method-v1]\nenable_text_input_v3 = false\n",
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert!(!wayfire.input.enable_text_input_v3);
+        let i3 = TilefireConfig::parse(
+            "set $enable_text_input_v3 no\n",
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert!(!i3.input.enable_text_input_v3);
+        assert!(TilefireConfig::default().input.enable_text_input_v3);
+    }
+
+    #[test]
+    fn decoration_modes_are_imported_and_validated() {
+        let wayfire = TilefireConfig::parse(
+            concat!(
+                "[core]\n",
+                "preferred_decoration_mode = server\n",
+                "[workarounds]\n",
+                "force_preferred_decoration_mode = true\n",
+            ),
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert_eq!(wayfire.behavior.preferred_decoration_mode, "server");
+        assert!(wayfire.behavior.force_preferred_decoration_mode);
+
+        let i3 = TilefireConfig::parse(
+            concat!(
+                "set $preferred_decoration_mode server\n",
+                "set $force_preferred_decoration_mode yes\n",
+            ),
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert_eq!(i3.behavior.preferred_decoration_mode, "server");
+        assert!(i3.behavior.force_preferred_decoration_mode);
+        assert!(
+            TilefireConfig::parse(
+                "behavior:\n  preferred_decoration_mode: automatic\n",
+                ConfigFormat::Yaml,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn maximum_buffer_size_is_imported_and_validated() {
+        let wayfire = TilefireConfig::parse(
+            "[workarounds]\nmax_buffer_size = 4096\n",
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert_eq!(wayfire.behavior.max_buffer_size, 4096);
+        let i3 = TilefireConfig::parse(
+            "set $max_buffer_size 4096\n",
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert_eq!(i3.behavior.max_buffer_size, 4096);
+        assert!(
+            TilefireConfig::parse(
+                "behavior:\n  max_buffer_size: 0\n",
+                ConfigFormat::Yaml,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn scale_rejects_invalid_alpha() {
+        for field in ["inactive_alpha", "minimized_alpha"] {
+            for value in ["-0.1", "1.1", "nan"] {
+                let yaml = format!("scale:\n  {field}: {value}\n");
+                assert!(
+                    TilefireConfig::parse(&yaml, ConfigFormat::Yaml).is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extra_gestures_import_and_validate() {
+        let wayfire = TilefireConfig::parse(
+            concat!(
+                "[extra-gestures]\n",
+                "move_fingers = 4\n",
+                "move_delay = 500\n",
+                "close_fingers = 2\n",
+            ),
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert_eq!(wayfire.extra_gestures.move_fingers, 4);
+        assert_eq!(wayfire.extra_gestures.move_delay, 500);
+        assert_eq!(wayfire.extra_gestures.close_fingers, 2);
+
+        let i3 = TilefireConfig::parse(
+            concat!(
+                "set $gesture_move_fingers 5\n",
+                "set $gesture_move_delay 600\n",
+                "set $gesture_close_fingers 3\n",
+            ),
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert_eq!(i3.extra_gestures.move_fingers, 5);
+        assert_eq!(i3.extra_gestures.move_delay, 600);
+        assert_eq!(i3.extra_gestures.close_fingers, 3);
+
+        let yaml = TilefireConfig::parse(
+            concat!(
+                "extra_gestures:\n",
+                "  move_fingers: 2\n",
+                "  move_delay: 200\n",
+                "  close_fingers: 4\n",
+            ),
+            ConfigFormat::Yaml,
+        )
+        .unwrap();
+        assert_eq!(yaml.extra_gestures.move_fingers, 2);
+        assert_eq!(yaml.extra_gestures.move_delay, 200);
+        assert_eq!(yaml.extra_gestures.close_fingers, 4);
+        assert!(
+            TilefireConfig::parse(
+                "extra_gestures:\n  move_delay: 0\n",
+                ConfigFormat::Yaml,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn xkb_keymap_supports_multiple_layouts_and_variants() {
+        let input = InputConfig {
+            layout: "us, de,cz".into(),
+            variant: ",dvorak,".into(),
+            ..Default::default()
+        };
+        let keymap = input.keymap();
+        assert!(keymap.contains("pc+us+de(dvorak):2+cz:3+inet(evdev)"));
+    }
+
+    #[test]
+    fn xkb_command_bindings_preserve_symbol_case() {
+        let wayfire = TilefireConfig::parse(
+            concat!(
+                "[command]\n",
+                "binding_symbol = <super> xkb:XF86AudioPlay\n",
+                "command_symbol = playerctl play-pause\n",
+            ),
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert_eq!(wayfire.commands[0].binding.key, "xkb:XF86AudioPlay");
+
+        let i3 = TilefireConfig::parse(
+            "bindsym Mod4+xkb:Return exec foot\n",
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert_eq!(i3.commands[0].binding.key, "xkb:Return");
+
+        let yaml = TilefireConfig::parse(
+            concat!(
+                "commands:\n",
+                "  - binding: super+xkb:A\n",
+                "    command: true\n",
+            ),
+            ConfigFormat::Yaml,
+        )
+        .unwrap();
+        assert_eq!(yaml.commands[0].binding.key, "xkb:A");
+        assert!(
+            TilefireConfig::parse(
+                "commands:\n  - binding: xkb:\n    command: true\n",
+                ConfigFormat::Yaml,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn wrot_options_import_and_validate() {
+        let wayfire = TilefireConfig::parse(
+            concat!(
+                "[wrot]\n",
+                "activate = <alt> BTN_LEFT\n",
+                "reset = <ctrl> KEY_F1\n",
+                "reset-one = <shift> KEY_F2\n",
+                "reset_radius = 40\n",
+            ),
+            ConfigFormat::Wayfire,
+        )
+        .unwrap();
+        assert_eq!(wayfire.pointer.wrot_activate.key, "btn_left");
+        assert_eq!(wayfire.keybindings.wrot_reset.key, "f1");
+        assert_eq!(wayfire.keybindings.wrot_reset_one.key, "f2");
+        assert_eq!(wayfire.effects.wrot_reset_radius, 40.0);
+
+        let i3 = TilefireConfig::parse(
+            concat!(
+                "bindsym Mod4+w wrot activate\n",
+                "bindsym Mod4+r wrot reset\n",
+                "bindsym Mod4+o wrot reset-one\n",
+                "set $wrot_reset_radius 30\n",
+            ),
+            ConfigFormat::I3,
+        )
+        .unwrap();
+        assert_eq!(i3.pointer.wrot_activate.key, "w");
+        assert_eq!(i3.keybindings.wrot_reset.key, "r");
+        assert_eq!(i3.keybindings.wrot_reset_one.key, "o");
+        assert_eq!(i3.effects.wrot_reset_radius, 30.0);
+
+        let yaml = TilefireConfig::parse(
+            concat!(
+                "effects:\n  wrot_reset_radius: 20\n",
+                "pointer:\n  wrot_activate: alt+btn_left\n",
+                "keybindings:\n  wrot_reset: ctrl+f1\n  wrot_reset_one: shift+f2\n",
+            ),
+            ConfigFormat::Yaml,
+        )
+        .unwrap();
+        assert_eq!(yaml.effects.wrot_reset_radius, 20.0);
+        assert_eq!(yaml.pointer.wrot_activate.key, "btn_left");
+        assert_eq!(yaml.keybindings.wrot_reset.key, "f1");
+        assert_eq!(yaml.keybindings.wrot_reset_one.key, "f2");
+        assert!(
+            TilefireConfig::parse(
+                "effects:\n  wrot_reset_radius: 0\n",
+                ConfigFormat::Yaml,
+            )
+            .is_err()
+        );
+    }
+}

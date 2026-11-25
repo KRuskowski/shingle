@@ -1,0 +1,25 @@
+[package]
+name = "gloomy-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wgpu = "0.20"
+bytemuck = { version = "1.14", features = ["derive"] }
+glam = { version = "0.25", features = ["bytemuck"] }
+log = "0.4"
+anyhow = "1.0"
+wgpu_text = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+ron = "0.8"
+image = "0.25.9"
+winit = "0.29"
+resvg = "0.36.0"
+tiny-skia = "0.11.3"
+regex = "1.12.2"
+chrono = { version = "0.4.42", features = ["serde"] }
+pollster = "0.3"
+
+[lints]
+workspace = true
