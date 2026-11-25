@@ -165,16 +165,6 @@ impl PredicateField {
 }
 
 impl ViewMatcher {
-  /// Matches a view known only by app ID and title, with every other property
-  /// at its [`ViewProperties::default`].
-  pub fn matches(&self, app_id: &str, title: Option<&str>) -> bool {
-    self.matches_view(&ViewProperties {
-      app_id,
-      title: title.unwrap_or(""),
-      ..ViewProperties::default()
-    })
-  }
-
   /// Evaluates the expression against `view`.
   pub fn matches_view(&self, view: &ViewProperties<'_>) -> bool {
     self.expression.matches(view)

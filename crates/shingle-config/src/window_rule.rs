@@ -139,12 +139,6 @@ impl WindowRule {
     self.event == event
   }
 
-  /// Matches the rule's [`ViewMatcher`] against a view known only by app ID and
-  /// title; see [`ViewMatcher::matches`].
-  pub fn matches(&self, app_id: &str, title: Option<&str>) -> bool {
-    self.matcher.matches(app_id, title)
-  }
-
   /// Matches the rule's [`ViewMatcher`] against a view's full state.
   pub fn matches_view(&self, view: &ViewProperties<'_>) -> bool {
     self.matcher.matches_view(view)
