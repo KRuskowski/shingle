@@ -10,7 +10,7 @@
 | `shingle-frontend` | The interactive frontend shared by the nested and (future) native hosts, without winit: `Frontend` with Scale, Expo, the switchers, drags, animations, effects, the scene build, binding dispatch, key repeat and session handling, behind the `Host` trait and `InputEvent`. |
 | `shingle-bin` | The `shingle` binary: argument parsing, backend selection and the headless backend. Its own package because the `shingle` library must not depend on the backends that depend on it. |
 | `shingle-nested` | Nested backend library, a thin winit host for `Frontend`: the window and renderer, winit-to-`InputEvent` translation, host focus handling and button emulation. Entry point `shingle_nested::run`. |
-| `shingle-xwayland` | XWayland without `wayland-server`: X display sockets and lock, the supervised Xwayland process with its restart rule, and the X window manager (x11rb) behind an `XConnection` trait: property parsers, classification, `Pairing` of windows and surfaces by serial, the `ConfigureRequest` policy, and the `xw_probe` test client (examples/). |
+| `shingle-xwayland` | XWayland without `wayland-server`: X display sockets and lock, the supervised Xwayland process with its restart rule, and the X window manager (x11rb) behind an `XConnection` trait: property parsers, classification, `Pairing` of windows and surfaces by serial, the `ConfigureRequest` policy, ICCCM focus and the `FocusIn` guard, client messages, restacking and the root cursor, and the `xw_probe` test client (examples/). |
 | `shingle-config` | Validated YAML model, Wayfire INI and i3 imports, XKB keymap generation. |
 | `shingle-session` | Atomic session persistence and relaunching saved applications. |
 | `shingle-idle` | Idle, DPMS, fullscreen suppression and lock coordination. |
@@ -39,8 +39,11 @@
 | XWayland glue: display, Xwayland start and exit, XWM connection, `xwayland-ready` | `crates/shingle/src/xwayland/mod.rs` |
 | `xwayland_shell_v1` and `Role::Xwayland` | `crates/shingle/src/xwayland/shell.rs` |
 | Managed X windows: pairing, toplevels, X configure, states and close | `crates/shingle/src/xwayland/windows.rs` |
+| X focus and stacking handed to the XWM each turn | `crates/shingle/src/xwayland/focus.rs` |
+| X client requests and what a managed X window gets on map | `crates/shingle/src/xwayland/requests.rs` |
+| Unmanaged X windows (menus, tooltips) in the Unmanaged layer | `crates/shingle/src/xwayland/unmanaged.rs` |
 | X display sockets, Xwayland process, XWM | `crates/shingle-xwayland/src/sockets.rs`, `server.rs`, `xwm/` |
-| XWayland real-client harness (namespaces) | `tools/xwayland_test/run.py` |
+| XWayland real-client harness (namespaces), with the Wayland probe client | `tools/xwayland_test/run.py`, `crates/shingle/examples/wl_probe.rs` |
 | Host seam: `Host` trait, `InputEvent` | `crates/shingle-frontend/src/host.rs` |
 | `Frontend` struct, public API, input dispatch | `crates/shingle-frontend/src/frontend.rs` |
 | Frontend areas: bindings, Scale, Expo, switcher, drags, effects, animations, scene build, session | `crates/shingle-frontend/src/frontend/*.rs` |
