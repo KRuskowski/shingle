@@ -222,5 +222,63 @@ class KeysTest(unittest.TestCase):
         ('KEY_SPACE', False), ('KEY_B', True), ('KEY_B', False),
         ('KEY_ENTER', True), ('KEY_ENTER', False)])
 
+class SelectionTest(unittest.TestCase):
+  """The selection group's payloads and options."""
+
+  def test_payloads_have_their_size_and_differ_by_seed(self):
+    for size in (run.SMALL_PAYLOAD, run.LARGE_PAYLOAD, 1, 64, 65):
+      self.assertEqual(len(run.payload(size, 3)), size)
+    self.assertNotEqual(run.payload(10, 1), run.payload(10, 2))
+    self.assertEqual(run.payload(10, 1), run.payload(10, 1))
+    large = run.payload(run.LARGE_PAYLOAD, 5)
+    self.assertTrue(all(32 <= byte < 127 or byte == 10 for byte in large))
+    self.assertIn(b'\n', large)
+
+  def test_labels(self):
+    self.assertEqual(run.payload_label(10), '10 bytes')
+    self.assertEqual(run.payload_label(1 << 20), '1 MiB')
+    self.assertEqual(run.payload_label(8 << 20), '8 MiB')
+    self.assertEqual(run.payload_label((1 << 20) + 1), '1048577 bytes')
+
+  def test_selection_options(self):
+    self.assertEqual(run.selection_options('clipboard'),
+                     (['-selection', 'clipboard'], []))
+    self.assertEqual(run.selection_options('primary'),
+                     (['-selection', 'primary'], ['--primary']))
+    with self.assertRaises(ValueError):
+      run.selection_options('secondary')
+
+  def test_compare_names_the_first_difference(self):
+    self.assertEqual(run.compare(b'abc', b'abc'), '3 bytes')
+    self.assertEqual(run.compare(None, b'abc'), 'nothing')
+    self.assertEqual(run.compare(b'abd', b'abc'),
+                     '3 bytes, expected 3, first difference at 2')
+    self.assertEqual(run.compare(b'ab', b'abc'),
+                     '2 bytes, expected 3, first difference at 2')
+
+  def test_helpers_are_stopped_through_signal_checked(self):
+    helper = run.Helper(['sleep', '30'], dict(os.environ), 'sleep')
+    helper.stop()
+    self.assertEqual(helper.process.returncode, -signal.SIGTERM)
+    # One whose program name does not match is not signalled.
+    other = run.Helper(['sleep', '30'], dict(os.environ), 'xclip')
+    self.assertFalse(
+        run.signal_checked(other.pid, signal.SIGTERM, other.program))
+    self.assertIsNone(other.process.poll())
+    other.process.kill()
+    other.process.wait()
+
+  def test_helpers_get_their_data_on_stdin(self):
+    with tempfile.TemporaryFile() as out:
+      helper = run.Helper(['cat'], dict(os.environ), 'cat', b'data',
+                          stdout=out)
+      self.assertEqual(helper.wait(10), 0)
+      out.seek(0)
+      self.assertEqual(out.read(), b'data')
+    failing = run.Helper(['sh', '-c', 'echo oops >&2'], dict(os.environ),
+                         'sh')
+    failing.wait(10)
+    self.assertEqual(failing.errors(), 'oops')
+
 if __name__ == '__main__':
   unittest.main()

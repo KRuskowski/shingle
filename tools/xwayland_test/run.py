@@ -22,20 +22,23 @@ user namespaces:
       [--probe target/debug/examples/xw_probe]
       [--wl-probe target/debug/examples/wl_probe] [--keep]
       [--only lazy|disabled|eager|running|idle|windows|probe|behaviour|
-              session|nested ...]
+              session|nested|selection ...]
 
 It prints one line per check and exits 0 when all pass. Every signal it
 sends goes to its own children or, through `kill_xwayland`, to a
 checked Xwayland PID inside the PID namespace. The pure helpers are
 tested by `python3 -m unittest` in this directory (test_run.py). The work
 directory under `target/` is removed afterwards unless `--keep` is given.
-The checks are XW-2's, XW-3's and XW-4's in docs/design/xwayland.md,
-section 7. Input comes only from STIPC. The `session` group runs Shingle
-as uid 1000 in a nested user namespace, like the X clients, so that the
-xterm it restores can start. The `nested` group runs nested Shingle on
+The checks are XW-2's to XW-5's in docs/design/xwayland.md, section 7.
+Input comes only from STIPC. The `session` group runs Shingle as uid 1000
+in a nested user namespace, like the X clients, so that the xterm it
+restores can start. The `nested` group runs nested Shingle on
 lavapipe (no GPU: `/dev/dri` is empty) as a client of a headless one,
 both inside the namespace, and checks pixels in wlr-screencopy captures
-of the headless output, which show the frames nested drew.
+of the headless output, which show the frames nested drew. The
+`selection` group copies between `xclip` and `wl-copy`/`wl-paste` in both
+directions; they too run only inside the namespace, against the private
+Shingle, so the operator's clipboard is never touched.
 """
 
 import argparse
@@ -46,7 +49,9 @@ import signal
 import socket
 import struct
 import subprocess
+import re
 import sys
+import tempfile
 import threading
 import time
 
@@ -1226,11 +1231,11 @@ def focused_id(shingle):
 class WaylandClient(XClient):
   """The Wayland probe client, with its stdout read as JSON lines."""
 
-  def __init__(self, shingle, wl_probe, app_id):
+  def __init__(self, shingle, wl_probe, app_id, *options):
     # pylint: disable=super-init-not-called
     self.program = 'wl_probe'
     self.process = subprocess.Popen(
-        [wl_probe, app_id], env=shingle.wayland_environment(),
+        [wl_probe, app_id, *options], env=shingle.wayland_environment(),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
     self.lines = []
@@ -2149,8 +2154,360 @@ def _nested_xterm_menu(results, outer, inner, display, clients):
   inner.call('stipc/feed_button', {'combo': 'BTN_LEFT', 'mode': 'release'})
   inner.press('KEY_LEFTCTRL', False)
 
+SMALL_PAYLOAD = 10
+LARGE_PAYLOAD = 1 << 20
+# Above any chunk size xclip picks (a quarter of the maximum request
+# size), so that xclip itself must offer it through INCR.
+HUGE_PAYLOAD = 8 << 20
+
+def payload(size, seed=0):
+  """`size` bytes of printable ASCII lines, different for each `seed`."""
+  alphabet = b'abcdefghijklmnopqrstuvwxyz0123456789'
+  line = bytes(alphabet[(index * 7 + seed) % len(alphabet)]
+               for index in range(63)) + b'\n'
+  count = size // len(line) + 1
+  data = (line * count)[:size]
+  # The seed also leads, so that short payloads differ too.
+  return (str(seed).encode() + data)[:size]
+
+def payload_label(size):
+  """'10 bytes', '1 MiB' or '8 MiB'."""
+  if size >= 1 << 20 and size % (1 << 20) == 0:
+    return f'{size >> 20} MiB'
+  return f'{size} bytes'
+
+def selection_options(selection):
+  """xclip's and wl-copy/wl-paste's options for 'clipboard' or 'primary'."""
+  if selection == 'clipboard':
+    return ['-selection', 'clipboard'], []
+  if selection == 'primary':
+    return ['-selection', 'primary'], ['--primary']
+  raise ValueError(selection)
+
+def compare(actual, expected):
+  """A short description of how `actual` bytes differ from `expected`."""
+  if actual == expected:
+    return f'{len(actual)} bytes'
+  if actual is None:
+    return 'nothing'
+  same = next((index for index, (a, b) in enumerate(zip(actual, expected))
+               if a != b), min(len(actual), len(expected)))
+  return (f'{len(actual)} bytes, expected {len(expected)}, '
+          f'first difference at {same}')
+
+class Helper:
+  """A helper process (xclip, wl-copy, a paste pipeline) fed `data` on
+  stdin from a thread, and stopped through `signal_checked`. Its stderr
+  goes to a temporary file, read by `errors`."""
+
+  def __init__(self, arguments, environment, program, data=None,
+               stdout=subprocess.DEVNULL):
+    self.program = program
+    self.stderr = tempfile.TemporaryFile()
+    self.process = subprocess.Popen(
+        arguments, env=environment,
+        stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
+        stdout=stdout, stderr=self.stderr)
+    self.writer = None
+    if data is not None:
+      self.writer = threading.Thread(target=self._write, args=(data,),
+                                     daemon=True)
+      self.writer.start()
+
+  def _write(self, data):
+    try:
+      self.process.stdin.write(data)
+      self.process.stdin.close()
+    except (BrokenPipeError, ValueError):
+      pass
+
+  @property
+  def pid(self):
+    """The helper's PID."""
+    return self.process.pid
+
+  def errors(self):
+    """What the helper wrote to stderr so far."""
+    self.stderr.seek(0)
+    return self.stderr.read().decode(errors='replace').strip()
+
+  def wait(self, timeout):
+    """Waits for the helper to exit; returns its status or None."""
+    try:
+      return self.process.wait(timeout)
+    except subprocess.TimeoutExpired:
+      return None
+
+  def stop(self):
+    """SIGTERM, then SIGKILL, each through `signal_checked`."""
+    if self.process.poll() is None:
+      signal_checked(self.pid, signal.SIGTERM, self.program)
+      if self.wait(5) is None:
+        signal_checked(self.pid, signal.SIGKILL, self.program)
+        self.wait(5)
+
+def copy_x(shingle, display, selection, data):
+  """`xclip -i` owning `selection` with `data`, in the foreground."""
+  options, _ = selection_options(selection)
+  return Helper(['xclip', *options, '-i', '-quiet'],
+                shingle.environment(display), 'xclip', data)
+
+def copy_wayland(shingle, selection, data):
+  """`wl-copy` offering `data` as `selection`, in the foreground."""
+  _, options = selection_options(selection)
+  return Helper(['wl-copy', '--foreground', *options],
+                shingle.wayland_environment(), 'wl-copy', data)
+
+def paste_x(shingle, display, selection, timeout=10):
+  """`xclip -o`'s output for `selection`, or None when it failed."""
+  options, _ = selection_options(selection)
+  try:
+    done = subprocess.run(['xclip', *options, '-o'],
+                          env=shingle.environment(display),
+                          capture_output=True, timeout=timeout,
+                          stdin=subprocess.DEVNULL)
+  except subprocess.TimeoutExpired:
+    return None
+  return done.stdout if done.returncode == 0 else None
+
+def paste_wayland(shingle, selection, timeout=10, debug=False):
+  """`wl-paste -n`'s output for `selection` (None when it failed) and its
+  stderr, which holds the protocol trace with `debug`."""
+  _, options = selection_options(selection)
+  environment = shingle.wayland_environment()
+  if debug:
+    environment['WAYLAND_DEBUG'] = '1'
+  try:
+    done = subprocess.run(['wl-paste', '--no-newline', *options],
+                          env=environment, capture_output=True,
+                          timeout=timeout, stdin=subprocess.DEVNULL)
+  except subprocess.TimeoutExpired:
+    return None, ''
+  output = done.stdout if done.returncode == 0 else None
+  return output, done.stderr.decode(errors='replace')
+
+def wait_paste(paste, expected, timeout=10.0):
+  """Calls `paste()` until it returns `expected`; returns the last
+  output."""
+  deadline = time.monotonic() + timeout
+  while True:
+    output = paste()
+    if output == expected or time.monotonic() > deadline:
+      return output
+    time.sleep(0.1)
+
+def ipc_latency(shingle):
+  """How long one IPC call takes, in seconds."""
+  started = time.monotonic()
+  shingle.call('stipc/get_xwayland_pid')
+  return time.monotonic() - started
+
+def selection_checks(results, binary, work, wl_probe):
+  """XW-5: the clipboard and primary selection between xclip and
+  wl-copy/wl-paste, in both directions, small and large (INCR); that
+  wlr-data-control sees X selections; that slow writers and readers stall
+  only their own transfer; and `disable_primary_selection`."""
+  del work
+  shingle = Shingle(binary, None, 'selection', {'xwayland': {'mode': True}})
+  shingle.wait_pid(lambda value: value > 0)
+  results.check('selection: Xwayland is ready',
+                wait_for(lambda: 'Xwayland ready' in shingle.log_text()))
+  display = ':0'
+  helpers = []
+  try:
+    seed = 0
+    for selection in ('clipboard', 'primary'):
+      for size in (SMALL_PAYLOAD, LARGE_PAYLOAD):
+        seed += 1
+        _selection_x_to_wayland(results, shingle, display, selection,
+                                payload(size, seed), helpers)
+        seed += 1
+        _selection_wayland_to_x(results, shingle, display, selection,
+                                payload(size, seed), helpers)
+    _selection_x_to_wayland(results, shingle, display, 'clipboard',
+                            payload(HUGE_PAYLOAD, 9), helpers)
+    _selection_data_control(results, shingle, display, helpers)
+    _selection_slow_reader(results, shingle, display, helpers)
+    _selection_slow_writer(results, shingle, display, helpers, wl_probe)
+  finally:
+    for helper in helpers:
+      helper.stop()
+  results.check('selection: SIGTERM exits with status 0', shingle.stop() == 0)
+  log = shingle.log_text()
+  return log + _selection_no_primary(results, binary)
+
+def _selection_x_to_wayland(results, shingle, display, selection, data,
+                            helpers):
+  """xclip owns `selection`; wl-paste reads it."""
+  owner = copy_x(shingle, display, selection, data)
+  helpers.append(owner)
+  pasted = wait_paste(lambda: paste_wayland(shingle, selection)[0], data)
+  results.check(f'selection: {selection}, {payload_label(len(data))}, '
+                'from xclip -i to wl-paste', pasted == data,
+                compare(pasted, data))
+  owner.stop()
+
+def _selection_wayland_to_x(results, shingle, display, selection, data,
+                            helpers):
+  """wl-copy offers `selection`; xclip -o reads it."""
+  owner = copy_wayland(shingle, selection, data)
+  helpers.append(owner)
+  pasted = wait_paste(lambda: paste_x(shingle, display, selection), data)
+  detail = compare(pasted, data)
+  if pasted != data:
+    detail += f'; wl-copy: {owner.errors()[-300:]!r}'
+  results.check(f'selection: {selection}, {payload_label(len(data))}, '
+                'from wl-copy to xclip -o', pasted == data, detail)
+  owner.stop()
+
+def _selection_data_control(results, shingle, display, helpers):
+  """wl-paste reads an X selection through wlr-data-control, which needs
+  no keyboard focus, as its protocol trace shows."""
+  data = payload(SMALL_PAYLOAD, 40)
+  owner = copy_x(shingle, display, 'clipboard', data)
+  helpers.append(owner)
+  wait_paste(lambda: paste_wayland(shingle, 'clipboard')[0], data)
+  pasted, trace = paste_wayland(shingle, 'clipboard', debug=True)
+  offered = 'zwlr_data_control_offer_v1' in trace and (
+      'offer("text/plain;charset=utf-8")' in trace)
+  results.check('selection: wlr-data-control offers the X selection',
+                offered and pasted == data, compare(pasted, data))
+  # The registry lists wl_data_device_manager; no object of it is used.
+  results.check('selection: wl-paste used no wl_data_device',
+                not re.search(r'wl_data_device(_manager)?@\d', trace))
+  owner.stop()
+
+def _selection_slow_reader(results, shingle, display, helpers):
+  """A Wayland reader that stops reading 1 MiB from X stalls only its
+  own transfer: IPC answers and a primary transfer completes meanwhile."""
+  data = payload(LARGE_PAYLOAD, 50)
+  owner = copy_x(shingle, display, 'clipboard', data)
+  helpers.append(owner)
+  wait_paste(lambda: paste_wayland(shingle, 'clipboard')[0], data)
+  out = os.path.join(shingle.directory, 'slow-reader')
+  started = time.monotonic()
+  reader = Helper(['sh', '-c', f'wl-paste --no-newline | '
+                   f'(sleep 3; cat > {out})'],
+                  shingle.wayland_environment(), 'sh')
+  helpers.append(reader)
+  time.sleep(0.5)
+  latency = ipc_latency(shingle)
+  results.check('selection: IPC answers while a slow reader stalls',
+                latency < 0.5, f'{latency:.3f} s')
+  primary = payload(SMALL_PAYLOAD, 51)
+  primary_owner = copy_x(shingle, display, 'primary', primary)
+  helpers.append(primary_owner)
+  pasted = wait_paste(lambda: paste_wayland(shingle, 'primary')[0], primary,
+                      timeout=2.0)
+  stalled = reader.process.poll() is None
+  results.check('selection: a primary transfer completes while the '
+                'clipboard reader stalls', pasted == primary and stalled,
+                f'{compare(pasted, primary)}, reader still waiting: '
+                f'{stalled}')
+  status = reader.wait(20)
+  elapsed = time.monotonic() - started
+  received = open(out, 'rb').read() if os.path.exists(out) else None
+  results.check('selection: the slow reader gets all 1 MiB in the end',
+                status == 0 and received == data and elapsed >= 3,
+                f'{compare(received, data)} after {elapsed:.1f} s')
+  primary_owner.stop()
+  owner.stop()
+
+def _selection_slow_writer(results, shingle, display, helpers, wl_probe):
+  """A Wayland source that waits 3 s before writing stalls only the X
+  reader waiting for it."""
+  text = b'slow writer text'
+  probe = WaylandClient(shingle, wl_probe, 'slow-copy', '--copy',
+                        text.decode(), '--delay-ms', '3000')
+  try:
+    results.check('selection: the slow writer set the clipboard',
+                  probe.wait_event('copied') is not None)
+    time.sleep(0.3)
+    out_path = os.path.join(shingle.directory, 'slow-writer')
+    started = time.monotonic()
+    with open(out_path, 'wb') as out:
+      options, _ = selection_options('clipboard')
+      reader = Helper(['xclip', *options, '-o'],
+                      shingle.environment(display), 'xclip', stdout=out)
+    helpers.append(reader)
+    sent = probe.wait_event('send', timeout=2.0)
+    results.check('selection: the X request reaches the Wayland source',
+                  sent is not None and
+                  sent.get('mime') == 'text/plain;charset=utf-8',
+                  json.dumps(sent))
+    latency = ipc_latency(shingle)
+    results.check('selection: IPC answers while a slow writer stalls',
+                  latency < 0.5, f'{latency:.3f} s')
+    primary = payload(SMALL_PAYLOAD, 60)
+    primary_owner = copy_wayland(shingle, 'primary', primary)
+    helpers.append(primary_owner)
+    pasted = wait_paste(lambda: paste_x(shingle, display, 'primary'),
+                        primary, timeout=2.0)
+    stalled = reader.process.poll() is None
+    results.check('selection: a primary transfer completes while the '
+                  'clipboard writer stalls', pasted == primary and stalled,
+                  f'{compare(pasted, primary)}, reader still waiting: '
+                  f'{stalled}')
+    status = reader.wait(10)
+    elapsed = time.monotonic() - started
+    received = open(out_path, 'rb').read()
+    results.check('selection: the X reader gets the slow text in the end',
+                  status == 0 and received == text and elapsed >= 2.5,
+                  f'{compare(received, text)} after {elapsed:.1f} s')
+    primary_owner.stop()
+  finally:
+    probe.stop()
+
+def _selection_no_primary(results, binary):
+  """With `disable_primary_selection`, PRIMARY is not bridged in either
+  direction, and the clipboard still is."""
+  config = {
+      'xwayland': {'mode': True},
+      'behavior': {'disable_primary_selection': True},
+  }
+  shingle = Shingle(binary, None, 'selection-noprimary', config)
+  shingle.wait_pid(lambda value: value > 0)
+  results.check('no-primary: Xwayland is ready',
+                wait_for(lambda: 'Xwayland ready' in shingle.log_text()))
+  display = ':0'
+  helpers = []
+  try:
+    data = payload(SMALL_PAYLOAD, 70)
+    owner = copy_x(shingle, display, 'clipboard', data)
+    helpers.append(owner)
+    pasted = wait_paste(lambda: paste_wayland(shingle, 'clipboard')[0], data)
+    results.check('no-primary: the clipboard is still bridged',
+                  pasted == data, compare(pasted, data))
+    owner.stop()
+    data = payload(SMALL_PAYLOAD, 71)
+    owner = copy_x(shingle, display, 'primary', data)
+    helpers.append(owner)
+    on_x = wait_paste(lambda: paste_x(shingle, display, 'primary'), data)
+    time.sleep(1.0)
+    pasted, _ = paste_wayland(shingle, 'primary')
+    results.check('no-primary: an X primary selection stays in X',
+                  on_x == data and pasted != data,
+                  f'X: {compare(on_x, data)}; Wayland: {pasted!r}')
+    owner.stop()
+    data = payload(SMALL_PAYLOAD, 72)
+    owner = copy_wayland(shingle, 'primary', data)
+    helpers.append(owner)
+    on_wayland = wait_paste(lambda: paste_wayland(shingle, 'primary')[0],
+                            data)
+    time.sleep(1.0)
+    pasted = paste_x(shingle, display, 'primary')
+    results.check('no-primary: a Wayland primary selection stays in Wayland',
+                  on_wayland == data and pasted != data,
+                  f'Wayland: {compare(on_wayland, data)}; X: {pasted!r}')
+    owner.stop()
+  finally:
+    for helper in helpers:
+      helper.stop()
+  results.check('no-primary: SIGTERM exits with status 0', shingle.stop() == 0)
+  return shingle.log_text()
+
 GROUPS = ('lazy', 'disabled', 'eager', 'running', 'idle', 'windows', 'probe',
-          'behaviour', 'session', 'nested')
+          'behaviour', 'session', 'nested', 'selection')
 
 def inner(binary, probe, wl_probe, work, groups):
   """Runs the check `groups` inside the namespace; returns the status."""
@@ -2178,10 +2535,13 @@ def inner(binary, probe, wl_probe, work, groups):
       'behaviour': behaviour_checks,
       'session': session_checks,
       'nested': nested_checks,
+      'selection': selection_checks,
   }
   for group in groups:
     if group == 'behaviour':
       log = checks[group](results, binary, work, probe, wl_probe)
+    elif group == 'selection':
+      log = checks[group](results, binary, work, wl_probe)
     elif group in ('windows', 'probe', 'session', 'nested'):
       log = checks[group](results, binary, work, probe)
     else:
