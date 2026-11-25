@@ -27,3 +27,4 @@ xkbcommon.workspace = true
 
 [dev-dependencies]
 libc = "0.2"
+wayland-client = "0.31"

@@ -12,18 +12,28 @@ pub(crate) fn create_global(handle: &DisplayHandle) {
   handle.create_global::<CompositorState, ZxdgOutputManagerV1, ()>(3, ());
 }
 
+/// Sends the current logical geometry to every xdg-output. The name is
+/// sent only when an xdg-output is created, and the description is updated
+/// only from version 3, where the protocol lets it change.
 pub(crate) fn update(state: &mut CompositorState) {
   for output in state.xdg_outputs.values() {
-    send_metadata(output, state.output);
+    send_metadata(state, output, false);
   }
 }
 
-fn send_metadata(resource: &ZxdgOutputV1, output: shingle_core::Rect) {
+fn send_metadata(
+  state: &CompositorState,
+  resource: &ZxdgOutputV1,
+  created: bool,
+) {
+  let output = state.output;
   resource.logical_position(output.x, output.y);
   resource.logical_size(output.width as i32, output.height as i32);
-  if resource.version() >= 2 {
-    resource.name(crate::OUTPUT_NAME.into());
-    resource.description("Shingle output".into());
+  if created && resource.version() >= 2 {
+    resource.name(state.output_info.name.clone());
+  }
+  if (created && resource.version() >= 2) || resource.version() >= 3 {
+    resource.description(state.output_info.description());
   }
   resource.done();
 }
@@ -56,7 +66,7 @@ impl Dispatch<ZxdgOutputManagerV1, ()> for CompositorState {
     match request {
       zxdg_output_manager_v1::Request::GetXdgOutput { id, .. } => {
         let output = data_init.init(id, ());
-        send_metadata(&output, state.output);
+        send_metadata(state, &output, true);
         state.xdg_outputs.insert(output.id(), output);
       }
       zxdg_output_manager_v1::Request::Destroy => {}

@@ -10,7 +10,7 @@ use wayland_server::{
   backend::{ClientId, ObjectId},
 };
 
-use crate::{OUTPUT_NAME, state::CompositorState};
+use crate::state::CompositorState;
 
 const ACTIVATE_CAPABILITY: ext_workspace_handle_v1::WorkspaceCapabilities =
   ext_workspace_handle_v1::WorkspaceCapabilities::Activate;
@@ -265,7 +265,7 @@ fn create_workspace(
   };
   let x = index as u32 % grid.0;
   let y = index as u32 / grid.0;
-  let id = format!("{OUTPUT_NAME}:workspace-{x}-{y}");
+  let id = format!("{}:workspace-{x}-{y}", state.output_info.name);
   manager.resource.workspace(&workspace);
   workspace.id(id.clone());
   workspace.name(format!("Workspace {}", index + 1));

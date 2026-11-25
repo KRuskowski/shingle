@@ -143,6 +143,7 @@ pub(crate) struct CompositorState {
   pub(crate) cursor_theme: String,
   pub(crate) cursor_size: u32,
   pub(crate) output_id: OutputId,
+  pub(crate) output_info: crate::OutputInfo,
   pub(crate) output_power: crate::output_power::OutputPower,
   pub(crate) output_management: crate::output_management::OutputManagement,
   pub(crate) started: Instant,
@@ -271,6 +272,7 @@ impl CompositorState {
       cursor_theme: config.cursor_theme,
       cursor_size: config.cursor_size,
       output_id,
+      output_info: Default::default(),
       output_power: Default::default(),
       output_management: Default::default(),
       started,
@@ -879,16 +881,7 @@ impl CompositorState {
     }
     let output = self.output;
     for resource in self.outputs.values() {
-      resource.geometry(
-        output.x,
-        output.y,
-        310,
-        175,
-        wl_output::Subpixel::Unknown,
-        "Shingle".into(),
-        OUTPUT_NAME.into(),
-        transform,
-      );
+      self.send_output_geometry(resource);
       let (width, height) = crate::output_transform::physical_size(
         output.width,
         output.height,
@@ -899,7 +892,7 @@ impl CompositorState {
         wl_output::Mode::Current | wl_output::Mode::Preferred,
         width.min(i32::MAX as u32) as i32,
         height.min(i32::MAX as u32) as i32,
-        60_000,
+        self.output_info.refresh_mhz as i32,
       );
       if resource.version() >= 2 {
         resource.done();
@@ -911,6 +904,51 @@ impl CompositorState {
     crate::xdg_output::update(self);
     crate::output_management::sync(self);
     self.events.push(Event::OutputChanged { output });
+  }
+
+  /// Sends the output's position, physical size, subpixel layout, make,
+  /// model and transform.
+  fn send_output_geometry(&self, resource: &WlOutput) {
+    let info = &self.output_info;
+    let (width_mm, height_mm) = info.physical_size_mm;
+    resource.geometry(
+      self.output.x,
+      self.output.y,
+      width_mm.min(i32::MAX as u32) as i32,
+      height_mm.min(i32::MAX as u32) as i32,
+      info.subpixel,
+      info.make.clone(),
+      info.model.clone(),
+      self.output_transform,
+    );
+  }
+
+  pub(crate) fn set_output_info(&mut self, info: crate::OutputInfo) {
+    self.output_info = info;
+    let output = self.output;
+    for resource in self.outputs.values() {
+      self.send_output_geometry(resource);
+      let (width, height) = crate::output_transform::physical_size(
+        output.width,
+        output.height,
+        self.output_scale,
+        self.output_transform,
+      );
+      resource.mode(
+        wl_output::Mode::Current | wl_output::Mode::Preferred,
+        width.min(i32::MAX as u32) as i32,
+        height.min(i32::MAX as u32) as i32,
+        self.output_info.refresh_mhz as i32,
+      );
+      if resource.version() >= 4 {
+        resource.description(self.output_info.description());
+      }
+      if resource.version() >= 2 {
+        resource.done();
+      }
+    }
+    crate::xdg_output::update(self);
+    crate::output_management::sync(self);
   }
 
   pub(crate) fn set_output_scale(
@@ -936,7 +974,7 @@ impl CompositorState {
         wl_output::Mode::Current | wl_output::Mode::Preferred,
         width.min(i32::MAX as u32) as i32,
         height.min(i32::MAX as u32) as i32,
-        60_000,
+        self.output_info.refresh_mhz as i32,
       );
       if resource.version() >= 2 {
         resource.done();
@@ -955,16 +993,7 @@ impl CompositorState {
     output.validate()?;
     self.output = output;
     for resource in self.outputs.values() {
-      resource.geometry(
-        output.x,
-        output.y,
-        310,
-        175,
-        wl_output::Subpixel::Unknown,
-        "Shingle".into(),
-        OUTPUT_NAME.into(),
-        self.output_transform,
-      );
+      self.send_output_geometry(resource);
       let scale = self.output_scale;
       let (width, height) = crate::output_transform::physical_size(
         output.width,
@@ -976,7 +1005,7 @@ impl CompositorState {
         wl_output::Mode::Current | wl_output::Mode::Preferred,
         width.min(i32::MAX as u32) as i32,
         height.min(i32::MAX as u32) as i32,
-        60_000,
+        self.output_info.refresh_mhz as i32,
       );
       if resource.version() >= 2 {
         resource.scale(scale.ceil().clamp(1.0, i32::MAX as f64) as i32);
@@ -1745,16 +1774,7 @@ impl GlobalDispatch<WlOutput, ()> for CompositorState {
     data_init: &mut DataInit<'_, Self>,
   ) {
     let resource = data_init.init(resource, OutputData);
-    resource.geometry(
-      state.output.x,
-      state.output.y,
-      310,
-      175,
-      wl_output::Subpixel::Unknown,
-      "Shingle".into(),
-      OUTPUT_NAME.into(),
-      state.output_transform,
-    );
+    state.send_output_geometry(&resource);
     let scale = state.output_scale;
     let (width, height) = crate::output_transform::physical_size(
       state.output.width,
@@ -1766,14 +1786,14 @@ impl GlobalDispatch<WlOutput, ()> for CompositorState {
       wl_output::Mode::Current | wl_output::Mode::Preferred,
       width.min(i32::MAX as u32) as i32,
       height.min(i32::MAX as u32) as i32,
-      60_000,
+      state.output_info.refresh_mhz as i32,
     );
     if resource.version() >= 2 {
       resource.scale(scale.ceil().clamp(1.0, i32::MAX as f64) as i32);
     }
     if resource.version() >= 4 {
-      resource.name(OUTPUT_NAME.into());
-      resource.description("Shingle headless output".into());
+      resource.name(state.output_info.name.clone());
+      resource.description(state.output_info.description());
     }
     if resource.version() >= 2 {
       resource.done();

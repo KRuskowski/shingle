@@ -42,6 +42,8 @@ mod single_pixel_buffer;
 mod state;
 mod subsurface;
 mod tearing;
+#[cfg(test)]
+mod test_client;
 mod text_input;
 mod toplevel_icon;
 mod viewport;
@@ -80,6 +82,61 @@ use state::{ClientDataImpl, CompositorState};
 pub const OUTPUT_NAME: &str = "HEADLESS-1";
 pub const OUTPUT_WIDTH: u32 = 1280;
 pub const OUTPUT_HEIGHT: u32 = 720;
+
+/// What clients are told about the physical output: its identity, size and
+/// refresh rate. A backend describes its output with
+/// [`Compositor::set_output_info`]; nested and headless compositors keep
+/// the default, a 60 Hz output named [`OUTPUT_NAME`].
+///
+/// The output's position and logical size still come from
+/// [`Compositor::set_output`], and its scale and transform from their own
+/// setters, so the mode clients see is the output rectangle in physical
+/// pixels at `refresh_mhz`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputInfo {
+  /// Connector name, such as `DP-1`. Reported as the `wl_output`,
+  /// xdg-output, output-management and IPC output name.
+  pub name: String,
+  /// Manufacturer, from the EDID on real hardware.
+  pub make: String,
+  /// Model name, from the EDID on real hardware.
+  pub model: String,
+  /// Serial number, if the EDID has one.
+  pub serial: Option<String>,
+  /// Physical width and height in millimetres, or zero when unknown.
+  pub physical_size_mm: (u32, u32),
+  /// Subpixel layout of the panel.
+  pub subpixel: wayland_server::protocol::wl_output::Subpixel,
+  /// Refresh rate of the current mode in millihertz, or zero when unknown.
+  pub refresh_mhz: u32,
+}
+
+impl Default for OutputInfo {
+  fn default() -> Self {
+    Self {
+      name: OUTPUT_NAME.into(),
+      make: "Shingle".into(),
+      model: "Headless output".into(),
+      serial: None,
+      physical_size_mm: (310, 175),
+      subpixel: wayland_server::protocol::wl_output::Subpixel::Unknown,
+      refresh_mhz: 60_000,
+    }
+  }
+}
+
+impl OutputInfo {
+  /// Returns the human-readable description sent to clients, built like
+  /// wlroots' output description: make, model, serial and name.
+  pub fn description(&self) -> String {
+    match &self.serial {
+      Some(serial) => {
+        format!("{} {} {} ({})", self.make, self.model, serial, self.name)
+      }
+      None => format!("{} {} ({})", self.make, self.model, self.name),
+    }
+  }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WorkspaceWraparound {
@@ -1718,6 +1775,21 @@ impl Compositor {
     self.state.set_output(output)
   }
 
+  /// Returns the description of the output clients currently see.
+  pub fn output_info(&self) -> &OutputInfo {
+    &self.state.output_info
+  }
+
+  /// Describes the physical output to clients: `wl_output` geometry, mode,
+  /// name and description, xdg-output, wlr-output-management heads and the
+  /// IPC output name. Outputs and heads that clients have already bound get
+  /// the new geometry, refresh rate and description at once. Their name
+  /// does not change, because Wayland names an output once per binding, so
+  /// a backend describes its output before clients connect.
+  pub fn set_output_info(&mut self, info: OutputInfo) {
+    self.state.set_output_info(info);
+  }
+
   fn workspace_index(&self, workspace: WorkspaceId) -> usize {
     (workspace.y * self.state.workspace_width + workspace.x) as usize
   }
@@ -2020,6 +2092,175 @@ pub(crate) mod tests {
     assert_eq!(input::timestamp_usec(&compositor.state), 7_000_123);
     compositor.set_input_time(None);
     assert_ne!(input::timestamp_usec(&compositor.state), 7_000_123);
+  }
+
+  fn dell_output() -> OutputInfo {
+    OutputInfo {
+      name: "DP-1".into(),
+      make: "Dell Inc.".into(),
+      model: "DELL U2720Q".into(),
+      serial: Some("ABC123".into()),
+      physical_size_mm: (597, 336),
+      subpixel: wayland_server::protocol::wl_output::Subpixel::HorizontalRgb,
+      refresh_mhz: 59_951,
+    }
+  }
+
+  #[test]
+  fn output_description_follows_wlroots() {
+    assert_eq!(
+      dell_output().description(),
+      "Dell Inc. DELL U2720Q ABC123 (DP-1)"
+    );
+    assert_eq!(
+      OutputInfo::default().description(),
+      "Shingle Headless output (HEADLESS-1)"
+    );
+  }
+
+  #[test]
+  fn wl_output_reports_headless_1_without_output_info() {
+    use wayland_client::protocol::wl_output::{Event, WlOutput};
+    let (mut compositor, path) = test_compositor();
+    let mut client = test_client::TestClient::connect(&mut compositor, &path);
+    let _output = client.bind::<WlOutput>(4);
+    client.roundtrip(&mut compositor);
+    let events = &client.events.output;
+    assert!(events.iter().any(
+      |event| matches!(event, Event::Name { name } if name == "HEADLESS-1")
+    ));
+    assert!(events.iter().any(|event| matches!(
+      event,
+      Event::Geometry {
+        physical_width: 310,
+        physical_height: 175,
+        ..
+      }
+    )));
+    assert!(events.iter().any(|event| matches!(
+      event,
+      Event::Mode {
+        width: 1280,
+        height: 720,
+        refresh: 60_000,
+        ..
+      }
+    )));
+  }
+
+  #[test]
+  fn output_info_reaches_wl_output_xdg_output_and_output_management() {
+    use wayland_client::{
+      WEnum,
+      protocol::wl_output::{Event, Subpixel, WlOutput},
+    };
+    use wayland_protocols::xdg::xdg_output::zv1::client::{
+      zxdg_output_manager_v1::ZxdgOutputManagerV1, zxdg_output_v1,
+    };
+    use wayland_protocols_wlr::output_management::v1::client::{
+      zwlr_output_head_v1, zwlr_output_manager_v1::ZwlrOutputManagerV1,
+      zwlr_output_mode_v1,
+    };
+    let (mut compositor, path) = test_compositor();
+    compositor.set_output_info(dell_output());
+    assert_eq!(compositor.output_info(), &dell_output());
+    let mut client = test_client::TestClient::connect(&mut compositor, &path);
+    let output = client.bind::<WlOutput>(4);
+    let manager = client.bind::<ZxdgOutputManagerV1>(3);
+    manager.get_xdg_output(&output, &client.handle, ());
+    let _heads = client.bind::<ZwlrOutputManagerV1>(4);
+    client.roundtrip(&mut compositor);
+    let events = &client.events;
+    assert!(events.output.iter().any(|event| matches!(
+      event,
+      Event::Geometry {
+        physical_width: 597,
+        physical_height: 336,
+        subpixel: WEnum::Value(Subpixel::HorizontalRgb),
+        make,
+        model,
+        ..
+      } if make == "Dell Inc." && model == "DELL U2720Q"
+    )));
+    assert!(events.output.iter().any(|event| matches!(
+      event,
+      Event::Mode {
+        refresh: 59_951,
+        ..
+      }
+    )));
+    assert!(
+      events
+        .output
+        .iter()
+        .any(|event| matches!(event, Event::Name { name } if name == "DP-1"))
+    );
+    assert!(events.output.iter().any(|event| matches!(
+      event,
+      Event::Description { description }
+        if description == "Dell Inc. DELL U2720Q ABC123 (DP-1)"
+    )));
+    assert!(events.xdg_output.iter().any(|event| matches!(
+      event,
+      zxdg_output_v1::Event::Name { name } if name == "DP-1"
+    )));
+    let head_has = |expected: &dyn Fn(&zwlr_output_head_v1::Event) -> bool| {
+      events.heads.iter().any(expected)
+    };
+    assert!(head_has(&|event| matches!(
+      event,
+      zwlr_output_head_v1::Event::Name { name } if name == "DP-1"
+    )));
+    assert!(head_has(&|event| matches!(
+      event,
+      zwlr_output_head_v1::Event::Make { make } if make == "Dell Inc."
+    )));
+    assert!(head_has(&|event| matches!(
+      event,
+      zwlr_output_head_v1::Event::SerialNumber { serial_number }
+        if serial_number == "ABC123"
+    )));
+    assert!(head_has(&|event| matches!(
+      event,
+      zwlr_output_head_v1::Event::PhysicalSize {
+        width: 597,
+        height: 336
+      }
+    )));
+    assert!(events.modes.iter().any(|event| matches!(
+      event,
+      zwlr_output_mode_v1::Event::Refresh { refresh: 59_951 }
+    )));
+  }
+
+  #[test]
+  fn output_info_updates_bound_outputs_but_keeps_their_name() {
+    use wayland_client::protocol::wl_output::{Event, WlOutput};
+    let (mut compositor, path) = test_compositor();
+    let mut client = test_client::TestClient::connect(&mut compositor, &path);
+    let _output = client.bind::<WlOutput>(4);
+    client.roundtrip(&mut compositor);
+    client.events.output.clear();
+    compositor.set_output_info(dell_output());
+    client.roundtrip(&mut compositor);
+    let events = &client.events.output;
+    assert!(events.iter().any(|event| matches!(
+      event,
+      Event::Mode {
+        refresh: 59_951,
+        ..
+      }
+    )));
+    assert!(events.iter().any(|event| matches!(
+      event,
+      Event::Description { description } if description.ends_with("(DP-1)")
+    )));
+    assert!(matches!(events.last(), Some(Event::Done)));
+    assert!(
+      !events
+        .iter()
+        .any(|event| matches!(event, Event::Name { .. }))
+    );
   }
 
   #[test]

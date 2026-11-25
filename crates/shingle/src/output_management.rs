@@ -14,7 +14,7 @@ use wayland_server::{
   protocol::wl_output,
 };
 
-use crate::{OUTPUT_NAME, state::CompositorState};
+use crate::state::CompositorState;
 
 #[derive(Default)]
 pub(crate) struct OutputManagement {
@@ -102,6 +102,7 @@ pub(crate) fn sync(state: &mut CompositorState) {
           state.output_transform,
         );
         mode.size(width as i32, height as i32);
+        mode.refresh(state.output_info.refresh_mhz as i32);
         head.current_mode(&mode);
       }
       head.position(output.x, output.y);
@@ -150,8 +151,23 @@ impl GlobalDispatch<ZwlrOutputManagerV1, ()> for CompositorState {
       Err(_) => return,
     };
     manager.head(&head);
-    head.name(OUTPUT_NAME.into());
-    head.description(format!("Shingle {OUTPUT_NAME}"));
+    let info = &state.output_info;
+    head.name(info.name.clone());
+    head.description(info.description());
+    let (width_mm, height_mm) = info.physical_size_mm;
+    if width_mm > 0 && height_mm > 0 {
+      head.physical_size(
+        width_mm.min(i32::MAX as u32) as i32,
+        height_mm.min(i32::MAX as u32) as i32,
+      );
+    }
+    if version >= 2 {
+      head.make(info.make.clone());
+      head.model(info.model.clone());
+      if let Some(serial) = &info.serial {
+        head.serial_number(serial.clone());
+      }
+    }
     head.enabled(1);
     head.mode(&mode);
     let (width, height) = crate::output_transform::physical_size(
@@ -161,7 +177,7 @@ impl GlobalDispatch<ZwlrOutputManagerV1, ()> for CompositorState {
       state.output_transform,
     );
     mode.size(width as i32, height as i32);
-    mode.refresh(60_000);
+    mode.refresh(state.output_info.refresh_mhz as i32);
     mode.preferred();
     head.current_mode(&mode);
     head.position(state.output.x, state.output.y);

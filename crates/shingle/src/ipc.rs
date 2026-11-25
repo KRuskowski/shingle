@@ -703,9 +703,9 @@ fn geometry(rect: Rect) -> Value {
 fn wset_json(state: &CompositorState) -> Value {
   json!({
       "index": 1,
-      "name": crate::OUTPUT_NAME,
+      "name": state.output_info.name,
       "output-id": 1,
-      "output-name": crate::OUTPUT_NAME,
+      "output-name": state.output_info.name,
       "workspace": output_json(state)["workspace"].clone(),
   })
 }
@@ -721,7 +721,7 @@ fn output_json(state: &CompositorState) -> Value {
     .unwrap_or(state.output);
   json!({
       "id": 1,
-      "name": crate::OUTPUT_NAME,
+      "name": state.output_info.name,
       "geometry": geometry(state.output),
       "workarea": geometry(workarea),
       "wset-index": 1,
@@ -1724,7 +1724,7 @@ fn layout_views(state: &mut CompositorState, data: &Value) -> Value {
       return json_error("unknown or invalid view id");
     };
     if let Some(output) = view.get("output")
-      && output.as_str() != Some(crate::OUTPUT_NAME)
+      && output.as_str() != Some(state.output_info.name.as_str())
     {
       return json_error("unknown output");
     }
@@ -2813,6 +2813,21 @@ mod tests {
     );
     press(&mut state, "KEY_F9");
     assert_eq!(binding_events(&mut state), [4]);
+  }
+
+  #[test]
+  fn ipc_reports_the_described_output_name() {
+    let mut state = test_state();
+    let outputs = call(&mut state, "window-rules/list-outputs", json!({}));
+    assert_eq!(outputs[0]["name"], json!("HEADLESS-1"));
+    state.set_output_info(crate::OutputInfo {
+      name: "DP-1".into(),
+      ..Default::default()
+    });
+    let outputs = call(&mut state, "window-rules/list-outputs", json!({}));
+    assert_eq!(outputs[0]["name"], json!("DP-1"));
+    let wsets = call(&mut state, "window-rules/list-wsets", json!({}));
+    assert_eq!(wsets[0]["output-name"], json!("DP-1"));
   }
 
   #[test]
