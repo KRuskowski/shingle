@@ -15,6 +15,7 @@ use x11rb::{
   protocol::{
     Event,
     composite::{self, ConnectionExt as _, Redirect},
+    xfixes::{ClientDisconnectFlags, ConnectionExt as _},
     xproto::{
       ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux,
       EventMask, PropMode, Window, WindowClass,
@@ -87,6 +88,17 @@ pub trait XConnection {
   ///
   /// When a request or reply fails.
   fn intern_atoms(&mut self, names: &[&str]) -> Result<Vec<u32>, XwmError>;
+
+  /// Asks the server to treat this client like one that has gone when it
+  /// decides whether to exit with `-terminate` (XFixes 6
+  /// `SetClientDisconnectMode(Terminate)`). Without it, a lazily started
+  /// Xwayland would never exit, since the window manager stays
+  /// connected. Returns `false` when the server's XFixes is older than 6.
+  ///
+  /// # Errors
+  ///
+  /// When the version query fails.
+  fn terminate_without_clients(&mut self) -> Result<bool, XwmError>;
 
   /// Composite `RedirectSubwindows(window, Manual)`, checked.
   ///
@@ -235,6 +247,23 @@ impl XConnection for X11Connection {
       .collect()
   }
 
+  fn terminate_without_clients(&mut self) -> Result<bool, XwmError> {
+    let version = self
+      .connection
+      .xfixes_query_version(6, 0)
+      .map_err(connection_error)?
+      .reply()
+      .map_err(|error| XwmError::Request(error.to_string()))?;
+    if version.major_version < 6 {
+      return Ok(false);
+    }
+    self
+      .connection
+      .xfixes_set_client_disconnect_mode(ClientDisconnectFlags::TERMINATE)
+      .map_err(connection_error)?;
+    Ok(true)
+  }
+
   fn redirect_subwindows(&mut self, window: Window) -> Result<(), XwmError> {
     self
       .connection
@@ -336,6 +365,9 @@ impl XConnection for X11Connection {
 
 /// The name Composite is registered under.
 pub const COMPOSITE: &str = composite::X11_EXTENSION_NAME;
+
+/// The name XFixes is registered under.
+pub const XFIXES: &str = x11rb::protocol::xfixes::X11_EXTENSION_NAME;
 
 /// `AtomEnum::WINDOW`, the type of window-valued properties.
 pub const WINDOW_TYPE: u32 = 33;

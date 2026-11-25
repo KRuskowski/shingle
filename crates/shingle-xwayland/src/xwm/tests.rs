@@ -20,6 +20,7 @@ const ROOT: Window = 0x100;
 enum Request {
   InternAtoms(usize),
   HasExtension(&'static str),
+  TerminateWithoutClients,
   Redirect(Window),
   SelectEvents(Window, EventMask),
   CreateWindow(Window, Window),
@@ -37,6 +38,8 @@ struct Recording {
   next_id: u32,
   events: VecDeque<Result<Event, XwmError>>,
   without_composite: bool,
+  without_xfixes: bool,
+  old_xfixes: bool,
   refuse_redirect: bool,
 }
 
@@ -52,7 +55,19 @@ impl XConnection for Recording {
 
   fn has_extension(&mut self, name: &'static str) -> Result<bool, XwmError> {
     self.requests.push(Request::HasExtension(name));
-    Ok(!self.without_composite)
+    Ok(match name {
+      "Composite" => !self.without_composite,
+      "XFIXES" => !self.without_xfixes,
+      _ => true,
+    })
+  }
+
+  fn terminate_without_clients(&mut self) -> Result<bool, XwmError> {
+    if self.old_xfixes {
+      return Ok(false);
+    }
+    self.requests.push(Request::TerminateWithoutClients);
+    Ok(true)
   }
 
   fn intern_atoms(&mut self, names: &[&str]) -> Result<Vec<u32>, XwmError> {
@@ -158,6 +173,8 @@ fn bring_up_follows_wlroots() {
     [
       Request::InternAtoms(ATOM_NAMES.len()),
       Request::HasExtension("Composite"),
+      Request::HasExtension("XFIXES"),
+      Request::TerminateWithoutClients,
       Request::Redirect(ROOT),
       Request::SelectEvents(
         ROOT,
@@ -217,6 +234,32 @@ fn missing_composite_fails_bring_up() {
   assert_eq!(
     Xwm::start(connection).err(),
     Some(XwmError::MissingExtension("Composite"))
+  );
+}
+
+#[test]
+fn bring_up_needs_xfixes_and_reports_terminate_mode() {
+  let xwm = Xwm::start(Recording::default()).unwrap();
+  assert!(xwm.terminate_without_clients());
+  let old = Recording {
+    old_xfixes: true,
+    ..Recording::default()
+  };
+  let xwm = Xwm::start(old).unwrap();
+  assert!(!xwm.terminate_without_clients());
+  assert!(
+    !xwm
+      .connection()
+      .requests
+      .contains(&Request::TerminateWithoutClients)
+  );
+  let missing = Recording {
+    without_xfixes: true,
+    ..Recording::default()
+  };
+  assert_eq!(
+    Xwm::start(missing).err(),
+    Some(XwmError::MissingExtension("XFIXES"))
   );
 }
 

@@ -90,8 +90,12 @@ pub struct ChildFds {
 }
 
 /// Xwayland's arguments after the program name, as wlroots builds them
-/// (`xwayland/server.c`): `:N -rootless -core -terminate [DELAY]` and the
-/// descriptors. `DELAY` is given only in lazy mode.
+/// (`xwayland/server.c`): `:N -rootless -core`, `-terminate DELAY` in lazy
+/// mode only, and the descriptors.
+///
+/// An eager server gets no `-terminate`: since the window manager asks
+/// to be ignored for it (XFixes `SetClientDisconnectMode`), a bare
+/// `-terminate` would end the server whenever its last X client left.
 pub fn arguments(
   display: &str,
   mode: StartMode,
@@ -99,8 +103,8 @@ pub fn arguments(
 ) -> Vec<OsString> {
   let mut arguments: Vec<OsString> =
     vec![display.into(), "-rootless".into(), "-core".into()];
-  arguments.push("-terminate".into());
   if mode == StartMode::Lazy {
+    arguments.push("-terminate".into());
     arguments.push(LAZY_TERMINATE_DELAY.to_string().into());
   }
   for fd in fds.listen {
@@ -383,7 +387,6 @@ mod tests {
         ":2",
         "-rootless",
         "-core",
-        "-terminate",
         "-listenfd",
         "3",
         "-listenfd",

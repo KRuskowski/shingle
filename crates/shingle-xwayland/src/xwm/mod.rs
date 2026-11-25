@@ -11,7 +11,8 @@ mod connection;
 
 pub use atoms::{Atoms, NAMES as ATOM_NAMES, Name as AtomName, SUPPORTED};
 pub use connection::{
-  ATOM_TYPE, COMPOSITE, WINDOW_TYPE, X11Connection, XConnection, XwmError,
+  ATOM_TYPE, COMPOSITE, WINDOW_TYPE, X11Connection, XConnection, XFIXES,
+  XwmError,
 };
 
 use x11rb::protocol::{
@@ -40,12 +41,14 @@ pub struct Xwm<C: XConnection> {
   atoms: Atoms,
   root: Window,
   check_window: Window,
+  terminate_without_clients: bool,
 }
 
 impl<C: XConnection> Xwm<C> {
   /// Brings the window manager up on `connection`:
   ///
-  /// 1. interns [`ATOM_NAMES`] in one batch;
+  /// 1. interns [`ATOM_NAMES`] in one batch, checks for Composite and
+  ///    XFixes, and makes the server ignore this client for `-terminate`;
   /// 2. redirects the root's children (Composite, `Manual`);
   /// 3. selects `SubstructureRedirect`, `SubstructureNotify` and
   ///    `PropertyChange` on the root;
@@ -68,6 +71,13 @@ impl<C: XConnection> Xwm<C> {
     if !connection.has_extension(COMPOSITE)? {
       return Err(XwmError::MissingExtension(COMPOSITE));
     }
+    if !connection.has_extension(XFIXES)? {
+      return Err(XwmError::MissingExtension(XFIXES));
+    }
+    // As wlroots' xwm_create does: the window manager must not keep a
+    // lazily started server alive on its own. Older servers just never
+    // exit when idle.
+    let terminate_without_clients = connection.terminate_without_clients()?;
     let root = connection.root();
     connection.redirect_subwindows(root)?;
     connection.select_events(
@@ -123,6 +133,7 @@ impl<C: XConnection> Xwm<C> {
       atoms,
       root,
       check_window,
+      terminate_without_clients,
     })
   }
 
@@ -165,6 +176,12 @@ impl<C: XConnection> Xwm<C> {
   /// The window `_NET_SUPPORTING_WM_CHECK` names, which owns `WM_S0`.
   pub fn check_window(&self) -> Window {
     self.check_window
+  }
+
+  /// Whether the server ignores the window manager when deciding to exit
+  /// for `-terminate`; `false` with XFixes older than 6.
+  pub fn terminate_without_clients(&self) -> bool {
+    self.terminate_without_clients
   }
 
   /// The connection.
