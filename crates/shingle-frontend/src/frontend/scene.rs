@@ -730,6 +730,14 @@ impl Frontend {
     if renderer.render(&tiles, background)? {
       self.compositor.frame();
     }
+    // The tiles borrow textures from `self`, so only these two fields.
+    answer_captures(
+      &mut self.compositor,
+      &mut self.captures,
+      renderer,
+      &tiles,
+      background,
+    );
     // Decide with the time this frame was drawn at, not the time drawing
     // finished: a slow frame must not skip an animation's final state.
     self.animations.retain(|_, animation| {
@@ -794,6 +802,71 @@ impl Frontend {
   }
 }
 
+/// Answers the screencopy `captures` requested since the last frame with
+/// the frame just drawn: drawn once more offscreen, at the output's
+/// logical size, and cut to each capture's region.
+fn answer_captures(
+  compositor: &mut shingle::Compositor,
+  captures: &mut Vec<(shingle::CaptureId, shingle_core::Rect)>,
+  target: &mut dyn RenderTarget,
+  tiles: &[RenderTile<'_>],
+  background: [f64; 4],
+) {
+  if captures.is_empty() {
+    return;
+  }
+  let output = compositor.output();
+  let size = (output.width, output.height);
+  let frame = target
+    .capture(tiles, background, size)
+    .map_err(|error| error.to_string());
+  for (id, region) in std::mem::take(captures) {
+    let result = frame.as_ref().map_err(Clone::clone).map(|rgba| {
+      crop_rgba(
+        rgba,
+        size,
+        region.x - output.x,
+        region.y - output.y,
+        (region.width, region.height),
+      )
+    });
+    compositor.finish_capture(id, result);
+  }
+}
+
+/// The `width` by `height` rectangle at (`x`, `y`) of `rgba`, a frame of
+/// `size` pixels, as tightly packed RGBA8 rows. Pixels outside the frame
+/// are transparent black.
+pub(super) fn crop_rgba(
+  rgba: &[u8],
+  size: (u32, u32),
+  x: i32,
+  y: i32,
+  (width, height): (u32, u32),
+) -> Vec<u8> {
+  let mut out = vec![0; width as usize * height as usize * 4];
+  let frame_width = i64::from(size.0);
+  let frame_height = i64::from(size.1);
+  for row in 0..i64::from(height) {
+    let source_y = i64::from(y) + row;
+    if !(0..frame_height).contains(&source_y) {
+      continue;
+    }
+    let first = i64::from(x).max(0);
+    let last = (i64::from(x) + i64::from(width)).min(frame_width);
+    if first >= last {
+      continue;
+    }
+    let source = ((source_y * frame_width + first) * 4) as usize;
+    let length = ((last - first) * 4) as usize;
+    let destination =
+      ((row * i64::from(width) + first - i64::from(x)) * 4) as usize;
+    out[destination..destination + length]
+      .copy_from_slice(&rgba[source..source + length]);
+  }
+  out
+}
+
 pub(super) fn apply_buffer(tile: &mut RenderTile<'_>, buffer: &BufferSnapshot) {
   tile.transform = match buffer.transform {
     wayland_server::protocol::wl_output::Transform::Normal => {
@@ -846,5 +919,35 @@ pub(super) fn render_output_transform(
     Transform::Flipped180 => TextureTransform::FlipVertical,
     Transform::Flipped270 => TextureTransform::AntiTranspose,
     _ => TextureTransform::Normal,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::crop_rgba;
+
+  /// A 3x2 frame whose pixel (x, y) is [x, y, 0, 255].
+  fn frame() -> Vec<u8> {
+    (0..2u8)
+      .flat_map(|y| (0..3u8).flat_map(move |x| [x, y, 0, 255]))
+      .collect()
+  }
+
+  #[test]
+  fn a_crop_inside_the_frame_copies_its_rows() {
+    assert_eq!(
+      crop_rgba(&frame(), (3, 2), 1, 0, (2, 2)),
+      [1, 0, 0, 255, 2, 0, 0, 255, 1, 1, 0, 255, 2, 1, 0, 255]
+    );
+    assert_eq!(crop_rgba(&frame(), (3, 2), 0, 0, (3, 2)), frame());
+  }
+
+  #[test]
+  fn pixels_outside_the_frame_are_transparent() {
+    assert_eq!(
+      crop_rgba(&frame(), (3, 2), -1, 1, (2, 2)),
+      [0, 0, 0, 0, 0, 1, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0]
+    );
+    assert_eq!(crop_rgba(&frame(), (3, 2), 5, 5, (1, 1)), [0; 4]);
   }
 }

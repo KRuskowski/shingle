@@ -38,7 +38,9 @@ pub use draw::{draw, draw_with_access};
 pub use gpu::{AdapterFilter, GpuContext, GpuOptions, TextureFilter};
 pub use renderer::{OffscreenRenderer, Renderer};
 pub use state::RenderState;
-pub use target::{OffscreenTarget, WindowTarget};
+pub use target::{
+  CAPTURE_TIMEOUT, OffscreenTarget, WindowTarget, capture_frame,
+};
 
 use state::Zoom;
 

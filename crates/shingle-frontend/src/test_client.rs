@@ -2,18 +2,25 @@
 //! `xdg_toplevel`s with `wl_shm` buffers on a compositor running on the
 //! test thread.
 
-use std::{os::unix::net::UnixStream, path::Path};
+use std::{
+  os::{fd::OwnedFd, unix::net::UnixStream},
+  path::Path,
+};
 
 use shingle::Compositor;
 use wayland_client::{
   Connection, Dispatch, EventQueue, Proxy, QueueHandle,
   protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_registry, wl_shm, wl_shm_pool,
-    wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm,
+    wl_shm_pool, wl_surface,
   },
 };
 use wayland_protocols::xdg::shell::client::{
   xdg_surface, xdg_toplevel, xdg_wm_base,
+};
+use wayland_protocols_wlr::screencopy::v1::client::{
+  zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+  zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
 /// What the client has received.
@@ -22,7 +29,27 @@ pub(crate) struct Events {
   globals: Vec<(u32, String, u32)>,
   /// Configured sizes, newest last, with the toplevel they were sent to.
   configures: Vec<(wayland_client::backend::ObjectId, i32, i32)>,
+  /// Screencopy outcomes, `ready` or `failed`, in order.
+  pub(crate) captures: Vec<&'static str>,
   synced: bool,
+}
+
+/// A screencopy copy in flight, with the memory its buffer lives in.
+pub(crate) struct Capture {
+  _frame: ZwlrScreencopyFrameV1,
+  _buffer: wl_buffer::WlBuffer,
+  fd: OwnedFd,
+  size: usize,
+}
+
+impl Capture {
+  /// The buffer's bytes: ARGB8888, so B, G, R, A per pixel.
+  pub(crate) fn bytes(&self) -> Vec<u8> {
+    let mut bytes = vec![0; self.size];
+    let read = rustix::io::pread(&self.fd, &mut bytes, 0).expect("pread");
+    bytes.truncate(read);
+    bytes
+  }
 }
 
 /// A mapped toplevel; dropping it leaves the window in place.
@@ -133,6 +160,59 @@ impl TestClient {
       _xdg_surface: xdg_surface,
       _toplevel: toplevel,
     }
+  }
+
+  /// Asks wlr-screencopy for the `width` by `height` region at (`x`, `y`)
+  /// and copies it into a new shm buffer.
+  pub(crate) fn capture(
+    &mut self,
+    compositor: &mut Compositor,
+    (x, y, width, height): (i32, i32, i32, i32),
+  ) -> Capture {
+    let manager = self.bind::<ZwlrScreencopyManagerV1>(3);
+    let output = self.bind::<wl_output::WlOutput>(1);
+    let frame = manager.capture_output_region(
+      0,
+      &output,
+      x,
+      y,
+      width,
+      height,
+      &self.handle,
+      (),
+    );
+    let size = width * height * 4;
+    let fd = rustix::fs::memfd_create(
+      "shingle-frontend-test-capture",
+      rustix::fs::MemfdFlags::CLOEXEC,
+    )
+    .expect("memfd_create succeeds");
+    rustix::fs::ftruncate(&fd, size as u64).expect("ftruncate succeeds");
+    let shm = self.bind::<wl_shm::WlShm>(1);
+    let pool =
+      shm.create_pool(rustix::fd::AsFd::as_fd(&fd), size, &self.handle, ());
+    let buffer = pool.create_buffer(
+      0,
+      width,
+      height,
+      width * 4,
+      wl_shm::Format::Argb8888,
+      &self.handle,
+      (),
+    );
+    frame.copy(&buffer);
+    self.roundtrip(compositor);
+    Capture {
+      _frame: frame,
+      _buffer: buffer,
+      fd,
+      size: size as usize,
+    }
+  }
+
+  /// The screencopy outcomes so far.
+  pub(crate) fn captures(&self) -> &[&'static str] {
+    &self.events.captures
   }
 
   /// Attaches and commits a `width` by `height` shm buffer on `surface`.
@@ -247,6 +327,27 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for Events {
   }
 }
 
+impl Dispatch<ZwlrScreencopyFrameV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ZwlrScreencopyFrameV1,
+    event: zwlr_screencopy_frame_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      zwlr_screencopy_frame_v1::Event::Ready { .. } => {
+        events.captures.push("ready");
+      }
+      zwlr_screencopy_frame_v1::Event::Failed => {
+        events.captures.push("failed");
+      }
+      _ => {}
+    }
+  }
+}
+
 macro_rules! ignore_events {
   ($($interface:ty),* $(,)?) => {
     $(
@@ -271,4 +372,6 @@ ignore_events!(
   wl_shm::WlShm,
   wl_shm_pool::WlShmPool,
   wl_buffer::WlBuffer,
+  wl_output::WlOutput,
+  ZwlrScreencopyManagerV1,
 );

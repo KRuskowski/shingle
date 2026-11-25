@@ -3,7 +3,7 @@
 
 use crate::{
   GpuContext, GpuOptions, GpuTexture, OffscreenTarget, RenderError,
-  RenderState, RenderTile, TextureTransform, WindowTarget,
+  RenderState, RenderTile, TextureTransform, WindowTarget, capture_frame,
 };
 
 /// Renders to one window surface, for the nested frontend.
@@ -119,6 +119,17 @@ impl Renderer {
   ) -> Result<bool, RenderError> {
     self.target.render(&self.gpu, &self.state, tiles, clear)
   }
+
+  /// Draws the frame again offscreen for screencopy; see
+  /// [`capture_frame`].
+  pub fn capture(
+    &self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    size: (u32, u32),
+  ) -> Result<Vec<u8>, RenderError> {
+    capture_frame(&self.gpu, &self.state, size, tiles, clear)
+  }
 }
 
 /// Renders to one offscreen texture and reads every frame back, for
@@ -201,5 +212,15 @@ impl OffscreenRenderer {
   ) -> Result<Vec<u8>, RenderError> {
     self.target.render(&self.gpu, &self.state, tiles, clear);
     self.target.read_rgba(&self.gpu)
+  }
+
+  /// Draws the frame again for screencopy; see [`capture_frame`].
+  pub fn capture(
+    &self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    size: (u32, u32),
+  ) -> Result<Vec<u8>, RenderError> {
+    capture_frame(&self.gpu, &self.state, size, tiles, clear)
   }
 }

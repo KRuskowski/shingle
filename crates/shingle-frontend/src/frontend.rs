@@ -25,8 +25,8 @@ use std::{
 };
 
 use shingle::{
-  BufferSnapshot, Compositor, Config, Direction, Event, InputDeviceId,
-  InputDeviceKind, SurfaceId,
+  BufferSnapshot, CaptureId, Compositor, Config, Direction, Event,
+  InputDeviceId, InputDeviceKind, SurfaceId,
 };
 use shingle_config::{
   CommandBinding, ConfigWatcher, Keybindings, PointerBindings, ShingleConfig,
@@ -151,6 +151,8 @@ pub struct Frontend {
   quit: bool,
   /// Whether the host should be asked for a frame at the end of the call.
   redraw_requested: bool,
+  /// Screencopy captures the next frame answers, with their regions.
+  captures: Vec<(CaptureId, shingle_core::Rect)>,
 }
 
 impl Frontend {
@@ -256,6 +258,8 @@ impl Frontend {
     compositor.set_keymap(&keymap)?;
     // STIPC keys take the path of real keys, so configured bindings fire.
     compositor.set_stipc_key_events(true);
+    // Screencopy shows the frames drawn here, not a CPU composite.
+    compositor.set_frame_capture(true);
     compositor.set_repeat(config.input.repeat_rate, config.input.repeat_delay);
     let mut keyboard = Keyboard::new(&keymap)?;
     keyboard.sync_locked(
@@ -360,6 +364,7 @@ impl Frontend {
       last_config_poll: Instant::now(),
       quit: false,
       redraw_requested: false,
+      captures: Vec::new(),
     })
   }
 
@@ -548,8 +553,10 @@ impl Frontend {
         | Event::Resume
         | Event::FocusChanged { .. }
         | Event::GeometryChanged { .. }
-        | Event::LockStateChanged(_)
-        | Event::CaptureRequested { .. } => {}
+        | Event::LockStateChanged(_) => {}
+        Event::CaptureRequested { id, region } => {
+          self.captures.push((id, region));
+        }
       }
     }
     if save {

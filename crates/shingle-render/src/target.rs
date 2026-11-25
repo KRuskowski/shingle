@@ -294,6 +294,38 @@ impl OffscreenTarget {
   }
 }
 
+/// How long [`capture_frame`] waits for the GPU before it gives up.
+pub const CAPTURE_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(1);
+
+/// Draws `tiles` over `clear` into a new `width` by `height` offscreen
+/// target and reads it back as tightly packed RGBA8 rows, for screencopy.
+///
+/// The frame is drawn in layout logical pixels, at scale 1 and without
+/// the output transform, but with `state`'s zoom and the context's gamma
+/// and inversion, so it shows what the output shows in the orientation
+/// clients lay out in. Waits at most [`CAPTURE_TIMEOUT`] for the GPU.
+pub fn capture_frame(
+  gpu: &GpuContext,
+  state: &RenderState,
+  (width, height): (u32, u32),
+  tiles: &[RenderTile<'_>],
+  clear: [f64; 4],
+) -> Result<Vec<u8>, RenderError> {
+  let target = OffscreenTarget::new(gpu, width, height)?;
+  target.render(gpu, &capture_state(state), tiles, clear);
+  target.read_rgba_within(gpu, Some(CAPTURE_TIMEOUT))
+}
+
+/// `state` with scale 1 and no output transform, keeping its zoom and
+/// filter.
+fn capture_state(state: &RenderState) -> RenderState {
+  let mut capture = *state;
+  capture.set_scale_factor(1.0);
+  capture.set_output_transform(crate::TextureTransform::Normal);
+  capture
+}
+
 /// Bytes per row of a readback buffer, rounded up to wgpu's copy alignment.
 fn padded_row_bytes(width: u32) -> usize {
   let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
@@ -394,6 +426,20 @@ mod tests {
     let view = bgra.create_view(&Default::default());
     draw(&gpu, &state, &view, (4, 4), &tiles, [0.0; 4]);
     assert_eq!(gpu.pipeline_count(), 2);
+  }
+
+  #[test]
+  fn captures_ignore_scale_and_output_transform_but_keep_zoom() {
+    let mut state = RenderState::default();
+    state.set_scale_factor(2.0);
+    state.set_output_transform(crate::TextureTransform::Rotate90);
+    state.set_zoom(3.0, 10.0, 20.0);
+    state.set_nearest_filter(true);
+    let capture = capture_state(&state);
+    assert_eq!(capture.scale_factor(), 1.0);
+    assert_eq!(capture.output_transform(), crate::TextureTransform::Normal);
+    assert_eq!(capture.zoom(), (3.0, 10.0, 20.0));
+    assert_eq!(capture.texture_filter(), crate::TextureFilter::Nearest);
   }
 
   #[test]

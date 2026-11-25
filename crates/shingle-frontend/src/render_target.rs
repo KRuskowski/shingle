@@ -57,6 +57,16 @@ pub trait RenderTarget {
     tiles: &[RenderTile<'_>],
     clear: [f64; 4],
   ) -> Result<bool, RenderError>;
+
+  /// Draws the frame just rendered again, into a `size` offscreen target
+  /// in layout logical pixels, and reads it back as RGBA8 rows for
+  /// screencopy ([`shingle_render::capture_frame`]).
+  fn capture(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    size: (u32, u32),
+  ) -> Result<Vec<u8>, RenderError>;
 }
 
 impl RenderTarget for Renderer {
@@ -112,6 +122,15 @@ impl RenderTarget for Renderer {
   ) -> Result<bool, RenderError> {
     Renderer::render(self, tiles, clear)
   }
+
+  fn capture(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    size: (u32, u32),
+  ) -> Result<Vec<u8>, RenderError> {
+    Renderer::capture(self, tiles, clear, size)
+  }
 }
 
 /// Offscreen rendering reads every frame back and drops it; tearing does
@@ -166,5 +185,14 @@ impl RenderTarget for OffscreenRenderer {
     clear: [f64; 4],
   ) -> Result<bool, RenderError> {
     OffscreenRenderer::render(self, tiles, clear).map(|_| true)
+  }
+
+  fn capture(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    size: (u32, u32),
+  ) -> Result<Vec<u8>, RenderError> {
+    OffscreenRenderer::capture(self, tiles, clear, size)
   }
 }

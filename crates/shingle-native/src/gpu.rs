@@ -386,6 +386,15 @@ impl RenderTarget for GpuRenderer {
     );
     Ok(false)
   }
+
+  fn capture(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    size: (u32, u32),
+  ) -> Result<Vec<u8>, RenderError> {
+    shingle_render::capture_frame(&self.gpu, &self.state, size, tiles, clear)
+  }
 }
 
 impl FrameRenderer for GpuRenderer {

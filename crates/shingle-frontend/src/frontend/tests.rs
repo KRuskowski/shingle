@@ -749,6 +749,8 @@ struct RecordingTarget {
   alphas: Vec<Vec<f32>>,
   /// How long each frame takes to draw, to simulate a slow GPU.
   delay: Duration,
+  /// The size of every screencopy capture drawn.
+  captures: Vec<(u32, u32)>,
 }
 
 impl RenderTarget for RecordingTarget {
@@ -814,6 +816,16 @@ impl RenderTarget for RecordingTarget {
     thread::sleep(self.delay);
     RenderTarget::render(&mut self.renderer, tiles, clear)
   }
+
+  fn capture(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    size: (u32, u32),
+  ) -> Result<Vec<u8>, RenderError> {
+    self.captures.push(size);
+    RenderTarget::capture(&mut self.renderer, tiles, clear, size)
+  }
 }
 
 /// An offscreen recording target, or `None` without a GPU adapter.
@@ -824,6 +836,7 @@ fn recording_target() -> Option<RecordingTarget> {
       frames: Vec::new(),
       alphas: Vec::new(),
       delay: Duration::ZERO,
+      captures: Vec::new(),
     }),
     Err(RenderError::RequestAdapter(error)) => {
       eprintln!("skipping scene test, no GPU adapter: {error}");
@@ -988,4 +1001,54 @@ fn a_slow_frame_does_not_end_the_workspace_slide_early() {
     "the last frame shows the settled workspace: {:?}",
     target.frames
   );
+}
+
+/// The first pixel of an ARGB8888 capture as (r, g, b).
+fn first_pixel(bytes: &[u8]) -> (u8, u8, u8) {
+  (bytes[2], bytes[1], bytes[0])
+}
+
+#[test]
+fn screencopy_captures_the_frame_as_drawn_including_inversion() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut fixture = Fixture::new(ShingleConfig::default());
+  let capture = fixture
+    .client
+    .capture(fixture.frontend.compositor_mut(), (10, 20, 4, 3));
+  assert!(
+    fixture.client.captures().is_empty(),
+    "nothing before a frame"
+  );
+  fixture.frontend.process(&mut fixture.host);
+  assert!(fixture.host.redraws > 0, "a capture asks for a frame");
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  fixture.process();
+  assert_eq!(fixture.client.captures(), ["ready"]);
+  assert_eq!(
+    target.captures,
+    [(1000, 800)],
+    "one draw at the output size"
+  );
+  // The background, 0.1 linear, is 89 in sRGB.
+  let (r, g, b) = first_pixel(&capture.bytes());
+  assert!(r.abs_diff(89) <= 2 && r == g && g == b, "{:?}", (r, g, b));
+  fixture.frontend.toggle_inversion();
+  let inverted = fixture
+    .client
+    .capture(fixture.frontend.compositor_mut(), (0, 0, 2, 2));
+  fixture.frontend.process(&mut fixture.host);
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  fixture.process();
+  assert_eq!(fixture.client.captures(), ["ready", "ready"]);
+  // 0.9 linear is 243 in sRGB.
+  let (r, g, b) = first_pixel(&inverted.bytes());
+  assert!(r.abs_diff(243) <= 2 && r == g && g == b, "{:?}", (r, g, b));
 }
