@@ -94,7 +94,7 @@ Wayfire's `[wrot]` `activate`, `reset`, `reset-one`, and `reset_radius` options 
 
 ### XKB symbol commands
 
-Command bindings may use `xkb:` followed by a case-sensitive XKB keysym name to match the logical key instead of its physical position. Character keys and common editing/navigation keys are supported, and modifier, repeat, lock, and `always` policies are shared with ordinary commands.
+Ordinary bindings name physical keys the way Wayfire does, after the `KEY_*` constants of `linux/input-event-codes.h` in lower case without the prefix (`a`, `1`, `left`, `kp7`, `leftmeta`, `dot`, `leftbrace`), and the Wayfire and i3 importers turn `esc` and `return` into `escape` and `enter`. Command bindings may use `xkb:` followed by a case-sensitive XKB keysym name to match the logical key instead of its physical position. The keysym comes from Shingle's own keymap (`input.layout`, `variant`, `options` or `xkb_file`), not the host's, so with a `de` layout `xkb:z` is the key labelled Z on a German keyboard. Character keys and common editing/navigation keys are supported, and modifier, repeat, lock, and `always` policies are shared with ordinary commands.
 
 ```yaml
 commands:

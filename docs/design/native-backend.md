@@ -2,7 +2,7 @@
 
 Status: accepted with the operator's [decisions](#decisions), 2026-11-25. Roadmap item "Native backend" ([roadmap.md](../roadmap.md#3-native-backend)).
 
-Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit). This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1, NB-2 and NB-5 are implemented (see [`shingle-render` without winit](#shingle-render-without-winit) and the entries for [NB-2](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor) and [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)), each with notes on where the code differs from this design; the rest is not.
+Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit). This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1, NB-2, NB-3 and NB-5 are implemented (see [`shingle-render` without winit](#shingle-render-without-winit) and the entries for [NB-2](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor), [NB-3](#nb-3-shingle-frontend-extract-create-the-shared-crate-with-the-pure-modules) and [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)), each with notes on where the code differs from this design; the rest is not.
 
 Line numbers refer to branch `shingle-native-design` at `d2568d2`. Crate versions and dates were read from crates.io and GitHub on 2026-11-25; crate APIs were read from the crate sources (wgpu, drm, calloop and xkbcommon from `~/.cargo/registry`, the others from their published `.crate` files).
 
@@ -95,6 +95,40 @@ A shared `keyboard` module will hold an `xkb::State` built from `config.input.lo
 - real depressed, latched, locked and group masks for `Compositor::keyboard_modifiers` (crates/shingle/src/lib.rs:929).
 
 Key repeat for compositor bindings moves into the shared module as a timer, so native, which gets no repeats from libinput, behaves like nested. Nested then drops host repeats. The tests at main.rs:5058 and main.rs:5094 are ported to the evdev table.
+
+As built in NB-3 (crates/shingle-frontend/src/keyboard.rs), with these differences from the plan:
+
+```rust
+pub fn key_name(code: u32) -> Option<&'static str>;
+pub enum KeyState { Pressed, Released, Repeated }
+pub struct Key {
+  pub code: u32,
+  pub state: KeyState,
+  pub name: Option<&'static str>,
+  pub symbol: Option<String>,
+  pub text: Option<String>,
+  pub modifiers: shingle_config::Modifiers,
+  pub modifiers_changed: bool,
+}
+pub struct Keyboard;
+impl Keyboard {
+  pub fn new(keymap: &str) -> Result<Self, KeymapError>;
+  pub fn set_keymap(&mut self, keymap: &str) -> Result<(), KeymapError>;
+  pub fn key(&mut self, code: u32, state: KeyState) -> Key;
+  pub fn modifiers(&self) -> shingle::Modifiers;
+  pub fn binding_modifiers(&self) -> shingle_config::Modifiers;
+  pub fn sync_locked(&mut self, locked: u32, group: u32) -> bool;
+  pub fn release_all(&mut self) -> Vec<u32>;
+  pub fn is_held(&self, code: u32) -> bool;
+}
+```
+
+- **Key repeat stays with the host until NB-4.** The repeat timer needs `Frontend::next_deadline()`, which only exists once `App` moves. Until then nested passes winit's repeats in as `KeyState::Repeated`, which reports names, keysym and text but never changes the xkb state, so repeats behave exactly as before.
+- **Names and keysyms come from the state before the event**, as xkb clients do, which also matches winit's order (key event, then `ModifiersChanged`): pressing Super reports no modifiers, releasing it reports Super. `Key::modifiers_changed` tells the caller to send `Keyboard::modifiers()` and to check whether the switcher's modifiers were released.
+- **The compositor still owns locks and the layout index**, because the initial Caps Lock and Num Lock (`capslock_default`, `numlock_default`) and `wayfire/set-keyboard-state` set them there. Before each key nested calls `sync_locked` with `Compositor::locked_modifiers()` and the new `Compositor::keyboard_layout_index()` (crates/shingle/src/lib.rs), so `xkb:` bindings and Scale text follow an IPC layout switch. Locks and layout changes made by keys (Caps Lock, `grp:` options) now reach clients; before, nested always sent the compositor's initial locks and group 0.
+- **Focus changes are host glue** (crates/shingle-nested/src/host_keyboard.rs). winit reports no releases for keys held when the window loses focus and no presses for keys held when it gains it. On focus loss nested calls `release_all`. On focus gain, the first `ModifiersChanged` presses a left-hand stand-in key for each modifier the host reports held, which is released when the host stops reporting it; this replaces the old "host modifier resync on focus-in". Otherwise the host's modifiers are ignored, so a keymap option such as `ctrl:nocaps` or `altwin:swap_alt_win` in Shingle's keymap decides the binding modifiers.
+- **The name table** has every `KEY_*` with a numeric value in the Linux 6.12 header (508 codes). `KEY_ESC` is `escape`, which is what the importers normalise `esc` to; aliases defined by another constant's name (`KEY_SCREENLOCK` for `KEY_COFFEE` and eight others) are left out, so only the original name matches. winit-only names that had no Wayfire equivalent no longer match: `digit1` is now `1` (which makes the default `super+1` workspace bindings work in nested), `period` is `dot`, `bracketleft` is `leftbrace`, `shiftleft` is `leftshift` and so on.
+- **`Keyboard` is one keyboard's state.** NB-6 can keep one per libinput keyboard or one per seat; either way the disabled keyboard's keys have to leave the xkb state on `InputDeviceChanged` (see [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)).
 
 ### Module plan
 
@@ -538,6 +572,12 @@ Acceptance:
 - The new evdev-name tests reproduce every expectation of main.rs:5058-5130.
 - Nested key bindings and `xkb:` bindings work in a real run with a non-US Shingle keymap.
 - `shingle-frontend` does not depend on winit.
+
+Done on branch `shingle-frontend-extract`. Where it differs from the plan:
+
+- `ScaleState` moved to `scale.rs` with the free functions, because `scale_geometry_at` takes it; the Scale methods and `ScaleTitle` (which holds a `GpuTexture`) stay in nested until NB-4.
+- `bindings.rs` holds only the free helpers (`grid_slot`, `binding_modifiers`, `modifiers_empty`, `modifiers_held`, `modifier_matches`). `pointer_button_action`, `run_matching_command*` and `keyboard_input` are `App` methods and move with it in NB-4; `keyboard_input` already takes a `keyboard::Key`.
+- The keyboard module differs as described in [Keyboard handling](#keyboard-handling-becomes-shared-and-xkb-based): repeats still come from the host, the compositor keeps owning locks and the layout index, and focus changes are handled in nested.
 
 ### NB-4 `shingle-frontend-host`: move `App` into `Frontend`
 
