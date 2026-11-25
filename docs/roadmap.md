@@ -20,14 +20,14 @@ In short, the interactive frontend moves out of `shingle-nested` into a shared `
 2. NB-2 `shingle-compositor-host-api`: done; see [status.md](status.md#backend-host-api).
 3. NB-3 `shingle-frontend-extract`: new crate with the pure modules and an xkb-based shared keyboard.
 4. NB-4 `shingle-frontend-host`: `App` becomes `Frontend` behind a `Host` trait; nested becomes a thin winit host.
-5. NB-5 `shingle-input-registry`: per-device seat devices for `input/*` IPC.
+5. NB-5 `shingle-input-registry`: done; see [status.md](status.md#backend-host-api).
 6. NB-6 `shingle-native-session`: native backend in the `shingle` binary with libseat, libinput and VT switching, no display. Needs the test machine.
 7. NB-7 `shingle-native-kms`: atomic KMS, copy scanout, page-flip pacing, DPMS and the failure handling (test machine).
 8. NB-8 `shingle-native-zero-copy`: GBM scanout with modifier negotiation.
 9. NB-9 `shingle-native-outputs`: hotplug and Wayfire-compatible mode configuration.
 10. NB-10 `shingle-native-planes`: cursor plane, VRR, tearing and fences.
 
-NB-1 and NB-2 are done; NB-5 is in progress. NB-6 onwards waits for the test machine. The operator's decisions are recorded in the design's [Decisions](design/native-backend.md#decisions) section.
+NB-1, NB-2 and NB-5 are done; NB-3 is in progress. NB-6 onwards waits for the test machine. The operator's decisions are recorded in the design's [Decisions](design/native-backend.md#decisions) section.
 
 ## 4. DMA-BUF
 

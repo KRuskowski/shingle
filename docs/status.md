@@ -1,6 +1,6 @@
 # Status
 
-Last updated 2026-11-25, after the compositor gained the host API a native backend needs (NB-2).
+Last updated 2026-11-25, after the seat input devices became a registry (NB-5).
 
 ## Readiness
 
@@ -39,6 +39,7 @@ What a native backend needs from `Compositor` (NB-2 in [design/native-backend.md
 - `set_input_time`: seat input carries the backend's `CLOCK_MONOTONIC` event time. Input and frame-callback timestamps now use `CLOCK_MONOTONIC` instead of the time since startup.
 - `set_session_active(bool)`: pausing releases all held keys, buttons, touches, modifiers and gestures, then drops seat and STIPC input and withholds frame callbacks until resumed.
 - `set_default_cursor(bool)`: draws the theme's default arrow when no client cursor applies. Off in nested.
+- Input-device registry (NB-5): `add_input_device(InputDeviceInfo)` returns an `InputDeviceId` that every keyboard, pointer, gesture and touch entry point takes; `remove_input_device` releases what the device holds and unregisters it. Keys, buttons and touch points are held per device, so disabling one keyboard does not release keys held on another, and `Event::InputDeviceChanged` carries the ID. Nested registers its three devices as IDs 1 to 3, and its `input/*` IPC output is unchanged.
 
 ### Sessions
 
@@ -63,19 +64,19 @@ Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are pla
 
 ### Wayfire IPC
 
-77 methods and the Wayfire event set, including `input/list-devices` and `input/configure-device` for the three nested seat devices. Disabling a device releases its held input. See [ipc.md](ipc.md).
+77 methods and the Wayfire event set, including `input/list-devices` and `input/configure-device` for the registered seat devices (in nested, its keyboard, pointer and touch input). Disabling a device releases the input it holds. See [ipc.md](ipc.md).
 
 ## Verification
 
 ### Automated
 
-`cargo test --workspace` runs 219 tests (2026-11-25), 88 of them in `shingle-core` and 51 in `shingle`. Coverage of the other crates is uneven.
+`cargo test --workspace` runs TESTCOUNT tests (2026-11-25), 88 of them in `shingle-core`, 60 in `shingle` and 32 in `shingle-nested`. Coverage of the other crates is uneven.
 
 `shingle-render` has 15 unit tests and 8 offscreen pixel tests (`crates/shingle-render/tests/offscreen_pixels.rs`). The pixel tests render fixed scenes (solid, translucent, textured, UV-cropped, transformed and rotated tiles; scale, output transform and zoom; gamma ramp and both inversion modes; nearest filtering) and compare the readback with reference images in `crates/shingle-render/tests/golden`, which were rendered by the renderer before the NB-1 split. They need a wgpu adapter and are skipped without one; set `SHINGLE_RENDER_BLESS=1` to regenerate the references.
 
 `cargo clippy --workspace --all-targets -- -D warnings` passes (2026-11-25).
 
-The input-device unit tests (`crates/shingle/src/input_device.rs`, `crates/shingle/src/ipc.rs`, `crates/shingle-nested/src/main.rs`) cover IPC dispatch, the 77-method inventory, field validation and error text, gating of keys, modifiers, motion, buttons, gestures and touch, release of held input on disable, STIPC binding dispatch and host-event classification. They run without a Wayland client, so they check compositor state, not delivered protocol events.
+The input-device unit tests (`crates/shingle/src/input_device.rs`, `crates/shingle/src/ipc.rs`, `crates/shingle-nested/src/main.rs`) cover IPC dispatch, the 77-method inventory, field validation and error text, gating of keys, modifiers, motion, buttons, gestures and touch, release of held input on disable, STIPC binding dispatch and host-event classification. Registry tests cover ID allocation without reuse, vendor and product IDs in `input/list-devices`, two keyboards with independent holds (including a key both hold and modifiers kept while the other keyboard holds keys), removing devices while keys and buttons are held, configure-device on unknown and removed IDs, input from unknown or wrongly kinded devices, gestures owned by one of two pointers, and STIPC's choice of device. These run without a Wayland client, so they check compositor state, not delivered protocol events. Two `shingle-nested` fixture tests run a compositor whose sockets are in the temporary directory (`Compositor::with_socket_path`), register nested's devices as `App::new` does and send `input/list-devices` and `input/configure-device` over the real IPC socket; the `list-devices` reply must match, byte for byte, the reply recorded from `master` at `7189b50`.
 
 The `shingle-core` unit tests (`crates/shingle-core/src/tree.rs`, `core.rs`, `session.rs`, `geometry.rs`) pin exact tile order and slot geometry through insertion, drops, swaps and removal; split weights through resizing, minimum extents and floating or minimized windows; focus fallback, directional focus and stacking; floating, snapping, maximized and gap geometry; and placeholder reconciliation by launch identity. Session tests round-trip a two-output model with nested, unevenly weighted splits and every persisted flag through JSON and atomic file saves, and require tile order, sizes, state, focus and stacking to come back exactly, after repeated cycles and after reconciliation. They also cover version, unknown-field and malformed-snapshot errors. They exercise the model only; full frontend/session cycles with real clients are still needed.
 
@@ -121,6 +122,13 @@ Input devices, 2026-11-25 (before the run above): a Python IPC fixture and a min
 Not covered by that run: gating of real host keyboard, pointer and touch events and the nested frontend's switcher and drag clean-up, which need physical host input (see [Needs operator: host input](#needs-operator-host-input)); and modifier delivery on disable, which was only unit-tested. The fixture's `shingle-nested` did not exit on SIGTERM or SIGINT and had to be killed; that is fixed, see below.
 
 Signals, 2026-11-25: a Python fixture started `shingle-nested --ipc` in a window on the host session with a private `XDG_RUNTIME_DIR`, Wayland socket (`wayland-0`), IPC socket and XDG config and state directories, waited until `list-methods` answered over IPC (77 methods), then sent one signal. With the NB-2 build, SIGTERM and SIGINT each made it exit with status 0 about 0.11 s later; it wrote `shingle/session.json` to the private state directory and removed its Wayland socket. The same fixture against a build of `master` at `cf7aca5` reproduced the bug: neither signal ended the process within 10 s, and it had to be killed.
+
+Input-device registry, 2026-11-25: two Python fixtures ran against `shingle-nested` built from `master` at `7189b50` and then from the NB-5 branch, each in a window on the host session with a private `XDG_RUNTIME_DIR`, Wayland socket, IPC socket and XDG config and state directories, ended with SIGTERM (exit 0 every time). No host input was sent.
+
+- IPC transcript, 38 requests: `input/list-devices` before and after toggling devices, every `input/configure-device` error case, `stipc/move_cursor` and `get-cursor-position` with the pointer enabled and disabled, STIPC buttons and touch while disabled, and a `command/register-binding` binding fired by STIPC `feed_key` with the keyboard enabled, disabled and re-enabled. All 38 raw replies and the binding events were byte-identical between the two builds.
+- Held-input release, 18 steps, with a raw-protocol client (one `xdg_toplevel` with `wl_pointer`, `wl_keyboard` and `wl_touch`): a STIPC button held and the pointer disabled gave `wl_pointer.button` released; a key held and the keyboard disabled gave `wl_keyboard.key` released; a touch point held and touch disabled gave `wl_touch.cancel`; input while disabled gave no events; re-enabling the keyboard resent the modifiers, and keys, buttons and touch were delivered again afterwards. The client received the same event sequence from both builds.
+
+Not covered with real clients: more than one device of a kind, and device removal, since nested registers exactly three devices and never removes them; those are unit-tested only. Real libinput devices are for NB-6 on the test machine.
 
 #### Needs operator: host input
 

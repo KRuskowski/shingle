@@ -2,7 +2,7 @@
 
 Status: accepted with the operator's [decisions](#decisions), 2026-11-25. Roadmap item "Native backend" ([roadmap.md](../roadmap.md#3-native-backend)).
 
-Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit). This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1 is implemented (see [`shingle-render` without winit](#shingle-render-without-winit)) and so is NB-2 (see [its entry](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor)), each with notes on where the code differs from this design; the rest is not.
+Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit). This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1, NB-2 and NB-5 are implemented (see [`shingle-render` without winit](#shingle-render-without-winit) and the entries for [NB-2](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor) and [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)), each with notes on where the code differs from this design; the rest is not.
 
 Line numbers refer to branch `shingle-native-design` at `d2568d2`. Crate versions and dates were read from crates.io and GitHub on 2026-11-25; crate APIs were read from the crate sources (wgpu, drm, calloop and xkbcommon from `~/.cargo/registry`, the others from their published `.crate` files).
 
@@ -282,7 +282,7 @@ GPU textures survive the switch, since the Vulkan device does not depend on DRM 
 
 **Devices.**
 
-- `DeviceEvent::Added` registers the device with the compositor, applies configuration (below) and records which capabilities it has. `Removed` unregisters it.
+- `DeviceEvent::Added` registers the device with the compositor, applies configuration (below) and records which capabilities it has. A Shingle seat device has exactly one kind, so a libinput device with several capabilities (a keyboard with a touchpad, say) is registered once per capability, as wlroots splits it into one `wlr_input_device` per type. `Removed` unregisters each of them.
 - No input devices at startup is not an error; see [6](#6-failure-handling).
 - Keyboard LEDs follow xkb state through `Device::led_update`.
 
@@ -311,7 +311,7 @@ All `time_usec` values are passed through, so clients see libinput timestamps in
 
 **Input-device IPC** (crates/shingle/src/input_device.rs).
 
-- Today there are three fixed devices in `DEVICES` (input_device.rs:63-80), gated by kind. NB-5 replaces that with a registry: `Compositor::add_input_device(InputDeviceInfo { name, vendor, product, kind }) -> InputDeviceId`, `remove_input_device(id)`, and an `InputDeviceId` on each entry point. Held keys, buttons and touches are then tracked per device, so disabling one keyboard does not release keys held on another.
+- Before NB-5 there were three fixed devices in `DEVICES` (input_device.rs:63-80), gated by kind. NB-5 replaced that with a registry (as built: [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)): `Compositor::add_input_device(InputDeviceInfo { name, vendor, product, kind }) -> InputDeviceId`, `remove_input_device(id)`, and an `InputDeviceId` on each entry point. Held keys, buttons and touches are then tracked per device, so disabling one keyboard does not release keys held on another.
 - `input/list-devices` (`list_json`, input_device.rs:163) reports real names, vendor and product. Wayfire reports the same fields (wayfire/plugins/ipc-rules/ipc-input-methods.hpp:59-73).
 - Nested registers its three devices with today's names and ids 1-3, so its IPC output does not change.
 - `input/configure-device` (`configure`, input_device.rs:183) keeps its validation and error messages, and still releases held input and closes the gate (`set_enabled`, input_device.rs:108).
@@ -558,6 +558,39 @@ Acceptance:
 - Nested's IPC output for `input/list-devices` is unchanged; this is a fixture test.
 - New tests cover two keyboards with independent holds, removing a device while keys are held, and configure-device on an unknown id.
 - docs/ipc.md is updated.
+
+Done on branch `shingle-input-registry`. The API as built (crates/shingle/src/lib.rs, crates/shingle/src/input_device.rs):
+
+```rust
+pub fn add_input_device(&mut self, info: InputDeviceInfo) -> InputDeviceId;
+pub fn remove_input_device(&mut self, id: InputDeviceId) -> bool;
+pub fn input_device(&self, id: InputDeviceId) -> Option<&InputDeviceInfo>;
+pub fn input_device_enabled(&self, id: InputDeviceId) -> bool;
+pub fn with_socket_path(config: Config, path: &Path) -> Result<Self, Error>;
+
+// Every seat entry point takes the device first, for example:
+pub fn keyboard_key(&mut self, device: InputDeviceId, key: u32, pressed: bool);
+pub fn pointer_swipe_begin(&mut self, device: InputDeviceId, fingers: u32);
+
+pub struct InputDeviceId(u32); // get() -> u32, the IPC id
+pub struct InputDeviceInfo {
+  pub name: String,
+  pub vendor: Option<u32>,
+  pub product: Option<u32>,
+  pub kind: InputDeviceKind,
+}
+Event::InputDeviceChanged { id: InputDeviceId, enabled: bool }
+```
+
+Where the code differs from the plan above, and why:
+
+- **Vendor and product** are `Option<u32>`. Wayfire reports libinput's numeric IDs as JSON numbers and the string `"unknown"` for other devices (wayfire/plugins/ipc-rules/ipc-input-methods.hpp:59-70), so `input/list-devices` does the same; nested passes `None` and keeps `"unknown"`.
+- **One kind per device.** Input of another kind than the registered one is dropped, like input from an unknown, removed or disabled device. See the note on multi-capability libinput devices under [Devices](#4-input).
+- **Shared holds.** Holds are per device, but clients see one seat. A key, button or touch point held by two devices is released for clients only when the last of them lets go, whether by an ordinary release or by disabling or removing a device. Depressed and latched modifiers are cleared on disable only once no keyboard holds any key; while another keyboard holds keys, the modifier masks stay as the frontend last sent them, because only the frontend's xkb state can say which modifiers the remaining keys produce. NB-6's frontend has to drop the disabled keyboard's keys from its xkb state and resend modifiers when it handles `InputDeviceChanged`.
+- **Gestures** belong to the pointer that began them. Only that device updates or ends the gesture, and disabling or removing it cancels it.
+- **Removal** emits no `InputDeviceChanged`; the backend removed the device and already knows. IDs are never reused, so a stale ID simply drops input.
+- **STIPC** input goes through the registered device of each kind with the lowest ID (nested's own devices), and is dropped with an `ok` reply when there is none. Wayfire instead feeds STIPC through dedicated headless devices that `input/list-devices` lists. NB-6 should decide whether native registers such devices; nested does not, so its list stays unchanged.
+- **`input_device(id)`** was added so a frontend can map the ID in `InputDeviceChanged` back to a kind. **`Compositor::with_socket_path`** was added for the nested fixture test, which needs a full compositor with its Wayland socket outside `XDG_RUNTIME_DIR`.
 
 ### NB-6 `shingle-native-session`: native binary with seat and input, no display
 

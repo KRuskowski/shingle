@@ -67,20 +67,21 @@ The socket path is exported as `WAYFIRE_SOCKET` to every spawned process, so exi
 
 ## Input devices
 
-Shingle has three seat devices: the keyboard, pointer and touch input that reach it from the nested host window and from STIPC. Client-created virtual keyboards and pointers are separate devices, as in Wayfire, and are neither listed nor gated.
+The seat devices are a registry the backend fills (`Compositor::add_input_device` and `remove_input_device`, crates/shingle/src/input_device.rs). The nested frontend registers three: the keyboard, pointer and touch input of its host window, as IDs 1, 2 and 3. A native backend registers each libinput device capability as it appears. STIPC input goes through the registered device of each kind with the lowest ID, which in nested is one of those three. Client-created virtual keyboards and pointers are separate devices, as in Wayfire, and are neither listed nor gated.
 
-- `input/list-devices` returns one object per device with Wayfire's fields: `id` (stable: 1 keyboard, 2 pointer, 3 touch), `name`, `vendor` and `product` (always `"unknown"` for these virtual devices), `type` (`keyboard`, `pointer` or `touch`) and `enabled`.
-- `input/configure-device` takes an integer `id` and a boolean `enabled`. Errors match Wayfire's text and order: `Missing "id"`, `Field "id" does not have the correct type, expected int64`, `Missing "enabled"`, `Field "enabled" does not have the correct type, expected bool`, then `Unknown input device!`. A rejected request changes nothing; repeating the current state is a no-op.
+- `input/list-devices` returns one object per registered device, in registration order, with Wayfire's fields: `id`, `name`, `vendor` and `product`, `type` (`keyboard`, `pointer` or `touch`) and `enabled`. IDs count up from 1 and are never reused while Shingle runs. `vendor` and `product` are numbers when the backend knows them, as Wayfire reports libinput's IDs, and `"unknown"` otherwise, which is always the case for nested's devices. A removed device disappears from the list.
+- `input/configure-device` takes an integer `id` and a boolean `enabled`. Errors match Wayfire's text and order: `Missing "id"`, `Field "id" does not have the correct type, expected int64`, `Missing "enabled"`, `Field "enabled" does not have the correct type, expected bool`, then `Unknown input device!`, which also covers a removed device. A rejected request changes nothing; repeating the current state is a no-op.
 - A disabled keyboard delivers no keys or modifier changes and fires no bindings. A disabled pointer delivers no motion, buttons, scroll or pointer gestures. A disabled touch device delivers no touch points. This covers host input, which the nested frontend also stops matching against its own bindings and actions, and STIPC input, whose methods still reply `ok`.
 
 ### Releasing held input
 
-Disabling a device first returns it to a neutral state, the way libinput does when Wayfire suspends a device, so no client is left with stuck input:
+Each device tracks the keys, buttons and touch points it holds. Disabling or removing a device first returns it to a neutral state, the way libinput does when Wayfire suspends a device, so no client is left with stuck input, and leaves every other device alone:
 
 - Held keys and pointer buttons get ordinary release events. The protocol has no cancel for them, and a release is what the client would see if the user let go; a held button therefore also completes a drag-and-drop in progress.
-- Depressed and latched modifiers are cleared and sent; locked modifiers are kept.
+- A key, button or touch point that another device also holds stays down for clients until that device lets go too; the same rule applies to ordinary releases.
+- Depressed and latched modifiers are cleared and sent once no keyboard holds any key; locked modifiers are kept. While another keyboard still holds keys, the modifiers are left to the frontend, which owns the xkb state.
 - Active touch points are cancelled with `wl_touch.cancel` rather than lifted, so a touch interrupted by disabling never registers as a tap.
-- An active swipe, pinch or hold gesture ends with `cancelled` set.
+- An active swipe, pinch or hold gesture ends with `cancelled` set if this device began it. Only the device that began a gesture updates or ends it.
 - The nested frontend finishes an open window switcher as if its modifiers were released, and abandons a move or resize drag where the window is, without the drop, swap or snap a release would perform. When the keyboard is re-enabled, the host's current modifiers are sent again.
 
 ## Events
@@ -102,7 +103,7 @@ While blocked, a view answers geometry and state methods but is not rendered, fo
 ## STIPC test input
 
 - `feed_key` and `feed_button` accept common evdev key and button names, including `S-` prefixes and `press`, `release` or `full` click modes.
-- STIPC input goes through the seat devices, so it is dropped while the matching device is disabled (see [Input devices](#input-devices)).
+- STIPC input goes through the first registered seat device of each kind, so it is dropped while that device is disabled, and also when no device of that kind is registered (see [Input devices](#input-devices)). The methods still reply `ok`.
 - `move_cursor` moves the pointer. `touch` sends down for a new finger and motion for an active one; `touch_release` lifts it.
 - `run` launches a shell command with the compositor's `WAYLAND_DISPLAY`, returns its PID, and reaps exited children while polling.
 - `get_display` reports the Wayland socket and an empty XWayland display, since XWayland is not implemented.
