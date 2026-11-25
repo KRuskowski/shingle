@@ -1,7 +1,9 @@
 //! The frontend state machine: input dispatch, overviews, drags,
 //! animations, the scene build and session handling.
 
+mod animation;
 mod drag;
+mod effects;
 mod session;
 mod switcher;
 
@@ -18,7 +20,7 @@ use shingle::{
 };
 use shingle_config::{
   CommandBinding, ConfigWatcher, Keybindings, Modifiers as ConfigModifiers,
-  PointerBindings, ShingleConfig, ViewProperties,
+  PointerBindings, ShingleConfig,
 };
 use shingle_core::WindowId as TileWindowId;
 use shingle_render::{
@@ -30,9 +32,9 @@ use shingle_session::{
 };
 
 use crate::{
-  bindings::{grid_slot, modifier_matches, modifiers_held},
+  bindings::{grid_slot, modifiers_held},
   expo, extra_gestures,
-  host::{Axis, Gesture, Host, InputEvent, Touch, TouchPhase},
+  host::{Gesture, Host, InputEvent, Touch, TouchPhase},
   icon_theme,
   keyboard::{Key, KeyRepeat, KeyState, Keyboard},
   render_target::RenderTarget,
@@ -43,6 +45,7 @@ use crate::{
   scale_title, workspace_transition,
 };
 
+use animation::{ClosingAnimation, GeometryAnimation, apply_opening_animation};
 use drag::{DragState, RotationDrag};
 use switcher::{SwitcherKind, SwitcherState};
 
@@ -52,19 +55,6 @@ const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 /// `BTN_MIDDLE`.
 const BTN_MIDDLE: u32 = 0x112;
-
-struct GeometryAnimation {
-  started: Instant,
-  old_geometry: RenderRect,
-  old_texture: GpuTexture,
-}
-
-struct ClosingAnimation {
-  window: TileWindowId,
-  started: Instant,
-  geometry: RenderRect,
-  buffer: BufferSnapshot,
-}
 
 struct ScaleTitle {
   title: String,
@@ -618,19 +608,6 @@ impl Frontend {
     self.keyboard.binding_modifiers()
   }
 
-  fn map_zoom_input(&self, x: f64, y: f64) -> (f64, f64) {
-    let output = self.compositor.output();
-    shingle_render::zoom_input_point(
-      x,
-      y,
-      output.width,
-      output.height,
-      self.zoom_factor,
-      self.zoom_origin.0,
-      self.zoom_origin.1,
-    )
-  }
-
   fn pointer_button_action(&mut self, button: &str, pressed: bool) -> bool {
     let modifiers = self.config_modifiers();
     if self.run_matching_command_with(pressed, false, |binding| {
@@ -875,14 +852,6 @@ impl Frontend {
       }
     }
     true
-  }
-
-  fn toggle_inversion(&mut self) {
-    self.inverted = !self.inverted;
-    self
-      .compositor
-      .notify_plugin_activation("invert", self.inverted);
-    self.request_redraw();
   }
 
   /// Opens Expo or commits the currently selected workspace.
@@ -2379,133 +2348,6 @@ impl Frontend {
     self.compositor.keyboard_key(device, event.code, pressed);
   }
 
-  fn animation_matches(&self, snapshot: &SurfaceSnapshot) -> bool {
-    let view_type = match snapshot.role {
-      SurfaceRole::Toplevel => "toplevel",
-      SurfaceRole::Popup => "popup",
-      SurfaceRole::LayerShell => "overlay",
-      SurfaceRole::Cursor => "cursor",
-      _ => "other",
-    };
-    let mut view = ViewProperties {
-      app_id: snapshot.app_id.as_deref().unwrap_or(""),
-      title: snapshot.title.as_deref().unwrap_or(""),
-      view_type,
-      activated: self.compositor.focused_window() == snapshot.window,
-      focusable: snapshot.role == SurfaceRole::Toplevel,
-      mapped: snapshot.buffer.is_some(),
-      ..ViewProperties::default()
-    };
-    if let Some(window) = snapshot.window
-      && let Ok(info) = self.compositor.core().window_info(window)
-    {
-      view.fullscreen = info.state.fullscreen;
-      view.minimized = info.state.minimized;
-      view.maximized = info.state.maximized;
-      view.floating = info.state.floating.is_some() && !info.state.maximized;
-      view.tiled_left = !view.floating;
-      view.tiled_right = !view.floating;
-      view.tiled_top = !view.floating;
-      view.tiled_bottom = !view.floating;
-    }
-    self.animate.enabled_for.matches_view(&view)
-  }
-
-  fn minimize_window_changed(&mut self, window: TileWindowId, minimized: bool) {
-    if !minimized {
-      self
-        .minimize_animations
-        .retain(|_, animation| animation.window != window);
-      return;
-    }
-    if self.scale_config.include_minimized
-      && self
-        .scale
-        .as_ref()
-        .is_some_and(|state| state.windows.contains(&window))
-    {
-      self
-        .minimize_animations
-        .retain(|_, animation| animation.window != window);
-      return;
-    }
-    if self.animate.minimize_animation == "none" {
-      return;
-    }
-    let Some(surface) =
-      self
-        .surface_windows
-        .iter()
-        .find_map(|(surface, candidate)| {
-          (*candidate == window).then_some(*surface)
-        })
-    else {
-      return;
-    };
-    if !self.animation_enabled.contains(&surface)
-      || self.closing_animations.contains_key(&surface)
-      || !self.textures.contains_key(&surface)
-    {
-      return;
-    }
-    let Some((geometry, buffer)) =
-      self.previous_surfaces.get(&surface).cloned()
-    else {
-      return;
-    };
-    self.minimize_animations.insert(
-      surface,
-      ClosingAnimation {
-        window,
-        started: Instant::now(),
-        geometry,
-        buffer,
-      },
-    );
-  }
-
-  fn expire_closing_animations(&mut self, now: Instant) {
-    let completed = self
-      .closing_animations
-      .iter()
-      .filter(|(_, animation)| {
-        animation_progress(
-          animation.started,
-          now,
-          Duration::from_millis(self.animate.duration_ms),
-        ) >= 1.0
-      })
-      .map(|(surface, _)| *surface)
-      .collect::<Vec<_>>();
-    for surface in completed {
-      self.closing_animations.remove(&surface);
-      self.textures.remove(&surface);
-    }
-  }
-
-  fn expire_minimize_animations(&mut self, now: Instant) {
-    self.minimize_animations.retain(|_, animation| {
-      animation_progress(
-        animation.started,
-        now,
-        Duration::from_millis(self.animate.duration_ms),
-      ) < 1.0
-    });
-  }
-
-  /// Releases the retained exit snapshots after the final transition frame.
-  fn expire_scale_exit(&mut self, now: Instant) {
-    if self.scale_exit.as_ref().is_some_and(|state| {
-      animation_progress(
-        state.animation_started,
-        now,
-        Duration::from_millis(self.scale_config.duration_ms),
-      ) >= 1.0
-    }) {
-      self.scale_exit = None;
-    }
-  }
-
   fn append_closing_surfaces<'a>(
     animations: &'a HashMap<SurfaceId, ClosingAnimation>,
     textures: &'a HashMap<SurfaceId, GpuTexture>,
@@ -3607,69 +3449,6 @@ impl Frontend {
       self.handle_gesture_action(action);
     }
   }
-
-  fn pointer_axis(&mut self, device: InputDeviceId, axis: Axis) {
-    if self.expo.is_some() {
-      return;
-    }
-    let Axis {
-      horizontal,
-      vertical,
-      horizontal_steps,
-      vertical_steps,
-    } = axis;
-    if self.scale.is_some() {
-      if vertical != 0.0 {
-        self.select_scale_relative(vertical > 0.0);
-      }
-      return;
-    }
-    let shortcuts_allowed =
-      !self.compositor.is_locked() && !self.compositor.shortcuts_inhibited();
-    if shortcuts_allowed
-      && vertical != 0.0
-      && modifier_matches(&self.alpha.modifier, self.config_modifiers())
-      && self
-        .compositor
-        .adjust_opacity_at(
-          self.pointer_x,
-          self.pointer_y,
-          vertical,
-          self.alpha.min_value,
-        )
-        .is_some()
-    {
-      self.request_redraw();
-      return;
-    }
-    if shortcuts_allowed
-      && modifier_matches(&self.zoom.modifier, self.config_modifiers())
-    {
-      self.zoom_origin = (self.pointer_x as f32, self.pointer_y as f32);
-      let target = (self.zoom_target
-        - self.zoom_target * vertical as f32 * self.zoom.speed as f32)
-        .clamp(1.0, 50.0);
-      if target == self.zoom_target {
-        return;
-      }
-      self.zoom_target = target;
-      if self.zoom.smoothing_ms == 0 {
-        self.zoom_factor = target;
-        self.zoom_animation = None;
-      } else {
-        self.zoom_animation = Some((Instant::now(), self.zoom_factor));
-      }
-      self.request_redraw();
-      return;
-    }
-    self.compositor.pointer_axis_detailed(
-      device,
-      horizontal,
-      vertical,
-      horizontal_steps,
-      vertical_steps,
-    );
-  }
 }
 
 /// Returns the binding name of pointer button `code`. Codes `0x113` and
@@ -3724,30 +3503,6 @@ fn apply_buffer(tile: &mut RenderTile<'_>, buffer: &BufferSnapshot) {
   }
 }
 
-fn apply_opening_animation(
-  tile: &mut RenderTile<'_>,
-  animation: &str,
-  progress: f32,
-) {
-  let progress = progress.clamp(0.0, 1.0);
-  tile.color[3] *= progress;
-  if animation != "zoom" {
-    return;
-  }
-  let original = tile.geometry;
-  let scale = 1.0 / 3.0 + 2.0 / 3.0 * f64::from(progress);
-  tile.geometry.width = (f64::from(original.width) * scale).round() as u32;
-  tile.geometry.height = (f64::from(original.height) * scale).round() as u32;
-  tile.geometry.x = original.x.saturating_add(
-    i32::try_from((original.width - tile.geometry.width) / 2)
-      .unwrap_or(i32::MAX),
-  );
-  tile.geometry.y = original.y.saturating_add(
-    i32::try_from((original.height - tile.geometry.height) / 2)
-      .unwrap_or(i32::MAX),
-  );
-}
-
 fn render_output_transform(
   transform: wayland_server::protocol::wl_output::Transform,
 ) -> TextureTransform {
@@ -3762,48 +3517,5 @@ fn render_output_transform(
     Transform::Flipped180 => TextureTransform::FlipVertical,
     Transform::Flipped270 => TextureTransform::AntiTranspose,
     _ => TextureTransform::Normal,
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn opening_animation_fades_and_zooms_from_center() {
-    let geometry = RenderRect {
-      x: 100,
-      y: 50,
-      width: 200,
-      height: 100,
-    };
-    let mut fade = RenderTile::solid(geometry, [1.0; 4]);
-    apply_opening_animation(&mut fade, "fade", 0.25);
-    assert_eq!(fade.geometry, geometry);
-    assert_eq!(fade.color[3], 0.25);
-
-    let mut zoom = RenderTile::solid(geometry, [1.0; 4]);
-    apply_opening_animation(&mut zoom, "zoom", 0.5);
-    assert_eq!(
-      zoom.geometry,
-      RenderRect {
-        x: 133,
-        y: 66,
-        width: 133,
-        height: 67,
-      }
-    );
-    assert_eq!(zoom.color[3], 0.5);
-
-    let mut start = RenderTile::solid(geometry, [1.0; 4]);
-    apply_opening_animation(&mut start, "zoom", 0.0);
-    assert_eq!(start.geometry.width, 67);
-    assert_eq!(start.geometry.height, 33);
-    assert_eq!(start.color[3], 0.0);
-
-    let mut complete = RenderTile::solid(geometry, [1.0; 4]);
-    apply_opening_animation(&mut complete, "zoom", 1.0);
-    assert_eq!(complete.geometry, geometry);
-    assert_eq!(complete.color[3], 1.0);
   }
 }
