@@ -19,11 +19,13 @@
 
 mod config_watcher;
 mod i3;
+mod output;
 mod view_matcher;
 mod wayfire;
 mod window_rule;
 
 pub use config_watcher::ConfigWatcher;
+pub use output::{OutputConfig, OutputMode};
 pub use view_matcher::{ViewMatcher, ViewProperties};
 pub use window_rule::{RuleAction, RuleEvent, WindowRule};
 
@@ -34,7 +36,7 @@ use std::{
 };
 
 use serde::Deserialize;
-use shingle_core::{Gaps, Rect};
+use shingle_core::Gaps;
 use thiserror::Error;
 
 /// Source syntax accepted by [`ShingleConfig::parse`].
@@ -87,10 +89,14 @@ pub enum ConfigFormat {
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShingleConfig {
-  /// The single output's mode, position, scale and transform. Multi-output
-  /// support is not there yet, so every Wayfire `[output:NAME]` section writes
-  /// into this one, the last value winning.
+  /// The default output configuration: for every output without its own
+  /// entry in `outputs`, and the size of the nested window and the headless
+  /// output. A Wayfire `[output]` section without a name, or i3 `output *`.
   pub output: OutputConfig,
+  /// One entry per named output, from Wayfire's `[output:NAME]` sections
+  /// and i3's `output NAME` lines; see
+  /// [`ShingleConfig::output_config`]. Default empty.
+  pub outputs: Vec<OutputConfig>,
   /// Colour shown where no surface covers the output. `[core]
   /// background_color`; default `[0.1, 0.1, 0.1, 1.0]`.
   pub background_color: [f64; 4],
@@ -171,6 +177,7 @@ impl Default for ShingleConfig {
   fn default() -> Self {
     Self {
       output: OutputConfig::default(),
+      outputs: Vec::new(),
       background_color: [0.1, 0.1, 0.1, 1.0],
       behavior: BehaviorConfig::default(),
       xwayland: XwaylandConfig::default(),
@@ -403,16 +410,7 @@ impl ShingleConfig {
     ) {
       return Err(ConfigError::Invalid("unknown placement mode".into()));
     }
-    if self.output.width == 0 || self.output.height == 0 {
-      return Err(ConfigError::Invalid(
-        "output width and height must be nonzero".into(),
-      ));
-    }
-    if !self.output.scale.is_finite() || self.output.scale <= 0.0 {
-      return Err(ConfigError::Invalid(
-        "output.scale must be finite and positive".into(),
-      ));
-    }
+    self.validate_outputs()?;
     if self.behavior.max_buffer_size == 0 {
       return Err(ConfigError::Invalid(
         "behavior.max_buffer_size must be nonzero".into(),
@@ -559,25 +557,6 @@ impl ShingleConfig {
         "zoom.interpolation must be linear or nearest".into(),
       ));
     }
-    if !matches!(
-      self.output.transform.as_str(),
-      "normal"
-        | "90"
-        | "180"
-        | "270"
-        | "flipped"
-        | "90_flipped"
-        | "180_flipped"
-        | "270_flipped"
-        | "flipped-90"
-        | "flipped-180"
-        | "flipped-270"
-        | "flipped90"
-        | "flipped180"
-        | "flipped270"
-    ) {
-      return Err(ConfigError::Invalid("unknown output transform".into()));
-    }
     if self.background_color.iter().any(|component| {
       !component.is_finite() || !(0.0..=1.0).contains(component)
     }) {
@@ -692,57 +671,6 @@ pub fn parse_color(text: &str) -> Result<[f64; 4], ConfigError> {
     return Err(invalid());
   }
   Ok(color)
-}
-
-/// Mode, position, scale and transform of the single output.
-///
-/// Wayfire's `[output:NAME]` supplies `mode = WxH[@rate]` (the refresh rate is
-/// ignored), `position = X,Y`, `scale` and `transform`; i3 supplies `output
-/// NAME mode WxH scale S transform T`.
-#[derive(Clone, Debug, Deserialize, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct OutputConfig {
-  /// Horizontal position of the output's top-left corner in the global layout.
-  /// Default 0.
-  pub x: i32,
-  /// Vertical position of the output's top-left corner in the global layout.
-  /// Default 0.
-  pub y: i32,
-  /// Output width in the untransformed orientation, before `scale` is applied.
-  /// The compositor swaps width and height for 90° and 270° transforms. Must be
-  /// nonzero; default 1280.
-  pub width: u32,
-  /// Output height in the untransformed orientation, before `scale` is applied.
-  /// Must be nonzero; default 720.
-  pub height: u32,
-  /// Scale factor advertised to clients through `wl_output` and
-  /// fractional-scale. Must be finite and positive; default 1.
-  pub scale: f64,
-  /// `wl_output` transform: `normal`, `90`, `180`, `270`, `flipped` or
-  /// `90_flipped`, `180_flipped`, `270_flipped` as Wayfire spells them.
-  /// `flipped-90` and `flipped90` style spellings are also accepted. Rotations
-  /// are counter-clockwise, as in the Wayland protocol. Default `normal`.
-  pub transform: String,
-}
-
-impl Default for OutputConfig {
-  fn default() -> Self {
-    Self {
-      x: 0,
-      y: 0,
-      width: 1280,
-      height: 720,
-      scale: 1.0,
-      transform: "normal".into(),
-    }
-  }
-}
-
-impl OutputConfig {
-  /// The output's position and untransformed size as a layout rectangle.
-  pub fn rect(&self) -> Rect {
-    Rect::new(self.x, self.y, self.width, self.height)
-  }
 }
 
 /// Snapping during an interactive move, from Wayfire's `[move]` plugin

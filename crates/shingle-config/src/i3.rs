@@ -4,6 +4,75 @@ use crate::{
   Binding, ConfigError, Modifier, ShingleConfig, wayfire::normalize_key,
 };
 
+/// Reads the options of an `output NAME ...` line into `output`: `mode`
+/// (or `res`/`resolution`, with an optional `--custom`), `pos`/`position`,
+/// `scale`, `transform`, `adaptive_sync`, `disable` and `enable`.
+fn output_line(
+  output: &mut crate::OutputConfig,
+  tokens: &[String],
+  line_number: usize,
+) -> Result<(), ConfigError> {
+  let invalid =
+    |what: &str| ConfigError::Invalid(format!("line {line_number}: {what}"));
+  let mut index = 0;
+  while index < tokens.len() {
+    let value = |at: usize, what: &str| {
+      tokens
+        .get(at)
+        .map(String::as_str)
+        .ok_or_else(|| invalid(what))
+    };
+    match tokens[index].as_str() {
+      "mode" | "res" | "resolution" => {
+        let mut mode = value(index + 1, "missing output mode")?;
+        if mode == "--custom" {
+          index += 1;
+          mode = value(index + 1, "missing output mode")?;
+        }
+        output.mode = crate::OutputMode::from_sway(mode)
+          .ok_or_else(|| invalid("invalid output mode"))?;
+        index += 2;
+      }
+      "pos" | "position" => {
+        output.x =
+          number(value(index + 1, "incomplete output position")?, line_number)?;
+        output.y =
+          number(value(index + 2, "incomplete output position")?, line_number)?;
+        index += 3;
+      }
+      "scale" => {
+        output.scale =
+          number(value(index + 1, "missing output scale")?, line_number)?;
+        index += 2;
+      }
+      "transform" => {
+        output.transform =
+          value(index + 1, "missing output transform")?.to_lowercase();
+        index += 2;
+      }
+      "adaptive_sync" => {
+        output.vrr = matches!(
+          value(index + 1, "missing adaptive_sync value")?,
+          "on" | "enable" | "enabled" | "yes" | "true"
+        );
+        index += 2;
+      }
+      "disable" => {
+        output.mode = crate::OutputMode::Off;
+        index += 1;
+      }
+      "enable" => {
+        if output.mode == crate::OutputMode::Off {
+          output.mode = crate::OutputMode::Auto;
+        }
+        index += 1;
+      }
+      _ => index += 1,
+    }
+  }
+  Ok(())
+}
+
 pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
   let mut config = ShingleConfig::default();
   let mut variables = HashMap::new();
@@ -529,47 +598,16 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
         }
       }
       "output" => {
-        if let Some(index) = tokens.iter().position(|token| token == "mode") {
-          let mode = tokens.get(index + 1).ok_or_else(|| {
-            ConfigError::Invalid(format!(
-              "line {line_number}: missing output mode"
-            ))
-          })?;
-          let (width, height) = mode.split_once('x').ok_or_else(|| {
-            ConfigError::Invalid(format!(
-              "line {line_number}: invalid output mode"
-            ))
-          })?;
-          config.output.width = number(width, line_number)?;
-          config.output.height = number(height, line_number)?;
-        }
-        if let Some(index) = tokens.iter().position(|token| token == "pos") {
-          if index + 2 >= tokens.len() {
+        let output = match tokens.get(1).map(String::as_str) {
+          None => {
             return Err(ConfigError::Invalid(format!(
-              "line {line_number}: incomplete output position"
+              "line {line_number}: missing output name"
             )));
           }
-          config.output.x = number(&tokens[index + 1], line_number)?;
-          config.output.y = number(&tokens[index + 2], line_number)?;
-        }
-        if let Some(index) = tokens.iter().position(|token| token == "scale") {
-          let scale = tokens.get(index + 1).ok_or_else(|| {
-            ConfigError::Invalid(format!(
-              "line {line_number}: missing output scale"
-            ))
-          })?;
-          config.output.scale = number(scale, line_number)?;
-        }
-        if let Some(index) =
-          tokens.iter().position(|token| token == "transform")
-        {
-          let transform = tokens.get(index + 1).ok_or_else(|| {
-            ConfigError::Invalid(format!(
-              "line {line_number}: missing output transform"
-            ))
-          })?;
-          config.output.transform = transform.to_lowercase();
-        }
+          Some("*") => &mut config.output,
+          Some(name) => config.named_output(name),
+        };
+        output_line(output, &tokens[2..], line_number)?;
       }
       _ => {}
     }

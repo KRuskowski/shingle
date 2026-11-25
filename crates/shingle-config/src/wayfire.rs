@@ -11,6 +11,8 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
   let mut command_options = BTreeMap::new();
   let mut commands = BTreeMap::new();
   let mut section = String::new();
+  // The section name as written: connector names keep their case.
+  let mut section_name = String::new();
   for (index, original) in text.lines().enumerate() {
     let line_number = index + 1;
     let line = strip_comment(original).trim();
@@ -18,7 +20,8 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
       continue;
     }
     if line.starts_with('[') && line.ends_with(']') {
-      section = line[1..line.len() - 1].trim().to_lowercase();
+      section_name = line[1..line.len() - 1].trim().to_owned();
+      section = section_name.to_lowercase();
       continue;
     }
     let Some((key, value)) = line.split_once('=') else {
@@ -639,36 +642,12 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
       ("command", key) if key.starts_with("command_") => {
         commands.insert(key[8..].to_owned(), value.to_owned());
       }
-      _ if section.starts_with("output") && key == "mode" => {
-        let mode = value.split('@').next().unwrap_or(value);
-        let (width, height) = mode.split_once('x').ok_or_else(|| {
-          ConfigError::Invalid(format!(
-            "line {line_number}: invalid output mode"
-          ))
-        })?;
-        config.output.width = number(width, line_number)?;
-        config.output.height = number(height, line_number)?;
-      }
-      _ if section.starts_with("output") && key == "scale" => {
-        config.output.scale = number(value, line_number)?;
-      }
-      _ if section.starts_with("output") && key == "transform" => {
-        config.output.transform = value.to_lowercase();
-      }
-      _ if section.starts_with("output") && key == "position" => {
-        let position = value
-          .split(|character: char| {
-            character.is_whitespace() || character == ','
-          })
-          .filter(|part| !part.is_empty())
-          .collect::<Vec<_>>();
-        if position.len() != 2 {
-          return Err(ConfigError::Invalid(format!(
-            "line {line_number}: invalid output position"
-          )));
-        }
-        config.output.x = signed_number(position[0], line_number)?;
-        config.output.y = signed_number(position[1], line_number)?;
+      _ if section == "output" || section.starts_with("output:") => {
+        let output = match section_name[6..].strip_prefix(':').map(str::trim) {
+          Some(name) if !name.is_empty() => config.named_output(name),
+          _ => &mut config.output,
+        };
+        output_option(output, &key, value, line_number)?;
       }
       _ => {}
     }
@@ -688,6 +667,48 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
   }
   config.validate()?;
   Ok(config)
+}
+
+/// Reads one option of an `[output:NAME]` section into `output`. Unknown
+/// options are ignored, like every option Shingle does not import.
+fn output_option(
+  output: &mut crate::OutputConfig,
+  key: &str,
+  value: &str,
+  line_number: usize,
+) -> Result<(), ConfigError> {
+  match key {
+    // Shingle lights one output and does not mirror, so an output set to
+    // mirror another stays dark rather than competing with its source.
+    "mode" if value.starts_with("mirror") => {
+      output.mode = crate::OutputMode::Off;
+    }
+    "mode" => {
+      output.mode = value.parse().map_err(|_| {
+        ConfigError::Invalid(format!(
+          "line {line_number}: invalid output mode {value:?}"
+        ))
+      })?;
+    }
+    "scale" => output.scale = number(value, line_number)?,
+    "transform" => output.transform = value.to_lowercase(),
+    "vrr" => output.vrr = boolean(value, line_number)?,
+    "position" => {
+      let position = value
+        .split(|character: char| character.is_whitespace() || character == ',')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+      if position.len() != 2 {
+        return Err(ConfigError::Invalid(format!(
+          "line {line_number}: invalid output position"
+        )));
+      }
+      output.x = signed_number(position[0], line_number)?;
+      output.y = signed_number(position[1], line_number)?;
+    }
+    _ => {}
+  }
+  Ok(())
 }
 
 fn strip_comment(line: &str) -> &str {
