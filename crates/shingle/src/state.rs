@@ -1249,6 +1249,7 @@ impl CompositorState {
       return;
     }
     crate::region::commit_input(self, object);
+    let viewport = crate::viewport::pending(self, object).unwrap_or_default();
     let Some(surface) = self.surfaces.get_mut(object) else {
       return;
     };
@@ -1289,13 +1290,20 @@ impl CompositorState {
           attachment.height,
         ));
       }
-      let mut damage =
-        clip_damage(surface_damage, attachment.width, attachment.height, scale);
+      let mut damage = surface_damage_to_buffer(
+        surface_damage,
+        &DamageSpace {
+          width: attachment.width,
+          height: attachment.height,
+          scale,
+          transform: surface.pending.transform,
+          viewport,
+        },
+      );
       damage.extend(clip_damage(
         buffer_damage,
         attachment.width,
         attachment.height,
-        1,
       ));
       let offset_x = surface.pending.offset_x;
       let offset_y = surface.pending.offset_y;
@@ -1321,9 +1329,17 @@ impl CompositorState {
     } else if let Some(surface) = self.surfaces.get(object)
       && let Some(buffer) = &surface.buffer
     {
-      let mut damage =
-        clip_damage(surface_damage, buffer.width, buffer.height, scale);
-      damage.extend(clip_damage(buffer_damage, buffer.width, buffer.height, 1));
+      let mut damage = surface_damage_to_buffer(
+        surface_damage,
+        &DamageSpace {
+          width: buffer.width,
+          height: buffer.height,
+          scale,
+          transform: surface.pending.transform,
+          viewport,
+        },
+      );
+      damage.extend(clip_damage(buffer_damage, buffer.width, buffer.height));
       if let Some(surface) = self.surfaces.get_mut(object)
         && let Some(buffer) = &mut surface.buffer
       {
@@ -1403,33 +1419,127 @@ pub(crate) fn merge_pending(
   }
 }
 
-fn clip_damage(
-  damage: Vec<Rect>,
+/// What surface damage is converted into: a `width` by `height` buffer at
+/// `scale`, turned by `transform` and shown through `viewport`.
+struct DamageSpace {
   width: u32,
   height: u32,
   scale: i32,
+  transform: wl_output::Transform,
+  viewport: crate::viewport::ViewportState,
+}
+
+/// Converts `wl_surface.damage` rectangles from surface coordinates to
+/// buffer pixels, clipped to the buffer, in the order wlroots'
+/// `surface_update_damage` (types/wlr_compositor.c) uses: undo the
+/// viewport's scaling to its destination, move by the source origin,
+/// multiply by the buffer scale, then undo the buffer transform. Partly
+/// covered pixels count as damaged.
+fn surface_damage_to_buffer(
+  damage: Vec<Rect>,
+  space: &DamageSpace,
 ) -> Vec<Rect> {
-  let mut clipped = Vec::new();
-  for rect in damage {
-    let scale = i64::from(scale.max(1));
-    let x0 = i64::from(rect.x) * scale;
-    let y0 = i64::from(rect.y) * scale;
-    let x1 = x0.saturating_add(i64::from(rect.width) * scale);
-    let y1 = y0.saturating_add(i64::from(rect.height) * scale);
-    let x0 = x0.clamp(0, i64::from(width));
-    let y0 = y0.clamp(0, i64::from(height));
-    let x1 = x1.clamp(0, i64::from(width));
-    let y1 = y1.clamp(0, i64::from(height));
-    if x0 < x1 && y0 < y1 {
-      clipped.push(Rect::new(
-        x0 as i32,
-        y0 as i32,
-        (x1 - x0) as u32,
-        (y1 - y0) as u32,
-      ));
-    }
+  let scale = f64::from(space.scale.max(1));
+  let quarter_turn = matches!(
+    space.transform,
+    wl_output::Transform::_90
+      | wl_output::Transform::_270
+      | wl_output::Transform::Flipped90
+      | wl_output::Transform::Flipped270
+  );
+  // The buffer as the surface sees it, in buffer pixels.
+  let (width, height) = if quarter_turn {
+    (f64::from(space.height), f64::from(space.width))
+  } else {
+    (f64::from(space.width), f64::from(space.height))
+  };
+  let source = space.viewport.source;
+  let (source_width, source_height) = source
+    .map_or((width / scale, height / scale), |source| {
+      (source[2], source[3])
+    });
+  let (ratio_x, ratio_y) =
+    space.viewport.destination.map_or((1.0, 1.0), |(x, y)| {
+      (
+        source_width / f64::from(x.max(1)),
+        source_height / f64::from(y.max(1)),
+      )
+    });
+  let (origin_x, origin_y) =
+    source.map_or((0.0, 0.0), |source| (source[0], source[1]));
+  let rects = damage.into_iter().map(|rect| {
+    let x0 = (f64::from(rect.x) * ratio_x + origin_x) * scale;
+    let y0 = (f64::from(rect.y) * ratio_y + origin_y) * scale;
+    let x1 = x0 + f64::from(rect.width) * ratio_x * scale;
+    let y1 = y0 + f64::from(rect.height) * ratio_y * scale;
+    let (a, b) = (
+      untransform(space.transform, width, height, x0, y0),
+      untransform(space.transform, width, height, x1, y1),
+    );
+    let (x0, x1) = (a.0.min(b.0).floor(), a.0.max(b.0).ceil());
+    let (y0, y1) = (a.1.min(b.1).floor(), a.1.max(b.1).ceil());
+    let bound = |value: f64| value.clamp(i64::MIN as f64, i64::MAX as f64);
+    [bound(x0), bound(y0), bound(x1), bound(y1)].map(|value| value as i64)
+  });
+  clip_rects(rects, space.width, space.height)
+}
+
+/// Maps a point of the buffer as the surface sees it, `width` by
+/// `height`, to the buffer itself, whose content `transform` turned:
+/// `_90` is a quarter turn counter-clockwise, and the flipped variants
+/// mirror horizontally first.
+fn untransform(
+  transform: wl_output::Transform,
+  width: f64,
+  height: f64,
+  x: f64,
+  y: f64,
+) -> (f64, f64) {
+  match transform {
+    wl_output::Transform::_90 => (y, width - x),
+    wl_output::Transform::_180 => (width - x, height - y),
+    wl_output::Transform::_270 => (height - y, x),
+    wl_output::Transform::Flipped => (width - x, y),
+    wl_output::Transform::Flipped90 => (y, x),
+    wl_output::Transform::Flipped180 => (x, height - y),
+    wl_output::Transform::Flipped270 => (height - y, width - x),
+    _ => (x, y),
   }
-  clipped
+}
+
+/// Clips `wl_surface.damage_buffer` rectangles to the buffer.
+fn clip_damage(damage: Vec<Rect>, width: u32, height: u32) -> Vec<Rect> {
+  let rects = damage.into_iter().map(|rect| {
+    let x0 = i64::from(rect.x);
+    let y0 = i64::from(rect.y);
+    [
+      x0,
+      y0,
+      x0.saturating_add(i64::from(rect.width)),
+      y0.saturating_add(i64::from(rect.height)),
+    ]
+  });
+  clip_rects(rects, width, height)
+}
+
+/// Clips `[x0, y0, x1, y1]` boxes to a `width` by `height` buffer and drops
+/// the empty ones.
+fn clip_rects(
+  rects: impl Iterator<Item = [i64; 4]>,
+  width: u32,
+  height: u32,
+) -> Vec<Rect> {
+  rects
+    .filter_map(|[x0, y0, x1, y1]| {
+      let x0 = x0.clamp(0, i64::from(width));
+      let y0 = y0.clamp(0, i64::from(height));
+      let x1 = x1.clamp(0, i64::from(width));
+      let y1 = y1.clamp(0, i64::from(height));
+      (x0 < x1 && y0 < y1).then(|| {
+        Rect::new(x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32)
+      })
+    })
+    .collect()
 }
 
 struct SurfaceData;
@@ -1834,5 +1944,64 @@ impl Dispatch<WlOutput, OutputData> for CompositorState {
     _data: &OutputData,
   ) {
     state.outputs.remove(&resource.id());
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn surface_damage_lands_on_the_turned_buffer_pixel() {
+    use wl_output::Transform;
+    // A 4x2 surface; its top-left pixel and where each transform keeps it
+    // in the buffer, which is 2x4 for quarter turns.
+    for (transform, width, height, pixel) in [
+      (Transform::Normal, 4, 2, (0, 0)),
+      (Transform::_90, 2, 4, (0, 3)),
+      (Transform::_180, 4, 2, (3, 1)),
+      (Transform::_270, 2, 4, (1, 0)),
+      (Transform::Flipped, 4, 2, (3, 0)),
+      (Transform::Flipped90, 2, 4, (0, 0)),
+      (Transform::Flipped180, 4, 2, (0, 1)),
+      (Transform::Flipped270, 2, 4, (1, 3)),
+    ] {
+      let space = DamageSpace {
+        width,
+        height,
+        scale: 1,
+        transform,
+        viewport: Default::default(),
+      };
+      assert_eq!(
+        surface_damage_to_buffer(vec![Rect::new(0, 0, 1, 1)], &space),
+        [Rect::new(pixel.0, pixel.1, 1, 1)],
+        "{transform:?}"
+      );
+      assert_eq!(
+        surface_damage_to_buffer(vec![Rect::new(-5, -5, 50, 50)], &space),
+        [Rect::new(0, 0, width, height)],
+        "{transform:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn fractional_viewport_damage_covers_every_touched_pixel() {
+    let space = DamageSpace {
+      width: 10,
+      height: 10,
+      scale: 1,
+      transform: wl_output::Transform::Normal,
+      viewport: crate::viewport::ViewportState {
+        source: Some([0.5, 0.0, 9.0, 9.0]),
+        destination: Some((3, 3)),
+      },
+    };
+    // One destination pixel is 3x3 source pixels from x 0.5.
+    assert_eq!(
+      surface_damage_to_buffer(vec![Rect::new(0, 0, 1, 1)], &space),
+      [Rect::new(0, 0, 4, 3)]
+    );
   }
 }

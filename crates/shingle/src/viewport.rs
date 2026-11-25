@@ -99,6 +99,15 @@ pub(crate) fn apply(
   });
 }
 
+/// The viewport state the surface's next commit applies, if it has a
+/// viewport.
+pub(crate) fn pending(
+  state: &CompositorState,
+  object: &ObjectId,
+) -> Option<ViewportState> {
+  state.viewports.get(object).map(|viewport| viewport.pending)
+}
+
 pub(crate) fn dimensions(
   state: &CompositorState,
   object: &ObjectId,

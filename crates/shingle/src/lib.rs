@@ -498,7 +498,9 @@ pub struct BufferSnapshot {
   /// as `wl_shm` defines it.
   pub rgba: Arc<[u8]>,
   /// Rectangles in buffer pixels that changed in this commit, clipped to
-  /// the buffer. A new buffer committed without damage is fully damaged.
+  /// the buffer. `wl_surface.damage` is converted from surface coordinates
+  /// through the viewport, buffer scale and buffer transform. A new buffer
+  /// committed without damage is fully damaged.
   pub damage: Vec<Rect>,
   /// `wl_surface.offset` (or `attach` x) of this commit, in surface-local
   /// coordinates; zero when the commit carried none.
@@ -2948,6 +2950,89 @@ pub(crate) mod tests {
     assert_eq!(compositor.keyboard_layout_index(), 1);
     compositor.set_keymap(&keymap).expect("the keymap compiles");
     assert_eq!(compositor.keyboard_layout_index(), 0);
+  }
+
+  /// Commits `damage` in surface coordinates on a toplevel whose 1:1
+  /// buffer was attached after `setup`, and returns the damage the
+  /// renderer is given, in buffer pixels.
+  fn buffer_damage(
+    width: i32,
+    height: i32,
+    setup: impl FnOnce(
+      &crate::test_client::TestClient,
+      &wayland_client::protocol::wl_surface::WlSurface,
+    ),
+    damage: Rect,
+  ) -> Vec<Rect> {
+    let (mut compositor, path) = test_compositor();
+    let mut client =
+      crate::test_client::TestClient::connect(&mut compositor, &path);
+    let toplevel = client.toplevel(&mut compositor, "damaged");
+    setup(&client, &toplevel.surface);
+    client.attach_buffer(&mut compositor, &toplevel.surface, width, height);
+    compositor.drain_events();
+    toplevel.surface.damage(
+      damage.x,
+      damage.y,
+      damage.width as i32,
+      damage.height as i32,
+    );
+    toplevel.surface.commit();
+    client.roundtrip(&mut compositor);
+    compositor
+      .drain_events()
+      .into_iter()
+      .filter_map(|event| match event {
+        Event::SurfaceCommitted(snapshot) => snapshot.buffer,
+        _ => None,
+      })
+      .last()
+      .expect("the commit reached the renderer")
+      .damage
+  }
+
+  #[test]
+  fn surface_damage_follows_the_buffer_transform_scale_and_viewport() {
+    use wayland_client::protocol::wl_output::Transform;
+    use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+
+    // A 100x50 buffer turned a quarter: the surface is 50x100, and its
+    // top-left 10x20 is the buffer's bottom-left 20x10.
+    let rotated = buffer_damage(
+      100,
+      50,
+      |_, surface| surface.set_buffer_transform(Transform::_90),
+      Rect::new(0, 0, 10, 20),
+    );
+    assert_eq!(rotated, [Rect::new(0, 40, 20, 10)]);
+
+    // Upside down at scale 2: the surface's top-left 5x5 is the buffer's
+    // bottom-right 10x10.
+    let turned = buffer_damage(
+      100,
+      60,
+      |_, surface| {
+        surface.set_buffer_transform(Transform::_180);
+        surface.set_buffer_scale(2);
+      },
+      Rect::new(0, 0, 5, 5),
+    );
+    assert_eq!(turned, [Rect::new(90, 50, 10, 10)]);
+
+    // The bottom-right quarter of a 100x100 buffer shown at 25x25: the
+    // surface's top-left 5x5 is 10x10 buffer pixels from (50, 50).
+    let cropped = buffer_damage(
+      100,
+      100,
+      |client, surface| {
+        let viewporter = client.bind::<WpViewporter>(1);
+        let viewport = viewporter.get_viewport(surface, &client.handle, ());
+        viewport.set_source(50.0, 50.0, 50.0, 50.0);
+        viewport.set_destination(25, 25);
+      },
+      Rect::new(0, 0, 5, 5),
+    );
+    assert_eq!(cropped, [Rect::new(50, 50, 10, 10)]);
   }
 
   #[test]

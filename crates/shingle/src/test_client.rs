@@ -24,6 +24,7 @@ use wayland_protocols::{
     },
     fifo::v1::client::{wp_fifo_manager_v1, wp_fifo_v1},
     presentation_time::client::{wp_presentation, wp_presentation_feedback},
+    viewporter::client::{wp_viewport, wp_viewporter},
   },
   xdg::{
     shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
@@ -569,6 +570,8 @@ ignore_events!(
   wl_seat::WlSeat,
   zxdg_output_manager_v1::ZxdgOutputManagerV1,
   wp_presentation::WpPresentation,
+  wp_viewporter::WpViewporter,
+  wp_viewport::WpViewport,
   zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
   zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
   zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
