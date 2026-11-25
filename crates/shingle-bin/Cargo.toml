@@ -19,6 +19,7 @@ doc = false
 [dependencies]
 shingle = { path = "../shingle" }
 shingle-config = { path = "../shingle-config" }
+shingle-native = { path = "../shingle-native" }
 shingle-nested = { path = "../shingle-nested" }
 shingle-session = { path = "../shingle-session" }
 

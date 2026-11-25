@@ -3,8 +3,8 @@
 //! One binary for every backend. It parses the command line
 //! ([`cli::parse`]), selects the backend from it and the environment
 //! ([`backend::select`]) and runs that backend: nested in a window
-//! (`shingle-nested`), headless ([`headless`]) or, once NB-6 builds it,
-//! native on DRM/KMS and libinput.
+//! (`shingle-nested`), headless ([`headless`]) or native on libseat and
+//! libinput (`shingle-native`).
 
 mod backend;
 mod cli;
@@ -52,28 +52,30 @@ fn plan(
       );
     }
   };
-  match backend::select(options.backend, env) {
-    Ok(Selection {
-      backend: Backend::Native,
-      reason,
-    }) => Plan::Fail(native_unavailable(&reason), 1),
+  match backend::select(options.backend, &env) {
+    Ok(selection) if selection.backend == Backend::Native => {
+      // Refuse an SSH login before libseat is even opened.
+      match shingle_native::preflight(&env) {
+        Ok(()) => Plan::Start(selection, options),
+        Err(error) => Plan::Fail(no_seat(&error, &selection.reason), 1),
+      }
+    }
     Ok(selection) => Plan::Start(selection, options),
     Err(error) => Plan::Fail(format!("shingle: {error}\n"), USAGE_STATUS),
   }
 }
 
-/// The message for a selected native backend, which is not built yet,
-/// explaining why it was selected and what to use instead.
-fn native_unavailable(reason: &Reason) -> String {
+/// The message for a native backend without a seat: the cause, why native
+/// was selected and what to use instead.
+fn no_seat(error: &shingle_native::NoSeat, reason: &Reason) -> String {
   let why = match reason {
     Reason::Argument => reason.to_string(),
     _ => format!("selected because {reason}"),
   };
   format!(
-    "shingle: the native backend (DRM/KMS and libinput) is not built yet; \
-     it was {why}.\n\
-     shingle: start shingle inside a Wayland or X11 session for the nested \
-     backend, or use --headless.\n"
+    "shingle: {error}\n\
+     shingle: the native backend was {why}; inside a Wayland or X11 \
+     session shingle runs nested, and --headless needs no seat.\n"
   )
 }
 
@@ -95,7 +97,15 @@ fn start(
     Backend::Headless => {
       headless::run(config, options.ipc.as_deref(), options.spawn)
     }
-    Backend::Native => Err(native_unavailable(&selection.reason).into()),
+    Backend::Native => shingle_native::run(
+      config,
+      options.config,
+      options.ipc.as_deref(),
+      options.spawn,
+      shingle_native::Options {
+        allow_builtin_seat: options.allow_builtin_seat,
+      },
+    ),
   }
 }
 
@@ -169,27 +179,33 @@ mod tests {
     assert_eq!(backend, Backend::Headless);
   }
 
+  // These tests only plan: no seat, device or VT is touched.
+
   #[test]
-  fn native_explains_that_it_is_not_built() {
-    let Plan::Fail(message, status) = planned(&["--backend", "native"], &[])
-    else {
-      panic!("native must not start");
-    };
-    assert_eq!(status, 1);
-    assert!(message.contains("native backend"), "{message}");
-    assert!(message.contains("not built yet"), "{message}");
-    assert!(
-      message.contains("requested on the command line"),
-      "{message}"
-    );
-    assert!(message.contains("--headless"), "{message}");
+  fn tty_login_selects_native() {
+    let (backend, options) = started(planned(
+      &["--allow-builtin-seat"],
+      &[("TERM", "linux"), ("XDG_SEAT", "seat0")],
+    ));
+    assert_eq!(backend, Backend::Native);
+    assert!(options.allow_builtin_seat);
+    let (backend, _) = started(planned(&["--backend", "native"], &[]));
+    assert_eq!(backend, Backend::Native);
   }
 
   #[test]
-  fn tty_selects_native_and_says_why() {
-    let Plan::Fail(message, 1) = planned(&[], &[("TERM", "linux")]) else {
-      panic!("native must not start");
+  fn ssh_without_a_seat_is_refused_before_anything_starts() {
+    let Plan::Fail(message, status) =
+      planned(&[], &[("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")])
+    else {
+      panic!("native must not start over SSH");
     };
+    assert_eq!(status, 1);
+    assert!(
+      message.starts_with("shingle: no seat: started over SSH"),
+      "{message}"
+    );
+    assert!(message.contains("run from a VT login or start seatd"));
     assert!(
       message.contains(
         "selected because none of WAYLAND_DISPLAY, WAYLAND_SOCKET or \
@@ -197,6 +213,25 @@ mod tests {
       ),
       "{message}"
     );
+    assert!(message.contains("--headless"), "{message}");
+    let Plan::Fail(message, 1) =
+      planned(&["--backend", "native"], &[("SSH_TTY", "/dev/pts/1")])
+    else {
+      panic!("native must not start over SSH");
+    };
+    assert!(
+      message.contains("requested on the command line"),
+      "{message}"
+    );
+  }
+
+  #[test]
+  fn ssh_with_a_host_session_still_nests() {
+    let (backend, _) = started(planned(
+      &[],
+      &[("SSH_CONNECTION", "x"), ("WAYLAND_DISPLAY", "wayland-1")],
+    ));
+    assert_eq!(backend, Backend::Nested);
   }
 
   #[test]

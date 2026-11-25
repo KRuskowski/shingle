@@ -20,13 +20,16 @@ Options:
   --spawn PROGRAM [ARG]...
                      start PROGRAM as a client; every later argument
                      is passed to it
+  --allow-builtin-seat
+                     let the native backend run on libseat's builtin
+                     or noop backend, which cannot switch VT
   -h, --help         print this help and exit
   --version          print the version and exit
 
 Without --backend or --headless the backend is SHINGLE_BACKEND if set,
 otherwise nested (a window in the host session) when WAYLAND_DISPLAY,
-WAYLAND_SOCKET or DISPLAY is set, otherwise native (DRM/KMS and libinput
-from a TTY; not built yet).
+WAYLAND_SOCKET or DISPLAY is set, otherwise native (libseat and libinput
+from a VT login; it draws offscreen until KMS output is built).
 ";
 
 /// What the command line asks for.
@@ -53,6 +56,9 @@ pub struct Options {
   /// `--spawn`: a program and its arguments to start as a client; empty
   /// without `--spawn`.
   pub spawn: Vec<OsString>,
+  /// `--allow-builtin-seat`: let the native backend use a libseat backend
+  /// that cannot switch VT.
+  pub allow_builtin_seat: bool,
 }
 
 /// A command line that cannot be parsed.
@@ -142,6 +148,9 @@ pub fn parse(
           .map_err(UsageError::UnknownBackend)?;
         set_backend(&mut options.backend, backend)?;
       }
+      "--allow-builtin-seat" if inline.is_none() => {
+        options.allow_builtin_seat = true;
+      }
       "--config" => set_once(&mut options.config, "--config", value)?,
       "--ipc" => set_once(&mut options.ipc, "--ipc", value)?,
       "--spawn" if inline.is_none() => {
@@ -229,6 +238,7 @@ mod tests {
         config: Some("data/shingle.yaml".into()),
         ipc: Some("/run/ipc".into()),
         spawn: ["foot", "-e", "--config"].map(OsString::from).to_vec(),
+        allow_builtin_seat: false,
       }
     );
   }
@@ -242,7 +252,18 @@ mod tests {
         config: Some("a=b.yaml".into()),
         ipc: Some("/x".into()),
         spawn: Vec::new(),
+        allow_builtin_seat: false,
       }
+    );
+  }
+
+  #[test]
+  fn builtin_seat_is_allowed_by_its_option() {
+    let options = options(&["--backend", "native", "--allow-builtin-seat"]);
+    assert!(options.allow_builtin_seat);
+    assert_eq!(
+      parsed(&["--allow-builtin-seat=yes"]),
+      Err(UsageError::UnknownOption("--allow-builtin-seat=yes".into()))
     );
   }
 
