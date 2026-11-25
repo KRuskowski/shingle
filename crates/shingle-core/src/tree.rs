@@ -1115,3 +1115,686 @@ fn minimum_extent(node: &Node, direction: SplitDirection, minimum: u32) -> u32 {
       .unwrap_or(minimum),
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  const WORKAREA: Rect = Rect::new(0, 0, 1200, 800);
+
+  fn id(value: u64) -> WindowId {
+    WindowId(value)
+  }
+
+  fn tree_with(count: u64) -> TileTree {
+    let mut tree = TileTree::new(SplitDirection::Vertical, WORKAREA).unwrap();
+    for value in 1..=count {
+      tree.attach(id(value)).unwrap();
+    }
+    tree
+  }
+
+  fn nodes(tree: &TileTree) -> Vec<(u64, Rect)> {
+    tree
+      .layout()
+      .into_iter()
+      .map(|layout| (layout.window.get(), layout.node))
+      .collect()
+  }
+
+  fn widths(tree: &TileTree) -> Vec<u32> {
+    tree
+      .layout()
+      .into_iter()
+      .map(|layout| layout.node.width)
+      .collect()
+  }
+
+  fn floating() -> Option<Rect> {
+    Some(Rect::new(100, 100, 300, 200))
+  }
+
+  #[test]
+  fn window_id_rejects_zero() {
+    assert!(matches!(
+      WindowId::new(0),
+      Err(ShingleError::InvalidWindowId)
+    ));
+    assert_eq!(WindowId::new(7).unwrap().get(), 7);
+  }
+
+  #[test]
+  fn new_rejects_empty_and_overflowing_workareas() {
+    for workarea in [
+      Rect::new(0, 0, 0, 800),
+      Rect::new(0, 0, 1200, 0),
+      Rect::new(i32::MAX, 0, 1, 1),
+    ] {
+      assert!(matches!(
+        TileTree::new(SplitDirection::Vertical, workarea),
+        Err(ShingleError::InvalidWorkarea)
+      ));
+    }
+    let mut tree = tree_with(1);
+    assert!(tree.set_workarea(Rect::new(0, 0, 0, 0)).is_err());
+    assert_eq!(tree.workarea(), WORKAREA);
+  }
+
+  #[test]
+  fn attach_appends_in_order_with_equal_extents() {
+    let tree = tree_with(3);
+    assert_eq!(tree.windows(), vec![id(1), id(2), id(3)]);
+    assert_eq!(
+      nodes(&tree),
+      vec![
+        (1, Rect::new(0, 0, 400, 800)),
+        (2, Rect::new(400, 0, 400, 800)),
+        (3, Rect::new(800, 0, 400, 800)),
+      ]
+    );
+    assert_eq!(tree.focused(), Some(id(3)));
+    assert_eq!(tree.stack_order(), &[id(1), id(2), id(3)]);
+    assert_eq!(tree.len(), 3);
+  }
+
+  #[test]
+  fn last_child_absorbs_rounding_remainder() {
+    let mut tree = tree_with(3);
+    tree.set_workarea(Rect::new(10, 0, 1000, 800)).unwrap();
+    assert_eq!(widths(&tree), vec![333, 333, 334]);
+    let layout = tree.layout();
+    assert_eq!(layout[0].node.x, 10);
+    assert_eq!(layout[2].node.x + layout[2].node.width as i32, 1010);
+  }
+
+  #[test]
+  fn attach_rejects_zero_and_duplicate_ids() {
+    let mut tree = tree_with(1);
+    assert!(matches!(
+      tree.attach(id(0)),
+      Err(ShingleError::InvalidWindowId)
+    ));
+    assert!(matches!(
+      tree.attach(id(1)),
+      Err(ShingleError::DuplicateWindow(1))
+    ));
+    assert!(matches!(
+      tree.attach_at(id(1), id(1), Direction::Right),
+      Err(ShingleError::DuplicateWindow(1))
+    ));
+    assert!(matches!(
+      tree.attach_at(id(2), id(9), Direction::Right),
+      Err(ShingleError::WindowNotFound(9))
+    ));
+    assert_eq!(tree.windows(), vec![id(1)]);
+  }
+
+  #[test]
+  fn attach_minimized_keeps_focus() {
+    let mut tree = tree_with(2);
+    tree
+      .attach_with_state(
+        id(3),
+        LeafState {
+          minimized: true,
+          ..LeafState::default()
+        },
+      )
+      .unwrap();
+    assert_eq!(tree.focused(), Some(id(2)));
+    assert_eq!(tree.stack_order(), &[id(1), id(2), id(3)]);
+    assert_eq!(widths(&tree), vec![600, 600]);
+  }
+
+  #[test]
+  fn new_child_takes_average_share_and_others_shrink_proportionally() {
+    let mut tree = tree_with(2);
+    assert!(
+      tree
+        .resize_adjacent(id(1), Direction::Right, -300, 1)
+        .unwrap()
+    );
+    assert_eq!(widths(&tree), vec![300, 900]);
+    tree.attach(id(3)).unwrap();
+    assert_eq!(widths(&tree), vec![200, 600, 400]);
+  }
+
+  #[test]
+  fn attach_at_same_axis_inserts_beside_target() {
+    let mut tree = tree_with(2);
+    tree.attach_at(id(3), id(1), Direction::Right).unwrap();
+    tree.attach_at(id(4), id(1), Direction::Left).unwrap();
+    assert_eq!(tree.windows(), vec![id(4), id(1), id(3), id(2)]);
+    assert_eq!(widths(&tree), vec![300, 300, 300, 300]);
+    assert_eq!(tree.focused(), Some(id(4)));
+  }
+
+  #[test]
+  fn attach_at_cross_axis_splits_target_slot() {
+    let mut tree = tree_with(2);
+    tree.attach_at(id(3), id(2), Direction::Down).unwrap();
+    tree.attach_at(id(4), id(1), Direction::Up).unwrap();
+    assert_eq!(tree.windows(), vec![id(4), id(1), id(2), id(3)]);
+    assert_eq!(
+      nodes(&tree),
+      vec![
+        (4, Rect::new(0, 0, 600, 400)),
+        (1, Rect::new(0, 400, 600, 400)),
+        (2, Rect::new(600, 0, 600, 400)),
+        (3, Rect::new(600, 400, 600, 400)),
+      ]
+    );
+  }
+
+  #[test]
+  fn detach_returns_state_and_siblings_keep_proportions() {
+    let mut tree = tree_with(2);
+    tree
+      .resize_adjacent(id(1), Direction::Right, -300, 1)
+      .unwrap();
+    tree.attach(id(3)).unwrap();
+    tree.set_sticky(id(3), true).unwrap();
+    let state = tree.detach(id(3)).unwrap();
+    assert!(state.sticky);
+    assert_eq!(widths(&tree), vec![300, 900]);
+    assert!(!tree.contains(id(3)));
+    assert_eq!(tree.stack_order(), &[id(1), id(2)]);
+    assert!(matches!(
+      tree.detach(id(3)),
+      Err(ShingleError::WindowNotFound(3))
+    ));
+  }
+
+  #[test]
+  fn detach_collapses_single_child_splits() {
+    let mut tree = tree_with(2);
+    tree.attach_at(id(3), id(2), Direction::Down).unwrap();
+    tree.detach(id(3)).unwrap();
+    assert_eq!(
+      nodes(&tree),
+      vec![
+        (1, Rect::new(0, 0, 600, 800)),
+        (2, Rect::new(600, 0, 600, 800)),
+      ]
+    );
+    assert!(
+      tree
+        .root
+        .children
+        .iter()
+        .all(|child| matches!(child.node, Node::Leaf(_, _)))
+    );
+  }
+
+  #[test]
+  fn detach_promotes_lone_split_to_root() {
+    let mut tree = tree_with(2);
+    tree.attach_at(id(3), id(2), Direction::Down).unwrap();
+    tree.detach(id(1)).unwrap();
+    assert_eq!(tree.direction(), SplitDirection::Horizontal);
+    assert_eq!(
+      nodes(&tree),
+      vec![
+        (2, Rect::new(0, 0, 1200, 400)),
+        (3, Rect::new(0, 400, 1200, 400)),
+      ]
+    );
+    tree.detach(id(2)).unwrap();
+    tree.detach(id(3)).unwrap();
+    assert!(tree.is_empty());
+    assert_eq!(tree.focused(), None);
+  }
+
+  #[test]
+  fn focus_falls_back_to_topmost_unminimized_window() {
+    let mut tree = tree_with(3);
+    tree.raise(id(1)).unwrap();
+    tree.detach(id(3)).unwrap();
+    assert_eq!(tree.focused(), Some(id(1)));
+    tree.attach(id(3)).unwrap();
+    tree.set_minimized(id(1), true).unwrap();
+    tree.detach(id(3)).unwrap();
+    assert_eq!(tree.focused(), Some(id(2)));
+    tree.set_minimized(id(2), true).unwrap();
+    assert_eq!(tree.focused(), None);
+  }
+
+  #[test]
+  fn set_focus_rejects_minimized_and_unknown_windows() {
+    let mut tree = tree_with(2);
+    tree.set_minimized(id(1), true).unwrap();
+    assert!(tree.set_focus(id(1)).is_err());
+    assert!(tree.set_focus(id(9)).is_err());
+    assert_eq!(tree.focused(), Some(id(2)));
+    tree.set_minimized(id(1), false).unwrap();
+    tree.set_focus(id(1)).unwrap();
+    assert_eq!(tree.focused(), Some(id(1)));
+  }
+
+  #[test]
+  fn minimizing_unfocused_window_keeps_focus() {
+    let mut tree = tree_with(3);
+    tree.set_minimized(id(1), true).unwrap();
+    assert_eq!(tree.focused(), Some(id(3)));
+    assert_eq!(
+      nodes(&tree),
+      vec![
+        (2, Rect::new(0, 0, 600, 800)),
+        (3, Rect::new(600, 0, 600, 800)),
+      ]
+    );
+  }
+
+  #[test]
+  fn raise_and_lower_reorder_stack_only() {
+    let mut tree = tree_with(3);
+    tree.raise(id(1)).unwrap();
+    assert_eq!(tree.stack_order(), &[id(2), id(3), id(1)]);
+    tree.lower(id(3)).unwrap();
+    assert_eq!(tree.stack_order(), &[id(3), id(2), id(1)]);
+    assert_eq!(tree.windows(), vec![id(1), id(2), id(3)]);
+    assert!(tree.raise(id(9)).is_err());
+    assert!(tree.lower(id(9)).is_err());
+    tree.set_stacking(id(2), StackingMode::AlwaysOnTop).unwrap();
+    assert_eq!(tree.stack_order(), &[id(3), id(1), id(2)]);
+    assert_eq!(
+      tree.leaf_state(id(2)).unwrap().stacking,
+      StackingMode::AlwaysOnTop
+    );
+  }
+
+  #[test]
+  fn drop_moves_window_and_raises_it() {
+    let mut tree = tree_with(3);
+    tree.set_focus(id(2)).unwrap();
+    tree.drop(id(1), id(3), Direction::Right).unwrap();
+    assert_eq!(tree.windows(), vec![id(2), id(3), id(1)]);
+    assert_eq!(widths(&tree), vec![400, 400, 400]);
+    assert_eq!(tree.focused(), Some(id(1)));
+    assert_eq!(tree.stack_order(), &[id(2), id(3), id(1)]);
+  }
+
+  #[test]
+  fn drop_cross_axis_stacks_onto_target() {
+    let mut tree = tree_with(3);
+    tree.drop(id(3), id(1), Direction::Down).unwrap();
+    assert_eq!(
+      nodes(&tree),
+      vec![
+        (1, Rect::new(0, 0, 600, 400)),
+        (3, Rect::new(0, 400, 600, 400)),
+        (2, Rect::new(600, 0, 600, 800)),
+      ]
+    );
+  }
+
+  #[test]
+  fn drop_rejects_same_or_unknown_windows() {
+    let mut tree = tree_with(2);
+    assert!(matches!(
+      tree.drop(id(1), id(1), Direction::Left),
+      Err(ShingleError::SameWindow)
+    ));
+    assert!(matches!(
+      tree.drop(id(9), id(1), Direction::Left),
+      Err(ShingleError::WindowNotFound(9))
+    ));
+    assert!(matches!(
+      tree.drop(id(1), id(9), Direction::Left),
+      Err(ShingleError::WindowNotFound(9))
+    ));
+    assert_eq!(tree.windows(), vec![id(1), id(2)]);
+  }
+
+  #[test]
+  fn drop_minimized_window_keeps_focus() {
+    let mut tree = tree_with(3);
+    tree.set_minimized(id(1), true).unwrap();
+    tree.drop(id(1), id(3), Direction::Right).unwrap();
+    assert_eq!(tree.windows(), vec![id(2), id(3), id(1)]);
+    assert_eq!(tree.focused(), Some(id(3)));
+  }
+
+  #[test]
+  fn swap_exchanges_slots_and_keeps_window_state() {
+    let mut tree = tree_with(2);
+    tree.attach_at(id(3), id(2), Direction::Down).unwrap();
+    tree
+      .resize_adjacent(id(1), Direction::Right, -200, 1)
+      .unwrap();
+    tree.set_gaps(id(1), Gaps::new(5, 2)).unwrap();
+    tree.set_focus(id(2)).unwrap();
+    tree.swap(id(1), id(3)).unwrap();
+    assert_eq!(
+      nodes(&tree),
+      vec![
+        (3, Rect::new(0, 0, 400, 800)),
+        (2, Rect::new(400, 0, 800, 400)),
+        (1, Rect::new(400, 400, 800, 400)),
+      ]
+    );
+    assert_eq!(tree.leaf_state(id(1)).unwrap().gaps, Gaps::new(5, 2));
+    assert_eq!(tree.leaf_state(id(3)).unwrap().gaps, Gaps::default());
+    assert_eq!(tree.focused(), Some(id(2)));
+    assert!(matches!(
+      tree.swap(id(1), id(1)),
+      Err(ShingleError::SameWindow)
+    ));
+    assert!(tree.swap(id(1), id(9)).is_err());
+  }
+
+  #[test]
+  fn focus_directional_without_neighbour_keeps_focus() {
+    let mut tree = tree_with(2);
+    tree.set_focus(id(1)).unwrap();
+    assert_eq!(
+      tree.focus_directional(id(1), Direction::Left).unwrap(),
+      None
+    );
+    assert_eq!(tree.focus_directional(id(1), Direction::Up).unwrap(), None);
+    assert_eq!(tree.focused(), Some(id(1)));
+  }
+
+  #[test]
+  fn focus_directional_skips_hidden_windows() {
+    let mut tree = tree_with(4);
+    tree.set_minimized(id(2), true).unwrap();
+    tree.set_floating(id(3), floating()).unwrap();
+    assert_eq!(
+      tree.focus_directional(id(1), Direction::Right).unwrap(),
+      Some(id(4))
+    );
+    assert!(matches!(
+      tree.focus_directional(id(3), Direction::Left),
+      Err(ShingleError::WindowNotFound(3))
+    ));
+  }
+
+  #[test]
+  fn resize_moves_only_the_shared_edge() {
+    let mut tree = tree_with(3);
+    assert!(
+      tree
+        .resize_adjacent(id(2), Direction::Right, 100, 50)
+        .unwrap()
+    );
+    assert_eq!(widths(&tree), vec![400, 500, 300]);
+    assert!(
+      tree
+        .resize_adjacent(id(2), Direction::Left, 100, 50)
+        .unwrap()
+    );
+    assert_eq!(widths(&tree), vec![300, 600, 300]);
+    assert!(
+      tree
+        .resize_adjacent(id(3), Direction::Left, -50, 50)
+        .unwrap()
+    );
+    assert_eq!(widths(&tree), vec![300, 650, 250]);
+  }
+
+  #[test]
+  fn resize_clamps_to_minimum_extent() {
+    let mut tree = tree_with(2);
+    assert!(
+      tree
+        .resize_adjacent(id(1), Direction::Right, 10_000, 100)
+        .unwrap()
+    );
+    assert_eq!(widths(&tree), vec![1100, 100]);
+    assert!(
+      !tree
+        .resize_adjacent(id(1), Direction::Right, 10_000, 100)
+        .unwrap()
+    );
+    assert!(matches!(
+      tree.resize_adjacent(id(1), Direction::Right, 1, 700),
+      Err(ShingleError::MinimumExtent)
+    ));
+    assert!(matches!(
+      tree.resize_adjacent(id(1), Direction::Right, 1, 0),
+      Err(ShingleError::MinimumExtent)
+    ));
+    assert_eq!(widths(&tree), vec![1100, 100]);
+  }
+
+  #[test]
+  fn resize_without_adjacent_split_fails() {
+    let mut tree = tree_with(2);
+    for (window, direction) in [
+      (1, Direction::Left),
+      (2, Direction::Right),
+      (1, Direction::Up),
+      (1, Direction::Down),
+    ] {
+      assert!(matches!(
+        tree.resize_adjacent(id(window), direction, 10, 1),
+        Err(ShingleError::NoAdjacentWindow)
+      ));
+    }
+    assert!(matches!(
+      tree.resize_adjacent(id(9), Direction::Left, 10, 1),
+      Err(ShingleError::WindowNotFound(9))
+    ));
+  }
+
+  #[test]
+  fn resize_nested_split_uses_innermost_matching_axis() {
+    let mut tree = tree_with(2);
+    tree.attach_at(id(3), id(2), Direction::Down).unwrap();
+    assert!(
+      tree
+        .resize_adjacent(id(2), Direction::Down, 100, 50)
+        .unwrap()
+    );
+    assert!(
+      tree
+        .resize_adjacent(id(3), Direction::Left, 100, 50)
+        .unwrap()
+    );
+    assert_eq!(
+      nodes(&tree),
+      vec![
+        (1, Rect::new(0, 0, 500, 800)),
+        (2, Rect::new(500, 0, 700, 500)),
+        (3, Rect::new(500, 500, 700, 300)),
+      ]
+    );
+  }
+
+  #[test]
+  fn resize_respects_minimum_of_nested_split() {
+    let mut tree = tree_with(2);
+    tree.attach_at(id(3), id(2), Direction::Down).unwrap();
+    tree.attach_at(id(4), id(3), Direction::Right).unwrap();
+    // The right column holds 2 above a row of 3 and 4, so it needs two
+    // minimum extents of width.
+    assert!(
+      tree
+        .resize_adjacent(id(1), Direction::Right, 10_000, 100)
+        .unwrap()
+    );
+    assert_eq!(tree.window_layout(id(1)).unwrap().node.width, 1000);
+    assert_eq!(tree.window_layout(id(2)).unwrap().node.width, 200);
+    assert_eq!(tree.window_layout(id(3)).unwrap().node.width, 100);
+    assert_eq!(tree.window_layout(id(4)).unwrap().node.width, 100);
+  }
+
+  #[test]
+  fn float_and_unfloat_restores_tile_slot() {
+    let mut tree = tree_with(3);
+    tree
+      .resize_adjacent(id(1), Direction::Right, 100, 50)
+      .unwrap();
+    let before = nodes(&tree);
+    tree.set_floating(id(2), floating()).unwrap();
+    let state = tree.leaf_state(id(2)).unwrap();
+    assert_eq!(state.floating, floating());
+    assert_eq!(state.tiled_edges, 0);
+    assert!(tree.window_layout(id(2)).is_err());
+    assert_eq!(tree.windows(), vec![id(1), id(2), id(3)]);
+    tree.set_floating(id(2), None).unwrap();
+    assert_eq!(tree.leaf_state(id(2)).unwrap().tiled_edges, 15);
+    assert_eq!(nodes(&tree), before);
+  }
+
+  #[test]
+  fn floating_clears_snap() {
+    let mut tree = tree_with(2);
+    tree
+      .set_snapped(id(1), Some(Rect::new(0, 0, 600, 400)))
+      .unwrap();
+    tree.set_floating(id(1), floating()).unwrap();
+    let state = tree.leaf_state(id(1)).unwrap();
+    assert_eq!(state.snapped, None);
+    assert_eq!(state.restore_geometry, None);
+  }
+
+  #[test]
+  fn snap_records_restore_geometry_once() {
+    let mut tree = tree_with(2);
+    tree.set_maximized(id(1), true).unwrap();
+    tree.set_fullscreen(id(1), true).unwrap();
+    tree.set_maximized(id(1), false).unwrap();
+    let tiled = tree.window_layout(id(1)).unwrap().geometry;
+    let first = Rect::new(0, 0, 600, 400);
+    tree.set_snapped(id(1), Some(first)).unwrap();
+    let state = tree.leaf_state(id(1)).unwrap();
+    assert_eq!(state.snapped, Some(first));
+    assert_eq!(state.restore_geometry, Some(tiled));
+    assert!(!state.fullscreen && !state.maximized);
+    let layout = tree.window_layout(id(1)).unwrap();
+    assert_eq!(layout.geometry, first);
+    assert_eq!(layout.node, Rect::new(0, 0, 600, 800));
+
+    let second = Rect::new(0, 400, 600, 400);
+    tree.set_snapped(id(1), Some(second)).unwrap();
+    assert_eq!(
+      tree.leaf_state(id(1)).unwrap().restore_geometry,
+      Some(tiled)
+    );
+    tree.set_snapped(id(1), None).unwrap();
+    let state = tree.leaf_state(id(1)).unwrap();
+    assert_eq!(state.snapped, None);
+    assert_eq!(state.restore_geometry, None);
+    assert!(
+      tree
+        .set_snapped(id(1), Some(Rect::new(0, 0, 0, 1)))
+        .is_err()
+    );
+  }
+
+  #[test]
+  fn snapping_floating_window_restores_floating_geometry() {
+    let mut tree = tree_with(2);
+    tree.set_floating(id(1), floating()).unwrap();
+    tree
+      .set_snapped(id(1), Some(Rect::new(0, 0, 600, 400)))
+      .unwrap();
+    let state = tree.leaf_state(id(1)).unwrap();
+    assert_eq!(state.restore_geometry, floating());
+    assert_eq!(state.floating, None);
+  }
+
+  #[test]
+  fn tiled_edges_mask_is_bounded() {
+    let mut tree = tree_with(1);
+    tree.set_tiled_edges(id(1), 5).unwrap();
+    assert_eq!(tree.leaf_state(id(1)).unwrap().tiled_edges, 5);
+    assert!(matches!(
+      tree.set_tiled_edges(id(1), 16),
+      Err(ShingleError::InvalidTiledEdges(16))
+    ));
+    assert_eq!(tree.leaf_state(id(1)).unwrap().tiled_edges, 5);
+    assert_eq!(LeafState::default().tiled_edges, 15);
+  }
+
+  #[test]
+  fn gaps_use_inner_size_on_shared_edges() {
+    let mut tree = tree_with(2);
+    tree.attach_at(id(3), id(2), Direction::Down).unwrap();
+    let gaps = Gaps::new(10, 4);
+    for window in 1..=3 {
+      tree.set_gaps(id(window), gaps).unwrap();
+    }
+    let geometry: Vec<Rect> =
+      tree.layout().into_iter().map(|l| l.geometry).collect();
+    assert_eq!(
+      geometry,
+      vec![
+        Rect::new(10, 10, 586, 780),
+        Rect::new(604, 10, 586, 386),
+        Rect::new(604, 404, 586, 386),
+      ]
+    );
+    let layout = tree.window_layout(id(2)).unwrap();
+    assert_eq!(
+      layout.gaps,
+      Gaps {
+        top: 10,
+        right: 10,
+        bottom: 4,
+        left: 4,
+        inner: 4,
+      }
+    );
+  }
+
+  #[test]
+  fn maximized_window_fills_workarea_but_keeps_slot() {
+    let mut tree = tree_with(2);
+    tree.set_gaps(id(2), Gaps::new(8, 2)).unwrap();
+    tree.set_maximized(id(2), true).unwrap();
+    let layout = tree.window_layout(id(2)).unwrap();
+    assert!(layout.maximized);
+    assert_eq!(layout.node, Rect::new(600, 0, 600, 800));
+    assert_eq!(layout.geometry, Rect::new(8, 8, 1184, 784));
+    assert_eq!(layout.gaps, Gaps::new(8, 2));
+    assert_eq!(tree.window_layout(id(1)).unwrap().node.width, 600);
+  }
+
+  #[test]
+  fn window_at_hit_tests_tile_nodes() {
+    let tree = tree_with(2);
+    assert_eq!(tree.window_at(0, 0), Some(id(1)));
+    assert_eq!(tree.window_at(599, 799), Some(id(1)));
+    assert_eq!(tree.window_at(600, 0), Some(id(2)));
+    assert_eq!(tree.window_at(1200, 0), None);
+    assert_eq!(tree.window_at(0, 800), None);
+    assert_eq!(tree.window_at(-1, 0), None);
+  }
+
+  #[test]
+  fn setters_reject_unknown_windows() {
+    let mut tree = tree_with(1);
+    let missing = id(9);
+    assert!(tree.set_maximized(missing, true).is_err());
+    assert!(tree.set_minimized(missing, true).is_err());
+    assert!(tree.set_floating(missing, None).is_err());
+    assert!(tree.set_snapped(missing, None).is_err());
+    assert!(tree.set_fullscreen(missing, true).is_err());
+    assert!(tree.set_sticky(missing, true).is_err());
+    assert!(tree.set_stacking(missing, StackingMode::Normal).is_err());
+    assert!(tree.set_gaps(missing, Gaps::default()).is_err());
+    assert!(tree.set_tiled_edges(missing, 0).is_err());
+    assert!(tree.leaf_state(missing).is_err());
+    assert!(tree.window_layout(missing).is_err());
+  }
+
+  #[test]
+  fn replace_leaf_keeps_slot_focus_and_stack_position() {
+    let mut tree = tree_with(3);
+    tree.set_focus(id(2)).unwrap();
+    let previous = tree
+      .replace_leaf(id(2), id(7), LeafState::default())
+      .unwrap();
+    assert_eq!(previous, LeafState::default());
+    assert_eq!(tree.windows(), vec![id(1), id(7), id(3)]);
+    assert_eq!(tree.focused(), Some(id(7)));
+    assert_eq!(tree.stack_order(), &[id(1), id(7), id(3)]);
+    assert!(matches!(
+      tree.replace_leaf(id(1), id(3), LeafState::default()),
+      Err(ShingleError::DuplicateWindow(3))
+    ));
+  }
+}
