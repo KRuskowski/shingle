@@ -367,6 +367,43 @@ fn wait_readable(fd: BorrowedFd<'_>, timeout: Duration) -> bool {
   }
 }
 
+/// Writes `script` to `path` as an executable file, through a `sh` child
+/// that opens the file itself, for tests that stand a script in for
+/// Xwayland.
+///
+/// A file written by this process cannot be executed safely while other
+/// threads fork, as parallel tests do: a child forked between the file's
+/// `open` and `close` holds a write descriptor until it calls `exec`, and
+/// executing the file meanwhile fails with `ETXTBSY` ("Text file busy").
+/// The `sh` child is the only process that ever opens the file for
+/// writing, and it has exited when this returns.
+///
+/// # Errors
+///
+/// When `sh` cannot run or fails to write the file.
+pub fn write_script(path: &std::path::Path, script: &str) -> io::Result<()> {
+  use std::io::Write;
+  let mut child = Command::new("/bin/sh")
+    .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+    .arg(path)
+    .stdin(std::process::Stdio::piped())
+    .spawn()?;
+  let written = child
+    .stdin
+    .take()
+    .ok_or_else(|| io::Error::other("no stdin"))?
+    .write_all(script.as_bytes());
+  let status = child.wait()?;
+  written?;
+  if status.success() {
+    Ok(())
+  } else {
+    Err(io::Error::other(format!(
+      "writing the script failed: {status}"
+    )))
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use std::{fs, io::Read, path::PathBuf};
@@ -452,10 +489,8 @@ mod tests {
   /// Writes an executable bash script standing in for Xwayland. Bash,
   /// unlike dash, redirects descriptors above 9.
   fn fake_server(directory: &std::path::Path, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let path = directory.join("fake-xwayland");
-    fs::write(&path, format!("#!/bin/bash\n{body}\n")).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_script(&path, &format!("#!/bin/bash\n{body}\n")).unwrap();
     path
   }
 
@@ -551,6 +586,17 @@ mod tests {
     assert_eq!(process.try_exit().unwrap(), None);
     drop(process);
     drop(sockets);
+    fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[test]
+  fn written_scripts_run_at_once() {
+    let directory = temp_dir("script");
+    let path = directory.join("script");
+    write_script(&path, "#!/bin/sh\nexit 7\n").unwrap();
+    let status = Command::new(&path).status().unwrap();
+    assert_eq!(status.code(), Some(7));
+    assert!(write_script(&directory.join("missing/script"), "").is_err());
     fs::remove_dir_all(directory).unwrap();
   }
 

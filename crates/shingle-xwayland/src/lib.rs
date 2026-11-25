@@ -178,7 +178,6 @@ mod tests {
 
   /// A directory with a display and a fake server running `body`.
   fn fixture(name: &str, body: &str) -> (PathBuf, DisplaySockets, OsString) {
-    use std::os::unix::fs::PermissionsExt;
     let directory = std::env::temp_dir().join(format!(
       "shingle-xwayland-lib-{name}-{}",
       std::process::id()
@@ -187,8 +186,7 @@ mod tests {
     fs::create_dir_all(&directory).unwrap();
     let sockets = DisplaySockets::bind_in(&directory).unwrap();
     let program = directory.join("fake-xwayland");
-    fs::write(&program, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    server::write_script(&program, &format!("#!/bin/sh\n{body}\n")).unwrap();
     (directory, sockets, program.into_os_string())
   }
 

@@ -584,7 +584,7 @@ fn remove(
 mod tests {
   use std::{
     fs,
-    os::unix::{fs::PermissionsExt, net::UnixStream},
+    os::unix::net::UnixStream,
     path::Path,
     sync::atomic::{AtomicU32, Ordering},
     time::Instant,
@@ -625,8 +625,7 @@ mod tests {
   ) -> Compositor {
     let program = directory.join("fake-xwayland");
     let script = format!("#!/bin/bash\n{PARSE_ARGUMENTS}\n{body}\n");
-    fs::write(&program, script).unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    server::write_script(&program, &script).unwrap();
     let config = Config {
       xwayland: XwaylandSettings {
         mode,
