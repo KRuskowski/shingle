@@ -70,7 +70,7 @@ Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are pla
 
 ### Automated
 
-`cargo test --workspace` runs TESTCOUNT tests (2026-11-25), 88 of them in `shingle-core`, 60 in `shingle` and 32 in `shingle-nested`. Coverage of the other crates is uneven.
+`cargo test --workspace` runs 232 tests (2026-11-25), 88 of them in `shingle-core`, 60 in `shingle` and 32 in `shingle-nested`. Coverage of the other crates is uneven.
 
 `shingle-render` has 15 unit tests and 8 offscreen pixel tests (`crates/shingle-render/tests/offscreen_pixels.rs`). The pixel tests render fixed scenes (solid, translucent, textured, UV-cropped, transformed and rotated tiles; scale, output transform and zoom; gamma ramp and both inversion modes; nearest filtering) and compare the readback with reference images in `crates/shingle-render/tests/golden`, which were rendered by the renderer before the NB-1 split. They need a wgpu adapter and are skipped without one; set `SHINGLE_RENDER_BLESS=1` to regenerate the references.
 
