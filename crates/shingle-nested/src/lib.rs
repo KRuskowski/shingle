@@ -218,6 +218,19 @@ struct App {
   host: WindowHost,
   renderer: Option<Renderer>,
   host_keyboard: host_keyboard::HostKeyboard,
+  /// The window's size when it opens.
+  window_size: (u32, u32),
+}
+
+/// The size the nested window opens at: an explicit configured mode of
+/// the nested output, as a nested Wayfire sets a custom mode on its
+/// window, else 1280x720.
+fn initial_window_size(config: &ShingleConfig) -> (u32, u32) {
+  config
+    .output_config(shingle::OUTPUT_NAME)
+    .mode
+    .size()
+    .unwrap_or((1280, 720))
 }
 
 impl App {
@@ -227,6 +240,7 @@ impl App {
     config_path: Option<PathBuf>,
     ipc_path: Option<&Path>,
   ) -> Result<Self, Box<dyn Error>> {
+    let window_size = initial_window_size(&config);
     let mut frontend = Frontend::new(config, spawn, config_path, ipc_path)?;
     let devices = SeatDevices::register(frontend.compositor_mut());
     Ok(Self {
@@ -238,6 +252,7 @@ impl App {
       },
       renderer: None,
       host_keyboard: host_keyboard::HostKeyboard::default(),
+      window_size,
     })
   }
 
@@ -352,7 +367,10 @@ impl ApplicationHandler for App {
     }
     let attributes = WindowAttributes::default()
       .with_title("Shingle")
-      .with_inner_size(PhysicalSize::new(1280, 720));
+      .with_inner_size(PhysicalSize::new(
+        self.window_size.0,
+        self.window_size.1,
+      ));
     let window = match event_loop.create_window(attributes) {
       Ok(window) => Arc::new(window),
       Err(error) => {
@@ -527,6 +545,16 @@ impl ApplicationHandler for App {
 
   fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
     self.frontend.process(&mut self.host);
+    // A reload sizes the output from the config; the window decides.
+    if self.frontend.take_reloaded_config().is_some()
+      && let Some(window) = &self.host.window
+    {
+      let size = window.inner_size();
+      if let Err(error) = self.frontend.output_resized(size.width, size.height)
+      {
+        eprintln!("shingle: resizing the output after a reload: {error}");
+      }
+    }
     let exiting = self.host.exit;
     self.finish(event_loop);
     if exiting {
@@ -882,5 +910,24 @@ mod tests {
       assert_eq!(buttons.translate(button, true, false, false), Some(button));
     }
     assert!(!buttons.emulated_middle);
+  }
+
+  #[test]
+  fn the_window_opens_at_an_explicit_configured_mode() {
+    let mut config = ShingleConfig::default();
+    assert_eq!(super::initial_window_size(&config), (1280, 720));
+    config.output.width = 1920;
+    assert_eq!(
+      super::initial_window_size(&config),
+      (1280, 720),
+      "only a mode sets the window size"
+    );
+    config.output.mode = "1600x900@75".parse().unwrap();
+    assert_eq!(super::initial_window_size(&config), (1600, 900));
+    config.outputs.push(shingle_config::OutputConfig {
+      mode: "800x600".parse().unwrap(),
+      ..shingle_config::OutputConfig::named(shingle::OUTPUT_NAME)
+    });
+    assert_eq!(super::initial_window_size(&config), (800, 600));
   }
 }
