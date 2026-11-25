@@ -66,7 +66,7 @@ use calloop::{
   signals::{Signal, Signals},
 };
 pub use input::Modifiers;
-pub use input_device::InputDeviceKind;
+pub use input_device::{InputDeviceId, InputDeviceInfo, InputDeviceKind};
 pub use shingle_core::{Direction, StackingMode, WindowId};
 use shingle_core::{Gaps, Rect, Shingle, WorkspaceId};
 use shingle_idle::{Config as IdleConfig, IdleCoordinator};
@@ -478,9 +478,10 @@ pub enum Event {
   StartLockClient,
   LockStateChanged(LockState),
   /// A seat input device was enabled or disabled over IPC. Held input has
-  /// already been released when a device is disabled.
+  /// already been released when a device is disabled. A native backend
+  /// mirrors this in libinput's send-events mode.
   InputDeviceChanged {
-    device: InputDeviceKind,
+    id: InputDeviceId,
     enabled: bool,
   },
 }
@@ -636,11 +637,32 @@ impl Compositor {
     ipc::trigger_runtime_binding(&mut self.state, id);
   }
 
-  /// Returns whether the seat input device of this kind is enabled. The
+  /// Registers a seat input device and returns its ID, which the backend
+  /// passes with every event from that device. The device starts enabled
+  /// and is listed by `input/list-devices` in registration order. IDs count
+  /// up from 1 and are not reused.
+  pub fn add_input_device(&mut self, info: InputDeviceInfo) -> InputDeviceId {
+    input_device::add(&mut self.state, info)
+  }
+
+  /// Unregisters a seat input device, for example on a libinput
+  /// `DeviceEvent::Removed`. Everything it holds is released first, as when
+  /// it is disabled, and later input with its ID is dropped. Returns whether
+  /// the device was registered. No `InputDeviceChanged` event is emitted.
+  pub fn remove_input_device(&mut self, id: InputDeviceId) -> bool {
+    input_device::remove(&mut self.state, id)
+  }
+
+  /// Returns how a registered seat input device was described.
+  pub fn input_device(&self, id: InputDeviceId) -> Option<&InputDeviceInfo> {
+    input_device::info(&self.state, id)
+  }
+
+  /// Returns whether a seat input device is registered and enabled. The
   /// nested frontend checks this before acting on host input itself, for
   /// example to match bindings.
-  pub fn input_device_enabled(&self, kind: InputDeviceKind) -> bool {
-    input_device::enabled(&self.state, kind)
+  pub fn input_device_enabled(&self, id: InputDeviceId) -> bool {
+    input_device::enabled(&self.state, id)
   }
 
   /// Enables Wayfire-style length-prefixed JSON IPC on a local socket.
@@ -964,12 +986,19 @@ impl Compositor {
     self.state.process_idle_commands(commands);
   }
 
-  pub fn pointer_motion(&mut self, x: f64, y: f64) {
-    input_device::pointer_motion(&mut self.state, x, y);
+  // The seat entry points below take the ID of the device the event comes
+  // from. Input from an unknown, disabled or differently kinded device, or
+  // while the session is inactive, is dropped.
+
+  /// Moves the pointer to a position in the output layout.
+  pub fn pointer_motion(&mut self, device: InputDeviceId, x: f64, y: f64) {
+    input_device::pointer_motion(&mut self.state, device, x, y);
   }
 
+  /// Sends relative pointer motion to `zwp_relative_pointer_v1` clients.
   pub fn pointer_relative_motion(
     &mut self,
+    device: InputDeviceId,
     dx: f64,
     dy: f64,
     dx_unaccel: f64,
@@ -977,6 +1006,7 @@ impl Compositor {
   ) {
     input_device::pointer_relative_motion(
       &mut self.state,
+      device,
       dx,
       dy,
       dx_unaccel,
@@ -988,51 +1018,78 @@ impl Compositor {
     pointer_protocols::constrained(&self.state)
   }
 
-  pub fn pointer_swipe_begin(&mut self, fingers: u32) {
-    pointer_gestures::swipe_begin(&mut self.state, fingers);
+  /// Begins a touchpad swipe. Only one gesture is active at a time, and
+  /// only the device that began it updates or ends it; disabling or
+  /// removing that device ends it as cancelled.
+  pub fn pointer_swipe_begin(&mut self, device: InputDeviceId, fingers: u32) {
+    pointer_gestures::swipe_begin(&mut self.state, device, fingers);
   }
 
-  pub fn pointer_swipe_update(&mut self, dx: f64, dy: f64) {
-    pointer_gestures::swipe_update(&mut self.state, dx, dy);
+  pub fn pointer_swipe_update(
+    &mut self,
+    device: InputDeviceId,
+    dx: f64,
+    dy: f64,
+  ) {
+    pointer_gestures::swipe_update(&mut self.state, device, dx, dy);
   }
 
-  pub fn pointer_swipe_end(&mut self, cancelled: bool) {
-    pointer_gestures::swipe_end(&mut self.state, cancelled);
+  pub fn pointer_swipe_end(&mut self, device: InputDeviceId, cancelled: bool) {
+    pointer_gestures::swipe_end(&mut self.state, device, cancelled);
   }
 
-  pub fn pointer_pinch_begin(&mut self, fingers: u32) {
-    pointer_gestures::pinch_begin(&mut self.state, fingers);
+  pub fn pointer_pinch_begin(&mut self, device: InputDeviceId, fingers: u32) {
+    pointer_gestures::pinch_begin(&mut self.state, device, fingers);
   }
 
   pub fn pointer_pinch_update(
     &mut self,
+    device: InputDeviceId,
     dx: f64,
     dy: f64,
     scale: f64,
     rotation: f64,
   ) {
-    pointer_gestures::pinch_update(&mut self.state, dx, dy, scale, rotation);
+    pointer_gestures::pinch_update(
+      &mut self.state,
+      device,
+      dx,
+      dy,
+      scale,
+      rotation,
+    );
   }
 
-  pub fn pointer_pinch_end(&mut self, cancelled: bool) {
-    pointer_gestures::pinch_end(&mut self.state, cancelled);
+  pub fn pointer_pinch_end(&mut self, device: InputDeviceId, cancelled: bool) {
+    pointer_gestures::pinch_end(&mut self.state, device, cancelled);
   }
 
-  pub fn pointer_hold_begin(&mut self, fingers: u32) {
-    pointer_gestures::hold_begin(&mut self.state, fingers);
+  pub fn pointer_hold_begin(&mut self, device: InputDeviceId, fingers: u32) {
+    pointer_gestures::hold_begin(&mut self.state, device, fingers);
   }
 
-  pub fn pointer_hold_end(&mut self, cancelled: bool) {
-    pointer_gestures::hold_end(&mut self.state, cancelled);
+  pub fn pointer_hold_end(&mut self, device: InputDeviceId, cancelled: bool) {
+    pointer_gestures::hold_end(&mut self.state, device, cancelled);
   }
 
-  pub fn pointer_button(&mut self, button: u32, pressed: bool) {
-    input_device::pointer_button(&mut self.state, button, pressed);
+  pub fn pointer_button(
+    &mut self,
+    device: InputDeviceId,
+    button: u32,
+    pressed: bool,
+  ) {
+    input_device::pointer_button(&mut self.state, device, button, pressed);
   }
 
-  pub fn pointer_axis(&mut self, horizontal: f64, vertical: f64) {
+  pub fn pointer_axis(
+    &mut self,
+    device: InputDeviceId,
+    horizontal: f64,
+    vertical: f64,
+  ) {
     input_device::pointer_axis_detailed(
       &mut self.state,
+      device,
       horizontal,
       vertical,
       0,
@@ -1042,6 +1099,7 @@ impl Compositor {
 
   pub fn pointer_axis_detailed(
     &mut self,
+    device: InputDeviceId,
     horizontal: f64,
     vertical: f64,
     horizontal_steps: i32,
@@ -1049,6 +1107,7 @@ impl Compositor {
   ) {
     input_device::pointer_axis_detailed(
       &mut self.state,
+      device,
       horizontal,
       vertical,
       horizontal_steps,
@@ -1056,28 +1115,47 @@ impl Compositor {
     );
   }
 
-  pub fn touch_down(&mut self, id: i32, x: f64, y: f64) {
-    input_device::touch_down(&mut self.state, id, x, y);
+  pub fn touch_down(&mut self, device: InputDeviceId, id: i32, x: f64, y: f64) {
+    input_device::touch_down(&mut self.state, device, id, x, y);
   }
 
-  pub fn touch_motion(&mut self, id: i32, x: f64, y: f64) {
-    input_device::touch_motion(&mut self.state, id, x, y);
+  pub fn touch_motion(
+    &mut self,
+    device: InputDeviceId,
+    id: i32,
+    x: f64,
+    y: f64,
+  ) {
+    input_device::touch_motion(&mut self.state, device, id, x, y);
   }
 
-  pub fn touch_up(&mut self, id: i32) {
-    input_device::touch_up(&mut self.state, id);
+  pub fn touch_up(&mut self, device: InputDeviceId, id: i32) {
+    input_device::touch_up(&mut self.state, device, id);
   }
 
-  pub fn touch_cancel(&mut self, id: i32) {
-    input_device::touch_cancel(&mut self.state, id);
+  pub fn touch_cancel(&mut self, device: InputDeviceId, id: i32) {
+    input_device::touch_cancel(&mut self.state, device, id);
   }
 
-  pub fn keyboard_key(&mut self, key: u32, pressed: bool) {
-    input_device::keyboard_key(&mut self.state, key, pressed);
+  /// Feeds an evdev key from a seat keyboard. A key that two keyboards hold
+  /// is released for clients when the last of them lets go.
+  pub fn keyboard_key(
+    &mut self,
+    device: InputDeviceId,
+    key: u32,
+    pressed: bool,
+  ) {
+    input_device::keyboard_key(&mut self.state, device, key, pressed);
   }
 
-  pub fn keyboard_modifiers(&mut self, modifiers: Modifiers) {
-    input_device::keyboard_modifiers(&mut self.state, modifiers);
+  /// Sets the seat's modifier state, as computed by the frontend's xkb
+  /// state, on behalf of a seat keyboard.
+  pub fn keyboard_modifiers(
+    &mut self,
+    device: InputDeviceId,
+    modifiers: Modifiers,
+  ) {
+    input_device::keyboard_modifiers(&mut self.state, device, modifiers);
   }
 
   /// Tells the compositor whether its seat session is active, as libseat

@@ -13,8 +13,9 @@ use std::{
 };
 
 use shingle::{
-  BufferSnapshot, Compositor, Config, Direction, Event, InputDeviceKind,
-  Modifiers, SurfaceId, SurfaceRole, SurfaceSnapshot,
+  BufferSnapshot, Compositor, Config, Direction, Event, InputDeviceId,
+  InputDeviceInfo, InputDeviceKind, Modifiers, SurfaceId, SurfaceRole,
+  SurfaceSnapshot,
 };
 use shingle_config::{
   CommandBinding, ConfigWatcher, Keybindings, Modifiers as ConfigModifiers,
@@ -169,8 +170,60 @@ impl MouseButtons {
   }
 }
 
+/// The seat devices nested feeds host input from: one each for the host
+/// window's keyboard, pointer and touch input, which STIPC input also goes
+/// through.
+#[derive(Clone, Copy, Debug)]
+struct SeatDevices {
+  keyboard: InputDeviceId,
+  pointer: InputDeviceId,
+  touch: InputDeviceId,
+}
+
+impl SeatDevices {
+  /// Registers the three devices in the order and with the names that
+  /// `input/list-devices` has always reported for nested, so they get IDs
+  /// 1 to 3 on a new compositor.
+  fn register(compositor: &mut Compositor) -> Self {
+    let mut add = |name: &str, kind| {
+      compositor.add_input_device(InputDeviceInfo {
+        name: name.into(),
+        vendor: None,
+        product: None,
+        kind,
+      })
+    };
+    Self {
+      keyboard: add("Shingle nested keyboard", InputDeviceKind::Keyboard),
+      pointer: add("Shingle nested pointer", InputDeviceKind::Pointer),
+      touch: add("Shingle nested touch", InputDeviceKind::Touch),
+    }
+  }
+
+  /// Returns the device for host input of `kind`.
+  fn get(self, kind: InputDeviceKind) -> InputDeviceId {
+    match kind {
+      InputDeviceKind::Keyboard => self.keyboard,
+      InputDeviceKind::Pointer => self.pointer,
+      InputDeviceKind::Touch => self.touch,
+    }
+  }
+
+  /// Returns the kind of one of these devices.
+  fn kind(self, id: InputDeviceId) -> Option<InputDeviceKind> {
+    [
+      InputDeviceKind::Keyboard,
+      InputDeviceKind::Pointer,
+      InputDeviceKind::Touch,
+    ]
+    .into_iter()
+    .find(|kind| self.get(*kind) == id)
+  }
+}
+
 struct App {
   compositor: Compositor,
+  devices: SeatDevices,
   store: SessionStore,
   window: Option<Arc<Window>>,
   renderer: Option<Renderer>,
@@ -305,6 +358,7 @@ impl App {
       eprintln!("shingle: {error}");
     }
     session_children.extend(autostart.children);
+    let devices = SeatDevices::register(&mut compositor);
     compositor.set_keymap(&keymap)?;
     compositor.set_repeat(config.input.repeat_rate, config.input.repeat_delay);
     println!(
@@ -321,6 +375,7 @@ impl App {
     let initial_workspace = compositor.current_workspace_index().unwrap_or(0);
     Ok(Self {
       compositor,
+      devices,
       store,
       window: None,
       renderer: None,
@@ -595,8 +650,10 @@ impl App {
           }
         }
         Event::StartLockClient => self.start_lock_client(),
-        Event::InputDeviceChanged { device, enabled } => {
-          self.input_device_changed(device, enabled);
+        Event::InputDeviceChanged { id, enabled } => {
+          if let Some(kind) = self.devices.kind(id) {
+            self.input_device_changed(kind, enabled);
+          }
         }
         Event::DpmsChanged(_)
         | Event::OpacityChanged { .. }
@@ -810,12 +867,15 @@ impl App {
     if self.modifiers.super_key() {
       depressed |= 64;
     }
-    self.compositor.keyboard_modifiers(Modifiers {
-      depressed,
-      latched: 0,
-      locked: self.compositor.locked_modifiers(),
-      group: 0,
-    });
+    self.compositor.keyboard_modifiers(
+      self.devices.keyboard,
+      Modifiers {
+        depressed,
+        latched: 0,
+        locked: self.compositor.locked_modifiers(),
+        group: 0,
+      },
+    );
   }
 
   fn config_modifiers(&self) -> ConfigModifiers {
@@ -2575,7 +2635,9 @@ impl App {
     }
     if locked {
       if let Some(scancode) = event.physical_key.to_scancode() {
-        self.compositor.keyboard_key(scancode, pressed);
+        self
+          .compositor
+          .keyboard_key(self.devices.keyboard, scancode, pressed);
       }
       return;
     }
@@ -3006,7 +3068,9 @@ impl App {
       }
     }
     if let Some(scancode) = event.physical_key.to_scancode() {
-      self.compositor.keyboard_key(scancode, pressed);
+      self
+        .compositor
+        .keyboard_key(self.devices.keyboard, scancode, pressed);
     }
   }
 
@@ -4180,9 +4244,9 @@ impl ApplicationHandler for App {
       // are correct again the moment it is re-enabled.
       self.modifiers = modifiers.state();
     }
-    if window_event_device(&event)
-      .is_some_and(|device| !self.compositor.input_device_enabled(device))
-    {
+    if window_event_device(&event).is_some_and(|kind| {
+      !self.compositor.input_device_enabled(self.devices.get(kind))
+    }) {
       return;
     }
     match event {
@@ -4277,7 +4341,11 @@ impl ApplicationHandler for App {
           None => {}
         }
         if self.drag.is_none() {
-          self.compositor.pointer_motion(position.x, position.y);
+          self.compositor.pointer_motion(
+            self.devices.pointer,
+            position.x,
+            position.y,
+          );
         }
       }
       WindowEvent::MouseInput { state, button, .. } => {
@@ -4306,7 +4374,9 @@ impl ApplicationHandler for App {
           return;
         };
         if !self.pointer_button_action(name, pressed) {
-          self.compositor.pointer_button(button, pressed);
+          self
+            .compositor
+            .pointer_button(self.devices.pointer, button, pressed);
           self.save();
         }
       }
@@ -4360,6 +4430,7 @@ impl ApplicationHandler for App {
         let action = match touch.phase {
           TouchPhase::Started => {
             self.compositor.touch_down(
+              self.devices.touch,
               touch.id as i32,
               touch.location.x,
               touch.location.y,
@@ -4385,6 +4456,7 @@ impl ApplicationHandler for App {
               self.move_drag(touch.location.x, touch.location.y);
             } else {
               self.compositor.touch_motion(
+                self.devices.touch,
                 touch.id as i32,
                 touch.location.x,
                 touch.location.y,
@@ -4397,7 +4469,9 @@ impl ApplicationHandler for App {
             if self.drag.is_some() {
               self.pointer_button_action("btn_left", false);
             }
-            self.compositor.touch_up(touch.id as i32);
+            self
+              .compositor
+              .touch_up(self.devices.touch, touch.id as i32);
             action
           }
           TouchPhase::Cancelled => {
@@ -4405,7 +4479,9 @@ impl ApplicationHandler for App {
             if self.drag.is_some() {
               self.pointer_button_action("btn_left", false);
             }
-            self.compositor.touch_cancel(touch.id as i32);
+            self
+              .compositor
+              .touch_cancel(self.devices.touch, touch.id as i32);
             None
           }
         };
@@ -4479,6 +4555,7 @@ impl ApplicationHandler for App {
           return;
         }
         self.compositor.pointer_axis_detailed(
+          self.devices.pointer,
           horizontal,
           vertical,
           horizontal_steps,
@@ -4496,9 +4573,7 @@ impl ApplicationHandler for App {
     event: DeviceEvent,
   ) {
     if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event
-      && self
-        .compositor
-        .input_device_enabled(InputDeviceKind::Pointer)
+      && self.compositor.input_device_enabled(self.devices.pointer)
       && self.compositor.pointer_constrained()
     {
       let (dx, dy) = if let Some(window) = &self.window {
@@ -4513,7 +4588,10 @@ impl ApplicationHandler for App {
       } else {
         (dx, dy)
       };
-      self.compositor.pointer_relative_motion(dx, dy, dx, dy);
+      let pointer = self.devices.pointer;
+      self
+        .compositor
+        .pointer_relative_motion(pointer, dx, dy, dx, dy);
     }
   }
 
@@ -4803,6 +4881,7 @@ mod tests {
   /// directory, set up the way `App::new` sets up the nested one.
   struct IpcFixture {
     compositor: Compositor,
+    devices: SeatDevices,
     ipc: PathBuf,
   }
 
@@ -4818,11 +4897,16 @@ mod tests {
       let mut compositor =
         Compositor::with_socket_path(Config::default(), &base)
           .expect("the temporary directory accepts a Wayland socket");
+      let devices = SeatDevices::register(&mut compositor);
       let ipc = base.with_extension("ipc");
       compositor
         .enable_ipc(&ipc)
         .expect("the temporary directory accepts an IPC socket");
-      Self { compositor, ipc }
+      Self {
+        compositor,
+        devices,
+        ipc,
+      }
     }
 
     /// Sends one IPC request and returns the raw reply.
@@ -4867,6 +4951,47 @@ mod tests {
     let mut fixture = IpcFixture::new();
     let reply = fixture.request(r#"{"method":"input/list-devices","data":{}}"#);
     assert_eq!(reply, NESTED_LIST_DEVICES);
+  }
+
+  #[test]
+  fn seat_devices_get_ids_one_to_three_and_map_back_to_their_kind() {
+    let fixture = IpcFixture::new();
+    let devices = fixture.devices;
+    let kinds = [
+      InputDeviceKind::Keyboard,
+      InputDeviceKind::Pointer,
+      InputDeviceKind::Touch,
+    ];
+    for (index, kind) in kinds.into_iter().enumerate() {
+      let id = devices.get(kind);
+      assert_eq!(id.get() as usize, index + 1);
+      assert_eq!(devices.kind(id), Some(kind));
+      let info = fixture.compositor.input_device(id).expect("registered");
+      assert_eq!(info.kind, kind);
+      assert!(fixture.compositor.input_device_enabled(id));
+    }
+  }
+
+  #[test]
+  fn configure_device_events_carry_the_nested_device_id() {
+    let mut fixture = IpcFixture::new();
+    fixture.request(
+      r#"{"method":"input/configure-device","data":{"id":3,"enabled":false}}"#,
+    );
+    let changes: Vec<_> = fixture
+      .compositor
+      .drain_events()
+      .into_iter()
+      .filter_map(|event| match event {
+        Event::InputDeviceChanged { id, enabled } => Some((id, enabled)),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(changes, [(fixture.devices.touch, false)]);
+    assert_eq!(
+      fixture.devices.kind(fixture.devices.touch),
+      Some(InputDeviceKind::Touch)
+    );
   }
 
   #[test]

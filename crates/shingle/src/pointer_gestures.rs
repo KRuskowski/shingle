@@ -12,14 +12,19 @@ use wayland_server::{
   protocol::wl_surface::WlSurface,
 };
 
-use crate::{input, input_device::InputDeviceKind, state::CompositorState};
+use crate::{
+  input,
+  input_device::{InputDeviceId, InputDeviceKind},
+  state::CompositorState,
+};
 
 #[derive(Default)]
 pub(crate) struct PointerGestures {
   swipes: HashMap<ObjectId, Vec<ZwpPointerGestureSwipeV1>>,
   pinches: HashMap<ObjectId, Vec<ZwpPointerGesturePinchV1>>,
   holds: HashMap<ObjectId, Vec<ZwpPointerGestureHoldV1>>,
-  active: Option<GestureKind>,
+  /// The active gesture and the pointer device that began it.
+  active: Option<(GestureKind, InputDeviceId)>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -154,8 +159,12 @@ pub(crate) fn pointer_destroyed(
   state.pointer_gestures.holds.remove(pointer);
 }
 
-pub(crate) fn swipe_begin(state: &mut CompositorState, fingers: u32) {
-  if !begin(state, GestureKind::Swipe) {
+pub(crate) fn swipe_begin(
+  state: &mut CompositorState,
+  device: InputDeviceId,
+  fingers: u32,
+) {
+  if !begin(state, device, GestureKind::Swipe) {
     return;
   }
   let time = timestamp(state);
@@ -165,8 +174,13 @@ pub(crate) fn swipe_begin(state: &mut CompositorState, fingers: u32) {
   }
 }
 
-pub(crate) fn swipe_update(state: &mut CompositorState, dx: f64, dy: f64) {
-  if !active(state, GestureKind::Swipe) {
+pub(crate) fn swipe_update(
+  state: &mut CompositorState,
+  device: InputDeviceId,
+  dx: f64,
+  dy: f64,
+) {
+  if !active(state, device, GestureKind::Swipe) {
     return;
   }
   let time = timestamp(state);
@@ -175,8 +189,12 @@ pub(crate) fn swipe_update(state: &mut CompositorState, dx: f64, dy: f64) {
   }
 }
 
-pub(crate) fn swipe_end(state: &mut CompositorState, cancelled: bool) {
-  if !end(state, GestureKind::Swipe) {
+pub(crate) fn swipe_end(
+  state: &mut CompositorState,
+  device: InputDeviceId,
+  cancelled: bool,
+) {
+  if !end(state, device, GestureKind::Swipe) {
     return;
   }
   let time = timestamp(state);
@@ -186,8 +204,12 @@ pub(crate) fn swipe_end(state: &mut CompositorState, cancelled: bool) {
   }
 }
 
-pub(crate) fn pinch_begin(state: &mut CompositorState, fingers: u32) {
-  if !begin(state, GestureKind::Pinch) {
+pub(crate) fn pinch_begin(
+  state: &mut CompositorState,
+  device: InputDeviceId,
+  fingers: u32,
+) {
+  if !begin(state, device, GestureKind::Pinch) {
     return;
   }
   let time = timestamp(state);
@@ -199,12 +221,13 @@ pub(crate) fn pinch_begin(state: &mut CompositorState, fingers: u32) {
 
 pub(crate) fn pinch_update(
   state: &mut CompositorState,
+  device: InputDeviceId,
   dx: f64,
   dy: f64,
   scale: f64,
   rotation: f64,
 ) {
-  if !active(state, GestureKind::Pinch) {
+  if !active(state, device, GestureKind::Pinch) {
     return;
   }
   let time = timestamp(state);
@@ -213,8 +236,12 @@ pub(crate) fn pinch_update(
   }
 }
 
-pub(crate) fn pinch_end(state: &mut CompositorState, cancelled: bool) {
-  if !end(state, GestureKind::Pinch) {
+pub(crate) fn pinch_end(
+  state: &mut CompositorState,
+  device: InputDeviceId,
+  cancelled: bool,
+) {
+  if !end(state, device, GestureKind::Pinch) {
     return;
   }
   let time = timestamp(state);
@@ -224,8 +251,12 @@ pub(crate) fn pinch_end(state: &mut CompositorState, cancelled: bool) {
   }
 }
 
-pub(crate) fn hold_begin(state: &mut CompositorState, fingers: u32) {
-  if !begin(state, GestureKind::Hold) {
+pub(crate) fn hold_begin(
+  state: &mut CompositorState,
+  device: InputDeviceId,
+  fingers: u32,
+) {
+  if !begin(state, device, GestureKind::Hold) {
     return;
   }
   let time = timestamp(state);
@@ -235,8 +266,12 @@ pub(crate) fn hold_begin(state: &mut CompositorState, fingers: u32) {
   }
 }
 
-pub(crate) fn hold_end(state: &mut CompositorState, cancelled: bool) {
-  if !end(state, GestureKind::Hold) {
+pub(crate) fn hold_end(
+  state: &mut CompositorState,
+  device: InputDeviceId,
+  cancelled: bool,
+) {
+  if !end(state, device, GestureKind::Hold) {
     return;
   }
   let time = timestamp(state);
@@ -246,14 +281,23 @@ pub(crate) fn hold_end(state: &mut CompositorState, cancelled: bool) {
   }
 }
 
-/// Ends the active gesture, if any, as cancelled. Used when the seat pointer
-/// is disabled mid-gesture.
-pub(crate) fn cancel_active(state: &mut CompositorState) {
+/// Ends the active gesture as cancelled if `device` began it. Used when that
+/// pointer is disabled or removed mid-gesture.
+pub(crate) fn cancel_active(
+  state: &mut CompositorState,
+  device: InputDeviceId,
+) {
   match state.pointer_gestures.active {
-    Some(GestureKind::Swipe) => swipe_end(state, true),
-    Some(GestureKind::Pinch) => pinch_end(state, true),
-    Some(GestureKind::Hold) => hold_end(state, true),
-    None => {}
+    Some((GestureKind::Swipe, owner)) if owner == device => {
+      swipe_end(state, device, true);
+    }
+    Some((GestureKind::Pinch, owner)) if owner == device => {
+      pinch_end(state, device, true);
+    }
+    Some((GestureKind::Hold, owner)) if owner == device => {
+      hold_end(state, device, true);
+    }
+    _ => {}
   }
 }
 
@@ -262,42 +306,52 @@ pub(crate) fn is_active(state: &CompositorState) -> bool {
   state.pointer_gestures.active.is_some()
 }
 
-/// Gestures come from the seat pointer, so a disabled pointer or an
-/// inactive session starts, updates and ends none.
-fn pointer_enabled(state: &CompositorState) -> bool {
-  crate::input_device::delivers(state, InputDeviceKind::Pointer)
+/// Gestures come from a seat pointer, so a disabled pointer or an inactive
+/// session starts, updates and ends none.
+fn pointer_enabled(state: &CompositorState, device: InputDeviceId) -> bool {
+  crate::input_device::delivers(state, device, InputDeviceKind::Pointer)
 }
 
-fn begin(state: &mut CompositorState, kind: GestureKind) -> bool {
-  if !pointer_enabled(state) {
+fn begin(
+  state: &mut CompositorState,
+  device: InputDeviceId,
+  kind: GestureKind,
+) -> bool {
+  if !pointer_enabled(state, device) {
     return false;
   }
   input::activity(state);
   if state.pointer_gestures.active.is_some() {
     return false;
   }
-  state.pointer_gestures.active = Some(kind);
+  state.pointer_gestures.active = Some((kind, device));
   true
 }
 
-fn end(state: &mut CompositorState, kind: GestureKind) -> bool {
-  if !pointer_enabled(state) {
-    return false;
-  }
-  input::activity(state);
-  if state.pointer_gestures.active != Some(kind) {
+/// Ends the active gesture if it is of `kind` and `device` began it.
+fn end(
+  state: &mut CompositorState,
+  device: InputDeviceId,
+  kind: GestureKind,
+) -> bool {
+  if !active(state, device, kind) {
     return false;
   }
   state.pointer_gestures.active = None;
   true
 }
 
-fn active(state: &mut CompositorState, kind: GestureKind) -> bool {
-  if !pointer_enabled(state) {
+/// Returns whether the active gesture is of `kind` and `device` began it.
+fn active(
+  state: &mut CompositorState,
+  device: InputDeviceId,
+  kind: GestureKind,
+) -> bool {
+  if !pointer_enabled(state, device) {
     return false;
   }
   input::activity(state);
-  state.pointer_gestures.active == Some(kind)
+  state.pointer_gestures.active == Some((kind, device))
 }
 
 fn focused_pointers(state: &CompositorState) -> Vec<(ObjectId, WlSurface)> {

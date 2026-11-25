@@ -12,7 +12,7 @@ use wayland_server::Resource;
 use crate::{
   decoration::Mode as DecorationMode,
   input,
-  input_device::{self, InputDeviceKind},
+  input_device::{self, InputDeviceId, InputDeviceKind, stipc_device},
   shell::{self, Role, XdgKind},
   state::CompositorState,
 };
@@ -1533,11 +1533,14 @@ fn feed_key(state: &mut CompositorState, data: &Value) -> Value {
     return json_error("failed to parse evdev key");
   };
   let pressed = data.get("state").and_then(Value::as_bool).unwrap_or(false);
-  if !input_device::delivers(state, InputDeviceKind::Keyboard) {
+  let Some(keyboard) = stipc_device(state, InputDeviceKind::Keyboard) else {
+    return json_ok();
+  };
+  if !input_device::delivers(state, keyboard, InputDeviceKind::Keyboard) {
     return json_ok();
   }
-  if !stipc_key_binding(state, name, pressed) {
-    input_device::keyboard_key(state, key, pressed);
+  if !stipc_key_binding(state, keyboard, name, pressed) {
+    input_device::keyboard_key(state, keyboard, key, pressed);
   }
   json_ok()
 }
@@ -1548,6 +1551,7 @@ fn feed_key(state: &mut CompositorState, data: &Value) -> Value {
 /// matched key from the nested host keyboard.
 fn stipc_key_binding(
   state: &mut CompositorState,
+  keyboard: InputDeviceId,
   name: &str,
   pressed: bool,
 ) -> bool {
@@ -1555,7 +1559,7 @@ fn stipc_key_binding(
     return false;
   }
   let key = name.strip_prefix("KEY_").unwrap_or(name).to_lowercase();
-  let modifiers = stipc_modifiers(state);
+  let modifiers = stipc_modifiers(state, keyboard);
   let Some(binding) = state
     .runtime_bindings
     .values()
@@ -1588,11 +1592,14 @@ fn stipc_key_binding(
   true
 }
 
-/// Combines the keyboard's depressed modifiers with modifier keys held
-/// through STIPC, which does not run them through XKB.
-fn stipc_modifiers(state: &CompositorState) -> shingle_config::Modifiers {
+/// Combines the seat's depressed modifiers with modifier keys the STIPC
+/// keyboard holds, since STIPC does not run them through XKB.
+fn stipc_modifiers(
+  state: &CompositorState,
+  keyboard: InputDeviceId,
+) -> shingle_config::Modifiers {
   let depressed = state.input.modifiers.depressed;
-  let held = input_device::held_keys(state);
+  let held = input_device::held_keys(state, keyboard);
   let any_held = |codes: [u32; 2]| codes.iter().any(|code| held.contains(code));
   shingle_config::Modifiers {
     super_key: depressed & 64 != 0 || any_held([125, 126]),
@@ -1637,17 +1644,22 @@ fn feed_button(state: &mut CompositorState, data: &Value) -> Value {
     return json_error("failed to parse button combo");
   };
   let mode = data.get("mode").and_then(Value::as_str).unwrap_or("");
-  if matches!(mode, "press" | "full") {
-    if super_modifier {
-      input_device::keyboard_key(state, 125, true);
+  let keyboard = stipc_device(state, InputDeviceKind::Keyboard);
+  let Some(pointer) = stipc_device(state, InputDeviceKind::Pointer) else {
+    return json_ok();
+  };
+  let super_key = |state: &mut CompositorState, pressed| {
+    if let Some(keyboard) = keyboard.filter(|_| super_modifier) {
+      input_device::keyboard_key(state, keyboard, 125, pressed);
     }
-    input_device::pointer_button(state, button, true);
+  };
+  if matches!(mode, "press" | "full") {
+    super_key(state, true);
+    input_device::pointer_button(state, pointer, button, true);
   }
   if matches!(mode, "release" | "full") {
-    input_device::pointer_button(state, button, false);
-    if super_modifier {
-      input_device::keyboard_key(state, 125, false);
-    }
+    input_device::pointer_button(state, pointer, button, false);
+    super_key(state, false);
   }
   json_ok()
 }
@@ -1659,7 +1671,9 @@ fn move_cursor(state: &mut CompositorState, data: &Value) -> Value {
   let Some(y) = data.get("y").and_then(Value::as_f64) else {
     return json_error("missing or invalid y coordinate");
   };
-  input_device::pointer_motion(state, x, y);
+  if let Some(pointer) = stipc_device(state, InputDeviceKind::Pointer) {
+    input_device::pointer_motion(state, pointer, x, y);
+  }
   json_ok()
 }
 
@@ -1677,7 +1691,9 @@ fn feed_touch(state: &mut CompositorState, data: &Value) -> Value {
   let Some(y) = data.get("y").and_then(Value::as_f64) else {
     return json_error("missing or invalid y coordinate");
   };
-  input_device::touch(state, finger, x, y);
+  if let Some(touch) = stipc_device(state, InputDeviceKind::Touch) {
+    input_device::touch(state, touch, finger, x, y);
+  }
   json_ok()
 }
 
@@ -1689,7 +1705,9 @@ fn release_touch(state: &mut CompositorState, data: &Value) -> Value {
   else {
     return json_error("missing or invalid finger");
   };
-  input_device::touch_up(state, finger);
+  if let Some(touch) = stipc_device(state, InputDeviceKind::Touch) {
+    input_device::touch_up(state, touch, finger);
+  }
   json_ok()
 }
 
@@ -2681,7 +2699,8 @@ mod tests {
 
   use super::{SUPPORTED_METHODS, respond};
   use crate::{
-    RuntimeBinding, RuntimeBindingMode, input_device::tests::test_state,
+    RuntimeBinding, RuntimeBindingMode,
+    input_device::tests::{KEYBOARD, test_state},
     state::CompositorState,
   };
 
@@ -2798,7 +2817,7 @@ mod tests {
     add_binding(&mut state, 4, "KEY_F9");
     press(&mut state, "KEY_F9");
     assert_eq!(binding_events(&mut state), [4]);
-    assert!(crate::input_device::held_keys(&state).is_empty());
+    assert!(crate::input_device::held_keys(&state, KEYBOARD).is_empty());
     call(
       &mut state,
       "input/configure-device",
@@ -2889,13 +2908,13 @@ mod tests {
       "stipc/feed_key",
       json!({"key": "KEY_A", "state": true}),
     );
-    assert_eq!(crate::input_device::held_keys(&state).len(), 1);
+    assert_eq!(crate::input_device::held_keys(&state, KEYBOARD).len(), 1);
     call(
       &mut state,
       "input/configure-device",
       json!({"id": 1, "enabled": false}),
     );
-    assert!(crate::input_device::held_keys(&state).is_empty());
+    assert!(crate::input_device::held_keys(&state, KEYBOARD).is_empty());
   }
 
   #[test]
