@@ -858,7 +858,6 @@ pub(crate) fn resize_floating_from(
   let mut desired = original;
   match horizontal {
     Some(Direction::Left) => {
-      desired.x = desired.x.saturating_add(delta_x);
       desired.width = (i64::from(desired.width) - i64::from(delta_x))
         .clamp(minimum_width, maximum_width) as u32;
     }
@@ -870,7 +869,6 @@ pub(crate) fn resize_floating_from(
   }
   match vertical {
     Some(Direction::Up) => {
-      desired.y = desired.y.saturating_add(delta_y);
       desired.height = (i64::from(desired.height) - i64::from(delta_y))
         .clamp(minimum_height, maximum_height) as u32;
     }
@@ -881,7 +879,6 @@ pub(crate) fn resize_floating_from(
     _ => {}
   }
 
-  let unconstrained = desired;
   let ratio = f64::from(original.width) / f64::from(original.height);
   let width_delta = i64::from(desired.width) - i64::from(original.width);
   let height_delta = i64::from(desired.height) - i64::from(original.height);
@@ -908,15 +905,17 @@ pub(crate) fn resize_floating_from(
     i64::from(desired.width).clamp(minimum_width, maximum_width) as u32;
   desired.height =
     i64::from(desired.height).clamp(minimum_height, maximum_height) as u32;
+  // A left or top drag moves that edge, so the opposite one stays where it
+  // was at the start, whatever the limits and the ratio made of the size.
   if horizontal == Some(Direction::Left) {
-    desired.x = desired.x.saturating_add(
-      (i64::from(unconstrained.width) - i64::from(desired.width)) as i32,
-    );
+    let right = i64::from(original.x) + i64::from(original.width);
+    desired.x = (right - i64::from(desired.width))
+      .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
   }
   if vertical == Some(Direction::Up) {
-    desired.y = desired.y.saturating_add(
-      (i64::from(unconstrained.height) - i64::from(desired.height)) as i32,
-    );
+    let bottom = i64::from(original.y) + i64::from(original.height);
+    desired.y = (bottom - i64::from(desired.height))
+      .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
   }
   if desired == original {
     return Ok(false);
@@ -1704,6 +1703,47 @@ pub(crate) fn activity(state: &mut CompositorState) {
 mod tests {
   use super::*;
   use crate::input_device::tests::test_state;
+
+  #[test]
+  fn aspect_resize_from_the_left_and_top_keeps_the_far_edges() {
+    let mut state = test_state();
+    let output = state.output_id.clone();
+    let window = state
+      .core
+      .attach_window(&output, Default::default())
+      .unwrap();
+    let original = Rect::new(100, 100, 200, 100);
+    state.core.set_floating(window, Some(original)).unwrap();
+    state.resize.min_width = 150;
+    state.resize.min_height = 75;
+    let floating = |state: &CompositorState| {
+      state
+        .core
+        .window_info(window)
+        .unwrap()
+        .state
+        .floating
+        .unwrap()
+    };
+
+    // Dragging the left edge 100 px right hits the minimum width.
+    let left = Some(Direction::Left);
+    assert!(
+      resize_floating_from(&mut state, window, left, None, original, 100, 0)
+        .unwrap()
+    );
+    let geometry = floating(&state);
+    assert_eq!((geometry.width, geometry.height), (150, 75));
+    assert_eq!(geometry.x + geometry.width as i32, 300, "{geometry:?}");
+
+    // Dragging the top edge 60 px down hits the minimum height.
+    let up = Some(Direction::Up);
+    resize_floating_from(&mut state, window, None, up, original, 0, 60)
+      .unwrap();
+    let geometry = floating(&state);
+    assert_eq!((geometry.width, geometry.height), (150, 75));
+    assert_eq!(geometry.y + geometry.height as i32, 200, "{geometry:?}");
+  }
 
   #[test]
   fn timestamps_default_to_the_monotonic_clock() {

@@ -2141,7 +2141,7 @@ impl Compositor {
   /// pointer's total motion `(delta_x, delta_y)` since the drag began to
   /// `original`, the rectangle at its start, on the given edges, and keeps
   /// `original`'s width-to-height ratio within the size limits. The opposite
-  /// edges stay put as long as no size limit is reached. Returns `false`
+  /// edges stay put, also when a size limit is reached. Returns `false`
   /// when the window is not floating or the rectangle did not change.
   pub fn resize_floating_from(
     &mut self,
