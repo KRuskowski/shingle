@@ -29,3 +29,9 @@ xkbcommon.workspace = true
 [dev-dependencies]
 libc = "0.2"
 wayland-client = "0.31"
+
+# The Wayland probe client for tools/xwayland_test/run.py; its own unit
+# tests run with the workspace's.
+[[example]]
+name = "wl_probe"
+test = true
