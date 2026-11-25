@@ -2,18 +2,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::ShingleError;
 
+/// An axis-aligned rectangle in layout coordinates. The right and bottom edges,
+/// `x + width` and `y + height`, are exclusive.
 #[derive(
   Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize,
 )]
 #[serde(deny_unknown_fields)]
 pub struct Rect {
+  /// Left edge.
   pub x: i32,
+  /// Top edge.
   pub y: i32,
+  /// Width in pixels.
   pub width: u32,
+  /// Height in pixels.
   pub height: u32,
 }
 
 impl Rect {
+  /// Creates a rectangle.
   pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
     Self {
       x,
@@ -23,6 +30,12 @@ impl Rect {
     }
   }
 
+  /// Returns the rectangle if it is nonempty and its right and bottom edges fit
+  /// in `i32`.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::InvalidWorkarea`] otherwise.
   pub fn validate(self) -> Result<Self, ShingleError> {
     if self.width == 0 || self.height == 0 {
       return Err(ShingleError::InvalidWorkarea);
@@ -82,19 +95,27 @@ impl Rect {
   }
 }
 
+/// Gaps around a tile, in pixels. The outer sizes apply on edges that touch the
+/// workarea; `inner` replaces them on edges shared with another tile.
 #[derive(
   Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize,
 )]
 #[serde(deny_unknown_fields)]
 pub struct Gaps {
+  /// Outer gap above the tile.
   pub top: u32,
+  /// Outer gap right of the tile.
   pub right: u32,
+  /// Outer gap below the tile.
   pub bottom: u32,
+  /// Outer gap left of the tile.
   pub left: u32,
+  /// Gap on edges shared with another tile.
   pub inner: u32,
 }
 
 impl Gaps {
+  /// Creates gaps with the same outer size on all four sides.
   pub const fn new(outer: u32, inner: u32) -> Self {
     Self {
       top: outer,
@@ -128,10 +149,14 @@ pub(crate) struct InternalEdges {
   pub left: bool,
 }
 
+/// The axis along which a split arranges its children, named after its dividers
+/// as in Wayfire.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SplitDirection {
+  /// Children are stacked top to bottom, separated by horizontal dividers.
   Horizontal,
+  /// Children are placed left to right, separated by vertical dividers.
   Vertical,
 }
 
@@ -148,12 +173,17 @@ impl SplitDirection {
   }
 }
 
+/// A direction for focus, insertion, dropping and resizing.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
+  /// Towards smaller y.
   Up,
+  /// Towards larger y.
   Down,
+  /// Towards smaller x.
   Left,
+  /// Towards larger x.
   Right,
 }
 
@@ -166,6 +196,16 @@ impl Direction {
     SplitDirection::for_direction(self)
   }
 
+  /// Ranks `candidate` as a target for moving focus from `from` in this
+  /// direction.
+  ///
+  /// Returns `None` unless the candidate lies entirely beyond the edge being
+  /// crossed. Otherwise returns `(gap, cross)`: the distance between the facing
+  /// edges, and how far the midpoint of the crossed edge lies outside the
+  /// candidate's span on the other axis, zero if the candidate contains it.
+  /// Lower is nearer; callers compare the pair lexicographically and break ties
+  /// by window id. On a tight tiling this picks the tile just past the edge's
+  /// midpoint.
   pub fn score(self, from: Rect, candidate: Rect) -> Option<(i64, i64)> {
     let left = |rect: Rect| rect.x as i64;
     let top = |rect: Rect| rect.y as i64;

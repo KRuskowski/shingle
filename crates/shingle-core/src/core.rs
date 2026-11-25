@@ -7,6 +7,7 @@ use crate::{
   TileTree, WindowId, WindowLayout,
 };
 
+/// Stable identity of an output, such as its connector name.
 #[derive(
   Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
 )]
@@ -14,10 +15,12 @@ use crate::{
 pub struct OutputId(pub String);
 
 impl OutputId {
+  /// Creates an output id.
   pub fn new(value: impl Into<String>) -> Self {
     Self(value.into())
   }
 
+  /// Returns the identity as a string.
   pub fn as_str(&self) -> &str {
     &self.0
   }
@@ -35,6 +38,8 @@ impl From<String> for OutputId {
   }
 }
 
+/// Position of a workspace in an output's workspace grid, zero based. Ordered
+/// by column, then row.
 #[derive(
   Clone,
   Copy,
@@ -50,43 +55,61 @@ impl From<String> for OutputId {
 )]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceId {
+  /// Column.
   pub x: u32,
+  /// Row.
   pub y: u32,
 }
 
 impl WorkspaceId {
+  /// The top-left workspace, which every new output starts on.
   pub const ORIGIN: Self = Self { x: 0, y: 0 };
 
+  /// Creates a workspace id.
   pub const fn new(x: u32, y: u32) -> Self {
     Self { x, y }
   }
 }
 
+/// A workspace on a specific output.
 #[derive(
   Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
 )]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceRef {
+  /// The output.
   pub output: OutputId,
+  /// The workspace on that output.
   pub workspace: WorkspaceId,
 }
 
+/// What is known about how a window was launched. Sessions persist it so that
+/// restored placeholders can be matched to newly mapped clients; see
+/// [`Shingle::reconcile_mapped`].
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchIdentity {
+  /// Wayland app id. Placeholders only match clients with the same one.
   pub app_id: String,
+  /// Per-launch token. Reconciliation prefers a placeholder with the same
+  /// value.
   pub launch_id: Option<String>,
+  /// Command line that launched the window.
   #[serde(default)]
   pub command: Vec<String>,
+  /// Working directory of the launch.
   #[serde(default)]
   pub working_directory: Option<String>,
+  /// Window title.
   #[serde(default)]
   pub title: Option<String>,
+  /// Group of windows launched together.
   #[serde(default)]
   pub launch_group: Option<String>,
 }
 
 impl LaunchIdentity {
+  /// Creates an identity with only an app id.
   pub fn new(app_id: impl Into<String>) -> Self {
     Self {
       app_id: app_id.into(),
@@ -94,16 +117,19 @@ impl LaunchIdentity {
     }
   }
 
+  /// Sets the launch id.
   pub fn with_launch_id(mut self, launch_id: impl Into<String>) -> Self {
     self.launch_id = Some(launch_id.into());
     self
   }
 
+  /// Sets the launch group.
   pub fn with_launch_group(mut self, launch_group: impl Into<String>) -> Self {
     self.launch_group = Some(launch_group.into());
     self
   }
 
+  /// Sets the command line.
   pub fn with_command<I, S>(mut self, command: I) -> Self
   where
     I: IntoIterator<Item = S>,
@@ -113,6 +139,7 @@ impl LaunchIdentity {
     self
   }
 
+  /// Sets the working directory.
   pub fn with_working_directory(
     mut self,
     working_directory: impl Into<String>,
@@ -121,35 +148,55 @@ impl LaunchIdentity {
     self
   }
 
+  /// Sets the title.
   pub fn with_title(mut self, title: impl Into<String>) -> Self {
     self.title = Some(title.into());
     self
   }
 }
 
+/// Whether a window has a live client.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowPresence {
+  /// A client surface is mapped for the window.
   Mapped,
+  /// The window was restored from a session or its client unmapped. It keeps
+  /// its slot until a matching client maps. The compositor must not render,
+  /// focus, include in Scale or report placeholders as mapped.
   Placeholder,
 }
 
+/// A copy of one window's model state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowInfo {
+  /// The window.
   pub id: WindowId,
+  /// How the window was launched.
   pub identity: LaunchIdentity,
+  /// Whether the window has a live client.
   pub presence: WindowPresence,
+  /// The workspace holding the window.
   pub location: WorkspaceRef,
+  /// The window's leaf state.
   pub state: LeafState,
+  /// Parent window, for dialogs and other transient windows.
   pub parent: Option<WindowId>,
 }
 
+/// A window removed from the model, with everything needed to put it back.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DetachedWindow {
+  /// The window.
   pub id: WindowId,
+  /// How the window was launched.
   pub identity: LaunchIdentity,
+  /// Whether the window had a live client.
   pub presence: WindowPresence,
+  /// The workspace the window was removed from.
   pub location: WorkspaceRef,
+  /// The window's leaf state.
   pub state: LeafState,
+  /// Parent window.
   pub parent: Option<WindowId>,
 }
 
@@ -168,6 +215,12 @@ pub(crate) struct WindowRecord {
   pub parent: Option<WindowId>,
 }
 
+/// The window model: outputs, their workspaces and tiling trees, and a record
+/// for every window.
+///
+/// Every window record has exactly one leaf, in the tree of the workspace its
+/// location names. New windows are mapped; restored windows start as
+/// placeholders.
 #[derive(Clone, Debug)]
 pub struct Shingle {
   pub(crate) outputs: BTreeMap<OutputId, OutputState>,
@@ -182,6 +235,7 @@ impl Default for Shingle {
 }
 
 impl Shingle {
+  /// Creates an empty model with no outputs.
   pub fn new() -> Self {
     Self {
       outputs: BTreeMap::new(),
@@ -190,6 +244,13 @@ impl Shingle {
     }
   }
 
+  /// Adds an output with one empty workspace, [`WorkspaceId::ORIGIN`], which is
+  /// current.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::InvalidOutputId`], [`ShingleError::OutputExists`] or
+  /// [`ShingleError::InvalidWorkarea`].
   pub fn add_output(&mut self, output: OutputId, workarea: Rect) -> Result<()> {
     if output.0.is_empty() {
       return Err(ShingleError::InvalidOutputId);
@@ -212,14 +273,18 @@ impl Shingle {
     Ok(())
   }
 
+  /// Iterates over output ids in sorted order.
   pub fn outputs(&self) -> impl Iterator<Item = &OutputId> {
     self.outputs.keys()
   }
 
+  /// Returns the output's workarea.
   pub fn output_workarea(&self, output: &OutputId) -> Result<Rect> {
     Ok(self.output(output)?.workarea)
   }
 
+  /// Sets the output's workarea and lays out all of its workspaces in it,
+  /// keeping tile proportions.
   pub fn set_output_workarea(
     &mut self,
     output: &OutputId,
@@ -234,10 +299,16 @@ impl Shingle {
     Ok(())
   }
 
+  /// Returns the output's current workspace.
   pub fn current_workspace(&self, output: &OutputId) -> Result<WorkspaceId> {
     Ok(self.output(output)?.current_workspace)
   }
 
+  /// Switches the output to an existing workspace.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::WorkspaceNotFound`] if it does not exist.
   pub fn set_current_workspace(
     &mut self,
     output: &OutputId,
@@ -251,6 +322,8 @@ impl Shingle {
     Ok(())
   }
 
+  /// Creates the workspace if it does not exist and returns whether it was
+  /// created.
   pub fn ensure_workspace(
     &mut self,
     output: &OutputId,
@@ -267,10 +340,12 @@ impl Shingle {
     Ok(true)
   }
 
+  /// Returns the output's workspaces in [`WorkspaceId`] order.
   pub fn workspaces(&self, output: &OutputId) -> Result<Vec<WorkspaceId>> {
     Ok(self.output(output)?.workspaces.keys().copied().collect())
   }
 
+  /// Returns a workspace's tiling tree.
   pub fn tree(
     &self,
     output: &OutputId,
@@ -283,6 +358,8 @@ impl Shingle {
       .ok_or(ShingleError::WorkspaceNotFound)
   }
 
+  /// Adds a mapped window to the output's current workspace and returns its new
+  /// id.
   pub fn attach_window(
     &mut self,
     output: &OutputId,
@@ -292,6 +369,7 @@ impl Shingle {
     self.attach_window_on(output, workspace, identity)
   }
 
+  /// Adds a mapped window to the given workspace and returns its new id.
   pub fn attach_window_on(
     &mut self,
     output: &OutputId,
@@ -306,6 +384,7 @@ impl Shingle {
     )
   }
 
+  /// Adds a mapped window with initial leaf state and returns its new id.
   pub fn attach_window_with_state(
     &mut self,
     output: &OutputId,
@@ -318,6 +397,12 @@ impl Shingle {
     )
   }
 
+  /// Adds a mapped window with initial leaf state and parent, and returns its
+  /// new id.
+  ///
+  /// The window is appended to the workspace's root split as
+  /// [`TileTree::attach_with_state`] describes. The parent is recorded without
+  /// being checked.
   pub fn attach_window_with_state_and_parent(
     &mut self,
     output: &OutputId,
@@ -344,6 +429,8 @@ impl Shingle {
     Ok(id)
   }
 
+  /// Removes a window, mapped or placeholder, from the model and returns it for
+  /// [`Shingle::reattach_window`].
   pub fn detach_window(&mut self, window: WindowId) -> Result<DetachedWindow> {
     let record = self
       .windows
@@ -366,6 +453,12 @@ impl Shingle {
     })
   }
 
+  /// Appends a detached window to the given workspace's root split, keeping its
+  /// id, identity, presence, state and parent.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::DuplicateWindow`] if the id is in use again.
   pub fn reattach_window(
     &mut self,
     detached: DetachedWindow,
@@ -394,6 +487,8 @@ impl Shingle {
     Ok(())
   }
 
+  /// Puts a detached window back beside `target`, on the target's workspace;
+  /// see [`TileTree::attach_at_with_state`].
   pub fn reattach_window_at(
     &mut self,
     detached: DetachedWindow,
@@ -422,6 +517,8 @@ impl Shingle {
     Ok(())
   }
 
+  /// Moves `source` beside `target`, across workspaces and outputs if needed;
+  /// see [`TileTree::drop`]. If insertion fails, both trees are restored.
   pub fn drop_window(
     &mut self,
     source: WindowId,
@@ -462,6 +559,11 @@ impl Shingle {
     Ok(())
   }
 
+  /// Exchanges the slots of two windows, across workspaces if needed.
+  ///
+  /// Each window keeps its state. Across workspaces each window also takes over
+  /// the other's focus and stacking position, and the locations are updated. If
+  /// either replacement fails, both trees are restored.
   pub fn swap_windows(
     &mut self,
     first: WindowId,
@@ -511,11 +613,13 @@ impl Shingle {
     Ok(())
   }
 
+  /// Focuses a window in its workspace; see [`TileTree::set_focus`].
   pub fn focus_window(&mut self, window: WindowId) -> Result<()> {
     let location = self.location(window)?.clone();
     self.tree_mut(&location)?.set_focus(window)
   }
 
+  /// Sets a window's stacking layer and raises it.
   pub fn set_stacking(
     &mut self,
     window: WindowId,
@@ -525,16 +629,20 @@ impl Shingle {
     self.tree_mut(&location)?.set_stacking(window, mode)
   }
 
+  /// Raises a window within its workspace.
   pub fn raise_window(&mut self, window: WindowId) -> Result<()> {
     let location = self.location(window)?.clone();
     self.tree_mut(&location)?.raise(window)
   }
 
+  /// Lowers a window within its workspace.
   pub fn lower_window(&mut self, window: WindowId) -> Result<()> {
     let location = self.location(window)?.clone();
     self.tree_mut(&location)?.lower(window)
   }
 
+  /// Moves focus within the window's workspace; see
+  /// [`TileTree::focus_directional`].
   pub fn focus_directional(
     &mut self,
     from: WindowId,
@@ -544,6 +652,8 @@ impl Shingle {
     self.tree_mut(&location)?.focus_directional(from, direction)
   }
 
+  /// Resizes a tiled window; see [`TileTree::resize_adjacent`]. Floating
+  /// windows are resized by setting their floating geometry.
   pub fn resize_window(
     &mut self,
     window: WindowId,
@@ -560,6 +670,7 @@ impl Shingle {
     )
   }
 
+  /// Sets a window's maximized flag; see [`LeafState::maximized`].
   pub fn set_maximized(
     &mut self,
     window: WindowId,
@@ -569,6 +680,7 @@ impl Shingle {
     self.tree_mut(&location)?.set_maximized(window, maximized)
   }
 
+  /// Sets a window's minimized flag; see [`TileTree::set_minimized`].
   pub fn set_minimized(
     &mut self,
     window: WindowId,
@@ -578,6 +690,11 @@ impl Shingle {
     self.tree_mut(&location)?.set_minimized(window, minimized)
   }
 
+  /// Floats a window or returns it to tiling; see [`TileTree::set_floating`].
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::InvalidWorkarea`] for empty or unrepresentable geometry.
   pub fn set_floating(
     &mut self,
     window: WindowId,
@@ -590,6 +707,7 @@ impl Shingle {
     self.tree_mut(&location)?.set_floating(window, geometry)
   }
 
+  /// Snaps a window or ends its snap; see [`TileTree::set_snapped`].
   pub fn set_snapped(
     &mut self,
     window: WindowId,
@@ -599,6 +717,7 @@ impl Shingle {
     self.tree_mut(&location)?.set_snapped(window, geometry)
   }
 
+  /// Sets a window's tiled-edges mask; see [`LeafState::tiled_edges`].
   pub fn set_tiled_edges(
     &mut self,
     window: WindowId,
@@ -608,6 +727,7 @@ impl Shingle {
     self.tree_mut(&location)?.set_tiled_edges(window, edges)
   }
 
+  /// Sets a window's fullscreen flag.
   pub fn set_fullscreen(
     &mut self,
     window: WindowId,
@@ -617,16 +737,19 @@ impl Shingle {
     self.tree_mut(&location)?.set_fullscreen(window, fullscreen)
   }
 
+  /// Sets a window's sticky flag.
   pub fn set_sticky(&mut self, window: WindowId, sticky: bool) -> Result<()> {
     let location = self.location(window)?.clone();
     self.tree_mut(&location)?.set_sticky(window, sticky)
   }
 
+  /// Sets a window's gaps.
   pub fn set_gaps(&mut self, window: WindowId, gaps: Gaps) -> Result<()> {
     let location = self.location(window)?.clone();
     self.tree_mut(&location)?.set_gaps(window, gaps)
   }
 
+  /// Returns a tiled window's placement; see [`TileTree::window_layout`].
   pub fn window_layout(&self, window: WindowId) -> Result<WindowLayout> {
     let location = self.location(window)?;
     self
@@ -634,6 +757,7 @@ impl Shingle {
       .window_layout(window)
   }
 
+  /// Updates a window's app id, as reported by its client.
   pub fn set_window_app_id(
     &mut self,
     window: WindowId,
@@ -648,6 +772,7 @@ impl Shingle {
     Ok(())
   }
 
+  /// Updates a window's title.
   pub fn set_window_title(
     &mut self,
     window: WindowId,
@@ -662,6 +787,12 @@ impl Shingle {
     Ok(())
   }
 
+  /// Sets or clears a window's parent.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::SameWindow`] if the window would become its own ancestor,
+  /// [`ShingleError::WindowNotFound`] if either window is unknown.
   pub fn set_window_parent(
     &mut self,
     window: WindowId,
@@ -695,6 +826,7 @@ impl Shingle {
     Ok(())
   }
 
+  /// Returns a window's identity, presence, location, state and parent.
   pub fn window_info(&self, window: WindowId) -> Result<WindowInfo> {
     let record = self
       .windows
@@ -722,10 +854,12 @@ impl Shingle {
     self.windows.keys().copied()
   }
 
+  /// Returns the workspace holding a window.
   pub fn window_location(&self, window: WindowId) -> Result<&WorkspaceRef> {
     self.location(window)
   }
 
+  /// Returns the placeholder windows in id order.
   pub fn placeholders(&self) -> Vec<WindowId> {
     self
       .windows
@@ -744,6 +878,12 @@ impl Shingle {
     Ok(())
   }
 
+  /// Claims a placeholder for a newly mapped client and marks it mapped.
+  ///
+  /// Only placeholders with the same app id are candidates. In id order, the
+  /// first with an equal launch id wins; failing that, if the client has a
+  /// launch id, the first placeholder without one; failing that, the lowest id.
+  /// Returns `None` if no placeholder has the app id.
   pub fn reconcile_mapped(
     &mut self,
     identity: &LaunchIdentity,
@@ -775,6 +915,8 @@ impl Shingle {
     Some(id)
   }
 
+  /// Turns a window into a placeholder when its client unmaps. It keeps its
+  /// slot until [`Shingle::reconcile_mapped`] claims it again.
   pub fn reconcile_unmapped(&mut self, window: WindowId) -> Result<()> {
     self
       .windows
@@ -784,6 +926,11 @@ impl Shingle {
     Ok(())
   }
 
+  /// Removes a placeholder from the model.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::WindowStillMapped`] for a mapped window.
   pub fn forget_placeholder(
     &mut self,
     window: WindowId,

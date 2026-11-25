@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::geometry::{Direction, Gaps, InternalEdges, Rect, SplitDirection};
 use crate::{Result, ShingleError};
 
+/// Identifies a window. Ids are nonzero and are not reused within a model; a
+/// restored session continues after the highest saved id.
 #[derive(
   Clone,
   Copy,
@@ -19,6 +21,11 @@ use crate::{Result, ShingleError};
 pub struct WindowId(pub u64);
 
 impl WindowId {
+  /// Creates an id.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::InvalidWindowId`] for zero.
   pub fn new(value: u64) -> Result<Self> {
     if value == 0 {
       return Err(ShingleError::InvalidWindowId);
@@ -26,41 +33,67 @@ impl WindowId {
     Ok(Self(value))
   }
 
+  /// Returns the raw id.
   pub const fn get(self) -> u64 {
     self.0
   }
 }
 
+/// The stacking layer of a window.
 #[derive(
   Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum StackingMode {
+  /// Stacked with ordinary windows.
   #[default]
   Normal,
+  /// Kept above normal windows.
   AlwaysOnTop,
+  /// Kept below normal windows.
   AlwaysOnBottom,
 }
 
+/// Per-window state stored in a tree leaf and persisted in sessions.
+///
+/// Floating and minimized windows keep their leaf, and so their position and
+/// weight, but take no space in the layout. When they return to tiling they get
+/// the same slot back.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeafState {
+  /// Gaps around the window's tile.
   pub gaps: Gaps,
+  /// Whether the window fills the workarea, inset by its gaps. Its tile slot is
+  /// kept.
   pub maximized: bool,
+  /// Stacking layer.
   #[serde(default)]
   pub stacking: StackingMode,
+  /// Whether the window is minimized. Minimized windows are not laid out and
+  /// cannot take focus.
   #[serde(default)]
   pub minimized: bool,
+  /// Floating geometry. `Some` takes the window out of the tiled layout.
   #[serde(default)]
   pub floating: Option<Rect>,
+  /// Whether the window is fullscreen.
   #[serde(default)]
   pub fullscreen: bool,
+  /// Whether the window is shown on every workspace.
   #[serde(default)]
   pub sticky: bool,
+  /// Snapped geometry, which replaces the tiled geometry while set. Never set
+  /// together with `floating`.
   #[serde(default)]
   pub snapped: Option<Rect>,
+  /// Geometry to return to when the snap ends: the floating or tiled geometry
+  /// from before the first snap. Only set while snapped.
   #[serde(default)]
   pub restore_geometry: Option<Rect>,
+  /// Wayfire tiled-edges mask of `wlr_edges` bits: top 1, bottom 2, left 4,
+  /// right 8. Floating sets it to 0 and tiling to 15; it can also be set
+  /// directly, and sessions keep it as set.
   #[serde(default = "default_tiled_edges")]
   pub tiled_edges: u32,
 }
@@ -86,12 +119,22 @@ impl Default for LeafState {
   }
 }
 
+/// The computed placement of one tiled window.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowLayout {
+  /// The window.
   pub window: WindowId,
+  /// The window's tile slot, without gaps. The slots of a split cover it
+  /// exactly; the last visible child takes any rounding remainder.
   pub node: Rect,
+  /// Where the window is placed: the workarea inset by the leaf's gaps when
+  /// maximized, the snapped geometry when snapped, otherwise the slot inset by
+  /// the effective gaps.
   pub geometry: Rect,
+  /// Effective gaps: outer sizes on workarea edges and `inner` on shared edges,
+  /// or the leaf's own gaps when maximized.
   pub gaps: Gaps,
+  /// Whether the window is maximized.
   pub maximized: bool,
 }
 
@@ -113,6 +156,18 @@ pub(crate) enum Node {
   Leaf(WindowId, LeafState),
 }
 
+/// The tiling tree of one workspace.
+///
+/// The root is a split whose children are leaves or nested splits, each with a
+/// nonzero weight. A visible child's share of its split is its weight over the
+/// total weight of the visible children; floating and minimized windows are not
+/// visible. Nested splits always have at least two children: removing a window
+/// collapses a split left with one child into that child, and a root left with
+/// a single split child is replaced by it, which can change
+/// [`TileTree::direction`].
+///
+/// The tree also holds the focused window, which operations keep unminimized,
+/// and the stacking order, bottom first, which lists every window exactly once.
 #[derive(Clone, Debug)]
 pub struct TileTree {
   pub(crate) root: Split,
@@ -122,6 +177,13 @@ pub struct TileTree {
 }
 
 impl TileTree {
+  /// Creates an empty tree whose root split arranges children along
+  /// `direction`.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::InvalidWorkarea`] if `workarea` is empty or
+  /// unrepresentable.
   pub fn new(direction: SplitDirection, workarea: Rect) -> Result<Self> {
     Ok(Self {
       root: Split {
@@ -134,19 +196,27 @@ impl TileTree {
     })
   }
 
+  /// Returns the rectangle the tree is laid out in.
   pub fn workarea(&self) -> Rect {
     self.workarea
   }
 
+  /// Replaces the workarea. Weights are kept, so tiles keep their proportions.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::InvalidWorkarea`], leaving the workarea unchanged.
   pub fn set_workarea(&mut self, workarea: Rect) -> Result<()> {
     self.workarea = workarea.validate()?;
     Ok(())
   }
 
+  /// Returns the root split's direction.
   pub fn direction(&self) -> SplitDirection {
     self.root.direction
   }
 
+  /// Returns the number of windows, including floating and minimized ones.
   pub fn len(&self) -> usize {
     self
       .root
@@ -156,10 +226,12 @@ impl TileTree {
       .sum()
   }
 
+  /// Returns whether the tree holds no windows.
   pub fn is_empty(&self) -> bool {
     self.root.children.is_empty()
   }
 
+  /// Returns whether the window is in the tree.
   pub fn contains(&self, window: WindowId) -> bool {
     self
       .root
@@ -168,6 +240,8 @@ impl TileTree {
       .any(|child| contains(&child.node, window))
   }
 
+  /// Returns every window in tree order: depth first, with each split's
+  /// children left to right or top to bottom.
   pub fn windows(&self) -> Vec<WindowId> {
     let mut windows = Vec::with_capacity(self.len());
     for child in &self.root.children {
@@ -176,14 +250,21 @@ impl TileTree {
     windows
   }
 
+  /// Returns the focused window, if any.
   pub fn focused(&self) -> Option<WindowId> {
     self.focused
   }
 
+  /// Returns the stacking order, bottom first.
   pub fn stack_order(&self) -> &[WindowId] {
     &self.stack
   }
 
+  /// Focuses a window without changing the stacking order.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::WindowNotFound`] if the window is absent or minimized.
   pub fn set_focus(&mut self, window: WindowId) -> Result<()> {
     if self.leaf_state(window)?.minimized {
       return Err(ShingleError::WindowNotFound(window.0));
@@ -192,6 +273,7 @@ impl TileTree {
     Ok(())
   }
 
+  /// Moves a window to the top of the stacking order.
   pub fn raise(&mut self, window: WindowId) -> Result<()> {
     let Some(index) =
       self.stack.iter().position(|candidate| *candidate == window)
@@ -203,6 +285,7 @@ impl TileTree {
     Ok(())
   }
 
+  /// Moves a window to the bottom of the stacking order.
   pub fn lower(&mut self, window: WindowId) -> Result<()> {
     let Some(index) =
       self.stack.iter().position(|candidate| *candidate == window)
@@ -214,10 +297,21 @@ impl TileTree {
     Ok(())
   }
 
+  /// Appends a window with default state; see [`TileTree::attach_with_state`].
   pub fn attach(&mut self, window: WindowId) -> Result<()> {
     self.attach_with_state(window, LeafState::default())
   }
 
+  /// Appends a window as the root split's last child.
+  ///
+  /// The new child gets the average weight of its siblings, so it takes 1/(n+1)
+  /// of the root and the existing tiles shrink in proportion. The window goes
+  /// on top of the stacking order and takes focus unless it is minimized.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::InvalidWindowId`] for id 0,
+  /// [`ShingleError::DuplicateWindow`] if the window is already present.
   pub fn attach_with_state(
     &mut self,
     window: WindowId,
@@ -242,6 +336,8 @@ impl TileTree {
     Ok(())
   }
 
+  /// Inserts a window beside `target` with default state; see
+  /// [`TileTree::attach_at_with_state`].
   pub fn attach_at(
     &mut self,
     window: WindowId,
@@ -251,6 +347,18 @@ impl TileTree {
     self.attach_at_with_state(window, LeafState::default(), target, position)
   }
 
+  /// Inserts a window on the `position` side of `target`.
+  ///
+  /// If the target's split runs along that axis, the window becomes its sibling
+  /// and takes the average share, as in [`TileTree::attach_with_state`].
+  /// Otherwise the target's slot is split into two halves on the other axis,
+  /// and the slot keeps its size. Focus and stacking change as for
+  /// [`TileTree::attach_with_state`].
+  ///
+  /// # Errors
+  ///
+  /// As [`TileTree::attach_with_state`], and [`ShingleError::WindowNotFound`]
+  /// if `target` is absent.
   pub fn attach_at_with_state(
     &mut self,
     window: WindowId,
@@ -273,6 +381,11 @@ impl TileTree {
     Ok(())
   }
 
+  /// Removes a window and returns its state.
+  ///
+  /// Its siblings grow in proportion and single-child splits collapse. If the
+  /// window had focus, focus falls back to the topmost unminimized window in
+  /// the stacking order.
   pub fn detach(&mut self, window: WindowId) -> Result<LeafState> {
     let state = self.take_leaf(window)?;
     self.flatten();
@@ -280,6 +393,14 @@ impl TileTree {
     Ok(state)
   }
 
+  /// Moves `source` to the `position` side of `target`, keeping its state; see
+  /// [`TileTree::attach_at_with_state`]. The source is raised, and focused
+  /// unless minimized.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::SameWindow`] or [`ShingleError::WindowNotFound`], leaving
+  /// the tree unchanged.
   pub fn drop(
     &mut self,
     source: WindowId,
@@ -308,6 +429,8 @@ impl TileTree {
     Ok(())
   }
 
+  /// Exchanges the slots of two windows. Each window keeps its own state, the
+  /// slots keep their sizes, and focus and stacking are unchanged.
   pub fn swap(&mut self, first: WindowId, second: WindowId) -> Result<()> {
     if first == second {
       return Err(ShingleError::SameWindow);
@@ -334,6 +457,16 @@ impl TileTree {
     Ok(())
   }
 
+  /// Moves focus from `from` to the nearest tiled window in `direction`.
+  ///
+  /// Candidates are ranked by [`Direction::score`], with ties going to the
+  /// lower id. Returns the newly focused window, or `None` with focus unchanged
+  /// if there is no window that way. Floating and minimized windows are neither
+  /// sources nor targets.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::WindowNotFound`] if `from` is not laid out.
   pub fn focus_directional(
     &mut self,
     from: WindowId,
@@ -360,6 +493,22 @@ impl TileTree {
     Ok(next)
   }
 
+  /// Moves the edge of `window` facing `direction` by `delta` pixels; a
+  /// positive delta grows the window.
+  ///
+  /// The edge is taken from the innermost split along that axis in which the
+  /// window has a visible neighbour on that side. Only the two tiles sharing
+  /// the edge change size. Both keep at least `minimum_extent`, a nested split
+  /// enough for each of its tiles, and the delta is clamped to that. Hidden
+  /// siblings are skipped and keep their share for when they return. Returns
+  /// whether anything changed.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::MinimumExtent`] if `minimum_extent` is zero or the two
+  /// tiles cannot both keep it; [`ShingleError::NoAdjacentWindow`] if there is
+  /// no such edge, which includes hidden windows;
+  /// [`ShingleError::WindowNotFound`] if the window is absent.
   pub fn resize_adjacent(
     &mut self,
     window: WindowId,
@@ -384,6 +533,7 @@ impl TileTree {
     .ok_or(ShingleError::NoAdjacentWindow)
   }
 
+  /// Sets the maximized flag.
   pub fn set_maximized(
     &mut self,
     window: WindowId,
@@ -399,6 +549,8 @@ impl TileTree {
     Ok(())
   }
 
+  /// Sets the minimized flag. Minimizing the focused window moves focus as
+  /// [`TileTree::detach`] does.
   pub fn set_minimized(
     &mut self,
     window: WindowId,
@@ -417,6 +569,11 @@ impl TileTree {
     Ok(())
   }
 
+  /// Floats the window at `geometry`, or returns it to its slot with `None`.
+  ///
+  /// Floating clears any snap and sets the tiled-edges mask to 0; tiling sets
+  /// it to 15. The geometry is not validated here;
+  /// [`Shingle::set_floating`](crate::Shingle::set_floating) validates it.
   pub fn set_floating(
     &mut self,
     window: WindowId,
@@ -437,6 +594,15 @@ impl TileTree {
     Ok(())
   }
 
+  /// Snaps the window to `geometry`, or ends the snap with `None`.
+  ///
+  /// The first snap records the current floating or tiled geometry as restore
+  /// geometry, and later snaps keep it. Snapping clears floating, maximized and
+  /// fullscreen; ending the snap clears the restore geometry.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::InvalidWorkarea`] for empty or unrepresentable geometry.
   pub fn set_snapped(
     &mut self,
     window: WindowId,
@@ -472,6 +638,11 @@ impl TileTree {
     Ok(())
   }
 
+  /// Sets the tiled-edges mask.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::InvalidTiledEdges`] above 15.
   pub fn set_tiled_edges(
     &mut self,
     window: WindowId,
@@ -490,6 +661,7 @@ impl TileTree {
     Ok(())
   }
 
+  /// Sets the fullscreen flag.
   pub fn set_fullscreen(
     &mut self,
     window: WindowId,
@@ -505,6 +677,7 @@ impl TileTree {
     Ok(())
   }
 
+  /// Sets the sticky flag.
   pub fn set_sticky(&mut self, window: WindowId, sticky: bool) -> Result<()> {
     let (_, state) = find_leaf_mut(&mut self.root, window)
       .and_then(|node| match node {
@@ -516,6 +689,7 @@ impl TileTree {
     Ok(())
   }
 
+  /// Sets the stacking layer and raises the window.
   pub fn set_stacking(
     &mut self,
     window: WindowId,
@@ -531,6 +705,7 @@ impl TileTree {
     self.raise(window)
   }
 
+  /// Sets the window's gaps.
   pub fn set_gaps(&mut self, window: WindowId, gaps: Gaps) -> Result<()> {
     let (_, state) = find_leaf_mut(&mut self.root, window)
       .and_then(|node| match node {
@@ -542,6 +717,7 @@ impl TileTree {
     Ok(())
   }
 
+  /// Returns a copy of the window's state.
   pub fn leaf_state(&self, window: WindowId) -> Result<LeafState> {
     find_leaf(&self.root, window)
       .and_then(|node| match node {
@@ -551,6 +727,9 @@ impl TileTree {
       .ok_or(ShingleError::WindowNotFound(window.0))
   }
 
+  /// Computes the placement of every tiled window, in tree order. Floating and
+  /// minimized windows are left out, and their share goes to their visible
+  /// siblings.
   pub fn layout(&self) -> Vec<WindowLayout> {
     let mut layouts = Vec::with_capacity(self.len());
     layout_children(
@@ -563,6 +742,12 @@ impl TileTree {
     layouts
   }
 
+  /// Returns one window's placement.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::WindowNotFound`] if the window is absent, floating or
+  /// minimized.
   pub fn window_layout(&self, window: WindowId) -> Result<WindowLayout> {
     self
       .layout()
@@ -571,6 +756,7 @@ impl TileTree {
       .ok_or(ShingleError::WindowNotFound(window.0))
   }
 
+  /// Returns the tiled window whose slot contains the point.
   pub fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
     self.layout().into_iter().find_map(|layout| {
       let rect = layout.node;
@@ -582,6 +768,9 @@ impl TileTree {
     })
   }
 
+  /// Removes empty splits, replaces single-child splits with their child and
+  /// promotes a lone root child split to root. Every mutating operation already
+  /// does this.
   pub fn flatten(&mut self) {
     let children = std::mem::take(&mut self.root.children);
     self.root.children = children

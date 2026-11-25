@@ -14,68 +14,114 @@ use crate::{
   SplitDirection, TileTree, WindowId, WorkspaceId, WorkspaceRef,
 };
 
+/// Version written to new snapshots and the only one accepted when restoring.
 pub const SNAPSHOT_VERSION: u32 = 1;
 const MAX_TREE_DEPTH: usize = 64;
 const MAX_WINDOWS: usize = 65_536;
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// The serializable form of a [`Shingle`] model.
+///
+/// A snapshot is valid only if it restores; [`SessionSnapshot::validate`]
+/// checks the same invariants as restoring. Window presence is not stored, so
+/// every window restores as a placeholder.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
+  /// Must be [`SNAPSHOT_VERSION`].
   pub version: u32,
+  /// Outputs with unique, nonempty ids, sorted when produced by
+  /// [`Shingle::snapshot`].
   pub outputs: Vec<OutputSnapshot>,
+  /// One record per window, each matching exactly one leaf in one workspace
+  /// tree.
   pub windows: Vec<WindowSnapshot>,
 }
 
+/// One output's workarea, workspaces and current workspace.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputSnapshot {
+  /// The output.
   pub output: OutputId,
+  /// The output's workarea; must be valid.
   pub workarea: Rect,
+  /// The current workspace; must be one of `workspaces`.
   pub current_workspace: WorkspaceId,
+  /// At least one workspace, with unique ids.
   pub workspaces: Vec<WorkspaceSnapshot>,
 }
 
+/// One workspace's tiling tree, focus and stacking order.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSnapshot {
+  /// The workspace.
   pub workspace: WorkspaceId,
+  /// The root split. It may be empty; nested splits need at least two children,
+  /// and nesting is limited to 64 levels.
   pub root: SplitSnapshot,
+  /// The focused window, which must be a leaf of this tree.
   pub focused: Option<WindowId>,
+  /// Stacking order, bottom first, listing every leaf of this tree exactly
+  /// once.
   pub stack: Vec<WindowId>,
 }
 
+/// A split and its children.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SplitSnapshot {
+  /// The axis the children are arranged on.
   pub direction: SplitDirection,
+  /// The children, in order.
   pub children: Vec<ChildSnapshot>,
 }
 
+/// A child of a split with its weight.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChildSnapshot {
+  /// Nonzero relative size. The child's share is its weight over the total
+  /// weight of its visible siblings.
   pub weight: u64,
+  /// The child node.
   pub node: NodeSnapshot,
 }
 
+/// A tree node, tagged by `kind` in JSON.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NodeSnapshot {
+  /// A nested split.
   Split(SplitSnapshot),
-  Leaf { window: WindowId, state: LeafState },
+  /// A window's leaf.
+  Leaf {
+    /// The window, which needs a nonzero id that occurs once in the session and
+    /// a matching [`WindowSnapshot`].
+    window: WindowId,
+    /// The window's state. Floating and snapped are exclusive, restore geometry
+    /// requires a snap, geometry must be valid and the tiled-edges mask must
+    /// not exceed 15.
+    state: LeafState,
+  },
 }
 
+/// A window's identity, stored separately from its leaf.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowSnapshot {
+  /// The window.
   pub id: WindowId,
+  /// How the window was launched.
   pub identity: LaunchIdentity,
+  /// Parent window, which must exist and must not form a cycle.
   #[serde(default)]
   pub parent: Option<WindowId>,
 }
 
 impl Shingle {
+  /// Captures the whole model. Presence is not captured.
   pub fn snapshot(&self) -> SessionSnapshot {
     let outputs = self
       .outputs
@@ -112,23 +158,48 @@ impl Shingle {
     }
   }
 
+  /// Serializes the model as pretty-printed JSON ending in a newline.
   pub fn to_json(&self) -> Result<String> {
     self.snapshot().to_json()
   }
 
+  /// Restores a model from JSON.
+  ///
+  /// Tile order, weights, state, focus, stacking and current workspaces come
+  /// back exactly. Every window starts as a placeholder, and new window ids
+  /// continue after the highest restored id.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::Json`] for invalid JSON or unknown fields,
+  /// [`ShingleError::UnsupportedSnapshotVersion`] or
+  /// [`ShingleError::MalformedSnapshot`].
   pub fn from_json(json: &str) -> Result<Self> {
     let snapshot = SessionSnapshot::from_json(json)?;
     Self::from_snapshot(snapshot)
   }
 
+  /// Restores a model from a snapshot; see [`Shingle::from_json`].
   pub fn from_snapshot(snapshot: SessionSnapshot) -> Result<Self> {
     restore_snapshot(snapshot)
   }
 
+  /// Writes the model to `path` atomically.
+  ///
+  /// The JSON is written to a temporary file in the same directory, synced and
+  /// renamed over `path`, then the directory is synced. On failure the
+  /// temporary file is removed and `path` is left as it was.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::InvalidPersistencePath`] if `path` has no file name,
+  /// [`ShingleError::Io`] if writing fails.
   pub fn save_atomic(&self, path: impl AsRef<Path>) -> Result<()> {
     self.snapshot().save_atomic(path)
   }
 
+  /// Reads and restores a model saved by [`Shingle::save_atomic`]; see
+  /// [`Shingle::from_json`].
   pub fn load(path: impl AsRef<Path>) -> Result<Self> {
     let mut bytes = Vec::new();
     File::open(path)?.read_to_end(&mut bytes)?;
@@ -138,21 +209,26 @@ impl Shingle {
 }
 
 impl SessionSnapshot {
+  /// Parses a snapshot and checks that it restores.
   pub fn from_json(json: &str) -> Result<Self> {
     let snapshot: Self = serde_json::from_str(json)?;
     restore_snapshot(snapshot.clone())?;
     Ok(snapshot)
   }
 
+  /// Checks that the snapshot would restore.
   pub fn validate(&self) -> Result<()> {
     restore_snapshot(self.clone()).map(|_| ())
   }
 
+  /// Validates the snapshot and serializes it as pretty-printed JSON.
   pub fn to_json(&self) -> Result<String> {
     self.validate()?;
     serialize_snapshot(self)
   }
 
+  /// Validates the snapshot and writes it atomically; see
+  /// [`Shingle::save_atomic`].
   pub fn save_atomic(&self, path: impl AsRef<Path>) -> Result<()> {
     self.validate()?;
     let json = serialize_snapshot(self)?;
