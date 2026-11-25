@@ -2429,6 +2429,19 @@ mod tests {
   }
 
   #[test]
+  fn unknown_zoom_interpolation_names_its_line() {
+    let error = ShingleConfig::parse(
+      "[zoom]\n\ninterpolation_method = 5\n",
+      ConfigFormat::Wayfire,
+    )
+    .unwrap_err();
+    assert_eq!(
+      error.to_string(),
+      "invalid config: line 3: unknown zoom interpolation"
+    );
+  }
+
+  #[test]
   fn scale_imports_duration() {
     let wayfire = ShingleConfig::parse(
       "[scale]\nduration = 250ms\n",

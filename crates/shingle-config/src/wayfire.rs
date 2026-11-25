@@ -402,7 +402,7 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
           1 => "nearest".into(),
           _ => {
             return Err(ConfigError::Invalid(format!(
-              "line {line}: unknown zoom interpolation"
+              "line {line_number}: unknown zoom interpolation"
             )));
           }
         };
