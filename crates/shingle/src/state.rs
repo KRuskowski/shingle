@@ -1228,6 +1228,7 @@ impl CompositorState {
       surface.pending.scale = pending.scale;
       surface.pending.transform = pending.transform;
       crate::fifo::defer(self, object, pending);
+      crate::commit_timing::latch(self, object);
       return;
     }
     if crate::commit_timing::commit(self, object) {

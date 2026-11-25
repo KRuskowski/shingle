@@ -152,17 +152,17 @@ impl Dispatch<WpFifoManagerV1, ()> for CompositorState {
       wp_fifo_manager_v1::Request::GetFifo { id, surface } => {
         let fifo = data_init.init(id, ());
         let surface = Resource::id(&surface);
-        if state.fifo.surfaces.contains_key(&surface) {
+        // Only a live FIFO object counts: a client may destroy its object
+        // and create a new one, as Mesa's Vulkan WSI does when it recreates
+        // a swapchain. The surface keeps its barrier state meanwhile.
+        if state.fifo.objects.values().any(|object| *object == surface) {
           resource.post_error(
             wp_fifo_manager_v1::Error::AlreadyExists,
             "surface already has a FIFO object",
           );
           return;
         }
-        state
-          .fifo
-          .surfaces
-          .insert(surface.clone(), Default::default());
+        state.fifo.surfaces.entry(surface.clone()).or_default();
         state.fifo.objects.insert(Resource::id(&fifo), surface);
       }
       wp_fifo_manager_v1::Request::Destroy => {}
@@ -211,5 +211,32 @@ impl Dispatch<WpFifoV1, ()> for CompositorState {
     _data: &(),
   ) {
     state.fifo.objects.remove(&Resource::id(resource));
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use wayland_client::protocol::wl_compositor::WlCompositor;
+  use wayland_protocols::wp::fifo::v1::client::wp_fifo_manager_v1;
+
+  use crate::{test_client::TestClient, tests::test_compositor};
+
+  #[test]
+  fn a_surface_can_get_a_new_fifo_after_destroying_the_old_one() {
+    let (mut compositor, path) = test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let wl_compositor = client.bind::<WlCompositor>(4);
+    let manager = client.bind::<wp_fifo_manager_v1::WpFifoManagerV1>(1);
+    let surface = wl_compositor.create_surface(&client.handle, ());
+    let fifo = manager.get_fifo(&surface, &client.handle, ());
+    fifo.set_barrier();
+    surface.commit();
+    client.roundtrip(&mut compositor);
+    fifo.destroy();
+    let fifo = manager.get_fifo(&surface, &client.handle, ());
+    fifo.wait_barrier();
+    surface.commit();
+    // A protocol error would end the connection and fail the round trip.
+    client.roundtrip(&mut compositor);
   }
 }

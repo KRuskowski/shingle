@@ -18,7 +18,13 @@ use wayland_client::{
   },
 };
 use wayland_protocols::{
-  wp::presentation_time::client::{wp_presentation, wp_presentation_feedback},
+  wp::{
+    commit_timing::v1::client::{
+      wp_commit_timer_v1, wp_commit_timing_manager_v1,
+    },
+    fifo::v1::client::{wp_fifo_manager_v1, wp_fifo_v1},
+    presentation_time::client::{wp_presentation, wp_presentation_feedback},
+  },
   xdg::{
     shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
     xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1},
@@ -517,4 +523,8 @@ ignore_events!(
   zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
   zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
   zwp_input_method_v2::ZwpInputMethodV2,
+  wp_fifo_manager_v1::WpFifoManagerV1,
+  wp_fifo_v1::WpFifoV1,
+  wp_commit_timing_manager_v1::WpCommitTimingManagerV1,
+  wp_commit_timer_v1::WpCommitTimerV1,
 );
