@@ -23,6 +23,8 @@
 | Tiling order, focus, masks and splits | `crates/shingle-core/src/tree.rs` |
 | Session snapshot format | `crates/shingle-core/src/session.rs` |
 | Public compositor API and renderer events | `crates/shingle/src/lib.rs` |
+| Protocol timestamps (`CLOCK_MONOTONIC`) | `crates/shingle/src/clock.rs` |
+| In-process Wayland test client | `crates/shingle/src/test_client.rs` |
 | Shared state and workspace transitions | `crates/shingle/src/state.rs` |
 | Keymap, focus, input routing | `crates/shingle/src/input.rs` |
 | Seat devices, device gating, `input/*` IPC | `crates/shingle/src/input_device.rs` |

@@ -2,7 +2,7 @@
 
 Status: accepted with the operator's [decisions](#decisions), 2026-11-25. Roadmap item "Native backend" ([roadmap.md](../roadmap.md#3-native-backend)).
 
-Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit). This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). Nothing here is implemented yet.
+Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit). This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-2 is implemented (see [its entry](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor) for where the code differs from this design); the rest is not.
 
 Line numbers refer to branch `shingle-native-design` at `d2568d2`. Crate versions and dates were read from crates.io and GitHub on 2026-11-25; crate APIs were read from the crate sources (wgpu, drm, calloop and xkbcommon from `~/.cargo/registry`, the others from their published `.crate` files).
 
@@ -188,7 +188,7 @@ This replaces the fixed 16 ms `WaitUntil` (main.rs:4540) and the hard-coded `16_
 
 - wlr-gamma-control stays in the shader LUT (`Renderer::set_gamma_ramp`), so both scanout paths and nested behave the same. Moving it to the KMS `GAMMA_LUT` is optional later.
 - `Event::DpmsChanged` commits `ACTIVE=0` or `ACTIVE=1` on the CRTC.
-- The cursor is already composited as a `SurfaceRole::Cursor` snapshot (crates/shingle/src/state.rs:718). Native keeps it that way first and adds a default `left_ptr` when no client cursor is set. A hardware cursor plane is NB-10.
+- The cursor is already composited as a `SurfaceRole::Cursor` snapshot (crates/shingle/src/state.rs:718). Native keeps it that way first and turns on `Compositor::set_default_cursor(true)` (NB-2), which draws the theme's `default` arrow (falling back to `left_ptr`) when no client cursor applies. A hardware cursor plane is NB-10.
 
 ### `shingle-render` without winit
 
@@ -289,7 +289,7 @@ GPU textures survive the switch, since the Vulkan device does not depend on DRM 
 | `GestureEvent::{Swipe, Pinch, Hold}` | `Swipe`, `Pinch`, `Hold` | `pointer_swipe_*`, `pointer_pinch_*`, `pointer_hold_*` (lib.rs:841-877). Nested never feeds these, so touchpad gestures reach clients for the first time. |
 | `SwitchEvent`, tablet events | ignored | Shingle has no tablet protocol yet. |
 
-All `time_usec` values are passed through, so clients see libinput timestamps instead of `timestamp(state)` (crates/shingle/src/input.rs:1556). This needs time-taking variants of the entry points; `forward_keyboard_key` (input.rs:1210) already exists internally.
+All `time_usec` values are passed through, so clients see libinput timestamps instead of the compositor's own clock. The frontend calls `Compositor::set_input_time(Some(Duration::from_micros(time_usec)))` before feeding an event and `set_input_time(None)` afterwards (NB-2). Without a backend time, input timestamps also come from `CLOCK_MONOTONIC`, the clock libinput uses, so both sources share a base.
 
 **Pointer acceleration and device configuration.**
 
@@ -331,9 +331,10 @@ All `time_usec` values are passed through, so clients see libinput timestamps in
 **Compositor output description.**
 
 - Today the output is hard-coded as `HEADLESS-1`, 1280x720, 60 Hz, 310x175 mm (crates/shingle/src/lib.rs:80-82, state.rs:241, state.rs:1748-1781, state.rs:889, state.rs:965, xdg_output.rs:25, output_management.rs:153).
-- NB-2 adds `Compositor::set_output_info(OutputInfo { name, make, model, serial, physical_mm, modes, current_mode, subpixel })`, used for `wl_output.geometry`/`mode`/`name`/`description`, xdg-output and wlr-output-management. The default stays `HEADLESS-1` for nested and headless use.
+- NB-2 added `Compositor::set_output_info(OutputInfo { name, make, model, serial, physical_size_mm, subpixel, refresh_mhz })`, used for `wl_output.geometry`/`mode`/`name`/`description`, xdg-output, wlr-output-management, ext-workspace ids and the IPC output name. The default stays `HEADLESS-1` for nested and headless use. The mode list and current-mode index of the original design are left to NB-9, which is the first step that offers more than one mode to wlr-output-management; until then the mode clients see is the output rectangle at `refresh_mhz`.
+- A bound `wl_output` (and xdg-output and output-management head) keeps the name it was first sent, because the protocols send an output's name once. The native backend therefore describes its output before the first `dispatch_pending`, and NB-9 recreates the globals when the enabled output changes.
 - `set_output` (lib.rs:1654) keeps receiving the logical rectangle from `logical_output_size` (lib.rs:1583).
-- The current core output id (`OutputId::new(OUTPUT_NAME)`, state.rs:241) is renamed to the connector name when the first output is described, so sessions persist per connector name, which multi-output needs anyway.
+- The current core output id (`OutputId::new(OUTPUT_NAME)`, state.rs:241) is to be renamed to the connector name when the first output is described, so sessions persist per connector name, which multi-output needs anyway. NB-2 does not do this yet: `shingle-core` has no output rename, and renaming decides which saved session a native start restores, so it moves to NB-9 together with hotplug.
 
 **Hotplug.**
 
@@ -380,7 +381,7 @@ Diagnostics go to stderr and to `$XDG_STATE_HOME/shingle/native.log`, because st
 | Page flip never completes | No `PageFlip` within 1 s of a commit | Log, drop the pending state and do a blocking `ALLOW_MODESET` commit. After three consecutive timeouts, save and exit 2. |
 | GPU device lost or hung | `set_device_lost_callback` fires, `poll` returns an error, or the 100 ms wait times out three times in a row | Drop the `GpuContext` and scanout and recreate them. The texture cache is cleared and refilled from `visible_surfaces()` snapshots, which already carry their RGBA. After three failures within 60 s, save the session and exit 2. |
 | Output unplugged | udev hotplug | See [5](#5-outputs). |
-| SIGINT or SIGTERM | The `Compositor` signalfd sets `shutdown` | `Frontend` checks the new `Compositor::shutdown_requested()` after each dispatch, saves and exits 0. |
+| SIGINT or SIGTERM | The `Compositor` signalfd sets `shutdown` | `Frontend` checks `Compositor::shutdown_requested()` (NB-2) after each dispatch, saves and exits 0. |
 | Panic | Panic hook | Log, then unwind. libseat and fbdev restore the TTY. |
 | SIGKILL, abort or segfault | none | The seat daemon closes the session's devices and restores the VT, and the kernel restores the fbdev console on the last DRM close. The operator gets the TTY back, or can switch VT with Ctrl+Alt+Fn, which the seat daemon handles once Shingle is gone. |
 
@@ -392,7 +393,7 @@ Diagnostics go to stderr and to `$XDG_STATE_HOME/shingle/native.log`, because st
 
 A deliberate design point: no code path in Shingle puts the VT into graphics mode itself.
 
-**A bug this design found and fixes.** `Compositor::with_core` installs a calloop `Signals` source for SIGINT and SIGTERM (crates/shingle/src/lib.rs:496-502). That source blocks both signals and only sets `state.shutdown`. `shingle-nested` never reads that flag (there is no accessor) and exits only on its own `quit` flag (main.rs:4518). That is why nested ignored SIGTERM and SIGINT in the 2026-11-25 run (roadmap item "Host input checks after the rename"). `Compositor::request_quit` (lib.rs:731) has the same problem. NB-2 adds `shutdown_requested()` and makes nested honour it.
+**A bug this design found and fixes.** `Compositor::with_core` installs a calloop `Signals` source for SIGINT and SIGTERM (crates/shingle/src/lib.rs:496-502). That source blocks both signals and only sets `state.shutdown`. `shingle-nested` never reads that flag (there is no accessor) and exits only on its own `quit` flag (main.rs:4518). That is why nested ignored SIGTERM and SIGINT in the 2026-11-25 run (roadmap item "Host input checks after the rename"). `Compositor::request_quit` (lib.rs:731) has the same problem. NB-2 added `shutdown_requested()` and made nested honour it; a real nested run then exited with status 0 within about 0.1 s on both signals and saved its session ([status.md](../status.md#with-real-clients)).
 
 ## 7. Testing
 
@@ -476,6 +477,46 @@ Acceptance:
 - Nested exits cleanly on SIGTERM and SIGINT, verified with a real run. This closes that part of the real-client verification roadmap item.
 - With no output info set, `wl_output` still reports `HEADLESS-1`.
 
+Done on branch `shingle-compositor-host-api`. The API as built (crates/shingle/src/lib.rs):
+
+```rust
+impl AsFd for Compositor;
+pub fn shutdown_requested(&self) -> bool;
+pub fn set_output_info(&mut self, info: OutputInfo);
+pub fn output_info(&self) -> &OutputInfo;
+pub fn frame_presented(&mut self, info: PresentInfo);
+pub fn set_input_time(&mut self, time: Option<Duration>);
+pub fn set_session_active(&mut self, active: bool);
+pub fn set_default_cursor(&mut self, enabled: bool);
+
+pub struct OutputInfo {
+  pub name: String,
+  pub make: String,
+  pub model: String,
+  pub serial: Option<String>,
+  pub physical_size_mm: (u32, u32),
+  pub subpixel: wl_output::Subpixel,
+  pub refresh_mhz: u32,
+}
+pub struct PresentInfo {
+  pub time: Duration,
+  pub refresh_ns: u32,
+  pub seq: u64,
+  pub flags: PresentationFlags,
+}
+// wp_presentation_feedback::Kind, re-exported.
+pub use ...::wp_presentation_feedback::Kind as PresentationFlags;
+```
+
+Where the code differs from the plan above, and why:
+
+- **Timestamps.** Instead of a timestamped variant of every entry point (about fourteen methods), one `set_input_time(Option<Duration>)` sets the `CLOCK_MONOTONIC` time used by all seat entry points until it is cleared. The frontend's `handle_input` sets it from `InputEvent::time_usec` and clears it at the end, so bindings and compositor actions triggered by the event share its time. Default input timestamps, frame callback times and relative-pointer `utime` now use `CLOCK_MONOTONIC` instead of the time since startup, so libinput times and the compositor's own share a base, as in Wayfire.
+- **`AsFd`.** The descriptor is calloop's epoll fd, as planned. calloop keeps its timers in the poll timeout, though, so the 50 ms tick that runs idle timeouts and serves IPC (IPC is polled, not event-driven) would never have made that fd readable. The tick is now a timerfd source. A backend polling the fd therefore wakes at least every 50 ms; IPC latency stays up to 50 ms as before.
+- **`OutputInfo`.** No mode list or current-mode index yet, and no core output rename; see [5](#5-outputs).
+- **`frame_presented`.** `frame()` stays for nested and is `frame_presented` with the current time, the `OutputInfo` refresh rate, sequence 0 and no flags. The default 60 Hz refresh is still reported as 16 666 667 ns.
+- **`set_session_active(false)`** also drops seat and STIPC input until the session is active again and makes `frame_presented` a no-op, so pending presentation feedback waits for the first frame after resume instead of being discarded.
+- **Default cursor.** A method, `set_default_cursor(bool)`, rather than a `Config` option, because it is a property of the backend, not user configuration, and `apply_config` would otherwise reset it on every reload.
+
 ### NB-3 `shingle-frontend-extract`: create the shared crate with the pure modules
 
 Create `crates/shingle-frontend`. Move into it `expo.rs`, `workspace_transition.rs`, `extra_gestures.rs`, `scale_title.rs`, `icon_theme.rs`, the Scale free functions, the binding helpers and a new xkb-based `keyboard` module with the evdev name table. Switch nested's key handling to the shared keyboard module.
@@ -547,7 +588,7 @@ Acceptance:
 
 ### NB-9 `shingle-native-outputs`: hotplug and mode configuration
 
-Add udev DRM hotplug, connector diffing, switching the enabled output, headless waiting with no connector, EDID make/model/serial, `OutputConfig` gaining `name`, `mode` (auto/off/highres/highrr/explicit with refresh) and `vrr`, the importer handling `@refresh`, and `TEST_ONLY` for output-management `apply`.
+Add udev DRM hotplug, connector diffing, switching the enabled output, headless waiting with no connector, EDID make/model/serial, `OutputConfig` gaining `name`, `mode` (auto/off/highres/highrr/explicit with refresh) and `vrr`, the importer handling `@refresh`, and `TEST_ONLY` for output-management `apply`. From NB-2 it also takes the parts of output description that were deferred: the mode list in `OutputInfo` for wlr-output-management, renaming the core output to the connector name, and recreating the `wl_output` global when the enabled output changes, since a bound output cannot be renamed.
 
 Acceptance:
 

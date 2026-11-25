@@ -171,7 +171,9 @@ The `security_context.privileged_protocols` comma-separated list is imported fro
 
 `wp_tearing_control_v1` applies asynchronous or vertical-sync hints on surface commit. When any visible surface requests asynchronous presentation, the nested wgpu frontend selects Immediate mode if the host supports it. Otherwise it keeps FIFO presentation. Destroying the control schedules a return to vertical sync.
 
-`wp_fifo_v1` supports refresh barriers and wait-constrained commits. Eligible updates are coalesced in order and applied by `Compositor::frame()` before frame callbacks. Synchronized subsurfaces, invisible surfaces, and tearing-enabled surfaces bypass the barrier as permitted by the protocol. Destroying a FIFO object does not cancel state already submitted.
+`wp_fifo_v1` supports refresh barriers and wait-constrained commits. Eligible updates are coalesced in order and applied by `Compositor::frame()` or `frame_presented()` before frame callbacks. Synchronized subsurfaces, invisible surfaces, and tearing-enabled surfaces bypass the barrier as permitted by the protocol. Destroying a FIFO object does not cancel state already submitted.
+
+`wp_presentation` reports `CLOCK_MONOTONIC`. Nested feedback carries the time the frame was drawn, the refresh interval from the output's refresh rate (60 Hz by default), no sequence number and no flags; a backend passes page-flip timestamps, sequence numbers and flags to `Compositor::frame_presented`. Frame callbacks carry the same time in milliseconds, and feedback for surfaces that were not visible is discarded.
 
 `wp_commit_timing_v1` accepts monotonic target timestamps and applies updates as closely as possible without presenting early. Pending updates preserve content order, share FIFO frame processing, and drive nested redraw scheduling. Invalid or duplicate timestamps and destroyed surfaces use the protocol's error codes.
 
