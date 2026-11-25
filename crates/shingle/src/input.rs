@@ -80,8 +80,8 @@ pub(crate) struct InputState {
 
 impl InputState {
   pub(crate) fn new(locked_modifiers: u32) -> Result<Self, String> {
-    let (keymap, keymap_size) = create_keymap(DEFAULT_KEYMAP)?;
-    let layouts = keymap_layouts(DEFAULT_KEYMAP)?;
+    let (compiled, layouts) = compile_keymap(DEFAULT_KEYMAP)?;
+    let (keymap, keymap_size) = create_keymap(&compiled)?;
     Ok(Self {
       keyboards: HashMap::new(),
       pointers: HashMap::new(),
@@ -165,8 +165,8 @@ pub(crate) fn set_keymap(
   if keymap.as_bytes().contains(&0) {
     return Err("keymap cannot contain an interior null byte".into());
   }
-  let layouts = keymap_layouts(keymap)?;
-  let (fd, size) = create_keymap(keymap)?;
+  let (compiled, layouts) = compile_keymap(keymap)?;
+  let (fd, size) = create_keymap(&compiled)?;
   state.input.keymap = fd;
   state.input.keymap_size = size;
   state.input.layouts = layouts;
@@ -183,7 +183,15 @@ pub(crate) fn keyboard_layouts(state: &CompositorState) -> &[String] {
   &state.input.layouts
 }
 
-fn keymap_layouts(keymap: &str) -> Result<Vec<String>, String> {
+/// Compiles an XKB keymap, which may use `include` statements, and returns
+/// the compiled text clients receive with its layout names.
+///
+/// Clients get the compiled form, which needs no XKB data on their side, as
+/// from wlroots compositors: Wayfire compiles the configured keymap in
+/// `wf::keyboard_t::reload_input_options` (`src/core/seat/keyboard.cpp`)
+/// and hands it to `wlr_keyboard_set_keymap`, which sends the text of
+/// `xkb_keymap_get_as_string`.
+fn compile_keymap(keymap: &str) -> Result<(String, Vec<String>), String> {
   use xkbcommon::xkb;
   let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
   let keymap = xkb::Keymap::new_from_string(
@@ -196,24 +204,27 @@ fn keymap_layouts(keymap: &str) -> Result<Vec<String>, String> {
   if keymap.num_layouts() == 0 {
     return Err("XKB keymap contains no layouts".into());
   }
-  Ok(
-    (0..keymap.num_layouts())
-      .map(|index| {
-        let name = keymap.layout_get_name(index);
-        if name.is_empty() {
-          "unknown".into()
-        } else {
-          name.into()
-        }
-      })
-      .collect(),
-  )
+  let layouts = (0..keymap.num_layouts())
+    .map(|index| {
+      let name = keymap.layout_get_name(index);
+      if name.is_empty() {
+        "unknown".into()
+      } else {
+        name.into()
+      }
+    })
+    .collect();
+  let compiled = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+  if compiled.is_empty() {
+    return Err("failed to serialize XKB keymap".into());
+  }
+  Ok((compiled, layouts))
 }
 
 fn create_keymap(keymap: &str) -> Result<(OwnedFd, u32), String> {
   let mut bytes = keymap.as_bytes().to_vec();
   bytes.push(0);
-  let fd = memfd_create("shingle-us-keymap", MemfdFlags::CLOEXEC)
+  let fd = memfd_create("shingle-keymap", MemfdFlags::CLOEXEC)
     .map_err(|error| error.to_string())?;
   let mut written = 0;
   while written < bytes.len() {
@@ -1626,6 +1637,110 @@ mod tests {
     assert_eq!(timestamp_usec(&state), 123_456_789);
     set_event_time(&mut state, None);
     assert_ne!(timestamp_usec(&state), 123_456_789);
+  }
+
+  /// A `us,de` keymap as `include` statements, as shingle-config writes it.
+  const US_DE: &str = r#"xkb_keymap {
+  xkb_keycodes { include "evdev+aliases(qwerty)" };
+  xkb_types { include "complete" };
+  xkb_compatibility { include "complete" };
+  xkb_symbols { include "pc+us+de:2+inet(evdev)" };
+};"#;
+
+  /// Compiles a keymap a client received with no XKB data at all, as a
+  /// client without the compositor's XKB files would, and returns its
+  /// layout names.
+  fn compiled_layouts(keymap: &str) -> Vec<String> {
+    use xkbcommon::xkb;
+    assert!(
+      !keymap.contains("include"),
+      "the keymap is not compiled:\n{keymap}"
+    );
+    let context = xkb::Context::new(
+      xkb::CONTEXT_NO_DEFAULT_INCLUDES | xkb::CONTEXT_NO_ENVIRONMENT_NAMES,
+    );
+    let keymap = xkb::Keymap::new_from_string(
+      &context,
+      keymap.to_owned(),
+      xkb::KEYMAP_FORMAT_TEXT_V1,
+      xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+    .expect("the keymap compiles without XKB data");
+    (0..keymap.num_layouts())
+      .map(|index| keymap.layout_get_name(index).to_owned())
+      .collect()
+  }
+
+  fn us_de() -> Vec<String> {
+    vec!["English (US)".to_owned(), "German".to_owned()]
+  }
+
+  #[test]
+  fn wl_keyboard_receives_compiled_keymaps() {
+    use wayland_client::protocol::wl_seat::WlSeat;
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client =
+      crate::test_client::TestClient::connect(&mut compositor, &path);
+    let seat = client.bind::<WlSeat>(7);
+    let _keyboard = seat.get_keyboard(&client.handle, ());
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.keymaps.len(), 1);
+    assert_eq!(
+      compiled_layouts(&client.events.keymaps[0]),
+      vec!["English (US)".to_owned()]
+    );
+
+    // A live config reload sends the new keymap to bound keyboards.
+    compositor.set_keymap(US_DE).unwrap();
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.keymaps.len(), 2);
+    assert_eq!(compiled_layouts(&client.events.keymaps[1]), us_de());
+  }
+
+  #[test]
+  fn virtual_keyboard_keymaps_reach_clients_compiled() {
+    use wayland_client::protocol::wl_seat::WlSeat;
+    use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::
+      zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client =
+      crate::test_client::TestClient::connect(&mut compositor, &path);
+    let seat = client.bind::<WlSeat>(7);
+    let _keyboard = seat.get_keyboard(&client.handle, ());
+    let manager = client.bind::<ZwpVirtualKeyboardManagerV1>(1);
+    let virtual_keyboard =
+      manager.create_virtual_keyboard(&seat, &client.handle, ());
+    let fd = memfd_create("shingle-test-keymap", MemfdFlags::CLOEXEC).unwrap();
+    rustix::io::pwrite(&fd, US_DE.as_bytes(), 0).unwrap();
+    virtual_keyboard.keymap(1, fd.as_fd(), US_DE.len() as u32);
+    client.roundtrip(&mut compositor);
+    let keymap = client.events.keymaps.last().expect("a keymap was sent");
+    assert_eq!(compiled_layouts(keymap), us_de());
+  }
+
+  #[test]
+  fn input_method_keyboard_grabs_receive_compiled_keymaps() {
+    use wayland_client::protocol::wl_seat::WlSeat;
+    use wayland_protocols_misc::zwp_input_method_v2::client::
+      zwp_input_method_manager_v2::ZwpInputMethodManagerV2;
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client =
+      crate::test_client::TestClient::connect(&mut compositor, &path);
+    let seat = client.bind::<WlSeat>(7);
+    let manager = client.bind::<ZwpInputMethodManagerV2>(1);
+    let input_method = manager.get_input_method(&seat, &client.handle, ());
+    let _grab = input_method.grab_keyboard(&client.handle, ());
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.grab_keymaps.len(), 1);
+    assert_eq!(
+      compiled_layouts(&client.events.grab_keymaps[0]),
+      vec!["English (US)".to_owned()]
+    );
+
+    compositor.set_keymap(US_DE).unwrap();
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.grab_keymaps.len(), 2);
+    assert_eq!(compiled_layouts(&client.events.grab_keymaps[1]), us_de());
   }
 
   #[test]
