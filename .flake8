@@ -1,0 +1,6 @@
+[flake8]
+# Google style with two-space indents and one blank line between
+# top-level definitions (CLAUDE.md), so E302 and E305 do not apply.
+indent-size = 2
+max-line-length = 80
+extend-ignore = E302,E305

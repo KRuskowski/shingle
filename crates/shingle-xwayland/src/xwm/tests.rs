@@ -360,11 +360,34 @@ fn a_refused_redirect_fails_bring_up() {
 }
 
 #[test]
+fn errors_for_destroyed_windows_are_not_reported() {
+  let mut xwm = started();
+  map_xterm(&mut xwm);
+  let error = |bad_value| {
+    Event::Error(X11Error {
+      error_kind: x11rb::protocol::ErrorKind::Window,
+      error_code: 3,
+      sequence: 9,
+      bad_value,
+      minor_opcode: 0,
+      major_opcode: 18,
+      extension_name: None,
+      request_name: Some("ChangeProperty"),
+    })
+  };
+  // Still tracked: reported.
+  assert_eq!(feed(&mut xwm, vec![error(XTERM)]).len(), 1);
+  // Destroyed meanwhile: expected, and quiet.
+  let events = feed(&mut xwm, vec![destroy(XTERM), error(XTERM)]);
+  assert_eq!(events, [XwmEvent::Destroyed { window: XTERM }]);
+}
+
+#[test]
 fn dispatch_drains_events_and_reports_errors() {
   let mut xwm = Xwm::start(Recording::default()).unwrap();
   let error = X11Error {
-    error_kind: x11rb::protocol::ErrorKind::Window,
-    error_code: 3,
+    error_kind: x11rb::protocol::ErrorKind::Value,
+    error_code: 2,
     sequence: 7,
     bad_value: 0x42,
     minor_opcode: 0,

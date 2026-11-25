@@ -16,15 +16,17 @@ Usage, from the repository root and outside any sandbox that forbids
 user namespaces:
 
   cargo build -p shingle-bin
-  tools/xwayland_test/run.py [--binary target/debug/shingle] [--keep]
-      [--only lazy|disabled|eager|running|idle ...]
+  cargo build -p shingle-xwayland --example xw_probe
+  tools/xwayland_test/run.py [--binary target/debug/shingle]
+      [--probe target/debug/examples/xw_probe] [--keep]
+      [--only lazy|disabled|eager|running|idle|windows|probe ...]
 
 It prints one line per check and exits 0 when all pass. Every signal it
 sends goes to its own children or, through `kill_xwayland`, to a
 checked Xwayland PID inside the PID namespace. The pure helpers are
 tested by `python3 -m unittest` in this directory (test_run.py). The work
 directory under `target/` is removed afterwards unless `--keep` is given.
-The checks are XW-2's in docs/design/xwayland.md, section 7.
+The checks are XW-2's and XW-3's in docs/design/xwayland.md, section 7.
 """
 
 import argparse
@@ -36,17 +38,19 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 INNER_FLAG = '--inner'
 IPC_TIMEOUT = 10.0
-
+# The probe client refuses to run without it, so it never opens a window
+# on the host's X displays.
+NAMESPACE_VARIABLE = 'SHINGLE_XWAYLAND_TEST_NAMESPACE'
 
 def encode_message(message):
   """Frames a JSON message for Wayfire IPC: little-endian length, body."""
   body = json.dumps(message).encode()
   return struct.pack('<I', len(body)) + body
-
 
 def decode_messages(buffer):
   """Splits complete frames off `buffer`; returns (messages, rest)."""
@@ -59,7 +63,6 @@ def decode_messages(buffer):
     buffer = buffer[4 + length:]
   return messages, buffer
 
-
 def parse_xprop(text):
   """Parses `xprop` output into {property: value text}."""
   properties = {}
@@ -70,7 +73,6 @@ def parse_xprop(text):
         properties[name.split('(')[0].strip()] = value.strip()
         break
   return properties
-
 
 def session_json(command, working_directory):
   """A saved session with one tiled window launched by `command`."""
@@ -117,7 +119,6 @@ def session_json(command, working_directory):
       'windows': [{'id': 1, 'identity': identity, 'parent': None}],
   }
 
-
 def children_of(pid):
   """The PIDs of `pid`'s children, from /proc."""
   children = []
@@ -133,7 +134,6 @@ def children_of(pid):
       pass
   return children
 
-
 def command_name(pid):
   """The `comm` of `pid`, or None when it is gone."""
   try:
@@ -142,21 +142,87 @@ def command_name(pid):
   except FileNotFoundError:
     return None
 
+def signal_checked(pid, sig, expected):
+  """Sends `sig` to `pid` if it is a live `expected` process.
 
-def kill_xwayland(pid):
-  """SIGKILLs the Xwayland process `pid`; returns whether it did.
-
-  Refuses anything that is not a live Xwayland process. `-1`, which
-  `stipc/get_xwayland_pid` returns when no server runs, would signal every
-  process the caller may signal, and `0` its whole process group.
+  Returns whether it did. Refuses any PID that is not an int above 1 or
+  whose `/proc/<pid>/comm` is not `expected` (as the kernel truncates it,
+  to 15 characters). `-1`, which `stipc/get_xwayland_pid` returns when no
+  server runs, would signal every process the caller may signal, and `0`
+  its whole process group.
   """
-  if not isinstance(pid, int) or pid <= 1:
+  if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
     return False
-  if command_name(pid) != 'Xwayland':
+  if command_name(pid) != expected[:15]:
     return False
-  os.kill(pid, signal.SIGKILL)
+  os.kill(pid, sig)
   return True
 
+def kill_xwayland(pid):
+  """SIGKILLs the Xwayland process `pid`; returns whether it did."""
+  return signal_checked(pid, signal.SIGKILL, 'Xwayland')
+
+def parse_xwininfo(text):
+  """The absolute geometry in `xwininfo -id` output, or None."""
+  keys = {
+      'Absolute upper-left X': 'x',
+      'Absolute upper-left Y': 'y',
+      'Width': 'width',
+      'Height': 'height',
+  }
+  geometry = {}
+  for line in text.splitlines():
+    name, _, value = line.strip().partition(':')
+    if name in keys:
+      try:
+        geometry[keys[name]] = int(value.strip())
+      except ValueError:
+        return None
+  return geometry if len(geometry) == 4 else None
+
+def parse_window_list(value):
+  """The window ids in an xprop `window id # 0x1, 0x2` value."""
+  if '#' not in value:
+    return []
+  return [int(part.strip(), 16) for part in value.split('#', 1)[1].split(',')
+          if part.strip()]
+
+def parse_wm_class(value):
+  """The class in an xprop WM_CLASS value `"xterm", "XTerm"`, or ''."""
+  parts = [part.strip().strip('"') for part in value.split(',')]
+  return parts[1] if len(parts) == 2 else ''
+
+def tiles_fill(geometries, area):
+  """Whether the rectangles cover `area` exactly, without overlapping."""
+  total = sum(g['width'] * g['height'] for g in geometries)
+  if total != area['width'] * area['height']:
+    return False
+  for index, first in enumerate(geometries):
+    for second in geometries[index + 1:]:
+      if (first['x'] < second['x'] + second['width']
+          and second['x'] < first['x'] + first['width']
+          and first['y'] < second['y'] + second['height']
+          and second['y'] < first['y'] + first['height']):
+        return False
+    if (first['x'] < area['x'] or first['y'] < area['y']
+        or first['x'] + first['width'] > area['x'] + area['width']
+        or first['y'] + first['height'] > area['y'] + area['height']):
+      return False
+  return True
+
+def same_geometry(first, second):
+  """Whether two {x, y, width, height} dictionaries agree."""
+  return all(first.get(key) == second.get(key)
+             for key in ('x', 'y', 'width', 'height'))
+
+def wait_for(predicate, timeout=10.0, interval=0.05):
+  """Polls `predicate` until it returns something true; returns that."""
+  deadline = time.monotonic() + timeout
+  while True:
+    value = predicate()
+    if value or time.monotonic() > deadline:
+      return value
+    time.sleep(interval)
 
 def device_fds(pid):
   """Paths of `pid`'s open descriptors under /dev/dri, /dev/input or TTYs."""
@@ -173,7 +239,6 @@ def device_fds(pid):
     if target.startswith(('/dev/dri', '/dev/input', '/dev/tty')):
       found.append(target)
   return found
-
 
 class Results:
   """Collects check results and prints them as they come."""
@@ -192,7 +257,6 @@ class Results:
   def all_passed(self):
     """Whether every check passed."""
     return all(passed for _, passed, _ in self.checks)
-
 
 class Ipc:
   """A Wayfire IPC connection."""
@@ -232,7 +296,6 @@ class Ipc:
   def close(self):
     """Closes the connection."""
     self.socket.close()
-
 
 class Shingle:
   """One headless Shingle run in the work directory."""
@@ -317,7 +380,33 @@ class Shingle:
         'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
         'HOME': os.path.join(self.directory, 'home'),
         'DISPLAY': display,
+        NAMESPACE_VARIABLE: '1',
     }
+
+  def views(self):
+    """`window-rules/list-views`."""
+    return self.call('window-rules/list-views')
+
+  def view(self, app_id):
+    """The one view with `app_id`, or None."""
+    views = [view for view in self.views() if view.get('app-id') == app_id]
+    return views[0] if len(views) == 1 else None
+
+  def x_windows(self, display):
+    """{X window id: class} for `_NET_CLIENT_LIST`, in its order."""
+    _, output = self.x_client(['xprop', '-root', '_NET_CLIENT_LIST'], display)
+    ids = parse_window_list(parse_xprop(output).get('_NET_CLIENT_LIST', ''))
+    windows = {}
+    for window in ids:
+      _, output = self.x_client(['xprop', '-id', hex(window), 'WM_CLASS'],
+                                display)
+      windows[window] = parse_wm_class(parse_xprop(output).get('WM_CLASS', ''))
+    return windows
+
+  def x_geometry(self, window, display):
+    """The absolute geometry `xwininfo -id` reports, or None."""
+    _, output = self.x_client(['xwininfo', '-id', hex(window)], display)
+    return parse_xwininfo(output)
 
   def x_client(self, arguments, display, timeout=10):
     """Runs an X client; returns (exit status, output)."""
@@ -349,6 +438,77 @@ class Shingle:
     with open(self.log_path, errors='replace') as file:
       return file.read()
 
+class XClient:
+  """A long-running X client, such as xterm or the probe, with its stdout
+  read in the background as lines."""
+
+  def __init__(self, shingle, arguments, display, program):
+    self.program = program
+    self.process = subprocess.Popen(
+        arguments, env=shingle.environment(display), stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    self.lines = []
+    self.lock = threading.Lock()
+    self.reader = threading.Thread(target=self._read, daemon=True)
+    self.reader.start()
+
+  def _read(self):
+    for line in self.process.stdout:
+      with self.lock:
+        self.lines.append(line.rstrip('\n'))
+
+  @property
+  def pid(self):
+    """The client's PID."""
+    return self.process.pid
+
+  def events(self):
+    """The JSON lines the client printed, parsed; other lines skipped."""
+    with self.lock:
+      lines = list(self.lines)
+    events = []
+    for line in lines:
+      try:
+        events.append(json.loads(line))
+      except ValueError:
+        pass
+    return events
+
+  def wait_event(self, name, timeout=10.0, after=0):
+    """Waits for the first `name` event at index `after` or later."""
+    def find():
+      events = self.events()[after:]
+      return next((event for event in events if event.get('event') == name),
+                  None)
+    return wait_for(find, timeout)
+
+  def send(self, command):
+    """Writes one command line to the client's stdin."""
+    try:
+      self.process.stdin.write(command + '\n')
+      self.process.stdin.flush()
+    except (BrokenPipeError, ValueError):
+      pass
+
+  def exited(self, timeout=10.0):
+    """Waits for the client to exit; returns its status or None."""
+    try:
+      return self.process.wait(timeout)
+    except subprocess.TimeoutExpired:
+      return None
+
+  def stop(self):
+    """Ends the client: SIGTERM, then SIGKILL, each through
+    `signal_checked`."""
+    if self.process.poll() is None:
+      signal_checked(self.pid, signal.SIGTERM, self.program)
+      if self.exited(5) is None:
+        signal_checked(self.pid, signal.SIGKILL, self.program)
+        self.exited(5)
+    try:
+      self.process.stdin.close()
+    except (BrokenPipeError, ValueError):
+      pass
 
 def lazy_checks(results, binary, work):
   """Lazy mode: start on connection, X tools, restart rule, SIGTERM."""
@@ -495,7 +655,6 @@ def lazy_checks(results, binary, work):
                 and 'not restarting Xwayland' in log)
   return log
 
-
 def idle_checks(results, binary, work):
   """Lazy mode: Xwayland exits 10 s after its last client and comes back."""
   shingle = Shingle(binary, work, 'idle', {'xwayland': {'mode': 'lazy'}})
@@ -515,7 +674,6 @@ def idle_checks(results, binary, work):
   results.check('idle: SIGTERM exits with status 0',
                 shingle.stop() == 0)
   return shingle.log_text()
-
 
 def eager_checks(results, binary, work):
   """Eager mode: start before restored clients, restart rule."""
@@ -566,7 +724,6 @@ def eager_checks(results, binary, work):
                 not os.path.exists('/tmp/.X0-lock')
                 and not os.path.exists('/tmp/.X11-unix/X0'))
 
-
 def running_sigterm_checks(results, binary, work):
   """SIGTERM while Xwayland runs stops it and frees the display."""
   shingle = Shingle(binary, work, 'running', {'xwayland': {'mode': 'true'}})
@@ -582,7 +739,6 @@ def running_sigterm_checks(results, binary, work):
                 not os.path.exists('/tmp/.X0-lock')
                 and not os.path.exists('/tmp/.X11-unix/X0'))
   return shingle.log_text()
-
 
 def disabled_checks(results, binary, work):
   """mode false: nothing bound, DISPLAY absent."""
@@ -606,11 +762,304 @@ def disabled_checks(results, binary, work):
                 spawned == 'unset', spawned)
   results.check('disabled: SIGTERM exits with status 0', shingle.stop() == 0)
 
+WORKAREA = {'x': 0, 'y': 0, 'width': 1280, 'height': 720}
+# Runs a program as an ordinary user in a nested user namespace. xterm,
+# run as the namespace's root, tries to give its pty to group tty, which
+# is not mapped, and exits. `unshare` execs the program, so its PID and
+# comm stay the program's.
+AS_USER = ['unshare', '--user', '--map-user=1000', '--map-group=1000', '--']
 
-GROUPS = ('lazy', 'disabled', 'eager', 'running', 'idle')
+def start_mapped(shingle, arguments, display, program, app_id):
+  """Starts an X client and waits until its view is mapped."""
+  client = XClient(shingle, arguments, display, program)
+  view = wait_for(lambda: (shingle.view(app_id) or {}).get('mapped')
+                  and shingle.view(app_id))
+  return client, view
 
+def windows_checks(results, binary, work, probe):
+  """Managed windows: tiling, xwininfo, list-views, close, configure."""
+  del work, probe
+  shingle = Shingle(binary, None, 'windows', {'xwayland': {'mode': True}})
+  shingle.wait_pid(lambda value: value > 0)
+  ready = wait_for(lambda: 'Xwayland ready' in shingle.log_text())
+  results.check('windows: Xwayland is ready', ready)
+  display = ':0'
+  clients = []
+  order = [('XTerm', AS_USER + ['xterm', '-e', 'sleep', '600'], 'xterm'),
+           ('XEyes', ['xeyes'], 'xeyes'),
+           ('XLogo', ['xlogo'], 'xlogo')]
+  views = {}
+  for app_id, arguments, program in order:
+    client, view = start_mapped(shingle, arguments, display, program, app_id)
+    clients.append(client)
+    views[app_id] = view
+    results.check(f'windows: {program} maps as a view with app-id {app_id}',
+                  bool(view), json.dumps(shingle.views())
+                  + f' exit {client.process.poll()} output: '
+                  + ' | '.join(client.lines[-5:]))
+  try:
+    if not all(views.values()):
+      return shingle.log_text()
+    # Tiling: in mapping order, filling the workarea.
+    time.sleep(0.5)
+    listed = {view['app-id']: view for view in shingle.views()}
+    geometries = [listed[app_id]['geometry'] for app_id, _, _ in order]
+    results.check('windows: three views tile the whole workarea',
+                  tiles_fill(geometries, WORKAREA), json.dumps(geometries))
+    by_position = sorted(order, key=lambda item: (
+        listed[item[0]]['geometry']['x'], listed[item[0]]['geometry']['y']))
+    results.check('windows: tiles are in mapping order',
+                  [item[0] for item in by_position]
+                  == [item[0] for item in order],
+                  ', '.join(item[0] for item in by_position))
+    # list-views: real PIDs and titles.
+    for (app_id, _, program), client in zip(order, clients):
+      view = listed[app_id]
+      results.check(f'windows: {app_id} has its X client\'s pid',
+                    view['pid'] == client.pid
+                    and command_name(view['pid']) == program,
+                    f'view {view["pid"]}, client {client.pid}')
+    results.check('windows: xterm\'s title is listed',
+                  bool(listed['XTerm']['title']), listed['XTerm']['title'])
+    # _NET_CLIENT_LIST and xwininfo.
+    windows = shingle.x_windows(display)
+    classes = list(windows.values())
+    results.check('windows: _NET_CLIENT_LIST lists them in map order',
+                  classes == ['XTerm', 'XEyes', 'XLogo'], json.dumps(classes))
+    ids = {app_id: window for window, app_id in windows.items()}
 
-def inner(binary, work, groups):
+    def matches_xwininfo():
+      for app_id, _, _ in order:
+        view = shingle.view(app_id)
+        x_geometry = shingle.x_geometry(ids[app_id], display)
+        if not view or not x_geometry:
+          return False
+        if not same_geometry(view['geometry'], x_geometry):
+          return False
+      return True
+    matched = wait_for(matches_xwininfo, timeout=5)
+    detail = '; '.join(
+        f'{app_id} view {json.dumps(shingle.view(app_id)["geometry"])} '
+        f'x {json.dumps(shingle.x_geometry(ids[app_id], display))}'
+        for app_id, _, _ in order)
+    results.check('windows: xwininfo matches view-info for all three',
+                  matched, detail)
+    _, output = shingle.x_client(
+        ['xprop', '-id', hex(ids['XTerm']), 'WM_STATE', 'WM_NAME'], display)
+    results.check('windows: xterm has WM_STATE Normal',
+                  'Normal' in output, output.strip().replace('\n', '; '))
+    # The last window mapped is focused, and only it says so.
+    focused = {}
+    for app_id, _, _ in order:
+      _, output = shingle.x_client(
+          ['xprop', '-id', hex(ids[app_id]), '_NET_WM_STATE'], display)
+      focused[app_id] = '_NET_WM_STATE_FOCUSED' in output
+    results.check('windows: only the focused xlogo has _NET_WM_STATE_FOCUSED',
+                  focused == {'XTerm': False, 'XEyes': False, 'XLogo': True},
+                  json.dumps(focused))
+    # simple-tile/set-layout reaches X geometry.
+    xterm, xeyes, xlogo = (listed[app_id]['id'] for app_id, _, _ in order)
+    layout = {'horizontal-split': [
+        {'weight': 1, 'view-id': xlogo},
+        {'weight': 3, 'vertical-split': [
+            {'weight': 1, 'view-id': xterm},
+            {'weight': 1, 'view-id': xeyes},
+        ]},
+    ]}
+    reply = shingle.call('simple-tile/set-layout', {
+        'wset-index': 1, 'workspace': {'x': 0, 'y': 0}, 'layout': layout})
+    results.check('windows: simple-tile/set-layout is accepted',
+                  reply.get('result') == 'ok', json.dumps(reply))
+    changed = wait_for(lambda: not same_geometry(
+        shingle.view('XLogo')['geometry'], geometries[2])
+        and matches_xwininfo(), timeout=5)
+    results.check('windows: set-layout reaches the X geometry',
+                  changed, json.dumps(shingle.view('XLogo')['geometry']))
+    # configure-view floats xlogo at the given geometry.
+    target = {'x': 100, 'y': 120, 'width': 400, 'height': 300}
+    reply = shingle.call('window-rules/configure-view',
+                         {'id': xlogo, 'geometry': target})
+    results.check('windows: configure-view is accepted',
+                  reply.get('result') == 'ok', json.dumps(reply))
+    reached = wait_for(lambda: same_geometry(
+        shingle.x_geometry(ids['XLogo'], display) or {}, target), timeout=5)
+    results.check('windows: configure-view reaches the X geometry',
+                  reached,
+                  json.dumps(shingle.x_geometry(ids['XLogo'], display)))
+    # close-view: WM_DELETE_WINDOW for xterm, KillClient for xeyes.
+    _, xterm_protocols = shingle.x_client(
+        ['xprop', '-id', hex(ids['XTerm']), 'WM_PROTOCOLS'], display)
+    _, xeyes_protocols = shingle.x_client(
+        ['xprop', '-id', hex(ids['XEyes']), 'WM_PROTOCOLS'], display)
+    # Both are Xt applications and list WM_DELETE_WINDOW; the probe
+    # checks KillClient for a client without it.
+    results.check('windows: xterm and xeyes list WM_DELETE_WINDOW',
+                  'WM_DELETE_WINDOW' in xterm_protocols
+                  and 'WM_DELETE_WINDOW' in xeyes_protocols,
+                  f'{xterm_protocols.strip()}; {xeyes_protocols.strip()}')
+    for app_id, client in (('XTerm', clients[0]), ('XEyes', clients[1])):
+      view_id = listed[app_id]['id']
+      reply = shingle.call('window-rules/close-view', {'id': view_id})
+      status = client.exited(10)
+      gone = wait_for(lambda: shingle.view(app_id) is None, timeout=5)
+      results.check(f'windows: close-view closes {app_id}',
+                    reply.get('result') == 'ok' and status is not None
+                    and gone, f'reply {json.dumps(reply)}, exit {status}')
+    remaining = [view['app-id'] for view in shingle.views()]
+    results.check('windows: only xlogo is left', remaining == ['XLogo'],
+                  json.dumps(remaining))
+  finally:
+    for client in clients:
+      client.stop()
+  results.check('windows: SIGTERM exits with status 0', shingle.stop() == 0)
+  return shingle.log_text()
+
+def probe_checks(results, binary, work, probe):
+  """The probe client: view-pre-map, ConfigureNotify, races, close."""
+  del work
+  shingle = Shingle(binary, None, 'probe', {'xwayland': {'mode': True}})
+  shingle.wait_pid(lambda value: value > 0)
+  wait_for(lambda: 'Xwayland ready' in shingle.log_text())
+  display = ':0'
+  clients = []
+  try:
+    # view-pre-map holds an X window until unblock-map.
+    watcher = Ipc(shingle.ipc_path)
+    watched = watcher.call('window-rules/events/watch',
+                           {'events': ['view-pre-map']})
+    results.check('probe: view-pre-map can be watched',
+                  watched == {'result': 'ok'}, json.dumps(watched))
+    held = XClient(shingle, [probe, '--class', 'held,Held'], display,
+                   'xw_probe')
+    clients.append(held)
+    try:
+      event = watcher.receive()
+    except (TimeoutError, ConnectionError) as error:
+      event = {'error': str(error)}
+    view = event.get('view', {})
+    results.check('probe: view-pre-map names the X window',
+                  event.get('event') == 'view-pre-map'
+                  and view.get('app-id') == 'Held', json.dumps(event))
+    time.sleep(0.5)
+    listed = shingle.view('Held')
+    results.check('probe: the held window is not mapped',
+                  listed is not None and not listed['mapped'],
+                  json.dumps(listed))
+    reply = watcher.call('window-rules/unblock-map', {'id': view.get('id')})
+    results.check('probe: unblock-map is accepted',
+                  reply.get('result') == 'ok', json.dumps(reply))
+    mapped = wait_for(lambda: (shingle.view('Held') or {}).get('mapped'))
+    results.check('probe: unblock-map maps the X window', mapped)
+    watcher.close()
+    # The probe sees the tile geometry in ConfigureNotify.
+    geometry = shingle.view('Held')['geometry']
+
+    def configured_to(client, geometry):
+      def find():
+        configures = [event for event in client.events()
+                      if event.get('event') == 'configure']
+        return configures and same_geometry(configures[-1], geometry)
+      return find
+    results.check('probe: ConfigureNotify reports the tile geometry',
+                  wait_for(configured_to(held, geometry)),
+                  json.dumps([e for e in held.events()
+                              if e.get('event') == 'configure'][-1:]))
+    results.check('probe: the view has the probe\'s pid',
+                  shingle.view('Held')['pid'] == held.pid)
+    # A tiled window asking for another geometry gets its tile back in a
+    # synthetic ConfigureNotify.
+    count = len(held.events())
+    held.send('configure 5 5 100 100')
+    synthetic = held.wait_event('configure', after=count)
+    results.check('probe: a tiled ConfigureRequest gets the tile back',
+                  synthetic is not None and synthetic.get('synthetic')
+                  and same_geometry(synthetic, geometry),
+                  json.dumps(synthetic))
+    # close-view sends WM_DELETE_WINDOW.
+    reply = shingle.call('window-rules/close-view',
+                         {'id': shingle.view('Held')['id']})
+    deleted = held.wait_event('delete')
+    results.check('probe: close-view sends WM_DELETE_WINDOW',
+                  reply.get('result') == 'ok' and deleted is not None,
+                  json.dumps(reply))
+    held.exited(5)
+    results.check('probe: the deleted window\'s view is gone',
+                  wait_for(lambda: shingle.view('Held') is None))
+    # An X window destroyed before its surface commits a buffer.
+    for attempt in range(5):
+      racer = XClient(shingle, [probe, '--class', 'racer,Racer',
+                                '--no-background'], display, 'xw_probe')
+      clients.append(racer)
+      racer.wait_event('window')
+      racer.wait_event('mapped')
+      racer.send('destroy')
+      racer.exited(5)
+    time.sleep(1)
+    results.check('probe: windows destroyed before their first buffer '
+                  'leave no view',
+                  all(view['app-id'] != 'Racer' for view in shingle.views()),
+                  json.dumps(shingle.views()))
+    # Unmapped at once after the map, so the surface goes before or
+    # around the serial; then mapped again.
+    flicker = XClient(shingle, [probe, '--class', 'flicker,Flicker'],
+                      display, 'xw_probe')
+    clients.append(flicker)
+    flicker.wait_event('mapped')
+    cycles = 0
+    for _ in range(10):
+      # Unmapped as soon as the server reports it mapped, which is when
+      # Xwayland creates its surface and announces the serial.
+      count = len(flicker.events())
+      flicker.send('unmap')
+      if not flicker.wait_event('unmapped', after=count):
+        break
+      count = len(flicker.events())
+      flicker.send('map')
+      if not flicker.wait_event('mapped', after=count):
+        break
+      cycles += 1
+    count = len(flicker.events())
+    flicker.send('unmap')
+    flicker.wait_event('unmapped', after=count)
+    time.sleep(1)
+    results.check('probe: after 10 map-unmap cycles an unmapped window '
+                  'leaves no view',
+                  cycles == 10 and shingle.view('Flicker') is None,
+                  f'{cycles} cycles, {json.dumps(shingle.views())}')
+    flicker.send('map')
+    remapped = wait_for(lambda: (shingle.view('Flicker') or {}).get('mapped'))
+    count = sum(1 for view in shingle.views() if view['app-id'] == 'Flicker')
+    results.check('probe: mapped again, it is one view again',
+                  remapped and count == 1, f'{count} views')
+    flicker.send('destroy')
+    flicker.exited(5)
+    results.check('probe: destroyed, it leaves no view',
+                  wait_for(lambda: shingle.view('Flicker') is None))
+    # A window without WM_DELETE_WINDOW is killed by close-view.
+    stubborn = XClient(shingle, [probe, '--class', 'stubborn,Stubborn',
+                                 '--no-delete'], display, 'xw_probe')
+    clients.append(stubborn)
+    view = wait_for(lambda: (shingle.view('Stubborn') or {}).get('mapped')
+                    and shingle.view('Stubborn'))
+    if view:
+      shingle.call('window-rules/close-view', {'id': view['id']})
+    status = stubborn.exited(10)
+    results.check('probe: close-view kills a client without '
+                  'WM_DELETE_WINDOW', status is not None
+                  and stubborn.wait_event('delete', timeout=0.1) is None,
+                  f'exit {status}')
+    results.check('probe: no X window is left',
+                  wait_for(lambda: shingle.views() == []),
+                  json.dumps(shingle.views()))
+  finally:
+    for client in clients:
+      client.stop()
+  results.check('probe: SIGTERM exits with status 0', shingle.stop() == 0)
+  return shingle.log_text()
+
+GROUPS = ('lazy', 'disabled', 'eager', 'running', 'idle', 'windows', 'probe')
+
+def inner(binary, probe, work, groups):
   """Runs the check `groups` inside the namespace; returns the status."""
   private_tmp = os.path.join(work, 'tmp')
   os.makedirs(private_tmp)
@@ -631,29 +1080,35 @@ def inner(binary, work, groups):
       'eager': eager_checks,
       'running': running_sigterm_checks,
       'idle': idle_checks,
+      'windows': windows_checks,
+      'probe': probe_checks,
   }
   for group in groups:
-    log = checks[group](results, binary, work)
+    if group in ('windows', 'probe'):
+      log = checks[group](results, binary, work, probe)
+    else:
+      log = checks[group](results, binary, work)
     if log:
       print(f'--- {group} run log ---\n{log}--- end ---', flush=True)
   passed = sum(1 for _, ok, _ in results.checks if ok)
   print(f'{passed}/{len(results.checks)} checks passed', flush=True)
   return 0 if results.all_passed() else 1
 
-
 def main():
   """Sets up the work directory and re-runs itself in the namespace."""
   parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   parser.add_argument('--binary', default='target/debug/shingle')
+  parser.add_argument('--probe', default='target/debug/examples/xw_probe')
   parser.add_argument('--keep', action='store_true')
   parser.add_argument('--only', action='append', choices=GROUPS,
                       help='run only this group of checks (repeatable)')
   parser.add_argument(INNER_FLAG, metavar='WORK')
   options = parser.parse_args()
   binary = os.path.abspath(options.binary)
+  probe = os.path.abspath(options.probe)
   groups = options.only or list(GROUPS)
   if options.inner:
-    return inner(binary, options.inner, groups)
+    return inner(binary, probe, options.inner, groups)
   work = os.path.abspath(os.path.join(
       'target', f'xwayland_test-{os.getpid()}'))
   os.makedirs(work)
@@ -663,14 +1118,13 @@ def main():
     command = ['unshare', '--user', '--map-root-user', '--mount', '--net',
                '--pid', '--fork', '--mount-proc', '--',
                sys.executable, os.path.abspath(__file__),
-               '--binary', binary, INNER_FLAG, work]
+               '--binary', binary, '--probe', probe, INNER_FLAG, work]
     for group in groups:
       command += ['--only', group]
     return subprocess.run(command).returncode
   finally:
     if not options.keep:
       shutil.rmtree(work, ignore_errors=True)
-
 
 if __name__ == '__main__':
   sys.exit(main())

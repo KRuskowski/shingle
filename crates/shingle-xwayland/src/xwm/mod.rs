@@ -272,7 +272,14 @@ impl<C: XConnection> Xwm<C> {
   ) -> Result<(), XwmError> {
     match event {
       Event::Error(error) => {
-        events.push(XwmEvent::RequestFailed(format!("{error:?}")));
+        // A request for a window that has been destroyed since, such as
+        // WM_STATE on the UnmapNotify that precedes its DestroyNotify, is
+        // expected to fail; wlroots ignores those too.
+        let gone = error.error_kind == x11rb::protocol::ErrorKind::Window
+          && !self.windows.contains_key(&error.bad_value);
+        if !gone {
+          events.push(XwmEvent::RequestFailed(format!("{error:?}")));
+        }
       }
       Event::CreateNotify(event) => {
         if event.window == self.check_window || event.parent != self.root {
