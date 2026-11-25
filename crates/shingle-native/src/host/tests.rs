@@ -1129,3 +1129,21 @@ fn output_management_modes_are_tested_before_they_are_set() {
   assert_eq!(compositor.output_info().current_mode, Some(1));
   assert_eq!(fixture.backend.output_size, (1920, 1080));
 }
+
+#[test]
+fn a_hotplug_during_a_pending_flip_waits_for_the_flip() {
+  let mut card = FakeKms::single_output();
+  let mut dp = crate::kms::fake::connector_info(9, "DP-2");
+  dp.modes = vec![crate::kms::fake::mode(2560, 1440, 60, true)];
+  card.add_connector(dp);
+  let mut fixture = Fixture::with_card(test_config(), card);
+  assert!(fixture.flip_pending());
+  fixture.card.borrow_mut().disconnect();
+  fixture.hotplug();
+  let compositor = fixture.backend.frontend().compositor();
+  assert_eq!(compositor.output_info().name, "HDMI-A-1", "not yet");
+  fixture.flip(Duration::from_secs(1), 1);
+  let compositor = fixture.backend.frontend().compositor();
+  assert_eq!(compositor.output_info().name, "DP-2");
+  assert!(fixture.flip_pending(), "DP-2 shows a frame");
+}

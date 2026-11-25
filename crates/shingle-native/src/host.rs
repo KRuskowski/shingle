@@ -172,6 +172,10 @@ pub struct Backend<S: Session, I: InputSource> {
   monitor: Option<Box<dyn DeviceMonitor>>,
   /// Mode changes waiting for no flip to be pending.
   output_requests: Vec<OutputRequest>,
+  /// A hotplug waiting for no flip to be pending.
+  hotplug_pending: bool,
+  /// Reloaded output modes waiting for no flip to be pending.
+  policy_pending: Option<OutputPolicy>,
 }
 
 impl<S: Session, I: InputSource> Backend<S, I> {
@@ -225,6 +229,8 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       warned_no_devices: false,
       monitor: None,
       output_requests: Vec::new(),
+      hotplug_pending: false,
+      policy_pending: None,
     })
   }
 
@@ -271,6 +277,7 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     self.frontend.process(&mut self.host);
     self.apply_host_requests();
     self.apply_reloaded_config();
+    self.apply_output_changes();
     self.handle_output_requests();
     self.update_dpms();
     self.update_leds();
@@ -435,9 +442,9 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     self.host.redraw = true;
   }
 
-  /// Follows DRM hotplug: the display probes the card again, and the
-  /// compositor learns about a different output. While the seat is
-  /// disabled, events are read and dropped; the resume probes anyway.
+  /// Reads DRM hotplug events. While the seat is disabled they are
+  /// dropped, since the resume probes anyway; otherwise the next
+  /// [`Backend::apply_output_changes`] probes the card again.
   fn dispatch_monitor(&mut self) {
     let Some(monitor) = self.monitor.as_mut() else {
       return;
@@ -446,26 +453,41 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     if events.contains(&DrmEvent::Removed) {
       diagnostics::log("the DRM card was removed; nothing can be shown");
     }
-    if !self.active
-      || !events
+    if self.active
+      && events
         .iter()
         .any(|event| matches!(event, DrmEvent::Hotplug(_)))
     {
-      return;
-    }
-    let change = self.display.hotplug();
-    if change.output_changed || change.resized.is_some() {
-      self.describe_output();
+      self.hotplug_pending = true;
     }
   }
 
-  /// Applies the output modes of a reloaded configuration.
+  /// Keeps the output modes of a reloaded configuration for
+  /// [`Backend::apply_output_changes`].
   fn apply_reloaded_config(&mut self) {
-    let Some(config) = self.frontend.take_reloaded_config() else {
+    if let Some(config) = self.frontend.take_reloaded_config() {
+      self.policy_pending = Some(OutputPolicy::from_config(&config));
+    }
+  }
+
+  /// Follows a hotplug and reloaded output modes once no page flip is
+  /// pending, since lighting an output takes a modeset: the display
+  /// probes the card again, and the compositor learns about a different
+  /// output. A flip that never completes times out within a second.
+  fn apply_output_changes(&mut self) {
+    if !self.active || self.display.flip_pending() {
       return;
-    };
-    let change = self.display.set_policy(OutputPolicy::from_config(&config));
-    if change.output_changed || change.resized.is_some() {
+    }
+    let mut changed = false;
+    if let Some(policy) = self.policy_pending.take() {
+      let change = self.display.set_policy(policy);
+      changed |= change.output_changed || change.resized.is_some();
+    }
+    if std::mem::take(&mut self.hotplug_pending) {
+      let change = self.display.hotplug();
+      changed |= change.output_changed || change.resized.is_some();
+    }
+    if changed {
       self.describe_output();
     }
   }
