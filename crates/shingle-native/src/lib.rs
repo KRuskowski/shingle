@@ -193,8 +193,11 @@ pub fn run(
       Ok((frontend, input))
     },
   )?;
-  let backend =
+  let mut backend =
     Backend::new(frontend, session, input, input_config, display, rendering)?;
+  backend.set_trace_flips(
+    std::env::var_os("SHINGLE_TRACE_FLIPS").is_some_and(|value| value == "1"),
+  );
   backend.run()
 }
 

@@ -30,5 +30,9 @@ wayland-client = "0.31"
 wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
 
+[[example]]
+name = "present_probe"
+test = true
+
 [lints]
 workspace = true

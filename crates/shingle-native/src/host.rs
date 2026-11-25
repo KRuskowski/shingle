@@ -149,6 +149,8 @@ pub struct Backend<S: Session, I: InputSource> {
   dpms: DpmsState,
   /// Why the loop ended, if it had to.
   fatal: Option<Fatal>,
+  /// Whether every presented page flip is logged.
+  trace_flips: bool,
   /// The LEDs last sent to the keyboards, or `None` to send them again.
   leds: Option<Leds>,
   /// Whether the missing-devices warning was given.
@@ -201,6 +203,7 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       health: GpuHealth::default(),
       dpms,
       fatal: None,
+      trace_flips: false,
       leds: None,
       warned_no_devices: false,
     })
@@ -224,6 +227,13 @@ impl<S: Session, I: InputSource> Backend<S, I> {
   /// The display, for queries.
   pub fn display(&self) -> &Display {
     &self.display
+  }
+
+  /// Logs every presented page flip with its sequence and time, as
+  /// `SHINGLE_TRACE_FLIPS=1` asks, for comparing with what clients get
+  /// (tools/native_test/present_check.py).
+  pub fn set_trace_flips(&mut self, trace: bool) {
+    self.trace_flips = trace;
   }
 
   /// Runs one turn of the loop without waiting. Returns false once the
@@ -408,6 +418,9 @@ impl<S: Session, I: InputSource> Backend<S, I> {
   /// from a flip that never completes.
   fn dispatch_display(&mut self, now: Instant) {
     for info in self.display.dispatch() {
+      if self.trace_flips {
+        diagnostics::log(&flip_line(&info));
+      }
       self.frontend.compositor_mut().frame_presented(info);
     }
     if let Err(fatal) = self.display.check_timeout(now) {
@@ -685,6 +698,16 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     }
     self.host.redraw = true;
   }
+}
+
+/// The log line for a presented flip: `page flip seq=S at SEC.NSEC s`.
+fn flip_line(info: &shingle::PresentInfo) -> String {
+  format!(
+    "page flip seq={} at {}.{:09} s",
+    info.seq,
+    info.time.as_secs(),
+    info.time.subsec_nanos()
+  )
 }
 
 /// Seat device ids for a log line, such as `seat devices 4, 5`.

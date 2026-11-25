@@ -970,3 +970,18 @@ fn no_connected_output_runs_clients_without_drawing() {
   let info = fixture.backend.frontend().compositor().output_info();
   assert_eq!(info.name, "HDMI-A-1");
 }
+
+#[test]
+fn traced_flips_are_logged_with_their_sequence_and_time() {
+  let info = shingle::PresentInfo {
+    time: Duration::new(12, 3_000),
+    refresh_ns: 16_666_666,
+    seq: 7,
+    flags: shingle::PresentationFlags::Vsync,
+  };
+  assert_eq!(super::flip_line(&info), "page flip seq=7 at 12.000003000 s");
+  let mut fixture = Fixture::new();
+  fixture.backend.set_trace_flips(true);
+  fixture.flip(Duration::from_secs(1), 1);
+  assert_eq!(fixture.client.events.frames.len(), 0, "none was asked for");
+}
