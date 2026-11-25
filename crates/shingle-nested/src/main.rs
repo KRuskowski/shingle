@@ -13,8 +13,8 @@ use std::{
 };
 
 use shingle::{
-  BufferSnapshot, Compositor, Config, Direction, Event, Modifiers, SurfaceId,
-  SurfaceRole, SurfaceSnapshot,
+  BufferSnapshot, Compositor, Config, Direction, Event, InputDeviceKind,
+  Modifiers, SurfaceId, SurfaceRole, SurfaceSnapshot,
 };
 use shingle_config::{
   CommandBinding, ConfigWatcher, Keybindings, Modifiers as ConfigModifiers,
@@ -595,6 +595,9 @@ impl App {
           }
         }
         Event::StartLockClient => self.start_lock_client(),
+        Event::InputDeviceChanged { device, enabled } => {
+          self.input_device_changed(device, enabled);
+        }
         Event::DpmsChanged(_)
         | Event::OpacityChanged { .. }
         | Event::Idle
@@ -608,6 +611,56 @@ impl App {
       self.save();
     }
     changed
+  }
+
+  /// Drops frontend state held by a device that IPC just disabled, so no
+  /// switcher, drag or gesture stays active with nothing left to end it. The
+  /// compositor has already released the device's keys, buttons and touches.
+  fn input_device_changed(&mut self, device: InputDeviceKind, enabled: bool) {
+    match (device, enabled) {
+      (InputDeviceKind::Keyboard, false) => {
+        // The switcher's modifiers can no longer be released, so finish it
+        // as if they had been.
+        if self.switcher.is_some() {
+          self.finish_switcher();
+        }
+      }
+      (InputDeviceKind::Keyboard, true) => {
+        // Host modifiers kept being tracked while disabled; resync them.
+        self.update_modifiers();
+      }
+      (InputDeviceKind::Pointer, false) => {
+        self.mouse_buttons = MouseButtons::default();
+        self.rotation_drag = None;
+        if let Some(state) = &mut self.expo {
+          state.cancel_pointer();
+        }
+        self.abandon_drag();
+      }
+      (InputDeviceKind::Touch, false) => {
+        self.gestures.cancel();
+        if self.expo_touch.take().is_some()
+          && let Some(state) = &mut self.expo
+        {
+          state.cancel_pointer();
+        }
+        // A drag may have been started by a touch gesture.
+        self.abandon_drag();
+      }
+      (InputDeviceKind::Pointer | InputDeviceKind::Touch, true) => {}
+    }
+  }
+
+  /// Ends a move or resize drag where the window currently is, without the
+  /// drop, swap or snap a button release would perform.
+  fn abandon_drag(&mut self) {
+    if self.drag.take().is_none() {
+      return;
+    }
+    self.drop_slot = None;
+    self.drop_preview = None;
+    self.workspace_switch_started = None;
+    self.save();
   }
 
   fn start_lock_client(&mut self) {
@@ -4119,6 +4172,16 @@ impl ApplicationHandler for App {
     if self.window.as_ref().map(|window| window.id()) != Some(window_id) {
       return;
     }
+    if let WindowEvent::ModifiersChanged(modifiers) = &event {
+      // Track host modifiers even while the keyboard is disabled, so they
+      // are correct again the moment it is re-enabled.
+      self.modifiers = modifiers.state();
+    }
+    if window_event_device(&event)
+      .is_some_and(|device| !self.compositor.input_device_enabled(device))
+    {
+      return;
+    }
     match event {
       WindowEvent::CloseRequested => {
         self.save();
@@ -4149,8 +4212,7 @@ impl ApplicationHandler for App {
         }
       }
       WindowEvent::KeyboardInput { event, .. } => self.keyboard_input(event),
-      WindowEvent::ModifiersChanged(modifiers) => {
-        self.modifiers = modifiers.state();
+      WindowEvent::ModifiersChanged(_) => {
         if self.switcher.as_ref().is_some_and(|state| {
           !modifiers_held(state.modifiers, self.config_modifiers())
         }) {
@@ -4431,6 +4493,9 @@ impl ApplicationHandler for App {
     event: DeviceEvent,
   ) {
     if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event
+      && self
+        .compositor
+        .input_device_enabled(InputDeviceKind::Pointer)
       && self.compositor.pointer_constrained()
     {
       let (dx, dy) = if let Some(window) = &self.window {
@@ -4598,6 +4663,24 @@ fn xkb_symbol(key: &winit::keyboard::Key) -> Option<String> {
 }
 
 /// Converts winit physical keys to the names used by Wayfire and our config.
+/// Returns the seat device a host window event comes from, if it is input.
+fn window_event_device(event: &WindowEvent) -> Option<InputDeviceKind> {
+  match event {
+    WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) => {
+      Some(InputDeviceKind::Keyboard)
+    }
+    WindowEvent::CursorMoved { .. }
+    | WindowEvent::MouseInput { .. }
+    | WindowEvent::MouseWheel { .. }
+    | WindowEvent::PinchGesture { .. }
+    | WindowEvent::PanGesture { .. }
+    | WindowEvent::DoubleTapGesture { .. }
+    | WindowEvent::RotationGesture { .. } => Some(InputDeviceKind::Pointer),
+    WindowEvent::Touch(_) => Some(InputDeviceKind::Touch),
+    _ => None,
+  }
+}
+
 fn binding_key_name(key: winit::keyboard::PhysicalKey) -> String {
   use winit::keyboard::KeyCode;
   let winit::keyboard::PhysicalKey::Code(code) = key else {
@@ -4687,6 +4770,64 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn host_input_events_map_to_their_seat_device() {
+    let device_id = DeviceId::dummy();
+    let cases = [
+      (
+        WindowEvent::ModifiersChanged(Default::default()),
+        Some(InputDeviceKind::Keyboard),
+      ),
+      (
+        WindowEvent::CursorMoved {
+          device_id,
+          position: winit::dpi::PhysicalPosition::new(1.0, 2.0),
+        },
+        Some(InputDeviceKind::Pointer),
+      ),
+      (
+        WindowEvent::MouseInput {
+          device_id,
+          state: ElementState::Pressed,
+          button: MouseButton::Left,
+        },
+        Some(InputDeviceKind::Pointer),
+      ),
+      (
+        WindowEvent::MouseWheel {
+          device_id,
+          delta: MouseScrollDelta::LineDelta(0.0, 1.0),
+          phase: TouchPhase::Moved,
+        },
+        Some(InputDeviceKind::Pointer),
+      ),
+      (
+        WindowEvent::PinchGesture {
+          device_id,
+          delta: 0.1,
+          phase: TouchPhase::Started,
+        },
+        Some(InputDeviceKind::Pointer),
+      ),
+      (
+        WindowEvent::Touch(winit::event::Touch {
+          device_id,
+          phase: TouchPhase::Started,
+          location: winit::dpi::PhysicalPosition::new(1.0, 2.0),
+          force: None,
+          id: 0,
+        }),
+        Some(InputDeviceKind::Touch),
+      ),
+      (WindowEvent::CloseRequested, None),
+      (WindowEvent::Resized(PhysicalSize::new(10, 10)), None),
+      (WindowEvent::Focused(true), None),
+    ];
+    for (event, device) in cases {
+      assert_eq!(window_event_device(&event), device, "{event:?}");
+    }
+  }
 
   #[test]
   fn left_handed_swaps_real_buttons() {

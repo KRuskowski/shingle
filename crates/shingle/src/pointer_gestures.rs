@@ -12,7 +12,7 @@ use wayland_server::{
   protocol::wl_surface::WlSurface,
 };
 
-use crate::{input, state::CompositorState};
+use crate::{input, input_device::InputDeviceKind, state::CompositorState};
 
 #[derive(Default)]
 pub(crate) struct PointerGestures {
@@ -246,7 +246,32 @@ pub(crate) fn hold_end(state: &mut CompositorState, cancelled: bool) {
   }
 }
 
+/// Ends the active gesture, if any, as cancelled. Used when the seat pointer
+/// is disabled mid-gesture.
+pub(crate) fn cancel_active(state: &mut CompositorState) {
+  match state.pointer_gestures.active {
+    Some(GestureKind::Swipe) => swipe_end(state, true),
+    Some(GestureKind::Pinch) => pinch_end(state, true),
+    Some(GestureKind::Hold) => hold_end(state, true),
+    None => {}
+  }
+}
+
+#[cfg(test)]
+pub(crate) fn is_active(state: &CompositorState) -> bool {
+  state.pointer_gestures.active.is_some()
+}
+
+/// Gestures come from the seat pointer, so a disabled pointer starts,
+/// updates and ends none.
+fn pointer_enabled(state: &CompositorState) -> bool {
+  crate::input_device::enabled(state, InputDeviceKind::Pointer)
+}
+
 fn begin(state: &mut CompositorState, kind: GestureKind) -> bool {
+  if !pointer_enabled(state) {
+    return false;
+  }
   input::activity(state);
   if state.pointer_gestures.active.is_some() {
     return false;
@@ -256,6 +281,9 @@ fn begin(state: &mut CompositorState, kind: GestureKind) -> bool {
 }
 
 fn end(state: &mut CompositorState, kind: GestureKind) -> bool {
+  if !pointer_enabled(state) {
+    return false;
+  }
   input::activity(state);
   if state.pointer_gestures.active != Some(kind) {
     return false;
@@ -265,6 +293,9 @@ fn end(state: &mut CompositorState, kind: GestureKind) -> bool {
 }
 
 fn active(state: &mut CompositorState, kind: GestureKind) -> bool {
+  if !pointer_enabled(state) {
+    return false;
+  }
   input::activity(state);
   state.pointer_gestures.active == Some(kind)
 }

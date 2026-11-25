@@ -39,23 +39,6 @@ pub struct Modifiers {
   pub group: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InputDeviceKind {
-  Keyboard,
-  Pointer,
-  Touch,
-}
-
-impl InputDeviceKind {
-  fn index(self) -> usize {
-    match self {
-      Self::Keyboard => 0,
-      Self::Pointer => 1,
-      Self::Touch => 2,
-    }
-  }
-}
-
 struct TouchPoint {
   object: ObjectId,
   x: f64,
@@ -87,7 +70,7 @@ pub(crate) struct InputState {
   repeat_delay: i32,
   scroll_speed: f64,
   natural_scroll: bool,
-  devices_enabled: [bool; 3],
+  pub(crate) devices: crate::input_device::InputDevices,
 }
 
 impl InputState {
@@ -122,46 +105,9 @@ impl InputState {
       repeat_delay: 400,
       scroll_speed: 1.0,
       natural_scroll: false,
-      devices_enabled: [true; 3],
+      devices: Default::default(),
     })
   }
-}
-
-pub(crate) const INPUT_DEVICES: &[(u64, &str, &str, InputDeviceKind)] = &[
-  (
-    1,
-    "Shingle nested keyboard",
-    "keyboard",
-    InputDeviceKind::Keyboard,
-  ),
-  (
-    2,
-    "Shingle nested pointer",
-    "pointer",
-    InputDeviceKind::Pointer,
-  ),
-  (3, "Shingle nested touch", "touch", InputDeviceKind::Touch),
-];
-
-pub(crate) fn input_device_enabled(
-  state: &CompositorState,
-  kind: InputDeviceKind,
-) -> bool {
-  state.input.devices_enabled[kind.index()]
-}
-
-pub(crate) fn set_input_device_enabled(
-  state: &mut CompositorState,
-  id: u64,
-  enabled: bool,
-) -> bool {
-  let Some((_, _, _, kind)) =
-    INPUT_DEVICES.iter().find(|device| device.0 == id)
-  else {
-    return false;
-  };
-  state.input.devices_enabled[kind.index()] = enabled;
-  true
 }
 
 pub(crate) fn create_globals(handle: &DisplayHandle) {
@@ -959,9 +905,6 @@ fn pointer_motion_inner(
   y: f64,
   relative: Option<(f64, f64, f64, f64)>,
 ) {
-  if !input_device_enabled(state, InputDeviceKind::Pointer) {
-    return;
-  }
   activity(state);
   if let Some((dx, dy, dx_unaccel, dy_unaccel)) = relative {
     crate::pointer_protocols::relative_motion(
@@ -994,9 +937,6 @@ pub(crate) fn pointer_button(
   button: u32,
   pressed: bool,
 ) {
-  if !input_device_enabled(state, InputDeviceKind::Pointer) {
-    return;
-  }
   activity(state);
   let (x, y) = (state.input.pointer_x, state.input.pointer_y);
   let modifiers = state.input.modifiers;
@@ -1044,14 +984,6 @@ pub(crate) fn pointer_button(
   if !pressed {
     crate::data_device::drop_drag(state);
   }
-}
-
-pub(crate) fn pointer_axis(
-  state: &mut CompositorState,
-  horizontal: f64,
-  vertical: f64,
-) {
-  pointer_axis_detailed(state, horizontal, vertical, 0, 0);
 }
 
 pub(crate) fn pointer_axis_detailed(

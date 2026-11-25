@@ -16,6 +16,7 @@ mod fractional_scale;
 mod gamma_control;
 mod idle_notify;
 mod input;
+mod input_device;
 mod input_method;
 mod input_method_v2;
 mod input_panel;
@@ -63,6 +64,7 @@ use calloop::{
   timer::{TimeoutAction, Timer},
 };
 pub use input::Modifiers;
+pub use input_device::InputDeviceKind;
 pub use shingle_core::{Direction, StackingMode, WindowId};
 use shingle_core::{Gaps, Rect, Shingle, WorkspaceId};
 use shingle_idle::{Config as IdleConfig, IdleCoordinator};
@@ -396,6 +398,12 @@ pub enum Event {
   Resume,
   StartLockClient,
   LockStateChanged(LockState),
+  /// A seat input device was enabled or disabled over IPC. Held input has
+  /// already been released when a device is disabled.
+  InputDeviceChanged {
+    device: InputDeviceKind,
+    enabled: bool,
+  },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -517,24 +525,14 @@ impl Compositor {
   }
 
   pub fn trigger_runtime_binding(&mut self, id: u64) {
-    let Some(binding) = self.state.runtime_bindings.get(&id).cloned() else {
-      return;
-    };
-    if let Some(method) = binding.call_method {
-      let _ = ipc::respond(
-        &mut self.state,
-        &serde_json::json!({
-            "method": method,
-            "data": binding.call_data.unwrap_or(serde_json::Value::Null),
-        }),
-      );
-    } else if binding.command.is_none() {
-      self.state.ipc_events.push(serde_json::json!({
-          "event": "command-binding",
-          "binding-id": id,
-          "client-id": binding.client_id,
-      }));
-    }
+    ipc::trigger_runtime_binding(&mut self.state, id);
+  }
+
+  /// Returns whether the seat input device of this kind is enabled. The
+  /// nested frontend checks this before acting on host input itself, for
+  /// example to match bindings.
+  pub fn input_device_enabled(&self, kind: InputDeviceKind) -> bool {
+    input_device::enabled(&self.state, kind)
   }
 
   /// Enables Wayfire-style length-prefixed JSON IPC on a local socket.
@@ -817,7 +815,7 @@ impl Compositor {
   }
 
   pub fn pointer_motion(&mut self, x: f64, y: f64) {
-    input::pointer_motion(&mut self.state, x, y);
+    input_device::pointer_motion(&mut self.state, x, y);
   }
 
   pub fn pointer_relative_motion(
@@ -827,7 +825,7 @@ impl Compositor {
     dx_unaccel: f64,
     dy_unaccel: f64,
   ) {
-    input::pointer_relative_motion(
+    input_device::pointer_relative_motion(
       &mut self.state,
       dx,
       dy,
@@ -879,11 +877,17 @@ impl Compositor {
   }
 
   pub fn pointer_button(&mut self, button: u32, pressed: bool) {
-    input::pointer_button(&mut self.state, button, pressed);
+    input_device::pointer_button(&mut self.state, button, pressed);
   }
 
   pub fn pointer_axis(&mut self, horizontal: f64, vertical: f64) {
-    input::pointer_axis(&mut self.state, horizontal, vertical);
+    input_device::pointer_axis_detailed(
+      &mut self.state,
+      horizontal,
+      vertical,
+      0,
+      0,
+    );
   }
 
   pub fn pointer_axis_detailed(
@@ -893,7 +897,7 @@ impl Compositor {
     horizontal_steps: i32,
     vertical_steps: i32,
   ) {
-    input::pointer_axis_detailed(
+    input_device::pointer_axis_detailed(
       &mut self.state,
       horizontal,
       vertical,
@@ -903,27 +907,27 @@ impl Compositor {
   }
 
   pub fn touch_down(&mut self, id: i32, x: f64, y: f64) {
-    input::touch_down(&mut self.state, id, x, y);
+    input_device::touch_down(&mut self.state, id, x, y);
   }
 
   pub fn touch_motion(&mut self, id: i32, x: f64, y: f64) {
-    input::touch_motion(&mut self.state, id, x, y);
+    input_device::touch_motion(&mut self.state, id, x, y);
   }
 
   pub fn touch_up(&mut self, id: i32) {
-    input::touch_up(&mut self.state, id);
+    input_device::touch_up(&mut self.state, id);
   }
 
   pub fn touch_cancel(&mut self, id: i32) {
-    input::touch_cancel(&mut self.state, id);
+    input_device::touch_cancel(&mut self.state, id);
   }
 
   pub fn keyboard_key(&mut self, key: u32, pressed: bool) {
-    input::keyboard_key(&mut self.state, key, pressed);
+    input_device::keyboard_key(&mut self.state, key, pressed);
   }
 
   pub fn keyboard_modifiers(&mut self, modifiers: Modifiers) {
-    input::keyboard_modifiers(&mut self.state, modifiers);
+    input_device::keyboard_modifiers(&mut self.state, modifiers);
   }
 
   pub fn locked_modifiers(&self) -> u32 {

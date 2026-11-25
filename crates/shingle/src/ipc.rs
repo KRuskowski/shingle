@@ -12,6 +12,7 @@ use wayland_server::Resource;
 use crate::{
   decoration::Mode as DecorationMode,
   input,
+  input_device::{self, InputDeviceKind},
   shell::{self, Role, XdgKind},
   state::CompositorState,
 };
@@ -381,6 +382,8 @@ const SUPPORTED_METHODS: &[&str] = &[
   "command/register-binding",
   "command/unregister-binding",
   "expo/toggle",
+  "input/configure-device",
+  "input/list-devices",
   "invert/toggle",
   "list-methods",
   "scale/toggle",
@@ -1523,15 +1526,104 @@ fn evdev_code(name: &str) -> Option<u32> {
 }
 
 fn feed_key(state: &mut CompositorState, data: &Value) -> Value {
-  let Some(key) = data.get("key").and_then(Value::as_str) else {
+  let Some(name) = data.get("key").and_then(Value::as_str) else {
     return json_error("missing or invalid key");
   };
-  let Some(key) = evdev_code(key) else {
+  let Some(key) = evdev_code(name) else {
     return json_error("failed to parse evdev key");
   };
   let pressed = data.get("state").and_then(Value::as_bool).unwrap_or(false);
-  input::keyboard_key(state, key, pressed);
+  if !input_device::enabled(state, InputDeviceKind::Keyboard) {
+    return json_ok();
+  }
+  if !stipc_key_binding(state, name, pressed) {
+    input_device::keyboard_key(state, key, pressed);
+  }
   json_ok()
+}
+
+/// Runs the runtime binding that matches a STIPC key, as Wayfire's input
+/// pipeline does for keys from its STIPC keyboard. Returns whether a binding
+/// matched; a matched key is consumed and not passed to clients, like a
+/// matched key from the nested host keyboard.
+fn stipc_key_binding(
+  state: &mut CompositorState,
+  name: &str,
+  pressed: bool,
+) -> bool {
+  if crate::shortcuts::active(state) {
+    return false;
+  }
+  let key = name.strip_prefix("KEY_").unwrap_or(name).to_lowercase();
+  let modifiers = stipc_modifiers(state);
+  let Some(binding) = state
+    .runtime_bindings
+    .values()
+    .find(|binding| binding.binding.matches(modifiers, &key))
+    .cloned()
+  else {
+    return false;
+  };
+  let locked = state.idle.lock_state() != shingle_idle::LockState::Unlocked;
+  if locked && !binding.exec_always {
+    return true;
+  }
+  let should_run = match binding.mode {
+    crate::RuntimeBindingMode::Normal | crate::RuntimeBindingMode::Repeat => {
+      pressed
+    }
+    crate::RuntimeBindingMode::Release => !pressed,
+  };
+  if !should_run {
+    return true;
+  }
+  if let Some(command) = &binding.command {
+    match shingle_session::launch_command(command, &state.socket_name, false) {
+      Ok(child) => state.ipc_children.push(child),
+      Err(error) => eprintln!("shingle: runtime command failed: {error}"),
+    }
+  } else {
+    trigger_runtime_binding(state, binding.id);
+  }
+  true
+}
+
+/// Combines the keyboard's depressed modifiers with modifier keys held
+/// through STIPC, which does not run them through XKB.
+fn stipc_modifiers(state: &CompositorState) -> shingle_config::Modifiers {
+  let depressed = state.input.modifiers.depressed;
+  let held = input_device::held_keys(state);
+  let any_held = |codes: [u32; 2]| codes.iter().any(|code| held.contains(code));
+  shingle_config::Modifiers {
+    super_key: depressed & 64 != 0 || any_held([125, 126]),
+    control: depressed & 4 != 0 || any_held([29, 97]),
+    alt: depressed & 8 != 0 || any_held([56, 100]),
+    shift: depressed & 1 != 0 || any_held([42, 54]),
+  }
+}
+
+/// Performs a runtime binding's compositor-side action: its IPC method call,
+/// or a `command-binding` event for the client that registered it. Bindings
+/// with a command are launched by the caller.
+pub(crate) fn trigger_runtime_binding(state: &mut CompositorState, id: u64) {
+  let Some(binding) = state.runtime_bindings.get(&id).cloned() else {
+    return;
+  };
+  if let Some(method) = binding.call_method {
+    let _ = respond(
+      state,
+      &json!({
+          "method": method,
+          "data": binding.call_data.unwrap_or(Value::Null),
+      }),
+    );
+  } else if binding.command.is_none() {
+    state.ipc_events.push(json!({
+        "event": "command-binding",
+        "binding-id": id,
+        "client-id": binding.client_id,
+    }));
+  }
 }
 
 fn feed_button(state: &mut CompositorState, data: &Value) -> Value {
@@ -1547,14 +1639,14 @@ fn feed_button(state: &mut CompositorState, data: &Value) -> Value {
   let mode = data.get("mode").and_then(Value::as_str).unwrap_or("");
   if matches!(mode, "press" | "full") {
     if super_modifier {
-      input::keyboard_key(state, 125, true);
+      input_device::keyboard_key(state, 125, true);
     }
-    input::pointer_button(state, button, true);
+    input_device::pointer_button(state, button, true);
   }
   if matches!(mode, "release" | "full") {
-    input::pointer_button(state, button, false);
+    input_device::pointer_button(state, button, false);
     if super_modifier {
-      input::keyboard_key(state, 125, false);
+      input_device::keyboard_key(state, 125, false);
     }
   }
   json_ok()
@@ -1567,7 +1659,7 @@ fn move_cursor(state: &mut CompositorState, data: &Value) -> Value {
   let Some(y) = data.get("y").and_then(Value::as_f64) else {
     return json_error("missing or invalid y coordinate");
   };
-  input::pointer_motion(state, x, y);
+  input_device::pointer_motion(state, x, y);
   json_ok()
 }
 
@@ -1585,7 +1677,7 @@ fn feed_touch(state: &mut CompositorState, data: &Value) -> Value {
   let Some(y) = data.get("y").and_then(Value::as_f64) else {
     return json_error("missing or invalid y coordinate");
   };
-  input::touch(state, finger, x, y);
+  input_device::touch(state, finger, x, y);
   json_ok()
 }
 
@@ -1597,7 +1689,7 @@ fn release_touch(state: &mut CompositorState, data: &Value) -> Value {
   else {
     return json_error("missing or invalid finger");
   };
-  input::touch_up(state, finger);
+  input_device::touch_up(state, finger);
   json_ok()
 }
 
@@ -2542,6 +2634,8 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
       }
       json_ok()
     }
+    "input/list-devices" => input_device::list_json(state),
+    "input/configure-device" => input_device::configure(state, data),
     "stipc/feed_key" => feed_key(state, data),
     "stipc/feed_button" => feed_button(state, data),
     "stipc/get_display" => json!({
@@ -2578,5 +2672,230 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
     }
     "list-methods" => json!({"methods": SUPPORTED_METHODS}),
     _ => json_error("unknown or unsupported method"),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use serde_json::{Value, json};
+
+  use super::{SUPPORTED_METHODS, respond};
+  use crate::{
+    RuntimeBinding, RuntimeBindingMode, input_device::tests::test_state,
+    state::CompositorState,
+  };
+
+  fn call(state: &mut CompositorState, method: &str, data: Value) -> Value {
+    respond(state, &json!({"method": method, "data": data}))
+  }
+
+  fn add_binding(state: &mut CompositorState, id: u64, binding: &str) {
+    state.runtime_bindings.insert(
+      id,
+      RuntimeBinding {
+        id,
+        binding: super::normalize_runtime_binding(binding).unwrap(),
+        command: None,
+        call_method: None,
+        call_data: None,
+        mode: RuntimeBindingMode::Normal,
+        exec_always: false,
+        client_id: Some(7),
+      },
+    );
+  }
+
+  fn binding_events(state: &mut CompositorState) -> Vec<u64> {
+    state
+      .ipc_events
+      .drain(..)
+      .filter(|event| event["event"] == "command-binding")
+      .filter_map(|event| event["binding-id"].as_u64())
+      .collect()
+  }
+
+  fn press(state: &mut CompositorState, key: &str) {
+    call(state, "stipc/feed_key", json!({"key": key, "state": true}));
+    call(state, "stipc/feed_key", json!({"key": key, "state": false}));
+  }
+
+  #[test]
+  fn list_methods_reports_77_sorted_methods_with_input_devices() {
+    let mut state = test_state();
+    let reply = call(&mut state, "list-methods", Value::Null);
+    let methods = reply["methods"].as_array().unwrap();
+    assert_eq!(methods.len(), 77);
+    assert_eq!(SUPPORTED_METHODS.len(), 77);
+    assert!(SUPPORTED_METHODS.windows(2).all(|pair| pair[0] < pair[1]));
+    for method in ["input/list-devices", "input/configure-device"] {
+      assert!(methods.contains(&json!(method)), "{method}");
+    }
+  }
+
+  #[test]
+  fn input_methods_dispatch_over_ipc() {
+    let mut state = test_state();
+    let devices = call(&mut state, "input/list-devices", Value::Null);
+    let devices = devices.as_array().unwrap();
+    assert_eq!(devices.len(), 3);
+    for (device, (id, kind)) in
+      devices
+        .iter()
+        .zip([(1, "keyboard"), (2, "pointer"), (3, "touch")])
+    {
+      assert_eq!(device["id"], json!(id));
+      assert_eq!(device["type"], json!(kind));
+      assert_eq!(device["enabled"], json!(true));
+      for field in ["name", "vendor", "product"] {
+        assert!(device[field].is_string(), "{field}");
+      }
+    }
+    let reply = call(
+      &mut state,
+      "input/configure-device",
+      json!({"id": 3, "enabled": false}),
+    );
+    assert_eq!(reply, json!({"result": "ok"}));
+    let devices = call(&mut state, "input/list-devices", Value::Null);
+    assert_eq!(devices[2]["enabled"], json!(false));
+    let reply = call(
+      &mut state,
+      "input/configure-device",
+      json!({"id": 9, "enabled": true}),
+    );
+    assert_eq!(reply, json!({"error": "Unknown input device!"}));
+  }
+
+  #[test]
+  fn stipc_cursor_motion_is_gated_by_the_pointer() {
+    let mut state = test_state();
+    let configure = |state: &mut CompositorState, enabled: bool| {
+      call(
+        state,
+        "input/configure-device",
+        json!({"id": 2, "enabled": enabled}),
+      )
+    };
+    let position = |state: &mut CompositorState| {
+      call(state, "window-rules/get-cursor-position", Value::Null)["pos"]
+        .clone()
+    };
+    call(&mut state, "stipc/move_cursor", json!({"x": 100, "y": 50}));
+    assert_eq!(position(&mut state), json!({"x": 100.0, "y": 50.0}));
+    configure(&mut state, false);
+    let reply =
+      call(&mut state, "stipc/move_cursor", json!({"x": 300, "y": 200}));
+    assert_eq!(reply, json!({"result": "ok"}));
+    assert_eq!(position(&mut state), json!({"x": 100.0, "y": 50.0}));
+    configure(&mut state, true);
+    call(&mut state, "stipc/move_cursor", json!({"x": 300, "y": 200}));
+    assert_eq!(position(&mut state), json!({"x": 300.0, "y": 200.0}));
+  }
+
+  #[test]
+  fn stipc_key_fires_runtime_binding_unless_keyboard_disabled() {
+    let mut state = test_state();
+    add_binding(&mut state, 4, "KEY_F9");
+    press(&mut state, "KEY_F9");
+    assert_eq!(binding_events(&mut state), [4]);
+    assert!(crate::input_device::held_keys(&state).is_empty());
+    call(
+      &mut state,
+      "input/configure-device",
+      json!({"id": 1, "enabled": false}),
+    );
+    press(&mut state, "KEY_F9");
+    assert!(binding_events(&mut state).is_empty());
+    call(
+      &mut state,
+      "input/configure-device",
+      json!({"id": 1, "enabled": true}),
+    );
+    press(&mut state, "KEY_F9");
+    assert_eq!(binding_events(&mut state), [4]);
+  }
+
+  #[test]
+  fn stipc_binding_honours_held_modifier_keys_and_modes() {
+    let mut state = test_state();
+    add_binding(&mut state, 1, "<super> KEY_X");
+    press(&mut state, "KEY_X");
+    assert!(binding_events(&mut state).is_empty());
+    call(
+      &mut state,
+      "stipc/feed_key",
+      json!({"key": "KEY_LEFTMETA", "state": true}),
+    );
+    press(&mut state, "KEY_X");
+    assert_eq!(binding_events(&mut state), [1]);
+    call(
+      &mut state,
+      "stipc/feed_key",
+      json!({"key": "KEY_LEFTMETA", "state": false}),
+    );
+    state.runtime_bindings.get_mut(&1).unwrap().mode =
+      RuntimeBindingMode::Release;
+    call(
+      &mut state,
+      "stipc/feed_key",
+      json!({"key": "KEY_LEFTMETA", "state": true}),
+    );
+    call(
+      &mut state,
+      "stipc/feed_key",
+      json!({"key": "KEY_X", "state": true}),
+    );
+    assert!(binding_events(&mut state).is_empty());
+    call(
+      &mut state,
+      "stipc/feed_key",
+      json!({"key": "KEY_X", "state": false}),
+    );
+    assert_eq!(binding_events(&mut state), [1]);
+  }
+
+  #[test]
+  fn disabling_keyboard_releases_stipc_held_keys() {
+    let mut state = test_state();
+    call(
+      &mut state,
+      "stipc/feed_key",
+      json!({"key": "KEY_A", "state": true}),
+    );
+    assert_eq!(crate::input_device::held_keys(&state).len(), 1);
+    call(
+      &mut state,
+      "input/configure-device",
+      json!({"id": 1, "enabled": false}),
+    );
+    assert!(crate::input_device::held_keys(&state).is_empty());
+  }
+
+  #[test]
+  fn stipc_buttons_and_touches_are_gated() {
+    let mut state = test_state();
+    call(
+      &mut state,
+      "input/configure-device",
+      json!({"id": 2, "enabled": false}),
+    );
+    call(
+      &mut state,
+      "input/configure-device",
+      json!({"id": 3, "enabled": false}),
+    );
+    let reply = call(
+      &mut state,
+      "stipc/feed_button",
+      json!({"combo": "BTN_LEFT", "mode": "press"}),
+    );
+    assert_eq!(reply, json!({"result": "ok"}));
+    assert!(crate::input_device::holds_nothing(&state));
+    call(
+      &mut state,
+      "stipc/touch",
+      json!({"finger": 0, "x": 10, "y": 10}),
+    );
+    assert!(crate::input_device::holds_nothing(&state));
   }
 }
