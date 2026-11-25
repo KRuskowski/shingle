@@ -1612,7 +1612,9 @@ impl Compositor {
 
   /// Cancels touch point `id` with `wl_touch.cancel`, for example when the
   /// compositor takes over the gesture. The protocol cancels the client's whole
-  /// touch sequence, but only `id` is forgotten here.
+  /// touch sequence, so every other point down on that client's surfaces ends
+  /// too: lifting it sends nothing, and touching down with its ID again starts
+  /// a new point.
   pub fn touch_cancel(&mut self, device: InputDeviceId, id: i32) {
     input_device::touch_cancel(&mut self.state, device, id);
   }

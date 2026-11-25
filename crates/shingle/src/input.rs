@@ -1190,9 +1190,22 @@ pub(crate) fn touch_up(state: &mut CompositorState, id: i32) {
 pub(crate) fn touch_cancel(state: &mut CompositorState, id: i32) {
   activity(state);
   let touches = touches_for(state, id);
-  if state.input.active_touches.remove(&id).is_none() {
+  let Some(point) = state.input.active_touches.remove(&id) else {
     return;
-  }
+  };
+  // wl_touch.cancel ends every point the client has, so forget them all,
+  // as wlroots' wlr_seat_touch_notify_cancel does for the client.
+  let client = state
+    .surfaces
+    .get(&point.object)
+    .map(|surface| surface.client.clone());
+  state.input.active_touches.retain(|_, other| {
+    state
+      .surfaces
+      .get(&other.object)
+      .map(|surface| &surface.client)
+      != client.as_ref()
+  });
   for touch in touches {
     touch.cancel();
     touch_frame(&touch);
@@ -1680,6 +1693,55 @@ mod tests {
 
   fn us_de() -> Vec<String> {
     vec!["English (US)".to_owned(), "German".to_owned()]
+  }
+
+  #[test]
+  fn touch_cancel_ends_every_point_of_the_client() {
+    use wayland_client::protocol::{wl_seat::WlSeat, wl_touch};
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let device = compositor.add_input_device(crate::InputDeviceInfo {
+      name: "test touch".into(),
+      vendor: None,
+      product: None,
+      kind: crate::InputDeviceKind::Touch,
+    });
+    let mut client =
+      crate::test_client::TestClient::connect(&mut compositor, &path);
+    let seat = client.bind::<WlSeat>(7);
+    let _touch = seat.get_touch(&client.handle, ());
+    let toplevel = client.toplevel(&mut compositor, "touched");
+    client.attach_buffer(&mut compositor, &toplevel.surface, 64, 64);
+    compositor.touch_down(device, 1, 10.0, 10.0);
+    compositor.touch_down(device, 2, 20.0, 20.0);
+    // wl_touch.cancel ends the client's whole sequence, both points.
+    compositor.touch_cancel(device, 1);
+    client.roundtrip(&mut compositor);
+    client.events.touch.clear();
+
+    // So point 2 is up for the client: lifting it sends nothing, and a new
+    // touch with its ID starts a new point.
+    compositor.touch_up(device, 2);
+    client.roundtrip(&mut compositor);
+    assert!(
+      client
+        .events
+        .touch
+        .iter()
+        .all(|event| matches!(event, wl_touch::Event::Frame)),
+      "{:?}",
+      client.events.touch
+    );
+    compositor.touch_down(device, 2, 30.0, 30.0);
+    client.roundtrip(&mut compositor);
+    assert!(
+      client
+        .events
+        .touch
+        .iter()
+        .any(|event| matches!(event, wl_touch::Event::Down { id: 2, .. })),
+      "{:?}",
+      client.events.touch
+    );
   }
 
   #[test]

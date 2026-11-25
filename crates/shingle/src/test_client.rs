@@ -14,7 +14,7 @@ use wayland_client::{
   backend::ObjectId,
   protocol::{
     wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer,
-    wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
+    wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface, wl_touch,
   },
 };
 use wayland_protocols::{
@@ -67,6 +67,10 @@ pub(crate) struct Events {
   pub(crate) configure_states: Vec<(ObjectId, i32, i32, Vec<u32>)>,
   /// Toplevels that received `xdg_toplevel.close`, in order.
   pub(crate) closes: Vec<ObjectId>,
+  /// Every `wl_pointer` event, in order.
+  pub(crate) pointer: Vec<wl_pointer::Event>,
+  /// Every `wl_touch` event, in order.
+  pub(crate) touch: Vec<wl_touch::Event>,
   synced: bool,
 }
 
@@ -292,6 +296,32 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Events {
     if let wl_keyboard::Event::Keymap { fd, size, .. } = event {
       events.keymaps.push(read_keymap(&fd, size));
     }
+  }
+}
+
+impl Dispatch<wl_pointer::WlPointer, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &wl_pointer::WlPointer,
+    event: wl_pointer::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.pointer.push(event);
+  }
+}
+
+impl Dispatch<wl_touch::WlTouch, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &wl_touch::WlTouch,
+    event: wl_touch::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.touch.push(event);
   }
 }
 
@@ -537,7 +567,6 @@ ignore_events!(
   wl_shm_pool::WlShmPool,
   wl_buffer::WlBuffer,
   wl_seat::WlSeat,
-  wl_pointer::WlPointer,
   zxdg_output_manager_v1::ZxdgOutputManagerV1,
   wp_presentation::WpPresentation,
   zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
