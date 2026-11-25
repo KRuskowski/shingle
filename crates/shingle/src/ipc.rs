@@ -1533,7 +1533,7 @@ fn feed_key(state: &mut CompositorState, data: &Value) -> Value {
     return json_error("failed to parse evdev key");
   };
   let pressed = data.get("state").and_then(Value::as_bool).unwrap_or(false);
-  if !input_device::enabled(state, InputDeviceKind::Keyboard) {
+  if !input_device::delivers(state, InputDeviceKind::Keyboard) {
     return json_ok();
   }
   if !stipc_key_binding(state, name, pressed) {
@@ -2811,6 +2811,18 @@ mod tests {
       "input/configure-device",
       json!({"id": 1, "enabled": true}),
     );
+    press(&mut state, "KEY_F9");
+    assert_eq!(binding_events(&mut state), [4]);
+  }
+
+  #[test]
+  fn stipc_key_fires_no_binding_while_the_session_is_inactive() {
+    let mut state = test_state();
+    add_binding(&mut state, 4, "KEY_F9");
+    crate::input_device::set_session_active(&mut state, false);
+    press(&mut state, "KEY_F9");
+    assert!(binding_events(&mut state).is_empty());
+    crate::input_device::set_session_active(&mut state, true);
     press(&mut state, "KEY_F9");
     assert_eq!(binding_events(&mut state), [4]);
   }

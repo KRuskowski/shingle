@@ -13,6 +13,10 @@
 //! buttons are released with ordinary release events, depressed and latched
 //! modifiers are cleared, active touch points are cancelled with
 //! `wl_touch.cancel` and an active pointer gesture ends as cancelled.
+//!
+//! The same release happens for every device when the seat session becomes
+//! inactive, for example on a VT switch, and no device delivers anything
+//! until it is active again.
 
 use std::collections::BTreeSet;
 
@@ -81,6 +85,7 @@ const DEVICES: [DeviceInfo; 3] = [
 /// Enabled flags and the input each device currently holds down.
 pub(crate) struct InputDevices {
   enabled: [bool; 3],
+  session_active: bool,
   held_keys: BTreeSet<u32>,
   held_buttons: BTreeSet<u32>,
   held_touches: BTreeSet<i32>,
@@ -90,6 +95,7 @@ impl Default for InputDevices {
   fn default() -> Self {
     Self {
       enabled: [true; 3],
+      session_active: true,
       held_keys: BTreeSet::new(),
       held_buttons: BTreeSet::new(),
       held_touches: BTreeSet::new(),
@@ -100,6 +106,39 @@ impl Default for InputDevices {
 /// Returns whether the seat device of this kind is enabled.
 pub(crate) fn enabled(state: &CompositorState, kind: InputDeviceKind) -> bool {
   state.input.devices.enabled[kind.index()]
+}
+
+/// Returns whether input from the seat device of this kind reaches the
+/// compositor: the device is enabled and the session is active.
+pub(crate) fn delivers(state: &CompositorState, kind: InputDeviceKind) -> bool {
+  session_active(state) && enabled(state, kind)
+}
+
+/// Returns whether the seat session is active.
+pub(crate) fn session_active(state: &CompositorState) -> bool {
+  state.input.devices.session_active
+}
+
+/// Marks the seat session active or inactive. Deactivating first releases
+/// everything every device holds. Returns whether the state changed.
+pub(crate) fn set_session_active(
+  state: &mut CompositorState,
+  active: bool,
+) -> bool {
+  if session_active(state) == active {
+    return false;
+  }
+  if !active {
+    for kind in [
+      InputDeviceKind::Keyboard,
+      InputDeviceKind::Pointer,
+      InputDeviceKind::Touch,
+    ] {
+      release_held(state, kind);
+    }
+  }
+  state.input.devices.session_active = active;
+  true
 }
 
 /// Enables or disables a device. Disabling first releases everything the
@@ -219,7 +258,7 @@ pub(crate) fn keyboard_key(
   key: u32,
   pressed: bool,
 ) -> bool {
-  if !enabled(state, InputDeviceKind::Keyboard) {
+  if !delivers(state, InputDeviceKind::Keyboard) {
     return false;
   }
   if pressed {
@@ -236,7 +275,7 @@ pub(crate) fn keyboard_modifiers(
   state: &mut CompositorState,
   modifiers: Modifiers,
 ) {
-  if enabled(state, InputDeviceKind::Keyboard) {
+  if delivers(state, InputDeviceKind::Keyboard) {
     input::keyboard_modifiers(state, modifiers);
   }
 }
@@ -248,7 +287,7 @@ pub(crate) fn held_keys(state: &CompositorState) -> &BTreeSet<u32> {
 
 /// Feeds absolute motion from the seat pointer.
 pub(crate) fn pointer_motion(state: &mut CompositorState, x: f64, y: f64) {
-  if enabled(state, InputDeviceKind::Pointer) {
+  if delivers(state, InputDeviceKind::Pointer) {
     input::pointer_motion(state, x, y);
   }
 }
@@ -261,7 +300,7 @@ pub(crate) fn pointer_relative_motion(
   dx_unaccel: f64,
   dy_unaccel: f64,
 ) {
-  if enabled(state, InputDeviceKind::Pointer) {
+  if delivers(state, InputDeviceKind::Pointer) {
     input::pointer_relative_motion(state, dx, dy, dx_unaccel, dy_unaccel);
   }
 }
@@ -272,7 +311,7 @@ pub(crate) fn pointer_button(
   button: u32,
   pressed: bool,
 ) {
-  if !enabled(state, InputDeviceKind::Pointer) {
+  if !delivers(state, InputDeviceKind::Pointer) {
     return;
   }
   if pressed {
@@ -291,7 +330,7 @@ pub(crate) fn pointer_axis_detailed(
   horizontal_steps: i32,
   vertical_steps: i32,
 ) {
-  if enabled(state, InputDeviceKind::Pointer) {
+  if delivers(state, InputDeviceKind::Pointer) {
     input::pointer_axis_detailed(
       state,
       horizontal,
@@ -304,7 +343,7 @@ pub(crate) fn pointer_axis_detailed(
 
 /// Starts a touch point on the seat touch device.
 pub(crate) fn touch_down(state: &mut CompositorState, id: i32, x: f64, y: f64) {
-  if enabled(state, InputDeviceKind::Touch) {
+  if delivers(state, InputDeviceKind::Touch) {
     state.input.devices.held_touches.insert(id);
     input::touch_down(state, id, x, y);
   }
@@ -317,14 +356,14 @@ pub(crate) fn touch_motion(
   x: f64,
   y: f64,
 ) {
-  if enabled(state, InputDeviceKind::Touch) {
+  if delivers(state, InputDeviceKind::Touch) {
     input::touch_motion(state, id, x, y);
   }
 }
 
 /// Starts or moves a touch point, as STIPC `touch` does.
 pub(crate) fn touch(state: &mut CompositorState, id: i32, x: f64, y: f64) {
-  if enabled(state, InputDeviceKind::Touch) {
+  if delivers(state, InputDeviceKind::Touch) {
     state.input.devices.held_touches.insert(id);
     input::touch(state, id, x, y);
   }
@@ -332,7 +371,7 @@ pub(crate) fn touch(state: &mut CompositorState, id: i32, x: f64, y: f64) {
 
 /// Lifts a touch point on the seat touch device.
 pub(crate) fn touch_up(state: &mut CompositorState, id: i32) {
-  if enabled(state, InputDeviceKind::Touch) {
+  if delivers(state, InputDeviceKind::Touch) {
     state.input.devices.held_touches.remove(&id);
     input::touch_up(state, id);
   }
@@ -340,7 +379,7 @@ pub(crate) fn touch_up(state: &mut CompositorState, id: i32) {
 
 /// Cancels a touch point on the seat touch device.
 pub(crate) fn touch_cancel(state: &mut CompositorState, id: i32) {
-  if enabled(state, InputDeviceKind::Touch) {
+  if delivers(state, InputDeviceKind::Touch) {
     state.input.devices.held_touches.remove(&id);
     input::touch_cancel(state, id);
   }
@@ -624,5 +663,64 @@ pub(crate) mod tests {
     set_enabled(&mut state, InputDeviceKind::Pointer, false);
     assert_eq!(held_keys(&state).len(), 1);
     assert_eq!(state.input.devices.held_touches.len(), 1);
+  }
+
+  #[test]
+  fn deactivating_the_session_releases_all_held_input() {
+    let mut state = test_state();
+    keyboard_key(&mut state, 30, true);
+    keyboard_modifiers(
+      &mut state,
+      Modifiers {
+        depressed: 64,
+        latched: 1,
+        locked: 2,
+        group: 0,
+      },
+    );
+    pointer_button(&mut state, 0x110, true);
+    touch_down(&mut state, 1, 0.0, 0.0);
+    crate::pointer_gestures::swipe_begin(&mut state, 3);
+    assert!(set_session_active(&mut state, false));
+    assert!(holds_nothing(&state));
+    assert_eq!(state.input.modifiers.depressed, 0);
+    assert_eq!(state.input.modifiers.latched, 0);
+    assert_eq!(state.input.modifiers.locked, 2);
+    assert!(!crate::pointer_gestures::is_active(&state));
+    assert!(!set_session_active(&mut state, false));
+  }
+
+  #[test]
+  fn inactive_session_drops_input_until_resumed() {
+    let mut state = test_state();
+    pointer_motion(&mut state, 10.0, 20.0);
+    set_session_active(&mut state, false);
+    assert!(!keyboard_key(&mut state, 30, true));
+    pointer_motion(&mut state, 30.0, 40.0);
+    pointer_button(&mut state, 0x110, true);
+    touch_down(&mut state, 1, 0.0, 0.0);
+    crate::pointer_gestures::hold_begin(&mut state, 2);
+    assert!(holds_nothing(&state));
+    assert!(!crate::pointer_gestures::is_active(&state));
+    assert_eq!((state.input.pointer_x, state.input.pointer_y), (10.0, 20.0));
+    assert!(set_session_active(&mut state, true));
+    assert!(keyboard_key(&mut state, 30, true));
+    pointer_motion(&mut state, 30.0, 40.0);
+    assert_eq!((state.input.pointer_x, state.input.pointer_y), (30.0, 40.0));
+  }
+
+  #[test]
+  fn session_activity_does_not_change_ipc_device_state() {
+    let mut state = test_state();
+    set_enabled(&mut state, InputDeviceKind::Touch, false);
+    device_events(&mut state);
+    set_session_active(&mut state, false);
+    assert_eq!(list_json(&state)[0]["enabled"], json!(true));
+    assert!(enabled(&state, InputDeviceKind::Keyboard));
+    assert!(!delivers(&state, InputDeviceKind::Keyboard));
+    set_session_active(&mut state, true);
+    assert!(delivers(&state, InputDeviceKind::Keyboard));
+    assert!(!delivers(&state, InputDeviceKind::Touch));
+    assert!(device_events(&mut state).is_empty());
   }
 }

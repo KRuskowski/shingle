@@ -623,6 +623,9 @@ impl Compositor {
   }
 
   pub fn frame(&mut self) {
+    if !input_device::session_active(&self.state) {
+      return;
+    }
     commit_timing::frame(&mut self.state);
     fifo::frame(&mut self.state);
     let time = self.state.now().as_millis() as u32;
@@ -959,6 +962,21 @@ impl Compositor {
 
   pub fn keyboard_modifiers(&mut self, modifiers: Modifiers) {
     input_device::keyboard_modifiers(&mut self.state, modifiers);
+  }
+
+  /// Tells the compositor whether its seat session is active, as libseat
+  /// reports it. A backend calls this with `false` when the session is
+  /// paused, for example on a VT switch, and with `true` once it resumes
+  /// and can draw again.
+  ///
+  /// Deactivating releases every key, button and touch point the seat
+  /// devices hold, with the same events as disabling them over IPC, so no
+  /// client is left with stuck input. While inactive, seat input (including
+  /// STIPC input) is dropped and frames send no frame callbacks or
+  /// presentation feedback. Clients keep running and their commits are
+  /// still processed. Devices disabled over IPC stay disabled either way.
+  pub fn set_session_active(&mut self, active: bool) {
+    input_device::set_session_active(&mut self.state, active);
   }
 
   /// Sets when the seat input passed in next happened, as a

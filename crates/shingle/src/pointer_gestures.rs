@@ -262,10 +262,10 @@ pub(crate) fn is_active(state: &CompositorState) -> bool {
   state.pointer_gestures.active.is_some()
 }
 
-/// Gestures come from the seat pointer, so a disabled pointer starts,
-/// updates and ends none.
+/// Gestures come from the seat pointer, so a disabled pointer or an
+/// inactive session starts, updates and ends none.
 fn pointer_enabled(state: &CompositorState) -> bool {
-  crate::input_device::enabled(state, InputDeviceKind::Pointer)
+  crate::input_device::delivers(state, InputDeviceKind::Pointer)
 }
 
 fn begin(state: &mut CompositorState, kind: GestureKind) -> bool {
