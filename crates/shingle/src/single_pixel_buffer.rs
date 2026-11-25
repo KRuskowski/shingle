@@ -1,7 +1,10 @@
-use wayland_protocols::wp::single_pixel_buffer::v1::server::wp_single_pixel_buffer_manager_v1::{
-    self, WpSinglePixelBufferManagerV1,
+use spb_server::wp_single_pixel_buffer_manager_v1::{
+  self, WpSinglePixelBufferManagerV1,
 };
-use wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource};
+use wayland_protocols::wp::single_pixel_buffer::v1::server as spb_server;
+use wayland_server::{
+  Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
+};
 
 use crate::{
   buffer::Attachment,

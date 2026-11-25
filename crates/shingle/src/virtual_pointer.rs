@@ -86,14 +86,13 @@ impl Dispatch<ZwlrVirtualPointerManagerV1, ()> for CompositorState {
     _dhandle: &DisplayHandle,
     data_init: &mut DataInit<'_, Self>,
   ) {
+    use zwlr_virtual_pointer_manager_v1::Request;
     let id = match request {
-            zwlr_virtual_pointer_manager_v1::Request::Destroy => return,
-            zwlr_virtual_pointer_manager_v1::Request::CreateVirtualPointer { id, .. }
-            | zwlr_virtual_pointer_manager_v1::Request::CreateVirtualPointerWithOutput {
-                id, ..
-            } => id,
-            _ => return,
-        };
+      Request::Destroy => return,
+      Request::CreateVirtualPointer { id, .. }
+      | Request::CreateVirtualPointerWithOutput { id, .. } => id,
+      _ => return,
+    };
     let pointer = data_init.init(id, ());
     state.virtual_pointers.devices.insert(
       pointer.id(),

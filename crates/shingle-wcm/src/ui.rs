@@ -676,7 +676,10 @@ pub fn build(model: &UiModel<'_>) -> Widget {
       let mut rows = vec![
         heading("Keyboard shortcuts"),
         label(
-          "Select a shortcut, then press the new key combination. Escape cancels.",
+          concat!(
+            "Select a shortcut, then press the new key combination. ",
+            "Escape cancels.",
+          ),
           15.0,
           850.0,
           30.0,
@@ -760,7 +763,10 @@ pub fn build(model: &UiModel<'_>) -> Widget {
       let mut rows = vec![
         heading("Command bindings"),
         label(
-          "Commands run through /bin/sh with the nested Shingle Wayland socket.",
+          concat!(
+            "Commands run through /bin/sh with the nested Shingle ",
+            "Wayland socket.",
+          ),
           15.0,
           850.0,
           30.0,
@@ -808,11 +814,14 @@ pub fn build(model: &UiModel<'_>) -> Widget {
       rows.push(Widget::button("Add command", "command_add", 160.0, 40.0));
       rows.push(heading("Autostart"));
       rows.push(label(
-                "Run once at startup; commands already restored from the session are skipped.",
-                15.0,
-                850.0,
-                30.0,
-            ));
+        concat!(
+          "Run once at startup; commands already restored from the ",
+          "session are skipped.",
+        ),
+        15.0,
+        850.0,
+        30.0,
+      ));
       for (index, command) in config.autostart.iter().enumerate() {
         rows.push(row(vec![
           Widget::text_input(
@@ -847,7 +856,10 @@ pub fn build(model: &UiModel<'_>) -> Widget {
           30.0,
         ),
         label(
-          "Example: on maximized if app_id is \"application\" then set alpha 0.8",
+          concat!(
+            "Example: on maximized if app_id is \"application\" ",
+            "then set alpha 0.8",
+          ),
           15.0,
           850.0,
           30.0,

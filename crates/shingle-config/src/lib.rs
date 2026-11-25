@@ -217,9 +217,12 @@ impl ShingleConfig {
       || !(1..=10_000).contains(&self.extra_gestures.move_delay)
     {
       return Err(ConfigError::Invalid(
-                "extra_gestures finger counts must be 1–20 and move_delay must be 1–10000"
-                    .into(),
-            ));
+        concat!(
+          "extra_gestures finger counts must be 1–20 and ",
+          "move_delay must be 1–10000",
+        )
+        .into(),
+      ));
     }
     if !self.effects.wrot_reset_radius.is_finite()
       || self.effects.wrot_reset_radius <= 0.0
@@ -1394,7 +1397,12 @@ impl InputConfig {
       }
     }
     format!(
-      "xkb_keymap {{\n  xkb_keycodes \"default\" {{ include \"evdev+aliases(qwerty)\" }};\n  xkb_types \"complete\" {{ include \"complete\" }};\n  xkb_compatibility \"complete\" {{ include \"complete\" }};\n  xkb_symbols \"default\" {{ include \"{symbols}\" }};\n}};\n"
+      "xkb_keymap {{\
+       \n  xkb_keycodes \"default\" {{ include \"evdev+aliases(qwerty)\" }};\
+       \n  xkb_types \"complete\" {{ include \"complete\" }};\
+       \n  xkb_compatibility \"complete\" {{ include \"complete\" }};\
+       \n  xkb_symbols \"default\" {{ include \"{symbols}\" }};\
+       \n}};\n"
     )
   }
 }
@@ -1706,10 +1714,18 @@ mod tests {
   #[test]
   fn scale_imports_from_wayfire_and_i3() {
     let wayfire = ShingleConfig::parse(
-            "[scale]\ntoggle = <super> KEY_O\ntoggle_all = <super> <shift> KEY_O\nspacing = 24\nouter_margin = 12\ninactive_alpha = 0.6\nallow_zoom = true\n",
-            ConfigFormat::Wayfire,
-        )
-        .unwrap();
+      concat!(
+        "[scale]\n",
+        "toggle = <super> KEY_O\n",
+        "toggle_all = <super> <shift> KEY_O\n",
+        "spacing = 24\n",
+        "outer_margin = 12\n",
+        "inactive_alpha = 0.6\n",
+        "allow_zoom = true\n",
+      ),
+      ConfigFormat::Wayfire,
+    )
+    .unwrap();
     assert_eq!(wayfire.keybindings.scale_toggle.key, "o");
     assert_eq!(
       wayfire.keybindings.scale_toggle.modifiers,
@@ -1726,10 +1742,17 @@ mod tests {
     assert!(wayfire.scale.allow_zoom);
 
     let i3 = ShingleConfig::parse(
-            "set $scale_spacing 30\nset $scale_outer_margin 15\nset $scale_inactive_alpha 0.5\nset $scale_allow_zoom yes\nbindsym Mod4+o scale toggle\nbindsym Mod4+Shift+o scale toggle_all\n",
-            ConfigFormat::I3,
-        )
-        .unwrap();
+      concat!(
+        "set $scale_spacing 30\n",
+        "set $scale_outer_margin 15\n",
+        "set $scale_inactive_alpha 0.5\n",
+        "set $scale_allow_zoom yes\n",
+        "bindsym Mod4+o scale toggle\n",
+        "bindsym Mod4+Shift+o scale toggle_all\n",
+      ),
+      ConfigFormat::I3,
+    )
+    .unwrap();
     assert_eq!(i3.keybindings.scale_toggle.key, "o");
     assert_eq!(i3.keybindings.scale_toggle.modifiers, [Modifier::Super]);
     assert_eq!(i3.keybindings.scale_toggle_all.key, "o");
@@ -1746,19 +1769,30 @@ mod tests {
   #[test]
   fn scale_imports_interaction_and_minimized_options() {
     let wayfire = ShingleConfig::parse(
-            "[scale]\nmiddle_click_close = true\ninclude_minimized = true\nminimized_alpha = 0.4\nclose_on_new_view = true\n",
-            ConfigFormat::Wayfire,
-        )
-        .unwrap();
+      concat!(
+        "[scale]\n",
+        "middle_click_close = true\n",
+        "include_minimized = true\n",
+        "minimized_alpha = 0.4\n",
+        "close_on_new_view = true\n",
+      ),
+      ConfigFormat::Wayfire,
+    )
+    .unwrap();
     assert!(wayfire.scale.middle_click_close);
     assert!(wayfire.scale.include_minimized);
     assert!(wayfire.scale.close_on_new_view);
     assert_eq!(wayfire.scale.minimized_alpha, 0.4);
     let i3 = ShingleConfig::parse(
-            "set $scale_middle_click_close yes\nset $scale_include_minimized yes\nset $scale_minimized_alpha 0.4\nset $scale_close_on_new_view yes\n",
-            ConfigFormat::I3,
-        )
-        .unwrap();
+      concat!(
+        "set $scale_middle_click_close yes\n",
+        "set $scale_include_minimized yes\n",
+        "set $scale_minimized_alpha 0.4\n",
+        "set $scale_close_on_new_view yes\n",
+      ),
+      ConfigFormat::I3,
+    )
+    .unwrap();
     assert!(i3.scale.middle_click_close);
     assert!(i3.scale.include_minimized);
     assert!(i3.scale.close_on_new_view);

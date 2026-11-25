@@ -830,17 +830,16 @@ fn exchange_leaf_ids(split: &mut Split, first: WindowId, second: WindowId) {
 }
 
 fn take_child(split: &mut Split, window: WindowId) -> Option<LeafState> {
-  if let Some(index) = split
-        .children
-        .iter()
-        .position(|child| matches!(&child.node, Node::Leaf(candidate, _) if *candidate == window))
-    {
-        let child = split.children.remove(index);
-        return match child.node {
-            Node::Leaf(_, state) => Some(state),
-            Node::Split(_) => None,
-        };
-    }
+  let index = split.children.iter().position(|child| {
+    matches!(&child.node, Node::Leaf(candidate, _) if *candidate == window)
+  });
+  if let Some(index) = index {
+    let child = split.children.remove(index);
+    return match child.node {
+      Node::Leaf(_, state) => Some(state),
+      Node::Split(_) => None,
+    };
+  }
   for child in &mut split.children {
     if let Node::Split(child_split) = &mut child.node
       && let Some(state) = take_child(child_split, window)

@@ -183,32 +183,29 @@ impl Dispatch<ZwpKeyboardShortcutsInhibitManagerV1, ()> for CompositorState {
     _dhandle: &DisplayHandle,
     data_init: &mut DataInit<'_, Self>,
   ) {
+    use zwp_keyboard_shortcuts_inhibit_manager_v1::{Error, Request};
     match request {
-            zwp_keyboard_shortcuts_inhibit_manager_v1::Request::InhibitShortcuts {
-                id,
-                surface,
-                ..
-            } => {
-                if state.shortcut_inhibitors.contains_surface(&surface.id()) {
-                    resource.post_error(
-                        zwp_keyboard_shortcuts_inhibit_manager_v1::Error::AlreadyInhibited,
-                        "shortcuts are already inhibited for this surface",
-                    );
-                    return;
-                }
-                let inhibitor = data_init.init(id, ());
-                state.shortcut_inhibitors.objects.insert(
-                    inhibitor.id(),
-                    Inhibitor {
-                        resource: inhibitor,
-                        surface: surface.id(),
-                        active: false,
-                    },
-                );
-            }
-            zwp_keyboard_shortcuts_inhibit_manager_v1::Request::Destroy => {}
-            _ => {}
+      Request::InhibitShortcuts { id, surface, .. } => {
+        if state.shortcut_inhibitors.contains_surface(&surface.id()) {
+          resource.post_error(
+            Error::AlreadyInhibited,
+            "shortcuts are already inhibited for this surface",
+          );
+          return;
         }
+        let inhibitor = data_init.init(id, ());
+        state.shortcut_inhibitors.objects.insert(
+          inhibitor.id(),
+          Inhibitor {
+            resource: inhibitor,
+            surface: surface.id(),
+            active: false,
+          },
+        );
+      }
+      Request::Destroy => {}
+      _ => {}
+    }
   }
 }
 

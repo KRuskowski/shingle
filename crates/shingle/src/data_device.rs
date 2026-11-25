@@ -1,5 +1,6 @@
 use std::{collections::HashMap, os::fd::AsFd};
 
+use wayland_protocols_wlr::data_control::v1::server as wlr_data_control;
 use wayland_server::{
   Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
   WEnum,
@@ -11,6 +12,7 @@ use wayland_server::{
     wl_data_source::{self, WlDataSource},
   },
 };
+use wlr_data_control::zwlr_data_control_source_v1::ZwlrDataControlSourceV1;
 
 use crate::state::CompositorState;
 
@@ -19,12 +21,12 @@ struct DeviceData;
 struct OfferData;
 
 struct Source {
-    resource: WlDataSource,
-    client: ClientId,
-    mime_types: Vec<String>,
-    used: bool,
-    actions: wl_data_device_manager::DndAction,
-    control_source: Option<wayland_protocols_wlr::data_control::v1::server::zwlr_data_control_source_v1::ZwlrDataControlSourceV1>,
+  resource: WlDataSource,
+  client: ClientId,
+  mime_types: Vec<String>,
+  used: bool,
+  actions: wl_data_device_manager::DndAction,
+  control_source: Option<ZwlrDataControlSourceV1>,
 }
 
 struct Drag {
@@ -86,7 +88,7 @@ pub(crate) fn set_control_selection(
   state: &mut CompositorState,
   handle: &DisplayHandle,
   client: &Client,
-  control_source: wayland_protocols_wlr::data_control::v1::server::zwlr_data_control_source_v1::ZwlrDataControlSourceV1,
+  control_source: ZwlrDataControlSourceV1,
   mime_types: Vec<String>,
 ) -> Result<(), ()> {
   let resource = client

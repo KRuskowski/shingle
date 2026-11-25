@@ -32,8 +32,8 @@ use wayland_client::{
 };
 use wayland_protocols::ext::session_lock::v1::client::{
   ext_session_lock_manager_v1::ExtSessionLockManagerV1,
-  ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
-  ext_session_lock_v1::ExtSessionLockV1,
+  ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
+  ext_session_lock_v1::{self, ExtSessionLockV1},
 };
 use xkbcommon::xkb;
 use zeroize::{Zeroize, Zeroizing};
@@ -282,8 +282,10 @@ fn print_help() {
          Usage: shingle-lock [OPTIONS]\n\
          \n\
          -c, --color <RRGGBB[AA]>  Set the lock-screen background color\n\
-         -u, --no-unlock-indicator Hide the password and authentication indicator\n\
-         -C, --config <PATH>       Read options from a swaylock-style config file\n\
+         -u, --no-unlock-indicator Hide the password and \
+         authentication indicator\n\
+         -C, --config <PATH>       Read options from a \
+         swaylock-style config file\n\
          -h, --help                Print this help\n\
          -v, --version             Print the version\n\
          \n\
@@ -992,22 +994,28 @@ impl Dispatch<ExtSessionLockV1, ()> for State {
       return;
     }
     match event {
-            wayland_protocols::ext::session_lock::v1::client::ext_session_lock_v1::Event::Locked => {
-                state.locked = true;
-                eprintln!("shingle-lock: compositor reported the session locked");
-                state.maybe_report_ready();
-            }
-            wayland_protocols::ext::session_lock::v1::client::ext_session_lock_v1::Event::Finished => {
-                state.finished = true;
-                if state.locked {
-                    state.fail("compositor finished the session lock; no unlock was requested");
-                } else {
-                    proxy.destroy();
-                    state.fail("compositor denied or finished the lock before it was acquired");
-                }
-            }
-            _ => {}
+      ext_session_lock_v1::Event::Locked => {
+        state.locked = true;
+        eprintln!("shingle-lock: compositor reported the session locked");
+        state.maybe_report_ready();
+      }
+      ext_session_lock_v1::Event::Finished => {
+        state.finished = true;
+        if state.locked {
+          state.fail(concat!(
+            "compositor finished the session lock; ",
+            "no unlock was requested",
+          ));
+        } else {
+          proxy.destroy();
+          state.fail(concat!(
+            "compositor denied or finished the lock ",
+            "before it was acquired",
+          ));
         }
+      }
+      _ => {}
+    }
   }
 }
 
@@ -1023,36 +1031,36 @@ impl Dispatch<ExtSessionLockSurfaceV1, u32> for State {
     if !state.active() {
       return;
     }
-    if let wayland_protocols::ext::session_lock::v1::client::ext_session_lock_surface_v1::Event::Configure {
-            serial,
-            width,
-            height,
-        } = event
-        {
-            proxy.ack_configure(serial);
-            let Some(output) = state.outputs.get_mut(output_name) else {
-                return;
-            };
-            if width == 0 || height == 0 {
-                output.size = None;
-                output.renderer = None;
-                output.buffers.clear();
-                output.committed = false;
-                return;
-            }
-            if output.size != Some((width, height)) {
-                output.size = Some((width, height));
-                output.renderer = None;
-                output.buffers.clear();
-            }
-            output.committed = false;
-            output.dirty = true;
-            if let Err(error) = state.render_output(*output_name, qh) {
-                state.fail(error);
-                return;
-            }
-            state.maybe_report_ready();
-        }
+    if let ext_session_lock_surface_v1::Event::Configure {
+      serial,
+      width,
+      height,
+    } = event
+    {
+      proxy.ack_configure(serial);
+      let Some(output) = state.outputs.get_mut(output_name) else {
+        return;
+      };
+      if width == 0 || height == 0 {
+        output.size = None;
+        output.renderer = None;
+        output.buffers.clear();
+        output.committed = false;
+        return;
+      }
+      if output.size != Some((width, height)) {
+        output.size = Some((width, height));
+        output.renderer = None;
+        output.buffers.clear();
+      }
+      output.committed = false;
+      output.dirty = true;
+      if let Err(error) = state.render_output(*output_name, qh) {
+        state.fail(error);
+        return;
+      }
+      state.maybe_report_ready();
+    }
   }
 }
 
@@ -1107,8 +1115,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
           );
           return;
         }
-        // SAFETY: The compositor transfers ownership of a valid keymap fd and its exact
-        // size; xkbcommon maps it read-only and takes ownership of the descriptor.
+        // SAFETY: The compositor transfers ownership of a valid keymap fd and
+        // its exact size; xkbcommon maps it read-only and takes ownership of
+        // the descriptor.
         let keymap = match unsafe {
           xkb::Keymap::new_from_fd(
             &state.xkb_context,

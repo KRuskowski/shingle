@@ -1,10 +1,7 @@
 use rustix::rand::{GetRandomFlags, getrandom};
 use shingle_core::{Rect, WindowId};
 
-use crate::{
-  shell::{self, Role, XdgKind},
-  state::CompositorState,
-};
+use crate::{shell, state::CompositorState};
 
 pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
   let Some((geometry, fullscreen)) = state
@@ -22,32 +19,38 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
     return;
   }
   let has_parent = state.surfaces.values().any(|surface| {
-        matches!(&surface.role, Role::Xdg { kind: Some(XdgKind::Toplevel(toplevel)), .. } if toplevel.window() == Some(window) && toplevel.parent.is_some())
-    });
+    surface.role.toplevel().is_some_and(|toplevel| {
+      toplevel.window() == Some(window) && toplevel.parent.is_some()
+    })
+  });
   if has_parent {
     return;
   }
   let natural_size = state.surfaces.iter().find_map(|(object, surface)| {
-        if !matches!(&surface.role, Role::Xdg { kind: Some(XdgKind::Toplevel(toplevel)), .. } if toplevel.window() == Some(window)) {
-            return None;
-        }
-        if let Some(dimensions) = crate::viewport::dimensions(state, object) {
-            return Some(dimensions);
-        }
-        let buffer = surface.buffer.as_ref()?;
-        let scale = buffer.scale.max(1) as u32;
-        let mut dimensions = (buffer.width / scale, buffer.height / scale);
-        if matches!(
-            buffer.transform,
-            wayland_server::protocol::wl_output::Transform::Flipped90
-                | wayland_server::protocol::wl_output::Transform::Flipped270
-                | wayland_server::protocol::wl_output::Transform::_90
-                | wayland_server::protocol::wl_output::Transform::_270
-        ) {
-            std::mem::swap(&mut dimensions.0, &mut dimensions.1);
-        }
-        Some(dimensions)
-    });
+    if surface
+      .role
+      .toplevel()
+      .is_none_or(|toplevel| toplevel.window() != Some(window))
+    {
+      return None;
+    }
+    if let Some(dimensions) = crate::viewport::dimensions(state, object) {
+      return Some(dimensions);
+    }
+    let buffer = surface.buffer.as_ref()?;
+    let scale = buffer.scale.max(1) as u32;
+    let mut dimensions = (buffer.width / scale, buffer.height / scale);
+    if matches!(
+      buffer.transform,
+      wayland_server::protocol::wl_output::Transform::Flipped90
+        | wayland_server::protocol::wl_output::Transform::Flipped270
+        | wayland_server::protocol::wl_output::Transform::_90
+        | wayland_server::protocol::wl_output::Transform::_270
+    ) {
+      std::mem::swap(&mut dimensions.0, &mut dimensions.1);
+    }
+    Some(dimensions)
+  });
   if let Some((width, height)) = natural_size
     && width > 0
     && height > 0

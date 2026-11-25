@@ -125,11 +125,14 @@ fn print_help() {
     "shingle-wcm [OPTIONS]\n\
          \n\
          --config PATH       Load YAML, Wayfire INI, or i3 config\n\
-         --output PATH       YAML destination (defaults to source YAML or Shingle default)\n\
+         --output PATH       YAML destination (defaults to source YAML or \
+         Shingle default)\n\
          --check             Validate the source without opening a window\n\
          --export-yaml       Convert and save YAML without opening a window\n\
-         --page NAME         Screenshot page: general, tiling, keys, commands, rules, input, idle\n\
-         --screenshot PATH   Render the selected page headlessly to a PNG (default: keys)\n\
+         --page NAME         Screenshot page: general, tiling, keys, \
+         commands, rules, input, idle\n\
+         --screenshot PATH   Render the selected page headlessly to a PNG \
+         (default: keys)\n\
          --help              Show this help"
   );
 }

@@ -8,10 +8,12 @@ use wayland_protocols::wp::primary_selection::zv1::server::{
   zwp_primary_selection_offer_v1::{self, ZwpPrimarySelectionOfferV1},
   zwp_primary_selection_source_v1::{self, ZwpPrimarySelectionSourceV1},
 };
+use wayland_protocols_wlr::data_control::v1::server as wlr_data_control;
 use wayland_server::{
   Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
   backend::{ClientId, ObjectId},
 };
+use wlr_data_control::zwlr_data_control_source_v1::ZwlrDataControlSourceV1;
 
 use crate::state::CompositorState;
 
@@ -20,10 +22,10 @@ struct DeviceData;
 struct OfferData;
 
 struct Source {
-    resource: ZwpPrimarySelectionSourceV1,
-    client: ClientId,
-    mime_types: Vec<String>,
-    control_source: Option<wayland_protocols_wlr::data_control::v1::server::zwlr_data_control_source_v1::ZwlrDataControlSourceV1>,
+  resource: ZwpPrimarySelectionSourceV1,
+  client: ClientId,
+  mime_types: Vec<String>,
+  control_source: Option<ZwlrDataControlSourceV1>,
 }
 
 struct Device {
@@ -74,14 +76,12 @@ pub(crate) fn set_control_selection(
   state: &mut CompositorState,
   handle: &DisplayHandle,
   client: &Client,
-  control_source: wayland_protocols_wlr::data_control::v1::server::zwlr_data_control_source_v1::ZwlrDataControlSourceV1,
+  control_source: ZwlrDataControlSourceV1,
   mime_types: Vec<String>,
 ) -> Result<(), ()> {
-  let resource = client
-        .create_resource::<ZwpPrimarySelectionSourceV1, SourceData, CompositorState>(
-            handle, 1, SourceData,
-        )
-        .map_err(|_| ())?;
+  let resource: ZwpPrimarySelectionSourceV1 = client
+    .create_resource::<_, SourceData, CompositorState>(handle, 1, SourceData)
+    .map_err(|_| ())?;
   let id = resource.id();
   state.primary_selection.sources.insert(
     id.clone(),
@@ -200,16 +200,15 @@ pub(crate) fn sync_selection(
       device.resource.selection(None);
       continue;
     };
-    let Ok(offer) = device
-            .client
-            .create_resource::<ZwpPrimarySelectionOfferV1, OfferData, CompositorState>(
-                handle,
-                device.resource.version(),
-                OfferData,
-            )
-        else {
-            continue;
-        };
+    let Ok(offer): Result<ZwpPrimarySelectionOfferV1, _> = device
+      .client
+      .create_resource::<_, OfferData, CompositorState>(
+      handle,
+      device.resource.version(),
+      OfferData,
+    ) else {
+      continue;
+    };
     device.resource.data_offer(&offer);
     for mime_type in &source.mime_types {
       offer.offer(mime_type.clone());

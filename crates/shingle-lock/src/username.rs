@@ -11,8 +11,9 @@ pub fn current() -> io::Result<String> {
     let mut record = unsafe { mem::zeroed::<libc::passwd>() };
     let mut result = ptr::null_mut();
     let mut storage = vec![0_u8; capacity];
-    // SAFETY: record and storage are valid writable buffers for the supplied sizes, result
-    // points to a valid pointer, and getpwuid_r does not retain any of these pointers.
+    // SAFETY: record and storage are valid writable buffers for the supplied
+    // sizes, result points to a valid pointer, and getpwuid_r does not retain
+    // any of these pointers.
     let status = unsafe {
       libc::getpwuid_r(
         libc::getuid(),
@@ -35,8 +36,8 @@ pub fn current() -> io::Result<String> {
         "the current user has no account name",
       ));
     }
-    // SAFETY: A successful getpwuid_r returns a NUL-terminated pw_name within storage, which
-    // remains alive while the name is copied.
+    // SAFETY: A successful getpwuid_r returns a NUL-terminated pw_name within
+    // storage, which remains alive while the name is copied.
     let name = unsafe { CStr::from_ptr(record.pw_name) }
       .to_str()
       .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?

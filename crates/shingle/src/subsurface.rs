@@ -19,9 +19,12 @@ fn object_for_subsurface(
   resource: &WlSubsurface,
 ) -> Option<ObjectId> {
   state.surfaces.iter().find_map(|(object, surface)| {
-        matches!(&surface.role, Role::Subsurface { resource: candidate, .. } if candidate == resource)
-            .then_some(object.clone())
-    })
+    let matches = matches!(
+        &surface.role,
+        Role::Subsurface { resource: candidate, .. } if candidate == resource
+    );
+    matches.then_some(object.clone())
+  })
 }
 
 fn restack(
@@ -42,12 +45,19 @@ fn restack(
     return;
   };
   let sibling = sibling.id();
-  if sibling == *object || state.surfaces.get(&sibling).is_none_or(|surface| {
-        matches!(&surface.role, Role::Subsurface { parent: candidate, .. } if *candidate != parent)
-            || !matches!(surface.role, Role::Subsurface { .. })
-    }) {
-        return;
-    }
+  if sibling == *object
+    || state
+      .surfaces
+      .get(&sibling)
+      .is_none_or(|surface| match &surface.role {
+        Role::Subsurface {
+          parent: candidate, ..
+        } => *candidate != parent,
+        _ => true,
+      })
+  {
+    return;
+  }
   let Some(children) = state.subsurface_order.get_mut(&parent) else {
     return;
   };
@@ -124,9 +134,12 @@ impl Dispatch<WlSubcompositor, ()> for CompositorState {
         let subsurface = data_init.init(id, ());
         if !valid {
           resource.post_error(
-                        wl_subcompositor::Error::BadSurface,
-                        "subsurface and parent must be distinct valid surfaces without another role",
-                    );
+            wl_subcompositor::Error::BadSurface,
+            concat!(
+              "subsurface and parent must be distinct valid ",
+              "surfaces without another role",
+            ),
+          );
           return;
         }
         if let Some(surface) = state.surfaces.get_mut(&object) {

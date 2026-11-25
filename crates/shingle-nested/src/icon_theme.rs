@@ -286,12 +286,13 @@ mod tests {
       let base = self.root.join(theme);
       std::fs::create_dir_all(base.join(directory)).unwrap();
       std::fs::write(
-                base.join("index.theme"),
-                format!(
-                    "[Icon Theme]\nInherits=fallback\n[{directory}]\nSize={size}\nType=Fixed\n"
-                ),
-            )
-            .unwrap();
+        base.join("index.theme"),
+        format!(
+          "[Icon Theme]\nInherits=fallback\n[{directory}]\n\
+                     Size={size}\nType=Fixed\n"
+        ),
+      )
+      .unwrap();
       image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
         .save(base.join(directory).join("document-save.png"))
         .unwrap();
@@ -354,10 +355,13 @@ mod tests {
     )
     .unwrap();
     std::fs::write(
-            directory.join("document-save.svg"),
-            "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><rect width='24' height='24' fill='#ff0000'/></svg>",
-        )
-        .unwrap();
+      directory.join("document-save.svg"),
+      concat!(
+        "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'>",
+        "<rect width='24' height='24' fill='#ff0000'/></svg>",
+      ),
+    )
+    .unwrap();
     let icon = super::load_from_roots(
       "document-save",
       64,

@@ -484,16 +484,14 @@ pub(crate) fn sync_focus(state: &mut CompositorState) {
         return;
       }
       let valid = !state.show_desktop
-                && state.input.keyboard_focus.as_ref().is_some_and(|object| {
-                    state.surfaces.get(object).is_some_and(|surface| {
-                    (matches!(&surface.role, Role::Xdg { kind: Some(_), .. })
-                        || matches!(surface.role, Role::Subsurface { .. })
-                        || matches!(&surface.role, Role::Layer(layer) if layer.accepts_keyboard()))
-                        && surface.buffer.is_some()
-                        && window_for_object(state, object)
-                            .is_none_or(|window| !shell::is_minimized(state, window))
-                })
-                });
+        && state.input.keyboard_focus.as_ref().is_some_and(|object| {
+          state.surfaces.get(object).is_some_and(|surface| {
+            role_accepts_keyboard(&surface.role)
+              && surface.buffer.is_some()
+              && window_for_object(state, object)
+                .is_none_or(|window| !shell::is_minimized(state, window))
+          })
+        });
       if !valid {
         let target = if state.show_desktop {
           None
@@ -1498,16 +1496,22 @@ fn pointers_for(state: &CompositorState, object: &ObjectId) -> Vec<WlPointer> {
     .collect()
 }
 
+/// Returns whether a surface with this role may take keyboard focus while
+/// the session is unlocked.
+fn role_accepts_keyboard(role: &Role) -> bool {
+  match role {
+    Role::Xdg { kind: Some(_), .. } | Role::Subsurface { .. } => true,
+    Role::Layer(layer) => layer.accepts_keyboard(),
+    _ => false,
+  }
+}
+
 fn input_allowed(state: &CompositorState, object: &ObjectId) -> bool {
   let Some(surface) = state.surfaces.get(object) else {
     return false;
   };
   match state.idle.lock_state() {
-    LockState::Unlocked => {
-      matches!(&surface.role, Role::Xdg { kind: Some(_), .. })
-        || matches!(surface.role, Role::Subsurface { .. })
-        || matches!(&surface.role, Role::Layer(layer) if layer.accepts_keyboard())
-    }
+    LockState::Unlocked => role_accepts_keyboard(&surface.role),
     LockState::Locked => matches!(surface.role, Role::SessionLock { .. }),
     LockState::Pending | LockState::Failed => false,
   }
@@ -1565,9 +1569,11 @@ fn object_for_window(
     return None;
   }
   state.surfaces.iter().find_map(|(object, surface)| {
-        matches!(&surface.role, Role::Xdg { kind: Some(XdgKind::Toplevel(toplevel)), .. } if toplevel.window() == Some(window) && surface.buffer.is_some())
-            .then_some(object.clone())
-    })
+    let matches = surface.role.toplevel().is_some_and(|toplevel| {
+      toplevel.window() == Some(window) && surface.buffer.is_some()
+    });
+    matches.then_some(object.clone())
+  })
 }
 
 pub(crate) fn window_for_object(

@@ -1,5 +1,5 @@
 use std::{
-  collections::{HashMap, HashSet},
+  collections::{BTreeSet, HashMap, HashSet},
   sync::{Arc, Mutex},
   time::{Duration, Instant},
 };
@@ -8,7 +8,15 @@ use shingle_core::{
   Gaps, LaunchIdentity, OutputId, Rect, Shingle, WindowId, WorkspaceId,
 };
 use shingle_idle::{Command, DpmsState, IdleCoordinator, LockState};
-use wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
+use wayland_protocols::{
+  ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1,
+  wp::fractional_scale::v1::server::wp_fractional_scale_v1::WpFractionalScaleV1,
+  xdg::{
+    decoration::zv1::server::zxdg_toplevel_decoration_v1,
+    xdg_output::zv1::server::zxdg_output_v1::ZxdgOutputV1,
+  },
+};
+use wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1::Layer;
 use wayland_server::{
   Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
   WEnum,
@@ -111,115 +119,107 @@ pub(crate) struct Surface {
 }
 
 pub(crate) struct CompositorState {
-    pub(crate) core: Shingle,
-    pub(crate) idle: IdleCoordinator,
-    pub(crate) idle_notifications: crate::idle_notify::IdleNotifications,
-    pub(crate) gaps: Gaps,
-    pub(crate) minimum_extent: u32,
-    pub(crate) gamma_control: crate::gamma_control::GammaControl,
-    pub(crate) keep_fullscreen_on_adjacent: bool,
-    pub(crate) resize: shingle_config::ResizeConfig,
-    pub(crate) tile_by_default: shingle_config::ViewMatcher,
-    pub(crate) placement_mode: String,
-    pub(crate) focus: shingle_config::FocusConfig,
-    pub(crate) cascade_position: (i32, i32),
-    pub(crate) window_rules: Vec<shingle_config::WindowRule>,
-    pub(crate) applying_window_rules: bool,
-    pub(crate) output: Rect,
-    pub(crate) background_color: [f64; 4],
-    pub(crate) workspace_width: u32,
-    pub(crate) workspace_height: u32,
-    pub(crate) workspace_wraparound: crate::WorkspaceWraparound,
-    pub(crate) output_scale: f64,
-    pub(crate) output_transform: wl_output::Transform,
-    pub(crate) cursor_theme: String,
-    pub(crate) cursor_size: u32,
-    pub(crate) output_id: OutputId,
-    pub(crate) output_power: crate::output_power::OutputPower,
-    pub(crate) output_management: crate::output_management::OutputManagement,
-    pub(crate) started: Instant,
-    pub(crate) surfaces: HashMap<ObjectId, Surface>,
-    pub(crate) regions: HashMap<ObjectId, Vec<Rect>>,
-    pub(crate) subsurface_order: HashMap<ObjectId, Vec<ObjectId>>,
-    pub(crate) viewports: HashMap<ObjectId, crate::viewport::Viewport>,
-    pub(crate) fractional_scales:
-        HashMap<ObjectId, wayland_protocols::wp::fractional_scale::v1::server::wp_fractional_scale_v1::WpFractionalScaleV1>,
-    pub(crate) surface_ids: HashMap<SurfaceId, ObjectId>,
-    pub(crate) pools: HashMap<ObjectId, Arc<ShmPool>>,
-    pub(crate) buffers: HashMap<ObjectId, Attachment>,
-    pub(crate) outputs: HashMap<ObjectId, WlOutput>,
-    pub(crate) xdg_outputs: HashMap<
-        ObjectId,
-        wayland_protocols::xdg::xdg_output::zv1::server::zxdg_output_v1::ZxdgOutputV1,
-    >,
-    pub(crate) events: Vec<Event>,
-    pub(crate) ipc_events: Vec<serde_json::Value>,
-    pub(crate) pre_map_clients: HashSet<u64>,
-    pub(crate) pending_maps: HashMap<WindowId, PendingMap>,
-    pub(crate) delayed_maps: HashSet<WindowId>,
-    pub(crate) frame_callbacks: Vec<FrameCallback>,
-    pub(crate) disconnected: Arc<Mutex<Vec<ClientId>>>,
-    pub(crate) foreign_toplevels: crate::foreign_toplevel::ForeignToplevels,
-    pub(crate) foreign: crate::foreign::ForeignHandles,
-    pub(crate) ext_workspaces: crate::ext_workspace::ExtWorkspaces,
-    pub(crate) ext_toplevels: crate::ext_toplevel::ExtToplevels,
-    pub(crate) launch_templates: HashMap<ClientId, LaunchIdentity>,
-    pub(crate) socket_name: std::ffi::OsString,
-    pub(crate) ipc_children: Vec<std::process::Child>,
-    pub(crate) next_surface: u64,
-    pub(crate) next_serial: u32,
-    pub(crate) active_lock: Option<ExtSessionLockV1>,
-    pub(crate) activation: crate::activation::Activation,
-    pub(crate) data_devices: crate::data_device::DataDevices,
-    pub(crate) data_control: crate::data_control::DataControl,
-    pub(crate) primary_selection: crate::primary_selection::PrimarySelection,
-    pub(crate) screencopy: crate::screencopy::Screencopy,
-    pub(crate) security_context: crate::security_context::SecurityContexts,
-    pub(crate) alpha_modifiers: crate::alpha_modifier::AlphaModifiers,
-    pub(crate) tearing_controls: crate::tearing::TearingControls,
-    pub(crate) fifo: crate::fifo::FifoState,
-    pub(crate) commit_timing: crate::commit_timing::CommitTiming,
-    pub(crate) shortcut_inhibitors: crate::shortcuts::ShortcutInhibitors,
-    pub(crate) pointer_protocols: crate::pointer_protocols::PointerProtocols,
-    pub(crate) pointer_gestures: crate::pointer_gestures::PointerGestures,
-    pub(crate) presentation: crate::presentation::Presentation,
-    pub(crate) virtual_pointers: crate::virtual_pointer::VirtualPointers,
-    pub(crate) virtual_keyboards: crate::virtual_keyboard::VirtualKeyboards,
-    pub(crate) input: InputState,
-    pub(crate) text_inputs: crate::text_input::TextInputs,
-    pub(crate) input_methods: crate::input_method::InputMethods,
-    pub(crate) input_methods_v2: crate::input_method_v2::InputMethods,
-    pub(crate) icons: crate::toplevel_icon::Icons,
-    pub(crate) enable_text_input_v3: bool,
-    pub(crate) focus_recency: HashMap<shingle_core::WindowId, u64>,
-    pub(crate) view_properties: HashMap<
-        shingle_core::WindowId,
-        HashMap<String, crate::ipc::ViewProperty>,
-    >,
-    pub(crate) runtime_bindings:
-        std::collections::BTreeMap<u64, crate::RuntimeBinding>,
-    pub(crate) focus_sequence: u64,
-    pub(crate) dispatch_pending: bool,
-    pub(crate) accept_pending: bool,
-    pub(crate) idle_pending: bool,
-    pub(crate) shutdown: bool,
-    pub(crate) show_desktop: bool,
-    pub(crate) show_desktop_windows: std::collections::BTreeSet<shingle_core::WindowId>,
-    pub(crate) show_desktop_focus: Option<shingle_core::WindowId>,
-    pub(crate) all_dialogs_modal: bool,
-    pub(crate) keep_last_toplevel_activated: bool,
-    pub(crate) max_buffer_size: u32,
-    pub(crate) disable_primary_selection: bool,
-    pub(crate) decorations:
-        HashMap<ObjectId, crate::decoration::Decoration>,
-    pub(crate) dialogs: crate::dialog::Dialogs,
-    pub(crate) preferred_decoration_mode:
-        wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
-    pub(crate) force_preferred_decoration_mode: bool,
-    pub(crate) focus_main_surface_instead_of_popup: bool,
-    pub(crate) last_workspace: Option<shingle_core::WorkspaceId>,
-    last_lock_state: LockState,
-    last_dpms_state: DpmsState,
+  pub(crate) core: Shingle,
+  pub(crate) idle: IdleCoordinator,
+  pub(crate) idle_notifications: crate::idle_notify::IdleNotifications,
+  pub(crate) gaps: Gaps,
+  pub(crate) minimum_extent: u32,
+  pub(crate) gamma_control: crate::gamma_control::GammaControl,
+  pub(crate) keep_fullscreen_on_adjacent: bool,
+  pub(crate) resize: shingle_config::ResizeConfig,
+  pub(crate) tile_by_default: shingle_config::ViewMatcher,
+  pub(crate) placement_mode: String,
+  pub(crate) focus: shingle_config::FocusConfig,
+  pub(crate) cascade_position: (i32, i32),
+  pub(crate) window_rules: Vec<shingle_config::WindowRule>,
+  pub(crate) applying_window_rules: bool,
+  pub(crate) output: Rect,
+  pub(crate) background_color: [f64; 4],
+  pub(crate) workspace_width: u32,
+  pub(crate) workspace_height: u32,
+  pub(crate) workspace_wraparound: crate::WorkspaceWraparound,
+  pub(crate) output_scale: f64,
+  pub(crate) output_transform: wl_output::Transform,
+  pub(crate) cursor_theme: String,
+  pub(crate) cursor_size: u32,
+  pub(crate) output_id: OutputId,
+  pub(crate) output_power: crate::output_power::OutputPower,
+  pub(crate) output_management: crate::output_management::OutputManagement,
+  pub(crate) started: Instant,
+  pub(crate) surfaces: HashMap<ObjectId, Surface>,
+  pub(crate) regions: HashMap<ObjectId, Vec<Rect>>,
+  pub(crate) subsurface_order: HashMap<ObjectId, Vec<ObjectId>>,
+  pub(crate) viewports: HashMap<ObjectId, crate::viewport::Viewport>,
+  pub(crate) fractional_scales: HashMap<ObjectId, WpFractionalScaleV1>,
+  pub(crate) surface_ids: HashMap<SurfaceId, ObjectId>,
+  pub(crate) pools: HashMap<ObjectId, Arc<ShmPool>>,
+  pub(crate) buffers: HashMap<ObjectId, Attachment>,
+  pub(crate) outputs: HashMap<ObjectId, WlOutput>,
+  pub(crate) xdg_outputs: HashMap<ObjectId, ZxdgOutputV1>,
+  pub(crate) events: Vec<Event>,
+  pub(crate) ipc_events: Vec<serde_json::Value>,
+  pub(crate) pre_map_clients: HashSet<u64>,
+  pub(crate) pending_maps: HashMap<WindowId, PendingMap>,
+  pub(crate) delayed_maps: HashSet<WindowId>,
+  pub(crate) frame_callbacks: Vec<FrameCallback>,
+  pub(crate) disconnected: Arc<Mutex<Vec<ClientId>>>,
+  pub(crate) foreign_toplevels: crate::foreign_toplevel::ForeignToplevels,
+  pub(crate) foreign: crate::foreign::ForeignHandles,
+  pub(crate) ext_workspaces: crate::ext_workspace::ExtWorkspaces,
+  pub(crate) ext_toplevels: crate::ext_toplevel::ExtToplevels,
+  pub(crate) launch_templates: HashMap<ClientId, LaunchIdentity>,
+  pub(crate) socket_name: std::ffi::OsString,
+  pub(crate) ipc_children: Vec<std::process::Child>,
+  pub(crate) next_surface: u64,
+  pub(crate) next_serial: u32,
+  pub(crate) active_lock: Option<ExtSessionLockV1>,
+  pub(crate) activation: crate::activation::Activation,
+  pub(crate) data_devices: crate::data_device::DataDevices,
+  pub(crate) data_control: crate::data_control::DataControl,
+  pub(crate) primary_selection: crate::primary_selection::PrimarySelection,
+  pub(crate) screencopy: crate::screencopy::Screencopy,
+  pub(crate) security_context: crate::security_context::SecurityContexts,
+  pub(crate) alpha_modifiers: crate::alpha_modifier::AlphaModifiers,
+  pub(crate) tearing_controls: crate::tearing::TearingControls,
+  pub(crate) fifo: crate::fifo::FifoState,
+  pub(crate) commit_timing: crate::commit_timing::CommitTiming,
+  pub(crate) shortcut_inhibitors: crate::shortcuts::ShortcutInhibitors,
+  pub(crate) pointer_protocols: crate::pointer_protocols::PointerProtocols,
+  pub(crate) pointer_gestures: crate::pointer_gestures::PointerGestures,
+  pub(crate) presentation: crate::presentation::Presentation,
+  pub(crate) virtual_pointers: crate::virtual_pointer::VirtualPointers,
+  pub(crate) virtual_keyboards: crate::virtual_keyboard::VirtualKeyboards,
+  pub(crate) input: InputState,
+  pub(crate) text_inputs: crate::text_input::TextInputs,
+  pub(crate) input_methods: crate::input_method::InputMethods,
+  pub(crate) input_methods_v2: crate::input_method_v2::InputMethods,
+  pub(crate) icons: crate::toplevel_icon::Icons,
+  pub(crate) enable_text_input_v3: bool,
+  pub(crate) focus_recency: HashMap<shingle_core::WindowId, u64>,
+  pub(crate) view_properties:
+    HashMap<shingle_core::WindowId, HashMap<String, crate::ipc::ViewProperty>>,
+  pub(crate) runtime_bindings:
+    std::collections::BTreeMap<u64, crate::RuntimeBinding>,
+  pub(crate) focus_sequence: u64,
+  pub(crate) dispatch_pending: bool,
+  pub(crate) accept_pending: bool,
+  pub(crate) idle_pending: bool,
+  pub(crate) shutdown: bool,
+  pub(crate) show_desktop: bool,
+  pub(crate) show_desktop_windows: BTreeSet<WindowId>,
+  pub(crate) show_desktop_focus: Option<shingle_core::WindowId>,
+  pub(crate) all_dialogs_modal: bool,
+  pub(crate) keep_last_toplevel_activated: bool,
+  pub(crate) max_buffer_size: u32,
+  pub(crate) disable_primary_selection: bool,
+  pub(crate) decorations: HashMap<ObjectId, crate::decoration::Decoration>,
+  pub(crate) dialogs: crate::dialog::Dialogs,
+  pub(crate) preferred_decoration_mode: zxdg_toplevel_decoration_v1::Mode,
+  pub(crate) force_preferred_decoration_mode: bool,
+  pub(crate) focus_main_surface_instead_of_popup: bool,
+  pub(crate) last_workspace: Option<shingle_core::WorkspaceId>,
+  last_lock_state: LockState,
+  last_dpms_state: DpmsState,
 }
 
 impl CompositorState {
@@ -386,7 +386,8 @@ impl CompositorState {
     Ok(())
   }
 
-  /// Resizes the grid, relocating out-of-range windows to the nearest valid cell.
+  /// Resizes the grid, relocating out-of-range windows to the nearest valid
+  /// cell.
   pub(crate) fn set_workspace_grid(
     &mut self,
     width: u32,
@@ -608,13 +609,7 @@ impl CompositorState {
         .collect();
     }
     let mut snapshots = Vec::new();
-    self.append_layers(
-            &mut snapshots,
-            &[
-                wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1::Layer::Background,
-                wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1::Layer::Bottom,
-            ],
-        );
+    self.append_layers(&mut snapshots, &[Layer::Background, Layer::Bottom]);
     let Ok(workspace) = self.core.current_workspace(&self.output_id) else {
       return snapshots;
     };
@@ -623,19 +618,38 @@ impl CompositorState {
     };
     let focused = crate::input::focused_window(self).or_else(|| tree.focused());
     let fullscreen = self.surfaces.iter().find_map(|(object, surface)| {
-            (!self.show_desktop)
-                .then_some(object.clone())
-                .filter(|_| matches!(&surface.role, Role::Xdg { kind: Some(shell::XdgKind::Toplevel(toplevel)), .. } if toplevel.window() == focused && toplevel.window().is_some_and(|window| self.core.window_info(window).is_ok_and(|info| info.state.fullscreen && !info.state.minimized)) && surface.buffer.is_some()))
-        });
-    let mut sticky = self
-            .surfaces
-            .values()
-            .filter(|surface| {
-                !self.show_desktop
-                    && surface.buffer.is_some()
-                    && matches!(&surface.role, Role::Xdg { kind: Some(shell::XdgKind::Toplevel(toplevel)), .. } if toplevel.window().is_some_and(|window| self.core.window_info(window).is_ok_and(|info| info.state.sticky && !info.state.minimized && (info.location.output != self.output_id || info.location.workspace != workspace))))
+      (!self.show_desktop).then_some(object.clone()).filter(|_| {
+        surface.role.toplevel().is_some_and(|toplevel| {
+          toplevel.window() == focused
+            && toplevel.window().is_some_and(|window| {
+              self.core.window_info(window).is_ok_and(|info| {
+                info.state.fullscreen && !info.state.minimized
+              })
             })
-            .collect::<Vec<_>>();
+            && surface.buffer.is_some()
+        })
+      })
+    });
+    let mut sticky = self
+      .surfaces
+      .values()
+      .filter(|surface| {
+        !self.show_desktop
+          && surface.buffer.is_some()
+          && surface
+            .role
+            .toplevel()
+            .and_then(|toplevel| toplevel.window())
+            .is_some_and(|window| {
+              self.core.window_info(window).is_ok_and(|info| {
+                info.state.sticky
+                  && !info.state.minimized
+                  && (info.location.output != self.output_id
+                    || info.location.workspace != workspace)
+              })
+            })
+      })
+      .collect::<Vec<_>>();
     sticky.sort_by_key(|surface| match &surface.role {
       Role::Xdg {
         kind: Some(shell::XdgKind::Toplevel(toplevel)),
@@ -657,9 +671,11 @@ impl CompositorState {
           continue;
         }
         let object = self.surfaces.iter().find_map(|(object, surface)| {
-                    matches!(&surface.role, Role::Xdg { kind: Some(shell::XdgKind::Toplevel(toplevel)), .. } if toplevel.window() == Some(*window) && surface.buffer.is_some())
-                        .then_some(object.clone())
-                });
+          let matches = surface.role.toplevel().is_some_and(|toplevel| {
+            toplevel.window() == Some(*window) && surface.buffer.is_some()
+          });
+          matches.then_some(object.clone())
+        });
         if let Some(object) = object
           && fullscreen.as_ref() != Some(&object)
         {
@@ -687,18 +703,9 @@ impl CompositorState {
     }
     if let Some(object) = fullscreen {
       self.append_surface_and_popups(&object, &mut snapshots);
-      self.append_layers(
-                &mut snapshots,
-                &[wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1::Layer::Overlay],
-            );
+      self.append_layers(&mut snapshots, &[Layer::Overlay]);
     } else {
-      self.append_layers(
-                &mut snapshots,
-                &[
-                    wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1::Layer::Top,
-                    wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1::Layer::Overlay,
-                ],
-            );
+      self.append_layers(&mut snapshots, &[Layer::Top, Layer::Overlay]);
     }
     if let Some(object) = &self.input.cursor_surface
       && self
@@ -717,17 +724,22 @@ impl CompositorState {
   fn append_layers(
     &self,
     snapshots: &mut Vec<SurfaceSnapshot>,
-    layers: &[wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1::Layer],
+    layers: &[Layer],
   ) {
     let mut surfaces = self
-            .surfaces
-            .values()
-            .filter(|surface| {
-                surface.buffer.is_some()
-                    && (matches!(&surface.role, Role::Layer(layer) if layers.contains(&layer.current.layer))
-                        || matches!(&surface.role, Role::InputPanel(panel) if panel.visible && layers.contains(&wayland_protocols_wlr::layer_shell::v1::server::zwlr_layer_shell_v1::Layer::Overlay)))
-            })
-            .collect::<Vec<_>>();
+      .surfaces
+      .values()
+      .filter(|surface| {
+        surface.buffer.is_some()
+          && match &surface.role {
+            Role::Layer(layer) => layers.contains(&layer.current.layer),
+            Role::InputPanel(panel) => {
+              panel.visible && layers.contains(&Layer::Overlay)
+            }
+            _ => false,
+          }
+      })
+      .collect::<Vec<_>>();
     surfaces.sort_by_key(|surface| surface.id);
     for surface in surfaces {
       self.append_surface_and_popups(&surface.resource.id(), snapshots);
@@ -766,14 +778,17 @@ impl CompositorState {
       }
     }
     let mut children = self
-            .surfaces
-            .iter()
-            .filter(|(_, surface)| {
-                surface.buffer.is_some()
-                    && matches!(&surface.role, Role::Xdg { kind: Some(shell::XdgKind::Popup(popup)), .. } if &popup.parent == object)
-            })
-            .map(|(object, surface)| (surface.id, object.clone()))
-            .collect::<Vec<_>>();
+      .surfaces
+      .iter()
+      .filter(|(_, surface)| {
+        surface.buffer.is_some()
+          && surface
+            .role
+            .popup()
+            .is_some_and(|popup| &popup.parent == object)
+      })
+      .map(|(object, surface)| (surface.id, object.clone()))
+      .collect::<Vec<_>>();
     children.sort_by_key(|(id, _)| *id);
     for (_, child) in children {
       self.append_surface_and_popups(&child, snapshots);
@@ -1141,8 +1156,14 @@ impl CompositorState {
 
   fn commit_inner(&mut self, object: &ObjectId, apply_cached: bool) {
     let synchronized = self.surfaces.get(object).is_some_and(|surface| {
-            matches!(&surface.role, Role::Subsurface { synchronized, .. } if *synchronized)
-        });
+      matches!(
+        &surface.role,
+        Role::Subsurface {
+          synchronized: true,
+          ..
+        }
+      )
+    });
     if synchronized && !apply_cached {
       let Some(surface) = self.surfaces.get_mut(object) else {
         return;
@@ -1439,9 +1460,12 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
       wl_surface::Request::Attach { buffer, x, y } => {
         if resource.version() >= 5 && (x != 0 || y != 0) {
           resource.post_error(
-                        wl_surface::Error::InvalidOffset,
-                        "wl_surface.attach offsets are invalid since version 5; use wl_surface.offset",
-                    );
+            wl_surface::Error::InvalidOffset,
+            concat!(
+              "wl_surface.attach offsets are invalid since ",
+              "version 5; use wl_surface.offset",
+            ),
+          );
           return;
         }
         let pending = match buffer {

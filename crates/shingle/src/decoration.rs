@@ -9,6 +9,9 @@ use wayland_server::{
 
 use crate::state::CompositorState;
 
+/// Decoration mode negotiated through xdg-decoration.
+pub(crate) use zxdg_toplevel_decoration_v1::Mode;
+
 pub(crate) struct Decoration {
   resource: ZxdgToplevelDecorationV1,
   requested: Option<zxdg_toplevel_decoration_v1::Mode>,

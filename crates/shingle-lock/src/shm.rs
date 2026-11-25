@@ -65,8 +65,9 @@ impl ShmBuffer {
     })?;
     let file = tempfile::tempfile()?;
     file.set_len(len as u64)?;
-    // SAFETY: The file has the requested length, the mapping is shared and uniquely owned by
-    // this buffer, and the returned non-null mapping is unmapped exactly once in Drop.
+    // SAFETY: The file has the requested length, the mapping is shared and
+    // uniquely owned by this buffer, and the returned non-null mapping is
+    // unmapped exactly once in Drop.
     let mapping = unsafe {
       mmap(
         ptr::null_mut(),
@@ -108,8 +109,9 @@ impl ShmBuffer {
         "invalid or busy shared-memory buffer",
       ));
     }
-    // SAFETY: The mapping is valid for len bytes and only this client writes it while the
-    // compositor has released the buffer. The source length exactly equals the mapping length.
+    // SAFETY: The mapping is valid for len bytes and only this client writes it
+    // while the compositor has released the buffer. The source length exactly
+    // equals the mapping length.
     let destination = unsafe {
       slice::from_raw_parts_mut(self.mapping.as_ptr().cast::<u8>(), self.len)
     };
@@ -139,8 +141,9 @@ impl Drop for ShmBuffer {
   fn drop(&mut self) {
     self.buffer.destroy();
     self.pool.destroy();
-    // SAFETY: This is the unique mapping returned by mmap, no mapped slice remains live, and
-    // destroying the Wayland objects does not invalidate the compositor's independent mapping.
+    // SAFETY: This is the unique mapping returned by mmap, no mapped slice
+    // remains live, and destroying the Wayland objects does not invalidate the
+    // compositor's independent mapping.
     if let Err(error) = unsafe { munmap(self.mapping.as_ptr(), self.len) } {
       eprintln!("shingle-lock: failed to unmap shared memory: {error}");
     }

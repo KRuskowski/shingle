@@ -197,15 +197,18 @@ pub(crate) fn reconfigure(state: &mut CompositorState) {
 
 pub(crate) fn sync_exclusive_focus(state: &mut CompositorState) -> bool {
   let target = state
-        .surfaces
-        .iter()
-        .filter_map(|(object, surface)| {
-            (surface.buffer.is_some()
-                && matches!(&surface.role, Role::Layer(layer) if layer.exclusive_keyboard()))
-            .then_some((surface.id, object.clone()))
-        })
-        .max_by_key(|(id, _)| *id)
-        .map(|(_, object)| object);
+    .surfaces
+    .iter()
+    .filter_map(|(object, surface)| {
+      (surface.buffer.is_some()
+        && matches!(
+            &surface.role,
+            Role::Layer(layer) if layer.exclusive_keyboard()
+        ))
+      .then_some((surface.id, object.clone()))
+    })
+    .max_by_key(|(id, _)| *id)
+    .map(|(_, object)| object);
   if let Some(target) = target {
     if state.input.keyboard_focus.as_ref() != Some(&target) {
       state.input.keyboard_focus = Some(target);

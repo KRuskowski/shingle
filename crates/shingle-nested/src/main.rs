@@ -4664,7 +4664,8 @@ fn main() -> Result<(), Box<dyn Error>> {
       }
       _ => {
         eprintln!(
-          "usage: shingle-nested [--config PATH] [--ipc PATH] [--spawn PROGRAM [ARGS...]]"
+          "usage: shingle-nested [--config PATH] [--ipc PATH] \
+           [--spawn PROGRAM [ARGS...]]"
         );
         return Err("invalid arguments".into());
       }

@@ -54,6 +54,30 @@ pub(crate) enum Role {
   },
 }
 
+impl Role {
+  /// Returns the xdg_toplevel role data if this is a toplevel surface.
+  pub(crate) fn toplevel(&self) -> Option<&ToplevelRole> {
+    match self {
+      Role::Xdg {
+        kind: Some(XdgKind::Toplevel(toplevel)),
+        ..
+      } => Some(toplevel),
+      _ => None,
+    }
+  }
+
+  /// Returns the xdg_popup role data if this is a popup surface.
+  pub(crate) fn popup(&self) -> Option<&PopupRole> {
+    match self {
+      Role::Xdg {
+        kind: Some(XdgKind::Popup(popup)),
+        ..
+      } => Some(popup),
+      _ => None,
+    }
+  }
+}
+
 #[derive(Clone)]
 pub(crate) enum XdgKind {
   Toplevel(Box<ToplevelRole>),
@@ -116,48 +140,53 @@ pub(crate) fn snapshot_metadata(
   Option<String>,
 ) {
   match &surface.role {
-        Role::Xdg {
-            kind: Some(XdgKind::Toplevel(toplevel)),
-            ..
-        } => (
-            SurfaceRole::Toplevel,
-            toplevel.window(),
-            toplevel.parent.and_then(|parent| {
-                state
-                    .surfaces
-                    .values()
-                    .find(|surface| {
-                        matches!(&surface.role, Role::Xdg { kind: Some(XdgKind::Toplevel(candidate)), .. } if candidate.window == parent)
-                    })
-                    .map(|surface| surface.id)
-            }),
-            Some(toplevel.app_id.clone()),
-            Some(toplevel.title.clone()),
-        ),
-        Role::Xdg {
-            kind: Some(XdgKind::Popup(popup)),
-            ..
-        } => (
-            SurfaceRole::Popup,
-            None,
-            state.surfaces.get(&popup.parent).map(|surface| surface.id),
-            None,
-            None,
-        ),
-        Role::Subsurface { parent, .. } => (
-            SurfaceRole::Subsurface,
-            None,
-            state.surfaces.get(parent).map(|surface| surface.id),
-            None,
-            None,
-        ),
-        Role::Layer(_) | Role::InputPanel(_) => {
-            (SurfaceRole::LayerShell, None, None, None, None)
-        }
-        Role::Cursor => (SurfaceRole::Cursor, None, None, None, None),
-        Role::SessionLock { .. } => (SurfaceRole::SessionLock, None, None, None, None),
-        _ => (SurfaceRole::Unassigned, None, None, None, None),
+    Role::Xdg {
+      kind: Some(XdgKind::Toplevel(toplevel)),
+      ..
+    } => (
+      SurfaceRole::Toplevel,
+      toplevel.window(),
+      toplevel.parent.and_then(|parent| {
+        state
+          .surfaces
+          .values()
+          .find(|surface| {
+            surface
+              .role
+              .toplevel()
+              .is_some_and(|candidate| candidate.window == parent)
+          })
+          .map(|surface| surface.id)
+      }),
+      Some(toplevel.app_id.clone()),
+      Some(toplevel.title.clone()),
+    ),
+    Role::Xdg {
+      kind: Some(XdgKind::Popup(popup)),
+      ..
+    } => (
+      SurfaceRole::Popup,
+      None,
+      state.surfaces.get(&popup.parent).map(|surface| surface.id),
+      None,
+      None,
+    ),
+    Role::Subsurface { parent, .. } => (
+      SurfaceRole::Subsurface,
+      None,
+      state.surfaces.get(parent).map(|surface| surface.id),
+      None,
+      None,
+    ),
+    Role::Layer(_) | Role::InputPanel(_) => {
+      (SurfaceRole::LayerShell, None, None, None, None)
     }
+    Role::Cursor => (SurfaceRole::Cursor, None, None, None, None),
+    Role::SessionLock { .. } => {
+      (SurfaceRole::SessionLock, None, None, None, None)
+    }
+    _ => (SurfaceRole::Unassigned, None, None, None, None),
+  }
 }
 
 pub(crate) fn opacity(state: &CompositorState, object: &ObjectId) -> f32 {
@@ -335,9 +364,12 @@ pub(crate) fn validate_commit(surface: &Surface) -> Result<(), ()> {
         && (attachment.width != width || attachment.height != height)
       {
         resource.post_error(
-                    ext_session_lock_surface_v1::Error::DimensionsMismatch,
-                    "lock surface buffer dimensions must match the acknowledged configure",
-                );
+          ext_session_lock_surface_v1::Error::DimensionsMismatch,
+          concat!(
+            "lock surface buffer dimensions must match the ",
+            "acknowledged configure",
+          ),
+        );
         return Err(());
       }
     }
@@ -467,7 +499,11 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
     .get(object)
     .is_some_and(|surface| surface.buffer.is_some());
   if has_buffer
-    && matches!(&state.surfaces.get(object).map(|surface| &surface.role), Some(Role::Xdg { kind: Some(XdgKind::Toplevel(toplevel)), .. }) if toplevel.window().is_none())
+    && state
+      .surfaces
+      .get(object)
+      .and_then(|surface| surface.role.toplevel())
+      .is_some_and(|toplevel| toplevel.window().is_none())
   {
     materialize_toplevel(state, object);
   }
@@ -736,20 +772,24 @@ pub(crate) fn reconfigure_all(state: &mut CompositorState) {
 }
 
 fn sync_fullscreen_idle(state: &mut CompositorState) {
+  let is_visible_fullscreen = |window: WindowId| {
+    let Ok(workspace) = state.core.current_workspace(&state.output_id) else {
+      return false;
+    };
+    state.core.window_info(window).is_ok_and(|info| {
+      info.state.fullscreen
+        && !info.state.minimized
+        && info.location.output == state.output_id
+        && (info.state.sticky || info.location.workspace == workspace)
+    })
+  };
   let fullscreen = !state.show_desktop
-        && state.surfaces.values().any(|surface| {
-            surface.buffer.is_some()
-                && matches!(&surface.role, Role::Xdg { kind: Some(XdgKind::Toplevel(toplevel)), .. } if toplevel.window().is_some_and(|window| {
-                    state.core.current_workspace(&state.output_id).is_ok_and(|workspace| {
-                        state.core.window_info(window).is_ok_and(|info| {
-                            info.state.fullscreen
-                                && !info.state.minimized
-                                && info.location.output == state.output_id
-                                && (info.state.sticky || info.location.workspace == workspace)
-                        })
-                    })
-                }))
-        });
+    && state.surfaces.values().any(|surface| {
+      surface.buffer.is_some()
+        && surface.role.toplevel().is_some_and(|toplevel| {
+          toplevel.window().is_some_and(is_visible_fullscreen)
+        })
+    });
   let commands = state.idle.set_fullscreen(fullscreen, state.now());
   state.process_idle_commands(commands);
 }
@@ -1484,9 +1524,15 @@ pub(crate) fn assign_pending_popup(
   parent: &ObjectId,
 ) {
   let object = state.surfaces.iter().find_map(|(object, surface)| {
-        matches!(&surface.role, Role::Xdg { kind: Some(XdgKind::PendingPopup { resource, .. }), .. } if resource == popup)
-            .then_some(object.clone())
-    });
+    let pending = match &surface.role {
+      Role::Xdg {
+        kind: Some(XdgKind::PendingPopup { resource, .. }),
+        ..
+      } => resource == popup,
+      _ => false,
+    };
+    pending.then_some(object.clone())
+  });
   let Some(object) = object else {
     return;
   };
@@ -1699,9 +1745,12 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
     data_init: &mut DataInit<'_, Self>,
   ) {
     let object = state.surfaces.iter().find_map(|(object, surface)| {
-            matches!(&surface.role, Role::Xdg { resource: candidate, .. } if candidate == resource)
-                .then_some(object.clone())
-        });
+      let matches = matches!(
+          &surface.role,
+          Role::Xdg { resource: candidate, .. } if candidate == resource
+      );
+      matches.then_some(object.clone())
+    });
     let Some(object) = object else {
       return;
     };
@@ -1766,11 +1815,15 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
           matches!(&surface.role, Role::Xdg { kind: None, .. })
         });
         let parent = parent.and_then(|parent| {
-                    state.surfaces.iter().find_map(|(object, surface)| {
-                        matches!(&surface.role, Role::Xdg { resource: candidate, .. } if candidate == &parent)
-                            .then_some(object.clone())
-                    })
-                });
+          state.surfaces.iter().find_map(|(object, surface)| {
+            let matches = matches!(
+                &surface.role,
+                Role::Xdg { resource: candidate, .. }
+                    if candidate == &parent
+            );
+            matches.then_some(object.clone())
+          })
+        });
         let Some(rules) =
           positioner
             .data::<Mutex<Positioner>>()
@@ -1875,9 +1928,12 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
     _data_init: &mut DataInit<'_, Self>,
   ) {
     let object = state.surfaces.iter().find_map(|(object, surface)| {
-            matches!(&surface.role, Role::Xdg { kind: Some(XdgKind::Toplevel(toplevel)), .. } if &toplevel.resource == resource)
-                .then_some(object.clone())
-        });
+      let matches = surface
+        .role
+        .toplevel()
+        .is_some_and(|toplevel| &toplevel.resource == resource);
+      matches.then_some(object.clone())
+    });
     let Some(object) = object else {
       return;
     };
@@ -1991,9 +2047,12 @@ impl Dispatch<XdgPopup, XdgPopupData> for CompositorState {
     _data_init: &mut DataInit<'_, Self>,
   ) {
     let object = state.surfaces.iter().find_map(|(object, surface)| {
-            matches!(&surface.role, Role::Xdg { kind: Some(XdgKind::Popup(PopupRole { resource: candidate, .. })), .. } if candidate == resource)
-                .then_some(object.clone())
-        });
+      let matches = surface
+        .role
+        .popup()
+        .is_some_and(|popup| &popup.resource == resource);
+      matches.then_some(object.clone())
+    });
     match request {
       xdg_popup::Request::Destroy => {
         if let Some(object) = object
@@ -2301,9 +2360,13 @@ impl Dispatch<ExtSessionLockSurfaceV1, SessionLockSurfaceData>
     _data_init: &mut DataInit<'_, Self>,
   ) {
     let object = state.surfaces.iter().find_map(|(object, surface)| {
-            matches!(&surface.role, Role::SessionLock { resource: candidate, .. } if candidate == resource)
-                .then_some(object.clone())
-        });
+      let matches = matches!(
+          &surface.role,
+          Role::SessionLock { resource: candidate, .. }
+              if candidate == resource
+      );
+      matches.then_some(object.clone())
+    });
     let Some(object) = object else {
       return;
     };

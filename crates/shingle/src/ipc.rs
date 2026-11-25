@@ -10,6 +10,7 @@ use shingle_core::{Direction, Rect, StackingMode, WindowId, WindowPresence};
 use wayland_server::Resource;
 
 use crate::{
+  decoration::Mode as DecorationMode,
   input,
   shell::{self, Role, XdgKind},
   state::CompositorState,
@@ -597,10 +598,14 @@ pub(crate) fn record_events(
       Event::WindowDestroyed { window, .. } => {
         view_event(state, "view-unmapped", *window)
       }
-      Event::FocusChanged { window } => json!({
-          "event": "view-focused",
-          "view": window.map_or(Value::Null, |window| event_view(state, window)),
-      }),
+      Event::FocusChanged { window } => {
+        let view =
+          window.map_or(Value::Null, |window| event_view(state, window));
+        json!({
+            "event": "view-focused",
+            "view": view,
+        })
+      }
       Event::TitleChanged { window, .. } => {
         view_event(state, "view-title-changed", *window)
       }
@@ -692,16 +697,30 @@ fn geometry(rect: Rect) -> Value {
   json!({"x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height})
 }
 
+fn wset_json(state: &CompositorState) -> Value {
+  json!({
+      "index": 1,
+      "name": crate::OUTPUT_NAME,
+      "output-id": 1,
+      "output-name": crate::OUTPUT_NAME,
+      "workspace": output_json(state)["workspace"].clone(),
+  })
+}
+
 fn output_json(state: &CompositorState) -> Value {
   let workspace = state
     .core
     .current_workspace(&state.output_id)
     .unwrap_or_default();
+  let workarea = state
+    .core
+    .output_workarea(&state.output_id)
+    .unwrap_or(state.output);
   json!({
       "id": 1,
       "name": crate::OUTPUT_NAME,
       "geometry": geometry(state.output),
-      "workarea": geometry(state.core.output_workarea(&state.output_id).unwrap_or(state.output)),
+      "workarea": geometry(workarea),
       "wset-index": 1,
       "workspace": {
           "x": workspace.x,
@@ -756,6 +775,8 @@ fn view_json(state: &CompositorState, window: WindowId) -> Value {
         )
       },
     );
+  let last_focus = state.focus_recency.get(&window).copied().unwrap_or(0);
+  let mapped = info.presence == WindowPresence::Mapped;
   json!({
       "id": window.0,
       "pid": -1,
@@ -767,9 +788,9 @@ fn view_json(state: &CompositorState, window: WindowId) -> Value {
       "bbox": geometry_value,
       "output-id": 1,
       "output-name": info.location.output.as_str(),
-      "last-focus-timestamp": state.focus_recency.get(&window).copied().unwrap_or(0),
+      "last-focus-timestamp": last_focus,
       "role": "toplevel",
-      "mapped": info.presence == WindowPresence::Mapped,
+      "mapped": mapped,
       "layer": "workspace",
       "tiled-edges": shell::tiled_edges(state, window),
       "fullscreen": info.state.fullscreen,
@@ -779,7 +800,7 @@ fn view_json(state: &CompositorState, window: WindowId) -> Value {
       "wset-index": 1,
       "min-size": {"width": min_size.0, "height": min_size.1},
       "max-size": {"width": max_size.0, "height": max_size.1},
-      "focusable": info.presence == WindowPresence::Mapped && !info.state.minimized,
+      "focusable": mapped && !info.state.minimized,
       "type": "toplevel",
       "always-on-top": info.state.stacking == StackingMode::AlwaysOnTop,
       "always-on-bottom": info.state.stacking == StackingMode::AlwaysOnBottom,
@@ -2071,9 +2092,9 @@ fn config_option(
 ) -> Option<(String, String)> {
   let (scroll_speed, natural_scroll) = input::scroll_config(state);
   let decoration = match state.preferred_decoration_mode {
-        wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode::ServerSide => "server",
-        _ => "client",
-    };
+    DecorationMode::ServerSide => "server",
+    _ => "client",
+  };
   Some(match name {
     "core/vwidth" => (state.workspace_width.to_string(), "10".into()),
     "core/vheight" => (state.workspace_height.to_string(), "1".into()),
@@ -2276,9 +2297,9 @@ fn apply_config_updates(
       ConfigUpdate::Background(color) => state.background_color = color,
       ConfigUpdate::Decoration(server) => {
         state.preferred_decoration_mode = if server {
-          wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode::ServerSide
+          DecorationMode::ServerSide
         } else {
-          wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode::ClientSide
+          DecorationMode::ClientSide
         };
         crate::decoration::apply_preferences(state);
       }
@@ -2427,17 +2448,15 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
       }
       Err(error) => error,
     },
-    "window-rules/get-focused-view" => json!({
-        "result": "ok",
-        "info": input::focused_window(state).map_or(Value::Null, |window| view_json(state, window)),
-    }),
-    "window-rules/list-wsets" => json!([{
-        "index": 1,
-        "name": crate::OUTPUT_NAME,
-        "output-id": 1,
-        "output-name": crate::OUTPUT_NAME,
-        "workspace": output_json(state)["workspace"].clone(),
-    }]),
+    "window-rules/get-focused-view" => {
+      let info = input::focused_window(state)
+        .map_or(Value::Null, |window| view_json(state, window));
+      json!({
+          "result": "ok",
+          "info": info,
+      })
+    }
+    "window-rules/list-wsets" => json!([wset_json(state)]),
     "window-rules/get-focused-output" => {
       json!({"result": "ok", "info": output_json(state)})
     }
@@ -2446,7 +2465,7 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
         if method.ends_with("output-info") {
           output_json(state)
         } else {
-          json!({"index": 1, "name": crate::OUTPUT_NAME, "output-id": 1, "output-name": crate::OUTPUT_NAME, "workspace": output_json(state)["workspace"].clone()})
+          wset_json(state)
         }
       } else {
         json_error("output or workspace set not found")
