@@ -1,0 +1,14 @@
+[package]
+name = "shingle-xwayland"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Xwayland server management and X window manager for Shingle"
+
+[lints]
+workspace = true
+
+[dependencies]
+rustix = { workspace = true, features = ["pipe"] }
+x11rb = { version = "0.14", features = ["composite"] }
