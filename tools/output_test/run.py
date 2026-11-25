@@ -23,7 +23,9 @@ device-specific: the mode list and current mode clients see, custom
 modes, tests that change nothing, placement, refusing to turn the only
 output off, explicit configured modes with their refresh rate, Wayfire
 `[output:NAME]` sections kept apart, and named YAML entries. Headless
-Shingle does not reload its config, so reloads are unit-tested only.
+Shingle does not reload its config, so a nested Shingle on lavapipe,
+running as a client of a headless one inside the namespace, checks the
+configured refresh rate and that a reload applies.
 Signals go only to Shingle, through `signal_checked`. The pure
 helpers are tested by `python3 -m unittest` in this directory
 (test_run.py).
@@ -124,13 +126,16 @@ def private_environment(directory):
   return environment
 
 class Headless:
-  """One headless Shingle run with a config file of its own."""
+  """One Shingle run with a config file of its own, headless unless
+  `backend` says otherwise."""
 
-  def __init__(self, binary, name, config_text, extension):
+  def __init__(self, binary, name, config_text, extension,
+               backend=('--headless',), extra_environment=None):
     self.directory = os.path.join('/tmp', name)
     for sub in ('runtime', 'config', 'state', 'home'):
       os.makedirs(os.path.join(self.directory, sub), mode=0o700)
     self.environment = private_environment(self.directory)
+    self.environment.update(extra_environment or {})
     self.runtime = self.environment['XDG_RUNTIME_DIR']
     self.config_path = os.path.join(self.directory, f'shingle.{extension}')
     self.write_config(config_text)
@@ -138,7 +143,7 @@ class Headless:
     self.log_path = os.path.join(self.directory, 'shingle.log')
     self.log = open(self.log_path, 'w')
     self.process = subprocess.Popen(
-        [binary, '--headless', '--config', self.config_path,
+        [binary, *backend, '--config', self.config_path,
          '--ipc', self.ipc_path],
         env=self.environment, stdout=self.log, stderr=self.log,
         stdin=subprocess.DEVNULL)
@@ -312,6 +317,46 @@ def configured_checks(results, binary):
                 str(status))
   return shingle.log_text()
 
+def nested_checks(results, binary):
+  """Nested Shingle on lavapipe inside a headless one: clients see the
+  configured refresh rate at the size of the window, which the outer
+  Shingle decides, and a config reload applies a new scale."""
+  outer = Headless(binary, 'outer', yaml_config({}), 'yaml')
+  nested_config = json.loads(yaml_config({'mode': '1024x768@75'}))
+  nested_config['behavior'] = {'auto_reload': True, 'config_reload_delay': 20}
+  nested = None
+  try:
+    nested = Headless(binary, 'nested', json.dumps(nested_config), 'yaml',
+                      backend=('--backend', 'nested'),
+                      extra_environment={
+                          'WAYLAND_DISPLAY': outer.wayland_display(),
+                          'VK_ICD_FILENAMES': _HARNESS.LAVAPIPE,
+                      })
+    window = wait_for(lambda: outer.ipc.call('window-rules/list-views'),
+                      timeout=30)
+    size = window[0]['geometry'] if window else {}
+    head = nested.heads().get('HEADLESS-1')
+    expected = (size.get('width'), size.get('height'), 75.0)
+    results.check('nested: the mode is the window at the configured refresh',
+                  head is not None and current_mode(head) == expected,
+                  f'{head and head["modes"]} window {size}')
+    nested_config['output']['scale'] = 2
+    nested.write_config(json.dumps(nested_config))
+    reloaded = wait_for(
+        lambda: nested.heads().get('HEADLESS-1', {}).get('scale') == 2.0)
+    logical = (0, 0, size.get('width', 0) // 2, size.get('height', 0) // 2)
+    results.check('nested: a reloaded scale is applied to the window size',
+                  reloaded and wait_for(lambda: geometry(nested) == logical),
+                  f'{nested.heads().get("HEADLESS-1")} {geometry(nested)}')
+  finally:
+    status = nested.stop() if nested else 'not started'
+    outer_status = outer.stop()
+  results.check('nested: SIGTERM exits nested with status 0', status == 0,
+                str(status))
+  results.check('nested: SIGTERM exits headless with status 0',
+                outer_status == 0, str(outer_status))
+  return nested.log_text() if nested else outer.log_text()
+
 def wayfire_checks(results, binary):
   """Two Wayfire output sections stay apart; the headless one applies."""
   ini = '\n'.join([
@@ -356,7 +401,8 @@ def inner(binary):
                 not os.path.isdir('/dev/dri') or not os.listdir('/dev/dri'))
   results.check('no host display variable is set',
                 not any(name in os.environ for name in HOST_VARIABLES))
-  for checks in (randr_checks, configured_checks, wayfire_checks):
+  for checks in (randr_checks, configured_checks, wayfire_checks,
+                 nested_checks):
     try:
       log = checks(results, binary)
     except Exception as error:  # pylint: disable=broad-except
