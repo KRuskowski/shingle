@@ -70,6 +70,9 @@ pub fn run(
     "WAYLAND_DISPLAY={}",
     compositor.socket_name().to_string_lossy()
   );
+  if let Some(display) = compositor.x_display() {
+    println!("DISPLAY={display}");
+  }
   if let Some(child) = spawn_client(&spawn, &environment)? {
     session_children.push(child);
   }

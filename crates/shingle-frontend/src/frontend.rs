@@ -227,6 +227,9 @@ impl Frontend {
       "WAYLAND_DISPLAY={}",
       frontend.compositor.socket_name().to_string_lossy()
     );
+    if let Some(display) = frontend.compositor.x_display() {
+      println!("DISPLAY={display}");
+    }
     if let Some((program, args)) = spawn.split_first() {
       let environment = frontend.compositor.client_environment();
       let child = launch_program(program, args, &environment)?;

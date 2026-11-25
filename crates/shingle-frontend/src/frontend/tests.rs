@@ -105,6 +105,8 @@ impl Fixture {
     // Never pick up the user's config while the tests run.
     config.behavior.auto_reload = false;
     config.session.restore = false;
+    // Never bind an X display in the shared /tmp.
+    config.xwayland.mode = shingle_config::XwaylandMode::Disabled;
     let mut compositor =
       Compositor::with_socket_path(Config::from(config.clone()), &base)
         .expect("the temporary directory accepts a Wayland socket");

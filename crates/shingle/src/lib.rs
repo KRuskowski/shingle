@@ -94,6 +94,7 @@ mod virtual_pointer;
 mod wayland_pins;
 mod window_rules;
 mod xdg_output;
+mod xwayland;
 
 use std::{
   collections::{HashMap, HashSet},
@@ -122,6 +123,7 @@ use wayland_server::{
 
 pub use state::SurfaceId;
 use state::{ClientDataImpl, CompositorState};
+pub use xwayland::XwaylandSettings;
 
 /// The output name used until a backend calls
 /// [`Compositor::set_output_info`]. The core's output ID stays this name
@@ -232,8 +234,9 @@ pub enum WorkspaceWraparound {
 ///
 /// [`Compositor::apply_config`] re-applies most fields at runtime. The
 /// exceptions are only read at startup: `enable_text_input_v3`,
-/// `initial_locked_modifiers`, `disable_primary_selection` and
-/// `security_privileged_protocols`.
+/// `initial_locked_modifiers`, `disable_primary_selection`,
+/// `security_privileged_protocols` and everything in `xwayland` except the
+/// startup script.
 #[derive(Clone, Debug)]
 pub struct Config {
   /// Output position and logical size before the output transform, so a
@@ -320,6 +323,10 @@ pub struct Config {
   pub security_privileged_protocols: HashSet<String>,
   /// Window rules evaluated on view events.
   pub window_rules: Vec<shingle_config::WindowRule>,
+  /// The X display and Xwayland. [`Config::default`] disables them;
+  /// `From<ShingleConfig>` takes `xwayland` from the configuration, whose
+  /// default is `lazy`.
+  pub xwayland: XwaylandSettings,
 }
 
 impl Default for Config {
@@ -359,6 +366,7 @@ impl Default for Config {
         &shingle_config::SecurityContextConfig::default().privileged_protocols,
       ),
       window_rules: Vec::new(),
+      xwayland: XwaylandSettings::default(),
     }
   }
 }
@@ -411,6 +419,12 @@ impl From<shingle_config::ShingleConfig> for Config {
         &config.security_context.privileged_protocols,
       ),
       window_rules: config.window_rules,
+      xwayland: XwaylandSettings {
+        mode: config.xwayland.mode,
+        startup_script: config.xwayland.startup_script,
+        discard_script_output: config.behavior.discard_command_output,
+        ..XwaylandSettings::default()
+      },
     }
   }
 }
@@ -866,6 +880,7 @@ pub struct Compositor {
   socket_name: OsString,
   security_listeners: HashMap<u64, security_context::SecurityListener>,
   ipc: Option<ipc::IpcServer>,
+  xwayland: Option<xwayland::Xwayland>,
 }
 
 impl Compositor {
@@ -920,6 +935,7 @@ impl Compositor {
   ) -> Result<Self, Error> {
     let display =
       Display::new().map_err(|error| Error::Display(error.to_string()))?;
+    let xwayland = xwayland::Xwayland::bind(&config.xwayland);
     let disconnected = Arc::new(Mutex::new(Vec::new()));
     let state =
       CompositorState::new(config, core, disconnected.clone(), &socket_name)?;
@@ -974,7 +990,7 @@ impl Compositor {
       })
       .map_err(|error| Error::EventLoop(error.to_string()))?;
 
-    Ok(Self {
+    let mut compositor = Self {
       display,
       state,
       event_loop,
@@ -982,7 +998,17 @@ impl Compositor {
       socket_name,
       security_listeners: HashMap::new(),
       ipc: None,
-    })
+      xwayland,
+    };
+    // An eager Xwayland starts here, before the host launches any client.
+    if let Some(xwayland) = &mut compositor.xwayland {
+      xwayland.start_up(
+        &mut compositor.state,
+        &compositor.display.handle(),
+        &compositor.event_loop.handle(),
+      );
+    }
+    Ok(compositor)
   }
 
   /// [`Compositor::new`] with [`Config::default`]: a 1280x720 output at scale
@@ -996,6 +1022,12 @@ impl Compositor {
   /// [`Compositor::with_socket_path`].
   pub fn socket_name(&self) -> &OsStr {
     &self.socket_name
+  }
+
+  /// Shingle's X display, `:N`, while XWayland is enabled. It is bound
+  /// when the compositor is built, so it is known before Xwayland runs.
+  pub fn x_display(&self) -> Option<&str> {
+    self.state.xwayland.display.as_deref()
   }
 
   /// Every binding IPC clients have registered with `command/register-binding`,
@@ -1055,7 +1087,8 @@ impl Compositor {
   /// The environment for every process the host starts as a client of
   /// this compositor: `WAYLAND_DISPLAY` is [`Compositor::socket_name`],
   /// `WAYFIRE_SOCKET` is the IPC socket once [`Compositor::enable_ipc`]
-  /// ran, `DISPLAY` is removed until Shingle runs its own X server, and
+  /// ran, `DISPLAY` is Shingle's own X display ([`Compositor::x_display`])
+  /// or removed when XWayland is disabled, and
   /// nothing of the host session's `WAYLAND_SOCKET`, `DISPLAY` or
   /// `WAYFIRE_SOCKET` gets through. IPC `stipc/run` and IPC binding
   /// commands use it too. See [`ClientEnvironment`].
@@ -1109,6 +1142,13 @@ impl Compositor {
       self.state.accept_pending = false;
       self.accept_clients()?;
     }
+    if let Some(xwayland) = &mut self.xwayland {
+      xwayland.poll(
+        &mut self.state,
+        &self.display.handle(),
+        &self.event_loop.handle(),
+      );
+    }
     let dispatched = if self.state.dispatch_pending {
       self.state.dispatch_pending = false;
       self.display.dispatch_clients(&mut self.state)?
@@ -1135,6 +1175,9 @@ impl Compositor {
     data_device::sync_drag(&mut self.state, &self.display.handle());
     data_control::sync(&mut self.state, &self.display.handle());
     primary_selection::sync_selection(&mut self.state, &self.display.handle());
+    if let Some(xwayland) = &mut self.xwayland {
+      xwayland.flush(&self.event_loop.handle());
+    }
     self.display.flush_clients()?;
     Ok(dispatched)
   }
@@ -1386,6 +1429,7 @@ impl Compositor {
       config.mouse_natural_scroll,
     );
     self.state.window_rules = config.window_rules;
+    self.apply_xwayland_config(config.xwayland);
     self
       .state
       .set_workspace_grid(config.workspace_width, config.workspace_height)?;
@@ -1413,6 +1457,33 @@ impl Compositor {
     self.state.set_output(output)?;
     shell::reconfigure_all(&mut self.state);
     Ok(())
+  }
+
+  /// Takes a reloaded startup script. A changed mode needs a restart, as
+  /// in Wayfire, which reads `core/xwayland` once; it is only logged.
+  fn apply_xwayland_config(&mut self, settings: XwaylandSettings) {
+    let running = self.xwayland.as_ref().map(xwayland::Xwayland::mode);
+    let wanted = match settings.mode {
+      shingle_config::XwaylandMode::Eager => {
+        Some(shingle_xwayland::StartMode::Eager)
+      }
+      shingle_config::XwaylandMode::Lazy => {
+        Some(shingle_xwayland::StartMode::Lazy)
+      }
+      shingle_config::XwaylandMode::Disabled => None,
+    };
+    if running != wanted {
+      eprintln!(
+        "shingle: xwayland.mode is now {}; restart Shingle to apply it",
+        settings.mode
+      );
+    }
+    if let Some(xwayland) = &mut self.xwayland {
+      xwayland.set_startup_script(
+        settings.startup_script,
+        settings.discard_script_output,
+      );
+    }
   }
 
   /// Ends a held session lock, as when the lock client authenticated: turns
@@ -2750,6 +2821,7 @@ impl Compositor {
               .security_context
               .privileged_protocols
               .clone(),
+            xwayland: false,
           }),
         )?;
         self.state.launch_templates.insert(client.id(), launch);
@@ -2775,12 +2847,24 @@ impl Compositor {
             .security_context
             .privileged_protocols
             .clone(),
+          xwayland: false,
         }),
       )?;
       self.state.launch_templates.insert(client.id(), launch);
     }
     self.state.dispatch_pending = true;
     Ok(())
+  }
+}
+
+impl Drop for Compositor {
+  /// Stops the X window manager and Xwayland before the Wayland clients
+  /// are destroyed, as Wayfire does on shutdown, then removes the X
+  /// display's sockets and lock.
+  fn drop(&mut self) {
+    if let Some(mut xwayland) = self.xwayland.take() {
+      xwayland.shut_down(&mut self.state, &self.event_loop.handle());
+    }
   }
 }
 
@@ -2840,7 +2924,11 @@ fn parse_output_transform(
 }
 
 impl ClientData for ClientDataImpl {
-  fn disconnected(&self, client: ClientId, _reason: DisconnectReason) {
+  fn disconnected(&self, client: ClientId, reason: DisconnectReason) {
+    // Xwayland exits with its connection; the pidfd reports that.
+    if self.xwayland {
+      eprintln!("shingle: Xwayland's Wayland connection closed: {reason:?}");
+    }
     if let Ok(mut clients) = self.disconnected.lock() {
       clients.push(client);
     }

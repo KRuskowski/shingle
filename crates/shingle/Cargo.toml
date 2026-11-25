@@ -18,6 +18,7 @@ shingle-config = { path = "../shingle-config" }
 shingle-core = { path = "../shingle-core" }
 shingle-idle = { path = "../shingle-idle" }
 shingle-session = { path = "../shingle-session" }
+shingle-xwayland = { path = "../shingle-xwayland" }
 wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
 wayland-protocols-misc.workspace = true

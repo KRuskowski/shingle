@@ -3027,6 +3027,7 @@ dependencies = [
  "shingle-core",
  "shingle-idle",
  "shingle-session",
+ "shingle-xwayland",
  "thiserror 2.0.21",
  "wayland-client",
  "wayland-protocols 0.32.13",

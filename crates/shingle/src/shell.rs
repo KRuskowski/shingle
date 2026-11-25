@@ -3044,6 +3044,7 @@ mod tests {
           disconnected: Arc::new(Mutex::new(Vec::new())),
           sandbox: None,
           privileged_protocols: Arc::default(),
+          xwayland: false,
         }),
       )
       .unwrap()

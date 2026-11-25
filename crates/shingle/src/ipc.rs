@@ -394,6 +394,8 @@ const SUPPORTED_METHODS: &[&str] = &[
   "stipc/feed_button",
   "stipc/feed_key",
   "stipc/get_display",
+  "stipc/get_xwayland_display",
+  "stipc/get_xwayland_pid",
   "stipc/layout_views",
   "stipc/move_cursor",
   "stipc/ping",
@@ -477,6 +479,7 @@ const KNOWN_EVENTS: &[&str] = &[
   "view-always-on-bottom",
   "wset-workspace-changed",
   "output-layout-changed",
+  "xwayland-ready",
 ];
 
 fn known_event(event: &str) -> bool {
@@ -2648,7 +2651,15 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
     "stipc/feed_button" => feed_button(state, data),
     "stipc/get_display" => json!({
         "wayland": state.socket_name.to_string_lossy(),
-        "xwayland": "",
+        "xwayland": state.xwayland.display.as_deref().unwrap_or_default(),
+    }),
+    "stipc/get_xwayland_display" => json!({
+        "result": "ok",
+        "display": state.xwayland.display.as_deref().unwrap_or_default(),
+    }),
+    "stipc/get_xwayland_pid" => json!({
+        "result": "ok",
+        "pid": state.xwayland.pid_or_minus_one(),
     }),
     "stipc/layout_views" => layout_views(state, data),
     "stipc/move_cursor" => move_cursor(state, data),
@@ -2729,12 +2740,12 @@ mod tests {
   }
 
   #[test]
-  fn list_methods_reports_77_sorted_methods_with_input_devices() {
+  fn list_methods_reports_79_sorted_methods_with_input_devices() {
     let mut state = test_state();
     let reply = call(&mut state, "list-methods", Value::Null);
     let methods = reply["methods"].as_array().unwrap();
-    assert_eq!(methods.len(), 77);
-    assert_eq!(SUPPORTED_METHODS.len(), 77);
+    assert_eq!(methods.len(), 79);
+    assert_eq!(SUPPORTED_METHODS.len(), 79);
     assert!(SUPPORTED_METHODS.windows(2).all(|pair| pair[0] < pair[1]));
     for method in ["input/list-devices", "input/configure-device"] {
       assert!(methods.contains(&json!(method)), "{method}");

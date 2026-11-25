@@ -59,6 +59,8 @@ pub(crate) struct ClientDataImpl {
   pub(crate) disconnected: Arc<Mutex<Vec<ClientId>>>,
   pub(crate) sandbox: Option<crate::security_context::SandboxMetadata>,
   pub(crate) privileged_protocols: Arc<HashSet<String>>,
+  /// The connection is Xwayland's own, the one Shingle started it with.
+  pub(crate) xwayland: bool,
 }
 
 pub(crate) struct FrameCallback {
@@ -181,6 +183,8 @@ pub(crate) struct CompositorState {
   /// ran; children find it as `WAYFIRE_SOCKET`.
   pub(crate) ipc_socket: Option<std::path::PathBuf>,
   pub(crate) ipc_children: Vec<std::process::Child>,
+  /// The X display and server, for IPC and the client environment.
+  pub(crate) xwayland: crate::xwayland::Status,
   pub(crate) next_surface: u64,
   pub(crate) next_serial: u32,
   pub(crate) active_lock: Option<ExtSessionLockV1>,
@@ -315,6 +319,7 @@ impl CompositorState {
       socket_name: socket_name.to_owned(),
       ipc_socket: None,
       ipc_children: Vec::new(),
+      xwayland: crate::xwayland::Status::default(),
       next_surface: 1,
       next_serial: 1,
       active_lock: None,
@@ -596,10 +601,15 @@ impl CompositorState {
     self.started.elapsed()
   }
 
-  /// The environment of every process Shingle starts. There is no X
-  /// server yet, so `DISPLAY` is removed (XW-2 fills it in).
+  /// The environment of every process Shingle starts. `DISPLAY` is
+  /// Shingle's own X display while one is bound, and removed otherwise.
   pub(crate) fn client_environment(&self) -> ClientEnvironment {
-    ClientEnvironment::new(&self.socket_name, None, self.ipc_socket.as_deref())
+    let display = self.xwayland.display.as_deref().map(std::ffi::OsStr::new);
+    ClientEnvironment::new(
+      &self.socket_name,
+      display,
+      self.ipc_socket.as_deref(),
+    )
   }
 
   pub(crate) fn serial(&mut self) -> u32 {
