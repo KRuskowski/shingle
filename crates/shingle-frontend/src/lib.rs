@@ -12,6 +12,7 @@ pub mod bindings;
 pub mod expo;
 pub mod extra_gestures;
 pub mod icon_theme;
+pub mod keyboard;
 pub mod scale;
 pub mod scale_title;
 pub mod workspace_transition;
