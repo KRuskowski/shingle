@@ -209,6 +209,24 @@ class CaptureTest(unittest.TestCase):
     self.assertIsNone(run.parse_ppm(b'P5\n1 1\n255\n\0'))
     self.assertIsNone(run.parse_ppm(b'P6\n2 2\n255\n\0\0\0'))
 
+  def test_saved_captures_round_trip_in_order(self):
+    directory = tempfile.mkdtemp()
+    try:
+      os.environ[run.CAPTURES_VARIABLE] = directory
+      run._saved_captures[0] = 0
+      first = run.Capture(2, 1, bytes([1, 2, 3, 4, 5, 6]))
+      run.save_capture(first)
+      run.save_capture(None)
+      run.save_capture(run.Capture(1, 1, bytes([7, 8, 9])))
+      self.assertEqual(sorted(os.listdir(directory)),
+                       ['000.ppm', '001.ppm'])
+      with open(os.path.join(directory, '000.ppm'), 'rb') as file:
+        self.assertEqual(run.parse_ppm(file.read()),
+                         (2, 1, first.pixels))
+    finally:
+      del os.environ[run.CAPTURES_VARIABLE]
+      shutil.rmtree(directory)
+
 class KeysTest(unittest.TestCase):
   """Typing through STIPC."""
 

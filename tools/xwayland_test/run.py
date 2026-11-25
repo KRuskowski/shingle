@@ -60,6 +60,9 @@ IPC_TIMEOUT = 10.0
 # The probe client refuses to run without it, so it never opens a window
 # on the host's X displays.
 NAMESPACE_VARIABLE = 'SHINGLE_XWAYLAND_TEST_NAMESPACE'
+# When set to a directory, every settled capture is saved there as
+# NNN.ppm in the order taken, so that two builds can be compared.
+CAPTURES_VARIABLE = 'SHINGLE_XWAYLAND_TEST_CAPTURES'
 
 def encode_message(message):
   """Frames a JSON message for Wayfire IPC: little-endian length, body."""
@@ -1934,14 +1937,33 @@ def capture(shingle):
   parsed = parse_ppm(done.stdout) if done.returncode == 0 else None
   return Capture(*parsed) if parsed else None
 
+def encode_ppm(shot):
+  """`shot` as a binary PPM."""
+  return b'P6\n%d %d\n255\n' % (shot.width, shot.height) + bytes(shot.pixels)
+
+_saved_captures = [0]
+
+def save_capture(shot):
+  """Saves `shot` in the directory named by CAPTURES_VARIABLE, if set."""
+  directory = os.environ.get(CAPTURES_VARIABLE)
+  if not directory or shot is None:
+    return
+  os.makedirs(directory, exist_ok=True)
+  path = os.path.join(directory, f'{_saved_captures[0]:03}.ppm')
+  _saved_captures[0] += 1
+  with open(path, 'wb') as file:
+    file.write(encode_ppm(shot))
+
 def settled_capture(shingle, predicate, timeout=10.0):
-  """Captures until `predicate(capture)` holds; returns the last capture."""
+  """Captures until `predicate(capture)` holds; returns the last capture,
+  which `save_capture` keeps when asked to."""
   last = [None]
 
   def attempt():
     last[0] = capture(shingle)
     return last[0] is not None and predicate(last[0])
   wait_for(attempt, timeout=timeout, interval=0.3)
+  save_capture(last[0])
   return last[0]
 
 def nested_checks(results, binary, work, probe):
