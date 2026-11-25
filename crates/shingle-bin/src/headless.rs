@@ -1,9 +1,18 @@
 //! The headless backend: the compositor without display or input devices,
 //! serving clients and IPC until SIGINT, SIGTERM or a quit request.
 
-use std::{error::Error, ffi::OsString, path::Path, process::Child};
+use std::{
+  error::Error,
+  ffi::OsString,
+  path::Path,
+  process::Child,
+  time::{Duration, Instant},
+};
 
-use shingle::{ClientEnvironment, Compositor, Config};
+use shingle::{
+  ClientEnvironment, Compositor, Config, InputDeviceId, InputDeviceInfo,
+  InputDeviceKind,
+};
 use shingle_config::ShingleConfig;
 use shingle_session::{
   SessionStore, launch_autostart, launch_program, launch_saved,
@@ -37,6 +46,7 @@ pub fn run(
     (Compositor::new(config)?, None)
   };
   compositor.set_keymap(&keymap)?;
+  register_stipc_devices(&mut compositor);
   if let Some(path) = ipc_path {
     compositor.enable_ipc(path)?;
   }
@@ -77,9 +87,60 @@ pub fn run(
     session_children.push(child);
   }
   let _session_children = session_children;
-  compositor.run()?;
+  run_with_frames(&mut compositor)?;
   store.save(compositor.core())?;
   Ok(())
+}
+
+/// Serves clients until shutdown, reporting a frame at the output's
+/// refresh rate as wlroots' headless backend does for Wayfire, so that
+/// clients waiting for frame callbacks or FIFO barriers keep drawing.
+/// Without it, a nested Shingle in a headless one drew one frame only.
+fn run_with_frames(compositor: &mut Compositor) -> Result<(), shingle::Error> {
+  let interval = frame_interval(compositor.output_info().refresh_mhz);
+  let mut next = Instant::now() + interval;
+  while !compositor.shutdown_requested() {
+    let now = Instant::now();
+    if now >= next {
+      compositor.frame();
+      next = (next + interval).max(now);
+    }
+    compositor.poll(Some(next.saturating_duration_since(Instant::now())))?;
+  }
+  Ok(())
+}
+
+/// The time between frames at `refresh_mhz` (millihertz); 60 Hz when it
+/// is not known.
+fn frame_interval(refresh_mhz: u32) -> Duration {
+  let refresh_mhz = if refresh_mhz == 0 {
+    60_000
+  } else {
+    refresh_mhz
+  };
+  Duration::from_nanos(1_000_000_000_000 / u64::from(refresh_mhz))
+}
+
+/// Registers a keyboard, a pointer and a touch device for STIPC input
+/// (`stipc/feed_key`, `feed_button`, `move_cursor`, `touch`), which
+/// Wayfire's stipc plugin creates as headless input devices on any
+/// backend. Headless has no other devices.
+fn register_stipc_devices(compositor: &mut Compositor) -> Vec<InputDeviceId> {
+  [
+    ("Shingle headless keyboard", InputDeviceKind::Keyboard),
+    ("Shingle headless pointer", InputDeviceKind::Pointer),
+    ("Shingle headless touch", InputDeviceKind::Touch),
+  ]
+  .into_iter()
+  .map(|(name, kind)| {
+    compositor.add_input_device(InputDeviceInfo {
+      name: name.into(),
+      vendor: None,
+      product: None,
+      kind,
+    })
+  })
+  .collect()
 }
 
 /// Starts `spawn`'s program, if any, with its arguments in the client
@@ -103,6 +164,36 @@ mod tests {
   /// The environment of a compositor on `wayland-9` without IPC.
   fn environment() -> ClientEnvironment {
     ClientEnvironment::new(OsStr::new("wayland-9"), None, None)
+  }
+
+  #[test]
+  fn frames_follow_the_refresh_rate() {
+    assert_eq!(frame_interval(60_000), Duration::from_nanos(16_666_666));
+    assert_eq!(frame_interval(0), frame_interval(60_000));
+    assert_eq!(frame_interval(144_000), Duration::from_nanos(6_944_444));
+  }
+
+  #[test]
+  fn stipc_devices_are_registered() {
+    let path = std::env::temp_dir()
+      .join(format!("shingle-headless-test-{}", std::process::id()));
+    let mut compositor =
+      Compositor::with_socket_path(Config::default(), &path).unwrap();
+    let ids = register_stipc_devices(&mut compositor);
+    let kinds = ids
+      .iter()
+      .map(|id| compositor.input_device(*id).unwrap().kind)
+      .collect::<Vec<_>>();
+    assert_eq!(
+      kinds,
+      [
+        InputDeviceKind::Keyboard,
+        InputDeviceKind::Pointer,
+        InputDeviceKind::Touch
+      ]
+    );
+    drop(compositor);
+    let _ = std::fs::remove_file(path);
   }
 
   #[test]
