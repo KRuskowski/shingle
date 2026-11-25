@@ -4140,7 +4140,11 @@ impl ApplicationHandler for App {
         return;
       }
     };
-    let renderer = match pollster::block_on(Renderer::new(window.clone())) {
+    let size = window.inner_size();
+    let renderer = match pollster::block_on(Renderer::new(
+      window.clone(),
+      (size.width, size.height),
+    )) {
       Ok(renderer) => renderer,
       Err(error) => {
         eprintln!("shingle: failed to initialize wgpu: {error}");
@@ -4148,7 +4152,6 @@ impl ApplicationHandler for App {
         return;
       }
     };
-    let size = window.inner_size();
     let (width, height) =
       self.compositor.logical_output_size(size.width, size.height);
     if let Err(error) = self
@@ -4189,7 +4192,7 @@ impl ApplicationHandler for App {
       }
       WindowEvent::Resized(size) => {
         if let Some(renderer) = self.renderer.as_mut() {
-          renderer.resize(size);
+          renderer.resize((size.width, size.height));
         }
         let (width, height) =
           self.compositor.logical_output_size(size.width, size.height);

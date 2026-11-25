@@ -9,7 +9,6 @@ license.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
 wgpu.workspace = true
-winit.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true

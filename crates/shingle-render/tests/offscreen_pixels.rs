@@ -1,15 +1,18 @@
 //! Pixel regression tests for the offscreen render path.
 //!
 //! Each test renders a fixed scene and compares the RGBA readback with a
-//! reference image in `tests/golden`. Set `SHINGLE_RENDER_BLESS=1` to write
-//! new reference images instead of comparing. Tests are skipped when the
-//! machine has no wgpu adapter.
+//! reference image in `tests/golden`. The references were rendered by the
+//! renderer before it was split into `GpuContext`, `RenderState`, `draw` and
+//! targets, so they also prove the split changed no pixels. Set
+//! `SHINGLE_RENDER_BLESS=1` to write new reference images instead of
+//! comparing. Tests are skipped when the machine has no wgpu adapter.
 
 use std::path::PathBuf;
 
 use shingle_render::{
-  GpuTexture, OffscreenRenderer, RenderError, RenderRect, RenderTile,
-  TextureTransform,
+  GpuContext, GpuOptions, GpuTexture, OffscreenRenderer, OffscreenTarget,
+  RenderError, RenderRect, RenderState, RenderTile, TextureFilter,
+  TextureTransform, draw,
 };
 
 const WIDTH: u32 = 96;
@@ -52,6 +55,18 @@ fn checker_rgba() -> Vec<u8> {
       [x * 80, y * 80, 255 - x * 40 - y * 20, 255]
     })
     .collect()
+}
+
+fn gpu() -> Option<GpuContext> {
+  let instance = GpuContext::create_instance();
+  match pollster::block_on(GpuContext::new(instance, GpuOptions::default())) {
+    Ok(gpu) => Some(gpu),
+    Err(RenderError::RequestAdapter(error)) => {
+      eprintln!("skipping pixel test, no GPU adapter: {error}");
+      None
+    }
+    Err(error) => panic!("GPU context failed: {error}"),
+  }
 }
 
 /// Overlapping solid, translucent, textured, transformed and rotated tiles.
@@ -187,4 +202,75 @@ fn empty_scene_is_clear_color() {
   let first = &rgba[..4];
   assert!(rgba.chunks_exact(4).all(|pixel| pixel == first));
   assert_eq!(first[3], 255);
+}
+
+#[test]
+fn draw_into_offscreen_target_matches_reference() {
+  let Some(gpu) = gpu() else {
+    return;
+  };
+  let state = RenderState::default();
+  let target = OffscreenTarget::new(&gpu, WIDTH, HEIGHT).expect("target");
+  let texture = gpu
+    .create_texture(4, 4, &checker_rgba(), TextureFilter::Linear)
+    .expect("texture upload");
+  draw(
+    &gpu,
+    &state,
+    target.view(),
+    target.size(),
+    &scene_tiles(&texture),
+    CLEAR,
+  );
+  let rgba = target.read_rgba(&gpu).expect("readback");
+  check_golden("plain", &rgba);
+}
+
+#[test]
+fn one_context_serves_targets_with_separate_state() {
+  let Some(mut gpu) = gpu() else {
+    return;
+  };
+  let texture = gpu
+    .create_texture(4, 4, &checker_rgba(), TextureFilter::Linear)
+    .expect("texture upload");
+  let plain = OffscreenTarget::new(&gpu, WIDTH, HEIGHT).expect("target");
+  let zoomed = OffscreenTarget::new(&gpu, WIDTH, HEIGHT).expect("target");
+  let small = OffscreenTarget::new(&gpu, 7, 5).expect("target");
+  let mut zoom_state = RenderState::default();
+  zoom_state.set_scale_factor(1.25);
+  zoom_state.set_output_transform(TextureTransform::Rotate90);
+  zoom_state.set_zoom(1.3, 60.0, 40.0);
+  let tiles = scene_tiles(&texture);
+  plain.render(&gpu, &RenderState::default(), &tiles, CLEAR);
+  zoomed.render(&gpu, &zoom_state, &tiles, CLEAR);
+  small.render(&gpu, &RenderState::default(), &[], [1.0, 1.0, 1.0, 1.0]);
+  check_golden("plain", &plain.read_rgba(&gpu).expect("readback"));
+  check_golden(
+    "scaled_transformed_zoomed",
+    &zoomed.read_rgba(&gpu).expect("readback"),
+  );
+  let white = small.read_rgba(&gpu).expect("readback");
+  assert_eq!(white.len(), 7 * 5 * 4);
+  assert!(white.iter().all(|&byte| byte == 255));
+  // Effects live in the context and apply to every target drawn after.
+  gpu.set_inversion(true, false);
+  small.render(&gpu, &RenderState::default(), &[], [1.0, 1.0, 1.0, 1.0]);
+  let black = small.read_rgba(&gpu).expect("readback");
+  assert!(black.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]));
+}
+
+#[test]
+fn zero_sized_targets_are_rejected() {
+  let Some(gpu) = gpu() else {
+    return;
+  };
+  assert!(matches!(
+    OffscreenTarget::new(&gpu, 0, 4),
+    Err(RenderError::EmptyTexture)
+  ));
+  assert!(matches!(
+    pollster::block_on(OffscreenRenderer::new(4, 0)),
+    Err(RenderError::EmptyTexture)
+  ));
 }
