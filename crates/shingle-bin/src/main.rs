@@ -80,11 +80,38 @@ fn no_seat(error: &shingle_native::NoSeat, reason: &Reason) -> String {
   )
 }
 
+/// Blocks SIGINT and SIGTERM in the calling thread, and so in every
+/// thread it starts afterwards.
+///
+/// The compositor reads both through a signalfd, which only works while
+/// every thread has them blocked; calloop blocks them only in the thread
+/// that creates the compositor. The offscreen and native backends open
+/// the GPU first, and a thread the driver starts then would take a
+/// SIGTERM with the default action and end Shingle without saving the
+/// session (NVIDIA's driver does). A signal that arrives before the
+/// compositor exists stays pending and ends it as soon as it does.
+/// Children start with an empty mask, which Rust's `Command` sets.
+fn block_shutdown_signals() -> std::io::Result<()> {
+  // SAFETY: `set` is initialised by sigemptyset before use, and
+  // pthread_sigmask only changes this thread's mask.
+  unsafe {
+    let mut set = std::mem::zeroed::<libc::sigset_t>();
+    libc::sigemptyset(&mut set);
+    libc::sigaddset(&mut set, libc::SIGINT);
+    libc::sigaddset(&mut set, libc::SIGTERM);
+    match libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) {
+      0 => Ok(()),
+      error => Err(std::io::Error::from_raw_os_error(error)),
+    }
+  }
+}
+
 /// Loads the configuration and runs the selected backend until it ends.
 fn start(
   selection: &Selection,
   options: Options,
 ) -> Result<(), Box<dyn Error>> {
+  block_shutdown_signals()?;
   // Clients find IPC as WAYFIRE_SOCKET through the compositor's client
   // environment, not through Shingle's own environment.
   let config = ShingleConfig::load(options.config.as_deref())?;
@@ -186,6 +213,32 @@ mod tests {
       Plan::Start(selection, options) => (selection.backend, options),
       other => panic!("expected a start, got {other:?}"),
     }
+  }
+
+  /// Whether `signal` is blocked in the calling thread.
+  fn blocked(signal: libc::c_int) -> bool {
+    // SAFETY: a null new set only reads the mask into `current`.
+    unsafe {
+      let mut current = std::mem::zeroed::<libc::sigset_t>();
+      libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut current);
+      libc::sigismember(&current, signal) == 1
+    }
+  }
+
+  #[test]
+  fn shutdown_signals_are_blocked_for_threads_started_later() {
+    // A thread of its own, so the test runner's mask is left alone.
+    std::thread::spawn(|| {
+      assert!(!blocked(libc::SIGTERM));
+      block_shutdown_signals().expect("the mask can be changed");
+      assert!(blocked(libc::SIGTERM) && blocked(libc::SIGINT));
+      let inherited =
+        std::thread::spawn(|| (blocked(libc::SIGTERM), blocked(libc::SIGINT)));
+      assert_eq!(inherited.join().unwrap(), (true, true));
+      assert!(!blocked(libc::SIGHUP));
+    })
+    .join()
+    .expect("the checks pass");
   }
 
   #[test]

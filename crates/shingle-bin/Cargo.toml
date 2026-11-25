@@ -17,8 +17,9 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-shingle = { path = "../shingle" }
+libc = "0.2"
 pollster.workspace = true
+shingle = { path = "../shingle" }
 shingle-config = { path = "../shingle-config" }
 shingle-frontend = { path = "../shingle-frontend" }
 shingle-native = { path = "../shingle-native" }
