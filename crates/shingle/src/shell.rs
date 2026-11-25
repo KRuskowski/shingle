@@ -505,6 +505,7 @@ fn finish_map(state: &mut CompositorState, window: WindowId) {
           && info.location.workspace == workspace
       })
     })
+    && crate::xwayland::requests::focus_on_map(state, window)
   {
     crate::input::focus_window(state, window);
   }
@@ -629,9 +630,12 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
         crate::window_rules::view_properties(state, window, &identity);
       if !state.tile_by_default.matches_view(&properties) {
         let _ = toggle_tiling(state, window);
+      } else if !crate::xwayland::requests::can_tile(state, object) {
+        crate::xwayland::requests::float(state, object, window);
       }
       crate::placement::place(state, window);
       crate::window_rules::apply_created(state, window, &identity);
+      crate::xwayland::requests::mapped(state, object, window);
     }
     reconfigure_all(state);
     if state
@@ -644,6 +648,7 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
             && info.location.workspace == workspace
         })
       })
+      && crate::xwayland::requests::focus_on_map(state, window)
     {
       crate::input::focus_window(state, window);
     }

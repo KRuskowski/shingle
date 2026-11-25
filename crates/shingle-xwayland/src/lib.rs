@@ -37,7 +37,8 @@ pub use server::{
 };
 pub use sockets::DisplaySockets;
 pub use xwm::{
-  Geometry, Kind, NetWmState, Paired, Pairing, Placement, Window, WindowInfo,
+  CursorImage, Geometry, InputModel, Kind, MoveResize, NetWmState, Paired,
+  Pairing, Placement, StateChange, Window, WindowInfo, WindowType,
   X11Connection, XConnection, Xwm, XwmError, XwmEvent, configure_reply,
 };
 

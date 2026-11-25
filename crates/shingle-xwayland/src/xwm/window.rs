@@ -188,6 +188,46 @@ pub enum Kind {
   DragIcon,
 }
 
+/// A window's ICCCM input model (ICCCM 4.1.7), from the input flag of
+/// `WM_HINTS` and `WM_TAKE_FOCUS` in `WM_PROTOCOLS`, as wlroots'
+/// `wlr_xwayland_icccm_input_model` reads it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputModel {
+  /// Input, no `WM_TAKE_FOCUS`: the window manager sets the focus.
+  Passive,
+  /// Input and `WM_TAKE_FOCUS`: the window manager sets the focus and
+  /// tells the client.
+  LocallyActive,
+  /// No input, `WM_TAKE_FOCUS`: the client sets the focus itself when it
+  /// is offered.
+  GloballyActive,
+  /// No input and no `WM_TAKE_FOCUS`: never focused.
+  NoInput,
+}
+
+impl InputModel {
+  /// The model for the input hint and the take-focus protocol.
+  pub fn new(input: bool, take_focus: bool) -> Self {
+    match (input, take_focus) {
+      (true, false) => Self::Passive,
+      (true, true) => Self::LocallyActive,
+      (false, true) => Self::GloballyActive,
+      (false, false) => Self::NoInput,
+    }
+  }
+
+  /// Whether focusing a window of this model sets the X input focus to
+  /// it (`SetInputFocus`).
+  pub fn sets_input_focus(self) -> bool {
+    matches!(self, Self::Passive | Self::LocallyActive)
+  }
+
+  /// Whether focusing a window of this model sends it `WM_TAKE_FOCUS`.
+  pub fn sends_take_focus(self) -> bool {
+    matches!(self, Self::LocallyActive | Self::GloballyActive)
+  }
+}
+
 /// Everything the window manager has read about a window.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WindowInfo {
@@ -225,6 +265,67 @@ impl WindowInfo {
   /// Whether `_NET_WM_WINDOW_TYPE` lists `kind`.
   pub fn has_type(&self, kind: WindowType) -> bool {
     self.types.contains(&kind)
+  }
+
+  /// The ICCCM input model.
+  pub fn input_model(&self) -> InputModel {
+    InputModel::new(self.hints.input, self.protocols.take_focus)
+  }
+
+  /// Whether a managed window is focused when it maps, as Wayfire's
+  /// `wayfire_xwayland_view::map` decides: passive and locally active
+  /// windows are; globally active ones are only offered the focus
+  /// ([`WindowInfo::offered_focus_on_map`]); no-input ones are not.
+  pub fn focused_on_map(&self) -> bool {
+    self.input_model().sets_input_focus()
+  }
+
+  /// Whether a globally active window is offered the focus with
+  /// `WM_TAKE_FOCUS` when it maps: only `NORMAL` and `DIALOG` windows, as
+  /// in Wayfire.
+  pub fn offered_focus_on_map(&self) -> bool {
+    self.input_model() == InputModel::GloballyActive
+      && (self.has_type(WindowType::Normal)
+        || self.has_type(WindowType::Dialog))
+  }
+
+  /// Whether an unmanaged window may take keyboard focus, Wayfire's
+  /// `kb_focus_enabled` for unmanaged views: always when it is not
+  /// override-redirect, else only when wlroots'
+  /// `wlr_xwayland_or_surface_wants_focus` heuristic finds none of the
+  /// menu, tooltip, splash and similar types.
+  pub fn unmanaged_accepts_keyboard(&self) -> bool {
+    !self.override_redirect
+      || !self.types.iter().any(|kind| {
+        matches!(
+          kind,
+          WindowType::Combo
+            | WindowType::Dnd
+            | WindowType::Menu
+            | WindowType::Notification
+            | WindowType::Splash
+            | WindowType::Tooltip
+            | WindowType::Utility
+        )
+      })
+  }
+
+  /// Whether an unmanaged window takes the keyboard focus when it maps:
+  /// it accepts the keyboard and its input model is not no-input, as in
+  /// Wayfire's `wayfire_unmanaged_xwayland_view::handle_map_request`.
+  pub fn unmanaged_focused_on_map(&self) -> bool {
+    self.unmanaged_accepts_keyboard()
+      && self.input_model() != InputModel::NoInput
+  }
+
+  /// The parent Shingle gives a managed window: `WM_TRANSIENT_FOR`, unless
+  /// the window says it is `NORMAL`, as Wayfire's `on_set_parent` drops
+  /// it. (Wayfire also drops a parent that is not mapped; the compositor
+  /// checks that.)
+  pub fn toplevel_parent(&self) -> Option<Window> {
+    self
+      .transient_for
+      .filter(|_| !self.has_type(WindowType::Normal))
   }
 
   /// Wayfire's `is_dialog`.
@@ -366,6 +467,110 @@ mod tests {
     let mut icon = info(&[Dnd], false);
     icon.override_redirect = true;
     assert_eq!(icon.kind(), Kind::DragIcon);
+  }
+
+  /// A window with the input hint and `WM_TAKE_FOCUS` as given.
+  fn focus_info(input: bool, take_focus: bool) -> WindowInfo {
+    WindowInfo {
+      hints: WmHints {
+        input,
+        urgent: false,
+      },
+      protocols: Protocols {
+        take_focus,
+        ..Protocols::default()
+      },
+      ..WindowInfo::default()
+    }
+  }
+
+  #[test]
+  fn the_input_model_table_follows_icccm() {
+    use InputModel::*;
+    let table = [
+      (true, false, Passive, true, false),
+      (true, true, LocallyActive, true, true),
+      (false, true, GloballyActive, false, true),
+      (false, false, NoInput, false, false),
+    ];
+    for (input, take_focus, model, set_focus, take) in table {
+      let info = focus_info(input, take_focus);
+      assert_eq!(info.input_model(), model);
+      assert_eq!(model.sets_input_focus(), set_focus, "{model:?}");
+      assert_eq!(model.sends_take_focus(), take, "{model:?}");
+    }
+    // Without WM_HINTS, input is assumed.
+    assert_eq!(WindowInfo::default().input_model(), Passive);
+  }
+
+  #[test]
+  fn only_passive_and_locally_active_windows_take_focus_on_map() {
+    assert!(focus_info(true, false).focused_on_map());
+    assert!(focus_info(true, true).focused_on_map());
+    assert!(!focus_info(false, true).focused_on_map());
+    assert!(!focus_info(false, false).focused_on_map());
+  }
+
+  #[test]
+  fn globally_active_normal_and_dialog_windows_are_offered_focus() {
+    let mut info = focus_info(false, true);
+    assert!(!info.offered_focus_on_map());
+    info.types = vec![WindowType::Normal];
+    assert!(info.offered_focus_on_map());
+    info.types = vec![WindowType::Dialog];
+    assert!(info.offered_focus_on_map());
+    info.types = vec![WindowType::Utility];
+    assert!(!info.offered_focus_on_map());
+    // Other models are never offered it.
+    let mut passive = focus_info(true, true);
+    passive.types = vec![WindowType::Normal];
+    assert!(!passive.offered_focus_on_map());
+  }
+
+  #[test]
+  fn override_redirect_focus_follows_wlroots_heuristic() {
+    let mut info = WindowInfo {
+      override_redirect: true,
+      ..WindowInfo::default()
+    };
+    // No type: it may take focus, like a launcher's popup.
+    assert!(info.unmanaged_accepts_keyboard());
+    assert!(info.unmanaged_focused_on_map());
+    for kind in [
+      WindowType::Menu,
+      WindowType::Tooltip,
+      WindowType::Combo,
+      WindowType::Dnd,
+      WindowType::Notification,
+      WindowType::Splash,
+      WindowType::Utility,
+    ] {
+      info.types = vec![kind];
+      assert!(!info.unmanaged_accepts_keyboard(), "{kind:?}");
+      assert!(!info.unmanaged_focused_on_map(), "{kind:?}");
+    }
+    // A parented popup that is not override-redirect always may.
+    let popup = WindowInfo {
+      types: vec![WindowType::Menu],
+      transient_for: Some(1),
+      ..WindowInfo::default()
+    };
+    assert!(popup.unmanaged_accepts_keyboard());
+    // But not on map without input.
+    let mut no_input = popup.clone();
+    no_input.hints.input = false;
+    assert!(!no_input.unmanaged_focused_on_map());
+  }
+
+  #[test]
+  fn normal_windows_drop_their_transient_parent() {
+    assert_eq!(info(&[], true).toplevel_parent(), Some(0x400001));
+    assert_eq!(
+      info(&[WindowType::Dialog], true).toplevel_parent(),
+      Some(0x400001)
+    );
+    assert_eq!(info(&[WindowType::Normal], true).toplevel_parent(), None);
+    assert_eq!(info(&[], false).toplevel_parent(), None);
   }
 
   #[test]

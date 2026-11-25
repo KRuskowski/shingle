@@ -44,6 +44,13 @@ impl XwaylandRole {
   pub(crate) fn is_live(&self) -> bool {
     !self.resource_destroyed
   }
+
+  /// Whether the surface may take keyboard focus: a managed window always
+  /// may, whatever its input model, since Wayfire's X toplevels are
+  /// always focusable.
+  pub(crate) fn accepts_keyboard(&self) -> bool {
+    self.toplevel.is_some()
+  }
 }
 
 /// Creates the `xwayland_shell_v1` global.

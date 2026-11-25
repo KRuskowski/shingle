@@ -15,19 +15,21 @@ use x11rb::{
   protocol::{
     Event,
     composite::{self, ConnectionExt as _, Redirect},
+    render::{ConnectionExt as _, CreatePictureAux, PictType, Pictforminfo},
     res::{ClientIdMask, ClientIdSpec, ConnectionExt as _},
     xfixes::{ClientDisconnectFlags, ConnectionExt as _},
     xproto::{
       CONFIGURE_NOTIFY_EVENT, ChangeWindowAttributesAux, ClientMessageEvent,
       ConfigureNotifyEvent, ConfigureWindowAux, ConnectionExt as _,
-      CreateWindowAux, EventMask, PropMode, Window, WindowClass,
+      CreateGCAux, CreateWindowAux, EventMask, ImageFormat, InputFocus,
+      PropMode, StackMode, Window, WindowClass,
     },
   },
   rust_connection::{DefaultStream, RustConnection},
   wrapper::ConnectionExt as _,
 };
 
-use super::{props::Property, window::Geometry};
+use super::{cursor::CursorImage, props::Property, window::Geometry};
 
 /// How many 32-bit items of a property are read at most: 256 KiB.
 const PROPERTY_LIMIT: u32 = 1 << 16;
@@ -260,6 +262,35 @@ pub trait XConnection {
   /// When the request cannot be queued.
   fn kill_client(&mut self, window: Window) -> Result<(), XwmError>;
 
+  /// `SetInputFocus(window, revert to PointerRoot, CurrentTime)`; `window`
+  /// may be `None` (0). Returns the request's sequence number, which the
+  /// window manager compares with `FocusIn` events.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn set_input_focus(&mut self, window: Window) -> Result<u16, XwmError>;
+
+  /// Restacks `window` just above `sibling`, or above all its siblings
+  /// without one (`ConfigureWindow` with `StackMode::Above`).
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn stack_above(
+    &mut self,
+    window: Window,
+    sibling: Option<Window>,
+  ) -> Result<(), XwmError>;
+
+  /// Makes `image` the root window's cursor through Render
+  /// `CreateCursor`, as wlroots' `xwm_set_cursor` does.
+  ///
+  /// # Errors
+  ///
+  /// When the server has no ARGB32 picture format, or a request fails.
+  fn set_root_cursor(&mut self, image: &CursorImage) -> Result<(), XwmError>;
+
   /// Sends every queued request.
   ///
   /// # Errors
@@ -281,6 +312,8 @@ pub struct X11Connection {
   connection: RustConnection,
   root: Window,
   has_res: Option<bool>,
+  /// The root cursor set last, freed when it is replaced.
+  cursor: Option<u32>,
 }
 
 impl X11Connection {
@@ -299,6 +332,7 @@ impl X11Connection {
       connection,
       root,
       has_res: None,
+      cursor: None,
     })
   }
 }
@@ -607,6 +641,91 @@ impl XConnection for X11Connection {
       .map_err(connection_error)
   }
 
+  fn set_input_focus(&mut self, window: Window) -> Result<u16, XwmError> {
+    self
+      .connection
+      .set_input_focus(InputFocus::POINTER_ROOT, window, CURRENT_TIME)
+      .map(|cookie| cookie.sequence_number() as u16)
+      .map_err(connection_error)
+  }
+
+  fn stack_above(
+    &mut self,
+    window: Window,
+    sibling: Option<Window>,
+  ) -> Result<(), XwmError> {
+    let mut aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+    if let Some(sibling) = sibling {
+      aux = aux.sibling(sibling);
+    }
+    self
+      .connection
+      .configure_window(window, &aux)
+      .map(drop)
+      .map_err(connection_error)
+  }
+
+  fn set_root_cursor(&mut self, image: &CursorImage) -> Result<(), XwmError> {
+    let request =
+      |error: x11rb::errors::ReplyError| XwmError::Request(error.to_string());
+    let formats = self
+      .connection
+      .render_query_pict_formats()
+      .map_err(connection_error)?
+      .reply()
+      .map_err(request)?;
+    let format = formats
+      .formats
+      .iter()
+      .find(|format| is_argb32(format))
+      .map(|format| format.id)
+      .ok_or_else(|| XwmError::Request("no ARGB32 picture format".into()))?;
+    let connection = &self.connection;
+    let id = || connection.generate_id().map_err(connection_error);
+    let (pixmap, picture, gc, cursor) = (id()?, id()?, id()?, id()?);
+    connection
+      .create_pixmap(32, pixmap, self.root, image.width, image.height)
+      .map_err(connection_error)?;
+    connection
+      .render_create_picture(picture, pixmap, format, &CreatePictureAux::new())
+      .map_err(connection_error)?;
+    connection
+      .create_gc(gc, pixmap, &CreateGCAux::new())
+      .map_err(connection_error)?;
+    connection
+      .put_image(
+        ImageFormat::Z_PIXMAP,
+        pixmap,
+        gc,
+        image.width,
+        image.height,
+        0,
+        0,
+        0,
+        32,
+        &image.argb,
+      )
+      .map_err(connection_error)?;
+    connection.free_gc(gc).map_err(connection_error)?;
+    connection
+      .render_create_cursor(cursor, picture, image.hotspot_x, image.hotspot_y)
+      .map_err(connection_error)?;
+    connection.free_pixmap(pixmap).map_err(connection_error)?;
+    connection
+      .render_free_picture(picture)
+      .map_err(connection_error)?;
+    connection
+      .change_window_attributes(
+        self.root,
+        &ChangeWindowAttributesAux::new().cursor(cursor),
+      )
+      .map_err(connection_error)?;
+    if let Some(old) = self.cursor.replace(cursor) {
+      self.connection.free_cursor(old).map_err(connection_error)?;
+    }
+    Ok(())
+  }
+
   fn flush(&mut self) -> Result<(), XwmError> {
     self.connection.flush().map_err(connection_error)
   }
@@ -614,6 +733,18 @@ impl XConnection for X11Connection {
   fn poll_for_event(&mut self) -> Result<Option<Event>, XwmError> {
     self.connection.poll_for_event().map_err(connection_error)
   }
+}
+
+/// Whether a Render picture format is ARGB32 with the byte layout
+/// [`CursorImage`] uses.
+fn is_argb32(format: &Pictforminfo) -> bool {
+  let direct = &format.direct;
+  format.type_ == PictType::DIRECT
+    && format.depth == 32
+    && (direct.alpha_shift, direct.alpha_mask) == (24, 0xff)
+    && (direct.red_shift, direct.red_mask) == (16, 0xff)
+    && (direct.green_shift, direct.green_mask) == (8, 0xff)
+    && (direct.blue_shift, direct.blue_mask) == (0, 0xff)
 }
 
 /// `value` clamped into an X coordinate.

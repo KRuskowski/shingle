@@ -151,6 +151,21 @@ impl Dispatch<WpCursorShapeDeviceV1, ()> for CompositorState {
 
 type CursorCache = Mutex<HashMap<(u32, String, u32), Arc<CursorImage>>>;
 
+/// The theme's default arrow (`default`, else `left_ptr`) for the X root
+/// window, in the X server's format; the built-in arrow when the theme
+/// has none.
+pub(crate) fn default_x_cursor(
+  state: &CompositorState,
+) -> Option<shingle_xwayland::CursorImage> {
+  let image = image(Shape::Default, &state.cursor_theme, state.cursor_size);
+  shingle_xwayland::CursorImage::from_rgba(
+    image.width,
+    image.height,
+    (image.hotspot_x, image.hotspot_y),
+    &image.rgba,
+  )
+}
+
 fn image(
   shape: Shape,
   configured_theme: &str,

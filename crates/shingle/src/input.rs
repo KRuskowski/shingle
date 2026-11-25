@@ -1542,6 +1542,7 @@ fn role_accepts_keyboard(role: &Role) -> bool {
   match role {
     Role::Xdg { kind: Some(_), .. } | Role::Subsurface { .. } => true,
     Role::Layer(layer) => layer.accepts_keyboard(),
+    Role::Xwayland(role) => role.accepts_keyboard(),
     _ => false,
   }
 }

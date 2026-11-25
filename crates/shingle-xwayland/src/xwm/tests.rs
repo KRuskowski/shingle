@@ -35,6 +35,9 @@ enum Request {
   SyntheticConfigure(Window, Geometry),
   ClientMessage(Window, u32, [u32; 5]),
   KillClient(Window),
+  SetInputFocus(Window),
+  StackAbove(Window, Option<Window>),
+  RootCursor(u16, u16),
   Flush,
 }
 
@@ -53,6 +56,8 @@ struct Recording {
   properties: HashMap<(Window, u32), Property>,
   /// PIDs XRes reports, by window.
   pids: HashMap<Window, u32>,
+  /// The sequence number of the next request that reports one.
+  sequence: u16,
 }
 
 impl XConnection for Recording {
@@ -226,6 +231,28 @@ impl XConnection for Recording {
 
   fn kill_client(&mut self, window: Window) -> Result<(), XwmError> {
     self.requests.push(Request::KillClient(window));
+    Ok(())
+  }
+
+  fn set_input_focus(&mut self, window: Window) -> Result<u16, XwmError> {
+    self.requests.push(Request::SetInputFocus(window));
+    self.sequence = self.sequence.wrapping_add(1);
+    Ok(self.sequence)
+  }
+
+  fn stack_above(
+    &mut self,
+    window: Window,
+    sibling: Option<Window>,
+  ) -> Result<(), XwmError> {
+    self.requests.push(Request::StackAbove(window, sibling));
+    Ok(())
+  }
+
+  fn set_root_cursor(&mut self, image: &CursorImage) -> Result<(), XwmError> {
+    self
+      .requests
+      .push(Request::RootCursor(image.width, image.height));
     Ok(())
   }
 
@@ -791,6 +818,7 @@ fn set_state_writes_net_wm_state_when_it_changes() {
     vec![create(XTERM, GEOMETRY, false), map_request(XTERM)],
   );
   xwm.connection.requests.clear();
+  // FOCUSED is the window manager's, not the compositor's to set.
   let state = NetWmState {
     fullscreen: true,
     focused: true,
@@ -807,10 +835,517 @@ fn set_state_writes_net_wm_state_when_it_changes() {
       vec![
         atom(AtomName::NET_WM_STATE_MODAL),
         atom(AtomName::NET_WM_STATE_FULLSCREEN),
-        atom(AtomName::NET_WM_STATE_FOCUSED),
       ],
     )]
   );
+}
+
+#[test]
+fn minimizing_sets_wm_state_iconic_and_back() {
+  let mut xwm = started();
+  map_xterm(&mut xwm);
+  xwm.set_state(XTERM, NetWmState::default()).unwrap();
+  xwm.connection.requests.clear();
+  let hidden = NetWmState {
+    hidden: true,
+    ..NetWmState::default()
+  };
+  xwm.set_state(XTERM, hidden).unwrap();
+  xwm.set_state(XTERM, NetWmState::default()).unwrap();
+  let wm_state = |value| {
+    Request::Property32(
+      XTERM,
+      atom(AtomName::WM_STATE),
+      atom(AtomName::WM_STATE),
+      vec![value, 0],
+    )
+  };
+  let net_wm_state =
+    |value| Request::Property32(XTERM, atom(AtomName::NET_WM_STATE), 4, value);
+  assert_eq!(
+    xwm.connection.requests,
+    [
+      net_wm_state(vec![atom(AtomName::NET_WM_STATE_HIDDEN)]),
+      wm_state(3),
+      net_wm_state(vec![]),
+      wm_state(1),
+    ]
+  );
+}
+
+/// Maps a probe-like window with the input hint and `WM_TAKE_FOCUS` as
+/// given, PID `pid`, and gives it a state, so that it is managed.
+fn map_with_model(
+  xwm: &mut Xwm<Recording>,
+  window: Window,
+  input: bool,
+  take_focus: bool,
+  pid: u32,
+) {
+  let properties = &mut xwm.connection.properties;
+  properties.insert((window, WM_CLASS), Property::bytes(31, b"p\0P\0"));
+  properties.insert(
+    (window, atom(AtomName::WM_HINTS)),
+    Property::words(
+      atom(AtomName::WM_HINTS),
+      &[1, u32::from(input), 0, 0, 0, 0, 0, 0, 0],
+    ),
+  );
+  let protocols = if take_focus {
+    vec![atom(AtomName::WM_TAKE_FOCUS)]
+  } else {
+    vec![]
+  };
+  properties.insert(
+    (window, atom(AtomName::WM_PROTOCOLS)),
+    Property::words(4, &protocols),
+  );
+  xwm.connection.pids.insert(window, pid);
+  feed(
+    xwm,
+    vec![create(window, GEOMETRY, false), map_request(window)],
+  );
+  xwm.set_state(window, NetWmState::default()).unwrap();
+}
+
+/// `_NET_ACTIVE_WINDOW` set to `window`.
+fn active(window: Window) -> Request {
+  Request::Property32(ROOT, atom(AtomName::NET_ACTIVE_WINDOW), 33, vec![window])
+}
+
+/// `_NET_WM_STATE` of `window` with FOCUSED or nothing.
+fn focused_state(window: Window, focused: bool) -> Request {
+  let value = if focused {
+    vec![atom(AtomName::NET_WM_STATE_FOCUSED)]
+  } else {
+    vec![]
+  };
+  Request::Property32(window, atom(AtomName::NET_WM_STATE), 4, value)
+}
+
+/// `WM_TAKE_FOCUS` for `window`.
+fn take_focus(window: Window) -> Request {
+  Request::ClientMessage(
+    window,
+    atom(AtomName::WM_PROTOCOLS),
+    [atom(AtomName::WM_TAKE_FOCUS), 0, 0, 0, 0],
+  )
+}
+
+#[test]
+fn focus_follows_each_input_model() {
+  let (passive, local, global, none) = (0x500001, 0x600001, 0x700001, 0x800001);
+  let mut xwm = started();
+  map_with_model(&mut xwm, passive, true, false, 10);
+  map_with_model(&mut xwm, local, true, true, 11);
+  map_with_model(&mut xwm, global, false, true, 12);
+  map_with_model(&mut xwm, none, false, false, 13);
+  let cases = [
+    (passive, vec![Request::SetInputFocus(passive)]),
+    (
+      local,
+      vec![take_focus(local), Request::SetInputFocus(local)],
+    ),
+    (global, vec![take_focus(global)]),
+    (none, vec![Request::SetInputFocus(0)]),
+  ];
+  let mut previous: Option<Window> = None;
+  for (window, focus_requests) in cases {
+    xwm.connection.requests.clear();
+    xwm.set_focus(Some(window)).unwrap();
+    let mut expected = vec![active(window)];
+    if let Some(previous) = previous {
+      expected.push(focused_state(previous, false));
+    }
+    expected.extend(focus_requests);
+    expected.push(focused_state(window, true));
+    assert_eq!(xwm.connection.requests, expected, "window {window:#x}");
+    assert_eq!(xwm.focused(), Some(window));
+    previous = Some(window);
+  }
+  // Asking again does nothing.
+  xwm.connection.requests.clear();
+  xwm.set_focus(Some(none)).unwrap();
+  assert!(xwm.connection.requests.is_empty());
+  // Focus on a Wayland window: no X window has it.
+  xwm.set_focus(None).unwrap();
+  assert_eq!(
+    xwm.connection.requests,
+    [
+      active(0),
+      focused_state(none, false),
+      Request::SetInputFocus(0),
+    ]
+  );
+}
+
+#[test]
+fn override_redirect_and_unknown_windows_are_never_focused() {
+  use x11rb::protocol::xproto::MapNotifyEvent;
+  let mut xwm = started();
+  let menu = 0x900001;
+  feed(
+    &mut xwm,
+    vec![
+      create(menu, GEOMETRY, true),
+      Event::MapNotify(MapNotifyEvent {
+        event: ROOT,
+        window: menu,
+        override_redirect: true,
+        ..Default::default()
+      }),
+    ],
+  );
+  xwm.connection.requests.clear();
+  xwm.set_focus(Some(menu)).unwrap();
+  xwm.set_focus(Some(0x123)).unwrap();
+  assert!(xwm.connection.requests.is_empty());
+  assert_eq!(xwm.focused(), None);
+}
+
+#[test]
+fn offering_focus_needs_take_focus() {
+  let mut xwm = started();
+  map_with_model(&mut xwm, 0x700001, false, true, 12);
+  map_with_model(&mut xwm, 0x800001, false, false, 13);
+  xwm.connection.requests.clear();
+  xwm.offer_focus(0x700001).unwrap();
+  xwm.offer_focus(0x800001).unwrap();
+  assert_eq!(xwm.connection.requests, [take_focus(0x700001)]);
+  // Offering does not focus.
+  assert_eq!(xwm.focused(), None);
+}
+
+/// `FocusIn` on `window` with sequence number `sequence`.
+fn focus_in(
+  window: Window,
+  mode: x11rb::protocol::xproto::NotifyMode,
+  sequence: u16,
+) -> Event {
+  Event::FocusIn(x11rb::protocol::xproto::FocusInEvent {
+    event: window,
+    mode,
+    detail: x11rb::protocol::xproto::NotifyDetail::NONLINEAR,
+    sequence,
+    ..Default::default()
+  })
+}
+
+#[test]
+fn focus_in_from_another_client_is_put_back() {
+  use x11rb::protocol::xproto::NotifyMode;
+  let (first, other) = (0x500001, 0x600001);
+  let mut xwm = started();
+  map_with_model(&mut xwm, first, true, false, 10);
+  map_with_model(&mut xwm, other, true, false, 20);
+  xwm.set_focus(Some(first)).unwrap();
+  xwm.connection.requests.clear();
+  // Another client takes the focus: it goes back.
+  feed(&mut xwm, vec![focus_in(other, NotifyMode::NORMAL, 100)]);
+  assert_eq!(xwm.connection.requests, [Request::SetInputFocus(first)]);
+  assert_eq!(xwm.focused(), Some(first));
+  // Grabs and the focused window itself are left alone.
+  xwm.connection.requests.clear();
+  feed(
+    &mut xwm,
+    vec![
+      focus_in(other, NotifyMode::GRAB, 100),
+      focus_in(other, NotifyMode::UNGRAB, 100),
+      focus_in(first, NotifyMode::NORMAL, 100),
+    ],
+  );
+  assert!(xwm.connection.requests.is_empty());
+  // With a Wayland window focused, no X client may take the focus.
+  xwm.set_focus(None).unwrap();
+  xwm.connection.requests.clear();
+  feed(&mut xwm, vec![focus_in(other, NotifyMode::NORMAL, 100)]);
+  assert_eq!(xwm.connection.requests, [Request::SetInputFocus(0)]);
+}
+
+#[test]
+fn focus_in_within_one_client_is_allowed_if_recent() {
+  use x11rb::protocol::xproto::NotifyMode;
+  let (main, dialog) = (0x500001, 0x500010);
+  let mut xwm = started();
+  map_with_model(&mut xwm, main, true, false, 10);
+  map_with_model(&mut xwm, dialog, true, false, 10);
+  xwm.set_focus(Some(main)).unwrap();
+  let sequence = xwm.connection.sequence;
+  xwm.connection.requests.clear();
+  // An event from before the last SetInputFocus is too old.
+  feed(
+    &mut xwm,
+    vec![focus_in(
+      dialog,
+      NotifyMode::NORMAL,
+      sequence.wrapping_sub(1),
+    )],
+  );
+  assert_eq!(xwm.connection.requests, [Request::SetInputFocus(main)]);
+  // A later one moves the focus within the client.
+  let sequence = xwm.connection.sequence;
+  xwm.connection.requests.clear();
+  feed(
+    &mut xwm,
+    vec![focus_in(dialog, NotifyMode::NORMAL, sequence)],
+  );
+  assert_eq!(
+    xwm.connection.requests,
+    [
+      focused_state(main, false),
+      Request::SetInputFocus(dialog),
+      focused_state(dialog, true),
+    ]
+  );
+  assert_eq!(xwm.focused(), Some(dialog));
+  // The compositor did not ask for it, so _NET_ACTIVE_WINDOW stays, and
+  // asking for the main window again does nothing.
+  xwm.connection.requests.clear();
+  xwm.set_focus(Some(main)).unwrap();
+  assert!(xwm.connection.requests.is_empty());
+}
+
+#[test]
+fn focus_sequences_wrap_around() {
+  assert!(sequence_after(10, 10));
+  assert!(sequence_after(10, 11));
+  assert!(!sequence_after(10, 9));
+  assert!(sequence_after(u16::MAX, 2));
+  assert!(!sequence_after(2, u16::MAX));
+}
+
+#[test]
+fn unmapping_the_focused_window_clears_the_active_window() {
+  let mut xwm = started();
+  map_xterm(&mut xwm);
+  xwm.set_state(XTERM, NetWmState::default()).unwrap();
+  xwm.set_focus(Some(XTERM)).unwrap();
+  xwm.connection.requests.clear();
+  feed(&mut xwm, vec![unmap(XTERM)]);
+  assert!(xwm.connection.requests.contains(&active(0)));
+  assert_eq!(xwm.focused(), None);
+  // The next focus request is not mistaken for a repeat.
+  feed(&mut xwm, vec![map_request(XTERM)]);
+  xwm.set_state(XTERM, NetWmState::default()).unwrap();
+  xwm.connection.requests.clear();
+  xwm.set_focus(Some(XTERM)).unwrap();
+  assert!(xwm.connection.requests.contains(&active(XTERM)));
+}
+
+/// A client message of `kind` about `window`, as a client sends it to the
+/// root.
+fn client_message(window: Window, kind: AtomName, data: [u32; 5]) -> Event {
+  Event::ClientMessage(x11rb::protocol::xproto::ClientMessageEvent::new(
+    32,
+    window,
+    atom(kind),
+    data,
+  ))
+}
+
+#[test]
+fn state_messages_become_requests() {
+  let mut xwm = started();
+  map_xterm(&mut xwm);
+  xwm.set_state(XTERM, NetWmState::default()).unwrap();
+  let fullscreen = atom(AtomName::NET_WM_STATE_FULLSCREEN);
+  let vert = atom(AtomName::NET_WM_STATE_MAXIMIZED_VERT);
+  let horz = atom(AtomName::NET_WM_STATE_MAXIMIZED_HORZ);
+  let events = feed(
+    &mut xwm,
+    vec![
+      client_message(XTERM, AtomName::NET_WM_STATE, [1, fullscreen, 0, 1, 0]),
+      client_message(XTERM, AtomName::NET_WM_STATE, [2, vert, horz, 1, 0]),
+      client_message(XTERM, AtomName::WM_CHANGE_STATE, [3, 0, 0, 0, 0]),
+      client_message(XTERM, AtomName::WM_CHANGE_STATE, [5, 0, 0, 0, 0]),
+    ],
+  );
+  let request = |change| XwmEvent::StateRequest {
+    window: XTERM,
+    change,
+  };
+  assert_eq!(
+    events,
+    [
+      request(StateChange {
+        fullscreen: Some(true),
+        ..StateChange::default()
+      }),
+      request(StateChange {
+        maximized: Some(true),
+        ..StateChange::default()
+      }),
+      request(StateChange {
+        minimized: Some(true),
+        ..StateChange::default()
+      }),
+    ]
+  );
+  // A mapped window's state stays what the compositor set until it
+  // grants the request.
+  assert!(!xwm.window(XTERM).unwrap().state.fullscreen);
+}
+
+#[test]
+fn state_messages_before_the_map_set_the_initial_state() {
+  let mut xwm = started();
+  feed(&mut xwm, vec![create(XTERM, GEOMETRY, false)]);
+  let fullscreen = atom(AtomName::NET_WM_STATE_FULLSCREEN);
+  let events = feed(
+    &mut xwm,
+    vec![client_message(
+      XTERM,
+      AtomName::NET_WM_STATE,
+      [1, fullscreen, 0, 1, 0],
+    )],
+  );
+  assert_eq!(events.len(), 1);
+  assert!(xwm.window(XTERM).unwrap().state.fullscreen);
+}
+
+#[test]
+fn modal_is_kept_by_the_window_manager() {
+  let mut xwm = started();
+  map_xterm(&mut xwm);
+  xwm.set_state(XTERM, NetWmState::default()).unwrap();
+  xwm.connection.requests.clear();
+  let modal = atom(AtomName::NET_WM_STATE_MODAL);
+  let events = feed(
+    &mut xwm,
+    vec![client_message(
+      XTERM,
+      AtomName::NET_WM_STATE,
+      [1, modal, 0, 1, 0],
+    )],
+  );
+  assert!(events.is_empty());
+  assert_eq!(
+    xwm.connection.requests,
+    [Request::Property32(
+      XTERM,
+      atom(AtomName::NET_WM_STATE),
+      4,
+      vec![modal]
+    )]
+  );
+}
+
+#[test]
+fn activate_moveresize_and_close_messages_become_requests() {
+  let mut xwm = started();
+  map_xterm(&mut xwm);
+  let events = feed(
+    &mut xwm,
+    vec![
+      client_message(XTERM, AtomName::NET_ACTIVE_WINDOW, [1, 0, 0, 0, 0]),
+      client_message(XTERM, AtomName::NET_WM_MOVERESIZE, [5, 6, 8, 1, 1]),
+      client_message(XTERM, AtomName::NET_WM_MOVERESIZE, [5, 6, 4, 1, 1]),
+      // Keyboard move: ignored.
+      client_message(XTERM, AtomName::NET_WM_MOVERESIZE, [5, 6, 10, 1, 1]),
+      client_message(XTERM, AtomName::NET_CLOSE_WINDOW, [0, 0, 0, 0, 0]),
+      // Unknown windows are ignored.
+      client_message(0x123, AtomName::NET_ACTIVE_WINDOW, [1, 0, 0, 0, 0]),
+    ],
+  );
+  assert_eq!(
+    events,
+    [
+      XwmEvent::ActivateRequest { window: XTERM },
+      XwmEvent::MoveResizeRequest {
+        window: XTERM,
+        request: MoveResize::Move,
+      },
+      XwmEvent::MoveResizeRequest {
+        window: XTERM,
+        request: MoveResize::Resize(10),
+      },
+      XwmEvent::CloseRequest { window: XTERM },
+    ]
+  );
+}
+
+#[test]
+fn restack_follows_shingles_order() {
+  let (first, second, third) = (0x500001, 0x600001, 0x700001);
+  let mut xwm = started();
+  for window in [first, second, third] {
+    feed(
+      &mut xwm,
+      vec![create(window, GEOMETRY, false), map_request(window)],
+    );
+  }
+  assert_eq!(xwm.stacking(), [first, second, third]);
+  xwm.connection.requests.clear();
+  // Unknown windows are skipped; unlisted ones stay below.
+  xwm.restack(&[third, 0x123, first]).unwrap();
+  let stacking = |windows: Vec<Window>| {
+    Request::Property32(
+      ROOT,
+      atom(AtomName::NET_CLIENT_LIST_STACKING),
+      33,
+      windows,
+    )
+  };
+  assert_eq!(
+    xwm.connection.requests,
+    [
+      Request::StackAbove(third, Some(second)),
+      Request::StackAbove(first, Some(third)),
+      stacking(vec![second, third, first]),
+    ]
+  );
+  // The same order again sends nothing.
+  xwm.connection.requests.clear();
+  xwm.restack(&[second, third, first]).unwrap();
+  assert!(xwm.connection.requests.is_empty());
+  // An unmapped window leaves the list; _NET_CLIENT_LIST keeps map order.
+  feed(&mut xwm, vec![unmap(third)]);
+  assert_eq!(xwm.stacking(), [second, first]);
+  assert_eq!(xwm.client_list(), [first, second]);
+}
+
+#[test]
+fn override_redirect_moves_are_reported() {
+  use x11rb::protocol::xproto::{ConfigureNotifyEvent, MapNotifyEvent};
+  let mut xwm = started();
+  let menu = 0x900001;
+  feed(
+    &mut xwm,
+    vec![
+      create(menu, GEOMETRY, true),
+      Event::MapNotify(MapNotifyEvent {
+        event: ROOT,
+        window: menu,
+        override_redirect: true,
+        ..Default::default()
+      }),
+    ],
+  );
+  let configure = |x| {
+    Event::ConfigureNotify(ConfigureNotifyEvent {
+      event: ROOT,
+      window: menu,
+      x,
+      y: 20,
+      width: 484,
+      height: 316,
+      override_redirect: true,
+      ..Default::default()
+    })
+  };
+  // Where it already is: nothing; elsewhere: reported.
+  assert!(feed(&mut xwm, vec![configure(10)]).is_empty());
+  let events = feed(&mut xwm, vec![configure(200)]);
+  assert!(matches!(&events[..], [XwmEvent::Changed { window, info }]
+    if *window == menu && info.geometry.x == 200));
+}
+
+#[test]
+fn set_cursor_reaches_the_connection() {
+  let mut xwm = started();
+  let image = CursorImage::from_rgba(2, 2, (0, 0), &[0; 16]).unwrap();
+  xwm.set_cursor(&image).unwrap();
+  assert_eq!(xwm.connection.requests, [Request::RootCursor(2, 2)]);
 }
 
 #[test]

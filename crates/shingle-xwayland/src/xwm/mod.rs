@@ -6,12 +6,16 @@
 //! what it supports. Then it tracks every child of the root, reads its
 //! properties, maps managed windows when they ask, keeps `WM_STATE` and
 //! the client lists, and reports what the compositor needs as
-//! [`XwmEvent`]s. The compositor answers with [`Xwm::configure`],
-//! [`Xwm::set_state`] and [`Xwm::close`]. Focus, the client messages
-//! other than `WL_SURFACE_SERIAL` and stacking are XW-4.
+//! [`XwmEvent`]s, including what clients ask for in their EWMH and ICCCM
+//! client messages. The compositor answers with [`Xwm::configure`],
+//! [`Xwm::set_state`], [`Xwm::close`], [`Xwm::set_focus`] (with the ICCCM
+//! input models and the `FocusIn` guard), [`Xwm::restack`] and
+//! [`Xwm::set_cursor`].
 
 mod atoms;
 mod connection;
+pub mod cursor;
+pub mod messages;
 pub mod pairing;
 pub mod policy;
 pub mod props;
@@ -24,17 +28,22 @@ pub use connection::{
   ATOM_TYPE, COMPOSITE, WINDOW_TYPE, X11Connection, XConnection, XFIXES,
   XwmError,
 };
+pub use cursor::CursorImage;
+pub use messages::{MoveResize, StateChange};
 pub use pairing::{Paired, Pairing};
 pub use policy::{Placement, configure_reply};
 pub use props::Property;
 pub use window::{
-  Geometry, Kind, NetWmState, Protocols, WindowInfo, WindowType,
+  Geometry, InputModel, Kind, NetWmState, Protocols, WindowInfo, WindowType,
 };
 pub use x11rb::protocol::xproto::Window;
 
 use x11rb::protocol::{
   Event,
-  xproto::{AtomEnum, ConfigWindow, EventMask},
+  xproto::{
+    AtomEnum, ClientMessageEvent, ConfigWindow, EventMask, NotifyDetail,
+    NotifyMode,
+  },
 };
 
 use props::{SizeHints, WmHints};
@@ -49,6 +58,7 @@ const CHECK_WINDOW_GEOMETRY: (i16, i16, u16, u16) = (0, 0, 10, 10);
 /// ICCCM `WM_STATE` values.
 const WITHDRAWN_STATE: u32 = 0;
 const NORMAL_STATE: u32 = 1;
+const ICONIC_STATE: u32 = 3;
 
 /// Something the window manager saw that the compositor should know about.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,6 +112,33 @@ pub enum XwmEvent {
     /// The current geometry with the requested fields applied.
     geometry: Geometry,
   },
+  /// `_NET_WM_STATE` or `WM_CHANGE_STATE`: the client asked to change
+  /// fullscreen, maximized or minimized. Before the window is mapped the
+  /// change is also kept in its info, as its initial state.
+  StateRequest {
+    /// The X window.
+    window: Window,
+    /// What to change.
+    change: StateChange,
+  },
+  /// `_NET_ACTIVE_WINDOW`: the client asked for the window to be focused.
+  ActivateRequest {
+    /// The X window.
+    window: Window,
+  },
+  /// `_NET_WM_MOVERESIZE`: the client asked for an interactive move or
+  /// resize.
+  MoveResizeRequest {
+    /// The X window.
+    window: Window,
+    /// Move, or resize from which edges.
+    request: MoveResize,
+  },
+  /// `_NET_CLOSE_WINDOW`: a client asked for the window to be closed.
+  CloseRequest {
+    /// The X window.
+    window: Window,
+  },
 }
 
 /// What the window manager keeps per child of the root.
@@ -116,6 +153,9 @@ struct Tracked {
   configured: Option<Geometry>,
   /// The `_NET_WM_STATE` last written.
   state: Option<NetWmState>,
+  /// The state the compositor asked for last with [`Xwm::set_state`];
+  /// `_NET_WM_STATE_FOCUSED` and `_MODAL` are the window manager's.
+  wanted: Option<NetWmState>,
   /// `WM_NAME`.
   wm_name: String,
   /// `_NET_WM_NAME`, which wins over `WM_NAME` when set.
@@ -134,6 +174,7 @@ impl Tracked {
       serial: None,
       configured: None,
       state: None,
+      wanted: None,
       wm_name: String::new(),
       net_wm_name: None,
     }
@@ -150,6 +191,18 @@ pub struct Xwm<C: XConnection> {
   windows: HashMap<Window, Tracked>,
   /// `_NET_CLIENT_LIST`, in map order.
   client_list: Vec<Window>,
+  /// `_NET_CLIENT_LIST_STACKING`, bottom to top.
+  stacking: Vec<Window>,
+  /// The window the compositor focused last with [`Xwm::set_focus`].
+  requested_focus: Option<Window>,
+  /// The window that has the X focus as far as the window manager is
+  /// concerned. It differs from `requested_focus` only after a client
+  /// moved the focus between its own windows.
+  focused: Option<Window>,
+  /// `_NET_ACTIVE_WINDOW` as last written.
+  active: Option<Window>,
+  /// The sequence number of the last `SetInputFocus`.
+  focus_sequence: u16,
   warned_surface_id: bool,
 }
 
@@ -165,8 +218,8 @@ impl<C: XConnection> Xwm<C> {
   /// 5. sets `_NET_SUPPORTING_WM_CHECK`, `_NET_SUPPORTED`, an empty
   ///    `_NET_ACTIVE_WINDOW` and empty client lists on the root.
   ///
-  /// Then it flushes. The root cursor (XW-4) and the selection bridge
-  /// (XW-5) are not set up yet.
+  /// Then it flushes. The compositor sets the root cursor with
+  /// [`Xwm::set_cursor`]; the selection bridge (XW-5) is not set up yet.
   ///
   /// # Errors
   ///
@@ -245,6 +298,11 @@ impl<C: XConnection> Xwm<C> {
       terminate_without_clients,
       windows: HashMap::new(),
       client_list: Vec::new(),
+      stacking: Vec::new(),
+      requested_focus: None,
+      focused: None,
+      active: None,
+      focus_sequence: 0,
       warned_surface_id: false,
     })
   }
@@ -304,6 +362,7 @@ impl<C: XConnection> Xwm<C> {
       }
       Event::DestroyNotify(event) => {
         if self.windows.remove(&event.window).is_some() {
+          self.forget_focus(event.window)?;
           self.remove_client(event.window)?;
           events.push(XwmEvent::Destroyed {
             window: event.window,
@@ -343,10 +402,12 @@ impl<C: XConnection> Xwm<C> {
         tracked.serial = None;
         tracked.configured = None;
         tracked.state = None;
+        tracked.wanted = None;
         if !tracked.info.override_redirect {
           self.set_wm_state(window, WITHDRAWN_STATE)?;
           self.remove_client(window)?;
         }
+        self.forget_focus(window)?;
         events.push(XwmEvent::Unmapped { window });
       }
       Event::ConfigureRequest(event) => {
@@ -374,15 +435,26 @@ impl<C: XConnection> Xwm<C> {
       }
       Event::ConfigureNotify(event) => {
         if let Some(tracked) = self.windows.get_mut(&event.window) {
-          tracked.info.geometry = Geometry::new(
+          let geometry = Geometry::new(
             event.x.into(),
             event.y.into(),
             event.width.into(),
             event.height.into(),
           );
+          let moved = tracked.info.geometry != geometry;
+          tracked.info.geometry = geometry;
           tracked.info.override_redirect = event.override_redirect;
+          // Override-redirect windows place themselves; the compositor
+          // draws them where they are.
+          if moved && tracked.mapped && event.override_redirect {
+            events.push(XwmEvent::Changed {
+              window: event.window,
+              info: Box::new(tracked.info.clone()),
+            });
+          }
         }
       }
+      Event::FocusIn(event) => self.focus_in(&event)?,
       Event::PropertyNotify(event) => {
         let window = event.window;
         if !self.windows.contains_key(&window)
@@ -407,39 +479,162 @@ impl<C: XConnection> Xwm<C> {
           });
         }
       }
-      Event::ClientMessage(event) => {
-        let data = event.data.as_data32();
-        if event.type_ == self.atoms.get(AtomName::WL_SURFACE_SERIAL) {
-          let Some(tracked) = self.windows.get_mut(&event.window) else {
-            return Ok(());
-          };
-          // A repeated serial for the same surface is ignored, as in
-          // wlroots' xwm_handle_surface_serial_message.
-          if tracked.serial.is_some() {
-            return Ok(());
-          }
-          let serial = u64::from(data[0]) | (u64::from(data[1]) << 32);
-          tracked.serial = Some(serial);
-          events.push(XwmEvent::Serial {
-            window: event.window,
-            serial,
-          });
-        } else if self.atoms.name_of(event.type_).is_none()
-          && !self.warned_surface_id
-        {
-          // Possibly WL_SURFACE_ID from an Xwayland before 23.1, which
-          // Shingle does not support; other messages come in XW-4.
-          self.warned_surface_id = true;
-          events.push(XwmEvent::Notice(format!(
-            "ignoring X client message type {}; if it is WL_SURFACE_ID, \
-             this Xwayland is older than 23.1, which Shingle needs",
-            event.type_
-          )));
-        }
-      }
+      Event::ClientMessage(event) => self.client_message(&event, events)?,
       _ => {}
     }
     Ok(())
+  }
+
+  /// Handles a client message: `WL_SURFACE_SERIAL` for association, and
+  /// the EWMH and ICCCM requests wlroots' `xwm_handle_client_message`
+  /// handles, plus `_NET_CLOSE_WINDOW`.
+  fn client_message(
+    &mut self,
+    event: &ClientMessageEvent,
+    events: &mut Vec<XwmEvent>,
+  ) -> Result<(), XwmError> {
+    let data = event.data.as_data32();
+    let window = event.window;
+    let kind = event.type_;
+    let atom = |name| self.atoms.get(name);
+    if kind == atom(AtomName::WL_SURFACE_SERIAL) {
+      let Some(tracked) = self.windows.get_mut(&window) else {
+        return Ok(());
+      };
+      // A repeated serial for the same surface is ignored, as in
+      // wlroots' xwm_handle_surface_serial_message.
+      if tracked.serial.is_some() {
+        return Ok(());
+      }
+      let serial = u64::from(data[0]) | (u64::from(data[1]) << 32);
+      tracked.serial = Some(serial);
+      events.push(XwmEvent::Serial { window, serial });
+      return Ok(());
+    }
+    if self.atoms.name_of(kind).is_none() {
+      if !self.warned_surface_id {
+        // Possibly WL_SURFACE_ID from an Xwayland before 23.1, which
+        // Shingle does not support.
+        self.warned_surface_id = true;
+        events.push(XwmEvent::Notice(format!(
+          "ignoring X client message type {kind}; if it is WL_SURFACE_ID, \
+           this Xwayland is older than 23.1, which Shingle needs"
+        )));
+      }
+      return Ok(());
+    }
+    if !self.windows.contains_key(&window) {
+      return Ok(());
+    }
+    if kind == atom(AtomName::NET_WM_STATE) {
+      if event.format != 32 {
+        return Ok(());
+      }
+      self.state_message(window, data, events)?;
+    } else if kind == atom(AtomName::WM_CHANGE_STATE) {
+      if let Some(minimized) = messages::change_state(data[0]) {
+        let change = StateChange {
+          minimized: Some(minimized),
+          ..StateChange::default()
+        };
+        self.request_state(window, change, events);
+      }
+    } else if kind == atom(AtomName::NET_ACTIVE_WINDOW) {
+      events.push(XwmEvent::ActivateRequest { window });
+    } else if kind == atom(AtomName::NET_WM_MOVERESIZE) {
+      if let Some(request) = messages::moveresize(data[2]) {
+        events.push(XwmEvent::MoveResizeRequest { window, request });
+      }
+    } else if kind == atom(AtomName::NET_CLOSE_WINDOW) {
+      events.push(XwmEvent::CloseRequest { window });
+    }
+    Ok(())
+  }
+
+  /// A `_NET_WM_STATE` message: `_NET_WM_STATE_MODAL` is the window
+  /// manager's to keep; fullscreen, maximized and hidden are requests.
+  fn state_message(
+    &mut self,
+    window: Window,
+    data: [u32; 5],
+    events: &mut Vec<XwmEvent>,
+  ) -> Result<(), XwmError> {
+    let Some(tracked) = self.windows.get_mut(&window) else {
+      return Ok(());
+    };
+    let before = tracked.info.state;
+    let after = messages::net_wm_state(&self.atoms, before, data);
+    if after.modal != before.modal {
+      tracked.info.state.modal = after.modal;
+      self.write_state(window)?;
+    }
+    self.request_state(window, messages::state_change(before, after), events);
+    Ok(())
+  }
+
+  /// Reports a state change the client asked for. Before the compositor
+  /// manages the window, the change also becomes its initial state.
+  fn request_state(
+    &mut self,
+    window: Window,
+    change: StateChange,
+    events: &mut Vec<XwmEvent>,
+  ) {
+    let Some(tracked) = self.windows.get_mut(&window) else {
+      return;
+    };
+    if change.is_empty() {
+      return;
+    }
+    if tracked.wanted.is_none() {
+      let state = &mut tracked.info.state;
+      if let Some(fullscreen) = change.fullscreen {
+        state.fullscreen = fullscreen;
+      }
+      if let Some(maximized) = change.maximized {
+        state.maximized_vert = maximized;
+        state.maximized_horz = maximized;
+      }
+      if let Some(minimized) = change.minimized {
+        state.hidden = minimized;
+      }
+    }
+    events.push(XwmEvent::StateRequest { window, change });
+  }
+
+  /// The `FocusIn` guard, wlroots' `xwm_handle_focus_in`: X clients may
+  /// not move the focus behind the compositor's back, except between
+  /// windows of the same client (by PID) after the window manager's last
+  /// `SetInputFocus`, which some applications rely on. Anything else gets
+  /// the focus put back. Grabs and pointer focus are left alone.
+  fn focus_in(
+    &mut self,
+    event: &x11rb::protocol::xproto::FocusInEvent,
+  ) -> Result<(), XwmError> {
+    if event.mode == NotifyMode::GRAB
+      || event.mode == NotifyMode::UNGRAB
+      || event.detail == NotifyDetail::POINTER
+    {
+      return Ok(());
+    }
+    let requested = event.event;
+    if self.focused == Some(requested) {
+      return Ok(());
+    }
+    let pid = |window: Window| {
+      self
+        .windows
+        .get(&window)
+        .and_then(|tracked| tracked.info.pid)
+    };
+    let same_client = self.focused.is_some_and(|focused| {
+      pid(focused).is_some() && pid(focused) == pid(requested)
+    });
+    if same_client && sequence_after(self.focus_sequence, event.sequence) {
+      self.focus_window(Some(requested))
+    } else {
+      self.focus_window(self.focused)
+    }
   }
 
   /// Grants a `MapRequest`: reads the window's properties, maps it, sets
@@ -463,6 +658,7 @@ impl<C: XConnection> Xwm<C> {
     self.set_wm_state(window, NORMAL_STATE)?;
     if !self.client_list.contains(&window) {
       self.client_list.push(window);
+      self.stacking.push(window);
       self.write_client_lists()?;
     }
     let Some(tracked) = self.windows.get_mut(&window) else {
@@ -586,26 +782,145 @@ impl<C: XConnection> Xwm<C> {
   fn remove_client(&mut self, window: Window) -> Result<(), XwmError> {
     let before = self.client_list.len();
     self.client_list.retain(|candidate| *candidate != window);
+    self.stacking.retain(|candidate| *candidate != window);
     if self.client_list.len() != before {
       self.write_client_lists()?;
     }
     Ok(())
   }
 
-  /// Writes `_NET_CLIENT_LIST` in map order and, until XW-4 restacks X
-  /// windows, the same list as `_NET_CLIENT_LIST_STACKING`.
+  /// Writes `_NET_CLIENT_LIST` in map order and
+  /// `_NET_CLIENT_LIST_STACKING` bottom to top.
   fn write_client_lists(&mut self) -> Result<(), XwmError> {
-    for list in [
-      AtomName::NET_CLIENT_LIST,
-      AtomName::NET_CLIENT_LIST_STACKING,
-    ] {
-      let atom = self.atoms.get(list);
-      self.connection.change_property32(
-        self.root,
-        atom,
-        WINDOW_TYPE,
-        &self.client_list,
-      )?;
+    self.connection.change_property32(
+      self.root,
+      self.atoms.get(AtomName::NET_CLIENT_LIST),
+      WINDOW_TYPE,
+      &self.client_list,
+    )?;
+    self.write_stacking()
+  }
+
+  /// Writes `_NET_CLIENT_LIST_STACKING`.
+  fn write_stacking(&mut self) -> Result<(), XwmError> {
+    self.connection.change_property32(
+      self.root,
+      self.atoms.get(AtomName::NET_CLIENT_LIST_STACKING),
+      WINDOW_TYPE,
+      &self.stacking,
+    )
+  }
+
+  /// Forgets the focus of a window that was unmapped or destroyed. The
+  /// server reverts the X focus itself; `_NET_ACTIVE_WINDOW` becomes
+  /// `None` until the compositor focuses another window.
+  fn forget_focus(&mut self, window: Window) -> Result<(), XwmError> {
+    if self.focused == Some(window) {
+      self.focused = None;
+    }
+    if self.requested_focus == Some(window) {
+      self.requested_focus = None;
+    }
+    self.write_active()
+  }
+
+  /// Writes `_NET_ACTIVE_WINDOW`, the window the compositor focused, when
+  /// it changed.
+  fn write_active(&mut self) -> Result<(), XwmError> {
+    let window = self.requested_focus;
+    if self.active == window {
+      return Ok(());
+    }
+    self.active = window;
+    self.connection.change_property32(
+      self.root,
+      self.atoms.get(AtomName::NET_ACTIVE_WINDOW),
+      WINDOW_TYPE,
+      &[window.unwrap_or(x11rb::NONE)],
+    )
+  }
+
+  /// Moves the X focus to `window`, or to `None`, following the window's
+  /// input model ([`InputModel`]), and updates `_NET_WM_STATE_FOCUSED`
+  /// on the old and the new window: wlroots' `xwm_set_focus_window`.
+  /// A no-input window gets the X focus set to `None`, so that keys do
+  /// not reach the window that had it.
+  fn focus_window(&mut self, window: Option<Window>) -> Result<(), XwmError> {
+    let previous = std::mem::replace(&mut self.focused, window);
+    if let Some(previous) =
+      previous.filter(|previous| Some(*previous) != window)
+    {
+      self.write_state(previous)?;
+    }
+    let Some(window) = window else {
+      self.focus_sequence = self.connection.set_input_focus(x11rb::NONE)?;
+      return Ok(());
+    };
+    let Some(model) = self.windows.get(&window).map(|t| t.info.input_model())
+    else {
+      return Ok(());
+    };
+    if model.sends_take_focus() {
+      self.take_focus(window)?;
+    }
+    if model.sets_input_focus() {
+      self.focus_sequence = self.connection.set_input_focus(window)?;
+    } else if model == InputModel::NoInput {
+      self.focus_sequence = self.connection.set_input_focus(x11rb::NONE)?;
+    }
+    self.write_state(window)
+  }
+
+  /// Sends `WM_TAKE_FOCUS`.
+  fn take_focus(&mut self, window: Window) -> Result<(), XwmError> {
+    let protocols = self.atoms.get(AtomName::WM_PROTOCOLS);
+    let take_focus = self.atoms.get(AtomName::WM_TAKE_FOCUS);
+    self.connection.send_client_message(
+      window,
+      protocols,
+      [take_focus, x11rb::CURRENT_TIME, 0, 0, 0],
+    )
+  }
+
+  /// Writes the `_NET_WM_STATE` of a mapped managed window from what the
+  /// compositor asked for, the window manager's focus and the client's
+  /// modal flag, and `WM_STATE` Iconic or Normal when minimizing changed,
+  /// as wlroots' `wlr_xwayland_surface_set_minimized` does. Nothing is
+  /// written before the compositor has asked for a state.
+  fn write_state(&mut self, window: Window) -> Result<(), XwmError> {
+    let focused = self.focused == Some(window);
+    let Some(tracked) = self.windows.get_mut(&window) else {
+      return Ok(());
+    };
+    if tracked.info.override_redirect || !tracked.mapped {
+      return Ok(());
+    }
+    let Some(wanted) = tracked.wanted else {
+      return Ok(());
+    };
+    let state = NetWmState {
+      modal: tracked.info.state.modal,
+      focused,
+      ..wanted
+    };
+    let previous = tracked.state.replace(state);
+    if previous == Some(state) {
+      return Ok(());
+    }
+    tracked.info.state = state;
+    let property = self.atoms.get(AtomName::NET_WM_STATE);
+    let value = state.encode(&self.atoms);
+    self
+      .connection
+      .change_property32(window, property, ATOM_TYPE, &value)?;
+    if previous.map_or(state.hidden, |previous| previous.hidden != state.hidden)
+    {
+      let wm_state = if state.hidden {
+        ICONIC_STATE
+      } else {
+        NORMAL_STATE
+      };
+      self.set_wm_state(window, wm_state)?;
     }
     Ok(())
   }
@@ -646,8 +961,11 @@ impl<C: XConnection> Xwm<C> {
     Ok(())
   }
 
-  /// Writes `_NET_WM_STATE` for Shingle's state of a managed window, when
-  /// it changed. `_NET_WM_STATE_MODAL` is kept as the client set it.
+  /// Sets Shingle's state of a managed window: fullscreen, maximized and
+  /// hidden (minimized) are written to `_NET_WM_STATE` when they change.
+  /// `focused` is ignored, since [`Xwm::set_focus`] decides
+  /// `_NET_WM_STATE_FOCUSED`, and `_NET_WM_STATE_MODAL` is kept as the
+  /// client set it.
   ///
   /// # Errors
   ///
@@ -663,20 +981,96 @@ impl<C: XConnection> Xwm<C> {
     if tracked.info.override_redirect || !tracked.mapped {
       return Ok(());
     }
-    let state = NetWmState {
-      modal: tracked.info.state.modal,
-      ..state
-    };
-    if tracked.state == Some(state) {
+    tracked.wanted = Some(state);
+    self.write_state(window)
+  }
+
+  /// Gives the keyboard focus to `window`, or takes it from every X
+  /// window with `None`, as wlroots' `xwm_surface_activate` does: sets
+  /// `_NET_ACTIVE_WINDOW` and the X focus for the window's input model
+  /// (`SetInputFocus`, `WM_TAKE_FOCUS` or both), and moves
+  /// `_NET_WM_STATE_FOCUSED`. Asking for the window focused already does
+  /// nothing, as do override-redirect and unknown windows.
+  ///
+  /// # Errors
+  ///
+  /// When the requests cannot be queued.
+  pub fn set_focus(&mut self, window: Option<Window>) -> Result<(), XwmError> {
+    if self.requested_focus == window {
       return Ok(());
     }
-    tracked.state = Some(state);
-    tracked.info.state = state;
-    let property = self.atoms.get(AtomName::NET_WM_STATE);
-    let value = state.encode(&self.atoms);
-    self
-      .connection
-      .change_property32(window, property, ATOM_TYPE, &value)
+    if let Some(window) = window
+      && self
+        .windows
+        .get(&window)
+        .is_none_or(|tracked| tracked.info.override_redirect)
+    {
+      return Ok(());
+    }
+    self.requested_focus = window;
+    self.write_active()?;
+    self.focus_window(window)
+  }
+
+  /// Offers the focus to a globally active window with `WM_TAKE_FOCUS`
+  /// without focusing it, as wlroots' `wlr_xwayland_surface_offer_focus`
+  /// does when Wayfire maps one; the client may take it for itself.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  pub fn offer_focus(&mut self, window: Window) -> Result<(), XwmError> {
+    let Some(tracked) = self.windows.get(&window) else {
+      return Ok(());
+    };
+    if tracked.info.override_redirect || !tracked.info.protocols.take_focus {
+      return Ok(());
+    }
+    self.take_focus(window)
+  }
+
+  /// Restacks the managed windows to Shingle's stacking order, bottom to
+  /// top. Windows Shingle does not list stay below in map order, and
+  /// windows it lists that are not mapped are skipped. When the order
+  /// changed, each window is stacked just above the one below it
+  /// (`ConfigureWindow` with a sibling, wlroots'
+  /// `wlr_xwayland_surface_restack`) and `_NET_CLIENT_LIST_STACKING` is
+  /// rewritten.
+  ///
+  /// # Errors
+  ///
+  /// When the requests cannot be queued.
+  pub fn restack(&mut self, order: &[Window]) -> Result<(), XwmError> {
+    let mut stacking = self
+      .client_list
+      .iter()
+      .filter(|window| !order.contains(window))
+      .copied()
+      .collect::<Vec<_>>();
+    stacking.extend(
+      order
+        .iter()
+        .filter(|window| self.client_list.contains(window)),
+    );
+    if stacking == self.stacking {
+      return Ok(());
+    }
+    for pair in stacking.windows(2) {
+      self.connection.stack_above(pair[1], Some(pair[0]))?;
+    }
+    self.stacking = stacking;
+    self.write_stacking()
+  }
+
+  /// Makes `image` the root window's cursor, which X windows without a
+  /// cursor of their own show (Wayfire's
+  /// `xwayland_update_default_cursor`).
+  ///
+  /// # Errors
+  ///
+  /// When the server has no ARGB32 picture format, or a request fails.
+  pub fn set_cursor(&mut self, image: &CursorImage) -> Result<(), XwmError> {
+    self.connection.set_root_cursor(image)
   }
 
   /// Closes a window: `WM_DELETE_WINDOW` when it lists that protocol,
@@ -710,6 +1104,17 @@ impl<C: XConnection> Xwm<C> {
   /// `_NET_CLIENT_LIST`: the mapped managed windows in map order.
   pub fn client_list(&self) -> &[Window] {
     &self.client_list
+  }
+
+  /// `_NET_CLIENT_LIST_STACKING`: the mapped managed windows, bottom to
+  /// top.
+  pub fn stacking(&self) -> &[Window] {
+    &self.stacking
+  }
+
+  /// The window with the X focus, as far as the window manager knows.
+  pub fn focused(&self) -> Option<Window> {
+    self.focused
   }
 
   /// Sends the queued requests.
@@ -746,6 +1151,13 @@ impl<C: XConnection> Xwm<C> {
   pub fn connection(&self) -> &C {
     &self.connection
   }
+}
+
+/// Whether an event with sequence number `event` came after the request
+/// with `request`, with wrap-around, as wlroots' `validate_focus_serial`
+/// decides.
+fn sequence_after(request: u16, event: u16) -> bool {
+  event.wrapping_sub(request) < u16::MAX / 2
 }
 
 #[cfg(test)]

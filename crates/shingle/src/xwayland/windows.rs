@@ -63,6 +63,8 @@ pub(crate) enum XRequest {
   State { window: Window, state: NetWmState },
   /// `Xwm::close`.
   Close(Window),
+  /// `Xwm::offer_focus`.
+  OfferFocus(Window),
 }
 
 /// The geometry of a Shingle rectangle.
@@ -114,6 +116,18 @@ pub(crate) fn apply(state: &mut CompositorState, event: XwmEvent) {
     XwmEvent::ConfigureRequest { window, geometry } => {
       configure_request(state, window, geometry);
     }
+    XwmEvent::StateRequest { window, change } => {
+      super::requests::state(state, window, change);
+    }
+    XwmEvent::ActivateRequest { window } => {
+      super::requests::activate(state, window);
+    }
+    XwmEvent::MoveResizeRequest { window, request } => {
+      super::requests::move_resize(state, window, request);
+    }
+    XwmEvent::CloseRequest { window } => {
+      super::requests::close(state, window);
+    }
   }
 }
 
@@ -127,14 +141,13 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
   let Role::Xwayland(role) = &mut surface.role else {
     return;
   };
-  let Some(serial) = role.pending_serial.take() else {
-    return;
-  };
-  role.serial = Some(serial);
-  if let Paired::Now { window, .. } =
-    state.xwayland.pairing.surface_serial(id, serial)
-  {
-    associate(state, window, id, true);
+  if let Some(serial) = role.pending_serial.take() {
+    role.serial = Some(serial);
+    if let Paired::Now { window, .. } =
+      state.xwayland.pairing.surface_serial(id, serial)
+    {
+      associate(state, window, id, true);
+    }
   }
 }
 
@@ -201,9 +214,7 @@ fn try_map(state: &mut CompositorState, window: Window, from_commit: bool) {
   let Some(entry) = state.xwayland.windows.get(&window) else {
     return;
   };
-  if !entry.mapped || !matches!(entry.info.kind(), Kind::Managed { .. }) {
-    // Unmanaged windows are tracked but not drawn yet (XW-4); drag icons
-    // come with XW-6.
+  if !entry.mapped {
     return;
   }
   let Some(object) = entry
@@ -213,6 +224,12 @@ fn try_map(state: &mut CompositorState, window: Window, from_commit: bool) {
   else {
     return;
   };
+  match entry.info.kind() {
+    Kind::Managed { .. } => {}
+    // Unmanaged windows are tracked but not drawn yet; drag icons come
+    // with drag and drop (XW-6).
+    Kind::Unmanaged | Kind::DragIcon => return,
+  }
   let toplevel = new_toplevel(state, window, entry);
   let Some(surface) = state.surfaces.get_mut(&object) else {
     return;
@@ -259,7 +276,7 @@ fn new_toplevel(
     app_id: info.class.clone(),
     title: info.title.clone(),
     parent: info
-      .transient_for
+      .toplevel_parent()
       .and_then(|parent| shingle_window(state, parent)),
     tiled: true,
     opacity: 1.0,
@@ -291,7 +308,10 @@ fn toplevel_object(
 }
 
 /// The Shingle window of an X window, once it exists.
-fn shingle_window(state: &CompositorState, window: Window) -> Option<WindowId> {
+pub(super) fn shingle_window(
+  state: &CompositorState,
+  window: Window,
+) -> Option<WindowId> {
   let object = toplevel_object(state, window)?;
   state.surfaces.get(&object)?.role.toplevel()?.window()
 }
@@ -377,9 +397,9 @@ fn changed(state: &mut CompositorState, window: Window, info: WindowInfo) {
   if old.class != info.class {
     set_app_id(state, &object, info.class.clone());
   }
-  if old.transient_for != info.transient_for {
+  if old.toplevel_parent() != info.toplevel_parent() {
     let parent = info
-      .transient_for
+      .toplevel_parent()
       .and_then(|parent| shingle_window(state, parent));
     shell::set_toplevel_parent(state, &object, parent);
   }
@@ -547,138 +567,15 @@ pub(crate) fn forget_all(state: &mut CompositorState) {
 
 #[cfg(test)]
 mod tests {
-  use serde_json::{Value, json};
+  use serde_json::json;
   use shingle_core::{LaunchIdentity, WindowPresence};
-  use shingle_xwayland::{Geometry, Kind, WindowInfo, XwmEvent};
-  use wayland_client::protocol::{wl_compositor, wl_surface};
+  use shingle_xwayland::{Geometry, Kind, XwmEvent};
   use wayland_protocols::xwayland::shell::v1::client::{
     xwayland_shell_v1, xwayland_surface_v1,
   };
 
   use super::*;
-  use crate::{Compositor, test_client::TestClient};
-
-  const XTERM: Window = 0x400001;
-  const XEYES: Window = 0x600001;
-
-  /// A compositor, the test Xwayland connected to it, and its globals.
-  struct Fixture {
-    compositor: Compositor,
-    client: TestClient,
-    wl_compositor: wl_compositor::WlCompositor,
-    shell: xwayland_shell_v1::XwaylandShellV1,
-  }
-
-  impl Fixture {
-    fn new() -> Self {
-      let (mut compositor, _) = crate::tests::test_compositor();
-      let client = TestClient::connect_xwayland(&mut compositor);
-      let wl_compositor = client.bind::<wl_compositor::WlCompositor>(4);
-      let shell = client.bind::<xwayland_shell_v1::XwaylandShellV1>(1);
-      Self {
-        compositor,
-        client,
-        wl_compositor,
-        shell,
-      }
-    }
-
-    fn state(&mut self) -> &mut CompositorState {
-      &mut self.compositor.state
-    }
-
-    /// A surface with the `xwayland_surface_v1` role and `serial` set but
-    /// not committed.
-    fn surface(
-      &mut self,
-      serial: u64,
-    ) -> (
-      wl_surface::WlSurface,
-      xwayland_surface_v1::XwaylandSurfaceV1,
-    ) {
-      let handle = &self.client.handle;
-      let surface = self.wl_compositor.create_surface(handle, ());
-      let role = self.shell.get_xwayland_surface(&surface, handle, ());
-      role.set_serial(serial as u32, (serial >> 32) as u32);
-      self.client.roundtrip(&mut self.compositor);
-      (surface, role)
-    }
-
-    /// Commits a buffer, which also applies a pending serial.
-    fn commit_buffer(&mut self, surface: &wl_surface::WlSurface) {
-      self
-        .client
-        .attach_buffer(&mut self.compositor, surface, 64, 48);
-    }
-
-    fn apply(&mut self, event: XwmEvent) {
-      apply(self.state(), event);
-    }
-
-    fn call(&mut self, method: &str, data: Value) -> Value {
-      crate::ipc::respond(
-        self.state(),
-        &json!({"method": method, "data": data}),
-      )
-    }
-
-    /// The Shingle windows with `app_id`.
-    fn windows(&mut self, app_id: &str) -> Vec<WindowId> {
-      let state = self.state();
-      let mut windows = state
-        .surfaces
-        .values()
-        .filter_map(|surface| {
-          let toplevel = surface.role.toplevel()?;
-          (toplevel.app_id == app_id)
-            .then_some(toplevel.window())
-            .flatten()
-        })
-        .collect::<Vec<_>>();
-      windows.sort();
-      windows
-    }
-
-    fn requests(&mut self) -> Vec<XRequest> {
-      std::mem::take(&mut self.state().xwayland.requests)
-    }
-  }
-
-  /// What the window manager reports for a plain window of `class`.
-  fn info(class: &str, title: &str) -> Box<WindowInfo> {
-    Box::new(WindowInfo {
-      class: class.into(),
-      instance: class.to_lowercase(),
-      title: title.into(),
-      geometry: Geometry::new(0, 0, 484, 316),
-      pid: Some(std::process::id()),
-      ..WindowInfo::default()
-    })
-  }
-
-  fn mapped(window: Window, class: &str) -> XwmEvent {
-    XwmEvent::Mapped {
-      window,
-      info: info(class, &format!("{class} title")),
-    }
-  }
-
-  /// Maps a window of `class` fully: surface, buffer, map and serial.
-  fn map(
-    fixture: &mut Fixture,
-    window: Window,
-    class: &str,
-    serial: u64,
-  ) -> (
-    wl_surface::WlSurface,
-    xwayland_surface_v1::XwaylandSurfaceV1,
-  ) {
-    let (surface, role) = fixture.surface(serial);
-    fixture.commit_buffer(&surface);
-    fixture.apply(mapped(window, class));
-    fixture.apply(XwmEvent::Serial { window, serial });
-    (surface, role)
-  }
+  use crate::{test_client::TestClient, xwayland::fixture::*};
 
   #[test]
   fn xwayland_shell_is_visible_only_to_xwayland() {

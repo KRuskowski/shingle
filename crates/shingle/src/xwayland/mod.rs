@@ -12,6 +12,12 @@
 //! [`shell`] is the `xwayland_shell_v1` protocol and [`windows`] turns
 //! managed X windows into Shingle toplevels (sections 3 and 4).
 
+#[cfg(test)]
+mod behaviour_tests;
+#[cfg(test)]
+pub(crate) mod fixture;
+pub(crate) mod focus;
+pub(crate) mod requests;
 pub(crate) mod shell;
 pub(crate) mod windows;
 
@@ -242,6 +248,8 @@ impl Xwayland {
     let Some(xwm) = &mut self.xwm else {
       return;
     };
+    let focus = focus::target(state);
+    let stacking = focus::stacking(state);
     let mut result = Ok(());
     for request in requests {
       result = match request {
@@ -252,11 +260,15 @@ impl Xwayland {
         } => xwm.configure(window, geometry, force),
         XRequest::State { window, state } => xwm.set_state(window, state),
         XRequest::Close(window) => xwm.close(window),
+        XRequest::OfferFocus(window) => xwm.offer_focus(window),
       };
       if result.is_err() {
         break;
       }
     }
+    let result = result
+      .and_then(|()| xwm.set_focus(focus))
+      .and_then(|()| xwm.restack(&stacking));
     if let Err(error) = result.and_then(|()| xwm.flush()) {
       eprintln!("shingle: X window manager lost its connection: {error}");
       self.drop_xwm(state, handle);
@@ -357,7 +369,12 @@ impl Xwayland {
           eprintln!("shingle: Xwayland reports display :{number}, not {name}");
         }
         match X11Connection::connect(stream).and_then(Xwm::start) {
-          Ok(xwm) => {
+          Ok(mut xwm) => {
+            if let Some(cursor) = crate::cursor_shape::default_x_cursor(state)
+              && let Err(error) = xwm.set_cursor(&cursor)
+            {
+              eprintln!("shingle: cannot set the X root cursor: {error}");
+            }
             self.xwm_source = watch(handle, xwm_fd(&xwm), Source::Xwm);
             self.xwm = Some(xwm);
           }
