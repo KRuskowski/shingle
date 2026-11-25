@@ -6,7 +6,7 @@
 | --- | --- |
 | `shingle-core` | Tiling trees, workspaces, geometry and the serializable session model. No Wayland dependency. |
 | `shingle` | Wayland protocol handling, input routing, output state, IPC and the compositor event loop. Library only; no winit. |
-| `shingle-render` | wgpu rendering without a windowing dependency: shared `GpuContext`, per-output `RenderState`, the `draw` pass, and window and offscreen targets. |
+| `shingle-render` | wgpu rendering without a windowing dependency: shared `GpuContext`, per-output `RenderState`, the `draw` pass, window and offscreen targets, and DMA-BUF import with its Vulkan setup. |
 | `shingle-frontend` | The interactive frontend shared by the nested and native hosts, without winit: `Frontend` with Scale, Expo, the switchers, drags, animations, effects, the scene build, binding dispatch, key repeat and session handling, behind the `Host` trait and `InputEvent`. |
 | `shingle-bin` | The `shingle` binary: argument parsing, backend selection and the headless backend. Its own package because the `shingle` library must not depend on the backends that depend on it. |
 | `shingle-native` | Native backend library: libseat session and VT switching, libinput devices with udev hotplug, atomic KMS with copy scanout and page-flip pacing, DRM hotplug and the configured choice of output and mode, the Vulkan renderer for it, and the event loop that runs `Frontend` on a seat, each device interaction behind a trait (`Session`, `InputSource`, `KmsDevice`, `DeviceMonitor`, `FrameRenderer`) with fakes in the tests. Entry point `shingle_native::run`. |
@@ -82,6 +82,8 @@
 | GPU device, pipelines, textures, gamma and effects | `crates/shingle-render/src/gpu.rs` |
 | Composite pass and tile geometry | `crates/shingle-render/src/draw.rs` |
 | Window and offscreen render targets | `crates/shingle-render/src/target.rs` |
+| DMA-BUF device setup, modifier caps, fourcc table, import, foreign queue-family barriers | `crates/shingle-render/src/dmabuf.rs`; caps of every adapter: `examples/dmabuf_caps.rs`; device tests `tests/dmabuf_import.rs` |
+| GPU test namespace with a private `/dev` (render node and NVIDIA nodes only) | `tools/gpu_test/run.py` |
 | Native config model and XKB generation | `crates/shingle-config/src/lib.rs` |
 | Wayfire INI import | `crates/shingle-config/src/wayfire.rs` |
 | i3 import | `crates/shingle-config/src/i3.rs` |

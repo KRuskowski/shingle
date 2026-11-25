@@ -27,7 +27,7 @@ NB-1 to NB-5 are done, and so is the single `shingle` binary of decision 4 ([sta
 
 ## 3. DMA-BUF
 
-Add DMA-BUF import and remove unnecessary CPU texture copies. The design is [design/dmabuf.md](design/dmabuf.md), from 2026-11-25; its open questions wait for the operator.
+Add DMA-BUF import and remove unnecessary CPU texture copies. The design is [design/dmabuf.md](design/dmabuf.md), from 2026-11-25; its open questions were decided with defaults on the operator's behalf ([Decisions](design/dmabuf.md#decisions)).
 
 In short:
 
@@ -38,6 +38,8 @@ In short:
 - **Testing.** A new GPU offscreen backend lets real NVIDIA clients and nested Shingle run in a namespace with a private `/dev` that holds only the render node, never touching the host's display.
 
 The work is split into seven workspaces, DB-1 to DB-7, each with acceptance criteria in the design: Vulkan setup, offscreen backend and GPU harness, buffer lifetime, `zwp_linux_dmabuf_v1`, `linux-drm-syncobj-v1`, shm uploads without copies, and later direct scanout of client buffers. NB-8 builds on DB-1.
+
+DB-1 `shingle-gpu-dmabuf` is done ([status.md](status.md#compositor-and-renderer), [design/dmabuf.md](design/dmabuf.md#db-1-as-built)); its GPU namespace, tools/gpu_test/run.py, is where DB-2 starts. DB-2 and DB-3 are next and do not depend on each other.
 
 ## 4. XWayland
 

@@ -14,7 +14,9 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-To be sure that no test reaches a GPU, input or VT device of the host, run the suite in a namespace whose `/dev` has none, with lavapipe as the only Vulkan driver: `bwrap --bind / / --dev /dev env VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json cargo test --workspace --no-fail-fast`. The three reference-image tests in crates/shingle-render/tests/offscreen_pixels.rs then fail, because their references were rendered on a hardware GPU; everything else passes.
+To be sure that no test reaches a GPU, input or VT device of the host, run the suite in a namespace whose `/dev` has none, with lavapipe as the only Vulkan driver: `bwrap --bind / / --dev /dev env VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json cargo test --workspace --no-fail-fast`. The three reference-image tests in crates/shingle-render/tests/offscreen_pixels.rs then fail, because their references were rendered on a hardware GPU; everything else passes, and the udmabuf tests in crates/shingle-render/tests/dmabuf_import.rs skip.
+
+To run a GPU test on the render node without exposing anything else, use tools/gpu_test/run.py: it runs one command in a user, mount, network and PID namespace whose `/dev` holds only the render node, NVIDIA's compute nodes, `udmabuf` and the basic nodes, and fails if any process opens another device. For example `cargo test -p shingle-render --test dmabuf_import --no-run`, then `tools/gpu_test/run.py -- target/debug/deps/dmabuf_import-HASH --include-ignored`. `cargo run -p shingle-render --example dmabuf_caps` prints which formats and modifiers each Vulkan adapter can import.
 
 `.cargo/config.toml` limits Cargo to two jobs. Check `/proc/loadavg` before large builds, and run builds and test suites one after another rather than in parallel.
 
@@ -62,7 +64,7 @@ Unit tests do not cover protocol behaviour end to end. For any protocol, IPC or 
 - Use a private `XDG_RUNTIME_DIR`, Wayland socket and IPC socket for each run.
 - Exercise real protocol calls and check the resulting state changes; a successful build or import proves nothing.
 - A harness that signals processes runs in a PID namespace (`unshare --pid --fork --mount-proc`) and checks every PID before signalling it: never signal a PID taken from a reply without checking it is positive, greater than 1 and the expected process, because `kill(-1)` reaches every process of the user.
-- X11 clients run only inside `tools/xwayland_test/run.py`'s namespace, never against the host's X displays.
+- X11 clients run only inside `tools/xwayland_test/run.py`'s namespace, never against the host's X displays. Anything that needs the GPU's render node runs inside `tools/gpu_test/run.py`'s namespace, never with the host's card node, input devices or TTYs.
 - Afterwards remove temporary fixture sources, binaries outside `target/`, sockets and logs. Leave `target/` itself in place.
 - Record the result in [status.md](status.md), separately from what was only unit-tested.
 
