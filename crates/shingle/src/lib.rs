@@ -2282,10 +2282,11 @@ impl Compositor {
 
   /// The workspace direction `(dx, dy)` for a window dragged to an edge or
   /// corner at `(x, y)`, each in `-1..=1`, for move's
-  /// `workspace_switch_after`. `None` away from the edges. Unlike Wayfire,
-  /// whose `calc_slot` turns the top edge into the centre slot and so
-  /// never switches up from it (`plugins/single_plugins/move.cpp`), the top
-  /// edge here means up.
+  /// `workspace_switch_after`. `None` away from the edges and on the top
+  /// edge, which [`Compositor::grid_slot_at`] makes the maximize slot: as in
+  /// Wayfire's `update_workspace_switch_timeout`
+  /// (`plugins/single_plugins/move.cpp`), only the top corners switch up,
+  /// diagonally.
   pub fn workspace_drag_direction_at(
     &self,
     x: f64,
@@ -2301,7 +2302,6 @@ impl Compositor {
       quarter_snap_threshold,
     ) {
       Some("top_left") => Some((-1, -1)),
-      Some("top") => Some((0, -1)),
       Some("top_right") => Some((1, -1)),
       Some("left") => Some((-1, 0)),
       Some("right") => Some((1, 0)),
@@ -2950,6 +2950,35 @@ pub(crate) mod tests {
     assert_eq!(compositor.keyboard_layout_index(), 1);
     compositor.set_keymap(&keymap).expect("the keymap compiles");
     assert_eq!(compositor.keyboard_layout_index(), 0);
+  }
+
+  #[test]
+  fn dragging_to_the_top_edge_maximizes_and_switches_no_workspace() {
+    let (compositor, _) = test_compositor();
+    let area = compositor.workarea();
+    let middle = f64::from(area.x) + f64::from(area.width) / 2.0;
+    let top = f64::from(area.y) + 2.0;
+    let right = f64::from(area.x) + f64::from(area.width) - 2.0;
+    let bottom = f64::from(area.y) + f64::from(area.height) - 2.0;
+    let at = |x, y| {
+      (
+        compositor.grid_slot_at(x, y, 10, 50),
+        compositor.workspace_drag_direction_at(x, y, 10, 50),
+      )
+    };
+    // Wayfire's calc_slot makes the top edge the centre slot, which
+    // move.cpp's update_workspace_switch_timeout gives no direction.
+    assert_eq!(at(middle, top), (Some("center"), None));
+    assert_eq!(
+      at(f64::from(area.x) + 2.0, top),
+      (Some("top_left"), Some((-1, -1)))
+    );
+    assert_eq!(at(right, top), (Some("top_right"), Some((1, -1))));
+    assert_eq!(at(middle, bottom), (Some("bottom"), Some((0, 1))));
+    assert_eq!(
+      at(right, f64::from(area.y) + 300.0),
+      (Some("right"), Some((1, 0)))
+    );
   }
 
   /// Commits `damage` in surface coordinates on a toplevel whose 1:1
