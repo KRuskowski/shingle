@@ -1,6 +1,6 @@
 # Native backend design
 
-Status: proposed, 2026-11-25. Roadmap item 4 ([roadmap.md](../roadmap.md#4-native-backend)).
+Status: accepted with the operator's [decisions](#decisions), 2026-11-25. Roadmap item "Native backend" ([roadmap.md](../roadmap.md#3-native-backend)).
 
 Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit). This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). Nothing here is implemented yet.
 
@@ -14,9 +14,9 @@ Line numbers refer to branch `shingle-native-design` at `d2568d2`. Crate version
 | 2 | Display path | Atomic KMS through the `drm` crate. wgpu renders into GBM buffers imported with `texture_from_dmabuf_fd` (zero-copy), with a dumb-buffer copy path as fallback. wgpu's own `drm` surface (VK_KHR_display) is not used. `shingle-render` loses winit. |
 | 3 | Session and seat | `libseat` (seatd, logind or builtin). Ctrl+Alt+F1..F10 switches VT as in Wayfire. On pause, stop committing, suspend libinput and release held input, then acknowledge. On resume, re-probe outputs and modeset again. |
 | 4 | Input | `input` crate (libinput) on a udev context, opening devices through libseat. Each libinput device becomes a Shingle seat device, so `input/list-devices` lists real devices and `input/configure-device` uses libinput's send-events mode, as Wayfire does. |
-| 5 | Outputs | One enabled output first, chosen and moded the way Wayfire does it. Hotplug comes from udev. The data model is per connector and keyed by connector name, so item 7 can enable more outputs without changing the structure. |
+| 5 | Outputs | One enabled output first, chosen and moded the way Wayfire does it. Hotplug comes from udev. The data model is per connector and keyed by connector name, so the multi-output roadmap item can enable more outputs without changing the structure. |
 | 6 | Failure handling | Fail before launching clients when the display cannot work. Treat losing DRM master as a pause, not an error. Recover from a lost GPU device, and rely on libseat and the kernel to restore the TTY even after a crash. |
-| 7 | Testing | Most logic is pure and unit-tested on the host behind traits. Input and session run in a plain takt VM with uinput and seatd. KMS runs in a VM with a virtio-gpu display, which an operator has to add. Zero-copy and VRR need real hardware that is not running the operator's session. Nothing touches this host's DRM, input or VT. |
+| 7 | Testing | Most logic is pure and unit-tested on the host behind traits. Everything that touches devices runs on a dedicated test machine that the operator is setting up; VMs are not used. Nothing touches this host's DRM, input or VT. |
 | 8 | Plan | Ten ordered workspaces, NB-1 to NB-10: render split, compositor host API, two frontend extraction steps, device registry, native session and input, KMS copy path, zero-copy, hotplug and modes, then cursor plane, VRR and tearing. |
 
 ## Crate survey
@@ -39,7 +39,7 @@ Every crate this design names, checked on 2026-11-25.
 | `smithay` | 0.7.0 (2025-06-24) | Active on master (pushed 2026-11-24), but master still pins `drm 0.14` and `gbm 0.18`. | Not used; see [2](#2-display-path). |
 | `libudev` | 0.3.0 (2021-01-17) | Unmaintained. | Not used; `udev` replaces it. |
 
-New system build dependencies are `libinput-dev`, `libseat-dev` and `libudev-dev`, plus `libgbm-dev` for NB-8. This host already has the pkg-config files for `libudev` 257, `gbm` 25.0.7 and `libdrm` 2.4.124, but not those for `libinput` or `libseat`; see [open questions](#open-questions).
+New system build dependencies are `libinput-dev`, `libseat-dev` and `libudev-dev`, plus `libgbm-dev` for NB-8. This host already has the pkg-config files for `libudev` 257, `gbm` 25.0.7 and `libdrm` 2.4.124, and `libinput-dev` and `libseat-dev` were installed on 2026-11-25 (see [Decisions](#decisions)).
 
 ## 1. Frontend split
 
@@ -163,8 +163,8 @@ Shingle drives KMS itself with atomic modesetting through `drm` 0.15, and wgpu o
    - Vulkan's `VkDrmFormatModifierPropertiesEXT` for `B8G8R8A8_SRGB` with `COLOR_ATTACHMENT`;
    - modifiers whose plane count is 1 (`gbm::Device::format_modifier_plane_count`).
 
-   The plane-count restriction matches the importer, which "currently only supports single-plane DMA-bufs" (device.rs:514). It also excludes compression modifiers (AMD DCC, Intel CCS), which would need a queue-family ownership transfer to `VK_QUEUE_FAMILY_FOREIGN_EXT` that wgpu does not record. The device must be opened with `Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF` (wgpu-types-30.0.2/src/features.rs:1246). That feature also covers roadmap item 5, client DMA-BUF import, which uses the same importer.
-2. **Copy (`DumbScanout`).** Render into a wgpu `Bgra8UnormSrgb` texture (the current `OffscreenRenderer` target, crates/shingle-render/src/lib.rs:1100). Then `copy_texture_to_buffer`, map the buffer, and copy rows into a mapped `create_dumb_buffer` (XRGB8888, linear) framebuffer, using two dumb buffers. This works on any KMS driver with any Vulkan adapter, including lavapipe. It is the fallback when zero-copy is unavailable and the path that the VM tests exercise. It costs one GPU readback and one CPU copy of the frame (about 8 MB at 1080p), which is acceptable as a fallback and is logged as such.
+   The plane-count restriction matches the importer, which "currently only supports single-plane DMA-bufs" (device.rs:514). It also excludes compression modifiers (AMD DCC, Intel CCS), which would need a queue-family ownership transfer to `VK_QUEUE_FAMILY_FOREIGN_EXT` that wgpu does not record. The device must be opened with `Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF` (wgpu-types-30.0.2/src/features.rs:1246). That feature also covers the DMA-BUF roadmap item, client DMA-BUF import, which uses the same importer.
+2. **Copy (`DumbScanout`).** Render into a wgpu `Bgra8UnormSrgb` texture (the current `OffscreenRenderer` target, crates/shingle-render/src/lib.rs:1100). Then `copy_texture_to_buffer`, map the buffer, and copy rows into a mapped `create_dumb_buffer` (XRGB8888, linear) framebuffer, using two dumb buffers. This works on any KMS driver with any Vulkan adapter, including lavapipe. It is the fallback when zero-copy is unavailable and is tested by forcing it on the test machine. It costs one GPU readback and one CPU copy of the frame (about 8 MB at 1080p), which is acceptable as a fallback and is logged as such.
 
 The native crate first tries zero-copy. It falls back to copy if the feature is missing, the intersection is empty, the GBM allocation fails or the first `TEST_ONLY` commit fails. `SHINGLE_SCANOUT=copy` forces the fallback.
 
@@ -333,7 +333,7 @@ All `time_usec` values are passed through, so clients see libinput timestamps in
 - Today the output is hard-coded as `HEADLESS-1`, 1280x720, 60 Hz, 310x175 mm (crates/shingle/src/lib.rs:80-82, state.rs:241, state.rs:1748-1781, state.rs:889, state.rs:965, xdg_output.rs:25, output_management.rs:153).
 - NB-2 adds `Compositor::set_output_info(OutputInfo { name, make, model, serial, physical_mm, modes, current_mode, subpixel })`, used for `wl_output.geometry`/`mode`/`name`/`description`, xdg-output and wlr-output-management. The default stays `HEADLESS-1` for nested and headless use.
 - `set_output` (lib.rs:1654) keeps receiving the logical rectangle from `logical_output_size` (lib.rs:1583).
-- The current core output id (`OutputId::new(OUTPUT_NAME)`, state.rs:241) is renamed to the connector name when the first output is described, so sessions persist per connector name, which item 7 needs anyway.
+- The current core output id (`OutputId::new(OUTPUT_NAME)`, state.rs:241) is renamed to the connector name when the first output is described, so sessions persist per connector name, which multi-output needs anyway.
 
 **Hotplug.**
 
@@ -342,16 +342,16 @@ All `time_usec` values are passed through, so clients see libinput timestamps in
 - If nothing is connected, Shingle keeps running with the last output size, stops scheduling frames and waits. Wayfire behaves the same way, keeping its views without a physical output.
 - wlr-output-management `apply` requests (output_management.rs) that change mode or turn the output off are validated with `TEST_ONLY` before they are applied.
 
-**Room for multi-output (roadmap item 7).**
+**Room for multi-output (roadmap item "Multi-output").**
 
 - Everything per output (scanout, scheduler, page-flip routing by `PageFlipEvent::crtc`, mode config, VRR) already lives in `kms::Output`.
 - CRTC assignment for more than one output is a bipartite match over `encoder.possible_crtcs()`, done when `enabled` grows past one entry.
-- What item 7 must still add lives in `shingle` and `shingle-core`: more than one `Rect`, per-output `wl_output` globals, and per-output frame callbacks. It does not need to change the native crate's structure.
+- What multi-output must still add lives in `shingle` and `shingle-core`: more than one `Rect`, per-output `wl_output` globals, and per-output frame callbacks. It does not need to change the native crate's structure.
 - Mirroring and multi-GPU (outputs on a second card) are out of scope.
 
 ### Rejected alternatives
 
-- **Enabling every connected output at once in NB-7.** `shingle` has only one output rectangle and global, and making that plural is item 7's work. Lighting a second screen with a duplicate or a blank image would be confusing. Rejected.
+- **Enabling every connected output at once in NB-7.** `shingle` has only one output rectangle and global, and making that plural is the multi-output item's work. Lighting a second screen with a duplicate or a blank image would be confusing. Rejected.
 - **Using the mode already set on the CRTC (taken over from fbcon) as the default.** It is often a low firmware mode, and Wayfire picks the preferred mode instead. Kept only as a last fallback when the preferred mode fails `TEST_ONLY`.
 
 ## 6. Failure handling
@@ -392,7 +392,7 @@ Diagnostics go to stderr and to `$XDG_STATE_HOME/shingle/native.log`, because st
 
 A deliberate design point: no code path in Shingle puts the VT into graphics mode itself.
 
-**A bug this design found and fixes.** `Compositor::with_core` installs a calloop `Signals` source for SIGINT and SIGTERM (crates/shingle/src/lib.rs:496-502). That source blocks both signals and only sets `state.shutdown`. `shingle-nested` never reads that flag (there is no accessor) and exits only on its own `quit` flag (main.rs:4518). That is why nested ignored SIGTERM and SIGINT in the 2026-11-25 run (roadmap item 2). `Compositor::request_quit` (lib.rs:731) has the same problem. NB-2 adds `shutdown_requested()` and makes nested honour it.
+**A bug this design found and fixes.** `Compositor::with_core` installs a calloop `Signals` source for SIGINT and SIGTERM (crates/shingle/src/lib.rs:496-502). That source blocks both signals and only sets `state.shutdown`. `shingle-nested` never reads that flag (there is no accessor) and exits only on its own `quit` flag (main.rs:4518). That is why nested ignored SIGTERM and SIGINT in the 2026-11-25 run (roadmap item "Repeat real-client verification"). `Compositor::request_quit` (lib.rs:731) has the same problem. NB-2 adds `shutdown_requested()` and makes nested honour it.
 
 ## 7. Testing
 
@@ -417,63 +417,28 @@ Run with `cargo test --workspace` and the [development.md](../development.md#bui
   - the startup error decisions in the [6](#6-failure-handling) table.
 - **`shingle`.** Tests for the device registry, `set_session_active` releasing held input, `frame_presented` feedback values, `OutputInfo` reaching `wl_output`, and `shutdown_requested`.
 
-### Layer 2: takt VM without a display
+### Layer 2: dedicated test machine
 
-For session and input. `takt target list` shows deb-04 free (Debian 13, kernel 6.12.73, 4 vCPU, 3.9 GB). deb-02, deb-03 and s5-test are claimed by other workspaces. A check on deb-04 during this design found:
+The operator decided against VM testing (2026-11-25) and is setting up a separate machine for native work. Everything that needs a seat, input devices or KMS is verified there: NB-6 onwards. Until it exists, NB-1 to NB-5 proceed, since they are verified on this host with unit tests and nested runs, and native code is only built and unit-tested here.
 
-- no display device and no `/dev/dri`;
-- PS/2 keyboard and VMware mouse evdev nodes;
-- passwordless sudo;
-- Mesa 25.0.7 with the lavapipe ICD;
-- the `virtio-gpu` and `bochs` kernel modules, but no `vkms` or `simpledrm` in the Debian kernel;
-- `seatd`, `libseat-dev` 0.9.1-1 and `libinput-dev` 1.28.1-1+deb13u1 available from apt.
+What the test machine covers:
 
-What it covers:
+- libseat with seatd or logind, Shingle started from a TTY;
+- libinput hotplug with real devices, plus uinput virtual keyboards, mice and touchscreens created by a Python harness using `python3-evdev` for repeatable scripts;
+- `input/list-devices` and `input/configure-device` with real libinput devices, and held-input release on disable and on VT switch;
+- modeset, mode selection, page-flip pacing, presentation timestamps and DPMS;
+- connector hotplug by unplugging and replugging a monitor;
+- zero-copy scanout with real modifiers, VRR, async flips, the hardware cursor plane and GPU-hang recovery;
+- the failure table in [6](#6-failure-handling), including recovery after `kill -9`;
+- SIGTERM cleanup.
 
-- libseat with seatd, with Shingle started on tty1 through `openvt` or an autologin getty;
-- libinput udev hotplug with uinput virtual keyboards, mice and touchscreens, created by a Python harness using `python3-evdev`;
-- `input/list-devices` and `input/configure-device` with real libinput devices;
-- held-key release on device disable and on VT switch (`chvt` over SSH);
-- SIGTERM cleanup;
-- the "no DRM device" and "no seat" exits.
-
-A test client that records `wl_keyboard`/`wl_pointer` events (a small Python `pywayland` client or `wev`) checks what clients receive. NB-6 is verified here.
-
-### Layer 3: takt VM with a virtio-gpu display
-
-For KMS. Debian's kernel has no `vkms`, so the VM needs a display device. The operator would add a clone (for example `deb-gfx`) from deb-01 with:
-
-```xml
-<video><model type='virtio' heads='1'/></video>
-<graphics type='vnc' listen='127.0.0.1' autoport='yes'/>
-```
-
-That gives virtio-gpu KMS (atomic, dumb buffers, one connector), rendering with lavapipe through the copy path. Do not enable virgl or venus: they would run guest GPU work on the host NVIDIA GPU that drives the operator's session. What it covers:
-
-- modeset and mode selection;
-- page-flip pacing and presentation timestamps;
-- DPMS through `wlr-output-power-management`;
-- pause and resume with `chvt 2`/`chvt 1`;
-- connector changes, which virtio-gpu reports as hotplug when the display is resized from the VNC client;
-- recovery after `kill -9` (tty1 returns to a login prompt);
-- the copy fallback.
-
-Pixel checks use Shingle's own wlr-screencopy (crates/shingle/src/screencopy.rs) with `grim` inside the guest, so no host libvirt access is needed. Zero-copy may work on virtio-gpu with Mesa's kms_swrast GBM and lavapipe's dma-buf import. NB-8 should probe it, but it is not required to pass. NB-7 and NB-9 are verified here.
-
-### Layer 4: real hardware
-
-For zero-copy with real modifiers, VRR, async flips, the hardware cursor plane and GPU-hang recovery on i915, amdgpu or nvidia-drm. This needs either a separate machine or a spare GPU passed through to a VM. No takt target offers either today (see [open questions](#open-questions)). Until then, NB-8 and NB-10 are verified on Layer 3 for the fallbacks, and their hardware criteria stay open in [status.md](../status.md).
-
-### takt targets
-
-deb-04 (or any free clone of deb-01) suits Layer 2 as it is. Layer 3 needs a new clone with the XML above, which only the operator can create (`clone_vm.py` and `virsh edit` need sudo). Each workspace claims its VM with `takt target claim` and releases it when done. Every VM test harness is a Python script under `tools/native_vm/`, run from the host over SSH with the key from takt's `config/targets.yaml`. Copying the build into the guest means building inside the guest, because the host lacks the libseat and libinput development files; with `--jobs 2`, that also keeps host load down.
+A test client that records `wl_keyboard`/`wl_pointer` events checks what clients receive, and pixel checks use Shingle's own wlr-screencopy (crates/shingle/src/screencopy.rs) with `grim`. Test harnesses are Python scripts under `tools/native_test/`, run on the test machine over SSH. Once the machine exists it should be registered as a takt target so workspaces can claim it exclusively.
 
 ### Rejected test strategies
 
-- **A second seat or another VT on this host.** It shares the GPU and the kernel DRM device with Wayfire, and a VT switch pauses it. Forbidden by the task.
-- **`vkms`.** The best fit for KMS testing, but it is not built in Debian's kernel. Building a custom guest kernel is possible but heavier than adding virtio-gpu.
-- **virgl or venus for GPU rendering in the VM.** Guest GPU work would run on the host GPU that drives the operator's session. Rejected for safety.
-- **Pixel-exact screenshots from the host (`virsh screenshot`).** Needs libvirt access, which the Claude sandbox denies. Screencopy inside the guest avoids that.
+- **A second seat or another VT on this host.** It shares the GPU and the kernel DRM device with Wayfire, and a VT switch pauses it. Forbidden.
+- **takt VMs (plain, or with a virtio-gpu display).** They would cover session, input and copy-path KMS, but the operator ruled out VM testing. Real hardware also exercises paths a VM cannot: real modifiers, VRR, cursor planes and GPU recovery.
+- **virgl or venus.** Guest GPU work would run on the host GPU that drives the operator's session.
 
 ## 8. Implementation plan
 
@@ -508,7 +473,7 @@ Make nested honour `shutdown_requested()`.
 Acceptance:
 
 - Unit tests for each new API.
-- Nested exits cleanly on SIGTERM and SIGINT, verified with a real run. This closes that part of roadmap item 2.
+- Nested exits cleanly on SIGTERM and SIGINT, verified with a real run. This closes that part of the real-client verification roadmap item.
 - With no output info set, `wl_output` still reports `HEADLESS-1`.
 
 ### NB-3 `shingle-frontend-extract`: create the shared crate with the pure modules
@@ -544,11 +509,11 @@ Acceptance:
 
 ### NB-6 `shingle-native-session`: native binary with seat and input, no display
 
-New crate `crates/shingle-native` with modules `main`, `session`, `udev`, `input`, `host`. It runs `Frontend` with libseat, libinput and the Ctrl+Alt+Fn VT switch, and renders offscreen only (no KMS). Also add the extra `[input]` options to `InputConfig` and the Wayfire importer.
+New library crate `crates/shingle-native` with modules `session`, `udev`, `input`, `host`, used by the single `shingle` binary (see [Decisions](#decisions)). It runs `Frontend` with libseat, libinput and the Ctrl+Alt+Fn VT switch, and renders offscreen only (no KMS). Also add the extra `[input]` options to `InputConfig` and the Wayfire importer.
 
-Acceptance (Layer 2 VM):
+Acceptance (test machine):
 
-- Starts on tty1 under seatd.
+- `shingle` started from tty1 selects the native backend and runs under seatd or logind; inside a Wayland session it still selects nested.
 - Refuses to start over SSH with the "no seat" message.
 - uinput keyboard, mouse and touch events reach a test client with libinput timestamps.
 - Hotplugged uinput devices appear in and disappear from `input/list-devices`.
@@ -560,7 +525,7 @@ Acceptance (Layer 2 VM):
 
 Add `kms/` (`KmsDevice` trait, property cache, `in_formats`, `modes`, atomic builder), `scanout/copy.rs`, `pacing.rs`, the GPU-selection rule, DPMS, presentation feedback from page flips, the startup order and the failure table of [6](#6-failure-handling).
 
-Acceptance (Layer 3 VM):
+Acceptance (test machine):
 
 - A client is visible on the virtio-gpu display, checked with `grim` through screencopy.
 - `wp_presentation` timestamps match page-flip times within 1 ms.
@@ -568,7 +533,7 @@ Acceptance (Layer 3 VM):
 - DPMS off and on works through `wlr-output-power-management`.
 - A VT switch away and back resumes with a fresh modeset.
 - `kill -9` leaves a usable tty1.
-- Every row of the failure table that can be produced in the VM is exercised and recorded.
+- Every row of the failure table that can be produced on the test machine is exercised and recorded.
 
 ### NB-8 `shingle-native-zero-copy`: GBM scanout
 
@@ -577,8 +542,8 @@ Add `scanout/gbm.rs`: modifier negotiation (KMS `IN_FORMATS` ∩ Vulkan ∩ sing
 Acceptance:
 
 - Unit tests for negotiation.
-- In the Layer 3 VM, either zero-copy works or the fallback is chosen with a logged reason, and both outcomes are recorded.
-- On real hardware (Layer 4), zero-copy is selected on at least one of i915, amdgpu or nvidia-drm, and `wp_presentation` reports `ZERO_COPY`.
+- Forcing the fallback (for example with an environment override) selects the copy path with a logged reason.
+- On the test machine, zero-copy is selected on at least one of i915, amdgpu or nvidia-drm, and `wp_presentation` reports `ZERO_COPY`.
 
 ### NB-9 `shingle-native-outputs`: hotplug and mode configuration
 
@@ -587,7 +552,7 @@ Add udev DRM hotplug, connector diffing, switching the enabled output, headless 
 Acceptance:
 
 - Mode-selection tests cover Wayfire's heuristics.
-- In the Layer 3 VM, resizing the VNC display triggers a re-probe and a new mode.
+- On the test machine, unplugging and replugging a monitor triggers a re-probe and a new mode.
 - Disconnecting all outputs keeps Shingle and its clients alive, and reconnecting restores the picture with the tiling tree intact.
 - `wlr-randr` (or an equivalent client) can change the mode.
 
@@ -598,20 +563,17 @@ Add the hardware cursor plane with software fallback, `VRR_ENABLED` from config,
 Acceptance:
 
 - Unit tests for the atomic requests.
-- On Layer 4 hardware: the cursor moves without full-frame renders (frame counter); VRR toggles `VRR_ENABLED` and the monitor reports it; a tearing client gets async flips.
-- Each feature falls back cleanly where unsupported, verified in Layer 3.
+- On the test machine: the cursor moves without full-frame renders (frame counter); VRR toggles `VRR_ENABLED` and the monitor reports it; a tearing client gets async flips.
+- Each feature falls back cleanly where unsupported, verified by forcing each fallback on the test machine.
 
-NB-1, NB-2 and NB-5 do not depend on each other and can run in parallel. NB-3 needs NB-1 (render types in the scene), and NB-4 needs NB-2 and NB-3. NB-6 needs NB-4 and NB-5, and NB-7 needs NB-6. NB-8 and NB-9 both need NB-7 but not each other. NB-10 comes last. Roadmap item 5 (DMA-BUF import) can start after NB-8, reusing its Vulkan feature setup. Item 7 (multi-output) can start after NB-9.
+NB-1, NB-2 and NB-5 do not depend on each other and can run in parallel. NB-3 needs NB-1 (render types in the scene), and NB-4 needs NB-2 and NB-3. NB-6 needs NB-4 and NB-5, and NB-7 needs NB-6. NB-8 and NB-9 both need NB-7 but not each other. NB-10 comes last. The DMA-BUF roadmap item (client buffer import) can start after NB-8, reusing its Vulkan feature setup. Multi-output can start after NB-9.
 
-## Open questions
+## Decisions
 
-These need the operator's decision.
+The operator answered the open questions on 2026-11-25:
 
-1. **A VM with a display for Layer 3.** NB-7 onwards needs a deb-01 clone with a virtio-gpu video device and VNC listening on localhost (the XML in [7](#layer-3-takt-vm-with-a-virtio-gpu-display)). Creating it needs `sudo clone_vm.py` and `virsh edit`, which agents cannot run. Alternatively, a guest kernel with `CONFIG_DRM_VKMS` would work without changing the VM definition.
-2. **Real hardware for Layer 4.** Zero-copy with real modifiers, VRR, the cursor plane and GPU-hang recovery cannot be verified in a VM, and must not be verified on this host. Is there a spare machine, or a spare GPU that could be passed through to a VM? Until then those criteria stay open.
-3. **Development headers on the host.** A `shingle-native` crate in the workspace makes `cargo test --workspace` on this host link libinput and libseat, but the host has no `libinput.pc` or `libseat.pc`. The options are:
-   - (a) install `libinput-dev libseat-dev` on the host (preferred);
-   - (b) use the same `LIBRARY_PATH` symlink workaround as for PAM ([development.md](../development.md#requirements));
-   - (c) keep `shingle-native` out of `default-members` so host builds skip it and only VM builds compile it.
-4. **Binary name.** This design adds a separate `shingle-native` binary and leaves `shingle` (headless) and `shingle-nested` unchanged. A single `shingle` binary that picks its backend (as Wayfire does through wlroots) would be friendlier for session files, at the cost of linking winit, libinput and libseat into one binary. Which one?
-5. **Removing the wgpu `drm` feature.** This design removes it in NB-1 because Shingle deliberately does not use VK_KHR_display. Keep it if you want that option open; it costs nothing at runtime.
+1. **No VM testing.** Device-level work is verified on a dedicated test machine the operator is setting up ([7](#layer-2-dedicated-test-machine)). NB-6 onwards waits for it; NB-1 to NB-5 do not.
+2. **Real hardware.** That test machine is the hardware for zero-copy, VRR, the cursor plane and GPU recovery. Until it exists, those criteria stay open in [status.md](../status.md).
+3. **Development headers.** `libinput-dev`, `libseat-dev` and `libpam0g-dev` are installed on the host, so native crates build and unit-test in the normal workspace. They are never run here.
+4. **One binary.** There is a single `shingle` binary that picks its backend the way Wayfire does: nested when `WAYLAND_DISPLAY` (or `DISPLAY`) is set, native from a TTY, and headless with `--headless`, with `--backend nested|native|headless` to override. `shingle-native` and the nested frontend become library crates linked into it, and the separate `shingle-nested` binary is dropped once the switch is in place (NB-4 or NB-6). Session files and docs refer to `shingle` only.
+5. **wgpu `drm` feature.** Removed in NB-1, since Shingle does not use VK_KHR_display. Re-adding it later costs nothing.

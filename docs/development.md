@@ -3,16 +3,8 @@
 ## Requirements
 
 - Rust 1.92 or newer (edition 2024).
-- Development headers for Wayland, xkbcommon and PAM. On Debian: `libwayland-dev libxkbcommon-dev libpam0g-dev`.
+- Development headers for Wayland, xkbcommon and PAM, and for the native backend libinput, libseat, udev, libdrm and GBM. On Debian: `libwayland-dev libxkbcommon-dev libpam0g-dev libinput-dev libseat-dev libudev-dev libdrm-dev libgbm-dev`.
 - A Vulkan-capable GPU and driver for wgpu.
-
-Without `libpam0g-dev`, every target that links `shingle-auth` (including `cargo test --workspace`) fails with `unable to find library -lpam`. If the headers cannot be installed, a symlink works around it:
-
-```sh
-mkdir -p /tmp/shingle-lib
-ln -sf /usr/lib/x86_64-linux-gnu/libpam.so.0 /tmp/shingle-lib/libpam.so
-export LIBRARY_PATH=/tmp/shingle-lib
-```
 
 ## Build, test and lint
 

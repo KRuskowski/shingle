@@ -25,7 +25,7 @@ rg -n '.{81,}' crates --type rust
 ```
 
 - Gloomy is a pinned git dependency (Cargo.toml, `[workspace.dependencies]`); change it in its own repo, then bump `rev` (docs/development.md#gloomy).
-- This host lacks `libpam0g-dev`; linking fails with `-lpam` (docs/development.md#requirements has the `LIBRARY_PATH` workaround).
+- Native-backend code is built and unit-tested here but never run: this host's GPU, input devices and VTs belong to the operator's Wayfire session. Device tests run on the dedicated test machine (docs/design/native-backend.md#layer-2-dedicated-test-machine).
 - Cargo writes to `~/.cargo`, which the Claude sandbox mounts read-only; cargo commands must run outside the sandbox.
 
 ## Conventions
