@@ -349,6 +349,9 @@ impl Session for LibSeatSession {
     &mut self,
     timeout: Option<Duration>,
   ) -> io::Result<Vec<SeatEvent>> {
+    // libseat's logind backend may enable the seat inside `Seat::open`;
+    // an event already queued must not wait for the timeout.
+    let timeout = timeout.filter(|_| self.events.borrow().is_empty());
     let millis = timeout.map_or(0, |timeout| {
       i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX)
     });
