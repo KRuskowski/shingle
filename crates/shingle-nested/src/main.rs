@@ -23,7 +23,7 @@ use shingle_frontend::{
     modifiers_held,
   },
   expo, extra_gestures, icon_theme,
-  keyboard::{Key, KeyState, Keyboard},
+  keyboard::{Key, KeyRepeat, KeyState, Keyboard},
   scale::{
     ScaleState, fit_scale_tile, interpolate_scale_rect, rect_contains,
     scale_cells, scale_columns, scale_filter_matches, scale_geometry_at,
@@ -230,6 +230,7 @@ struct App {
   lock_client: Option<Child>,
   session_children: Vec<Child>,
   keyboard: Keyboard,
+  key_repeat: KeyRepeat,
   host_keyboard: host_keyboard::HostKeyboard,
   switcher: Option<SwitcherState>,
   switcher_inactive_alpha: f32,
@@ -390,6 +391,10 @@ impl App {
       lock_client: None,
       session_children,
       keyboard,
+      key_repeat: KeyRepeat::new(
+        config.input.repeat_rate,
+        config.input.repeat_delay,
+      ),
       host_keyboard: host_keyboard::HostKeyboard::default(),
       switcher: None,
       switcher_inactive_alpha: config.fast_switcher.inactive_alpha,
@@ -756,6 +761,9 @@ impl App {
       self
         .compositor
         .set_repeat(config.input.repeat_rate, config.input.repeat_delay);
+      self
+        .key_repeat
+        .configure(config.input.repeat_rate, config.input.repeat_delay);
       Ok::<ShingleConfig, Box<dyn Error>>(config)
     })();
     match result {
@@ -2573,6 +2581,9 @@ impl App {
     let enabled = self.compositor.input_device_enabled(self.devices.keyboard);
     match event {
       WindowEvent::Focused(focused) => {
+        if !*focused {
+          self.key_repeat.cancel();
+        }
         if self
           .host_keyboard
           .focus_changed(&mut self.keyboard, *focused)
@@ -2601,14 +2612,22 @@ impl App {
         let Some(code) = event.physical_key.to_scancode() else {
           return true;
         };
-        let state = if event.repeat {
-          KeyState::Repeated
-        } else if event.state == ElementState::Pressed {
+        self.host_keyboard.key(code);
+        // The frontend repeats keys itself, at Shingle's configured rate.
+        if event.repeat {
+          return true;
+        }
+        let state = if event.state == ElementState::Pressed {
+          self.key_repeat.press(
+            code,
+            self.keyboard.key_repeats(code),
+            Instant::now(),
+          );
           KeyState::Pressed
         } else {
+          self.key_repeat.release(code);
           KeyState::Released
         };
-        self.host_keyboard.key(code);
         // Locks and the layout can change over IPC.
         self.keyboard.sync_locked(
           self.compositor.locked_modifiers(),
@@ -2624,6 +2643,21 @@ impl App {
         true
       }
       _ => false,
+    }
+  }
+
+  /// Repeats the held key once if its repeat is due.
+  fn process_key_repeat(&mut self) {
+    let Some(code) = self.key_repeat.poll(Instant::now()) else {
+      return;
+    };
+    self.keyboard.sync_locked(
+      self.compositor.locked_modifiers(),
+      self.compositor.keyboard_layout_index(),
+    );
+    let key = self.keyboard.key(code, KeyState::Repeated);
+    if self.compositor.input_device_enabled(self.devices.keyboard) {
+      self.keyboard_input(&key);
     }
   }
 
@@ -4436,6 +4470,7 @@ impl ApplicationHandler for App {
       return;
     }
     self.reload_if_changed();
+    self.process_key_repeat();
     self.process_workspace_switch_timeout();
     self.process_extra_gestures();
     self
@@ -4447,9 +4482,12 @@ impl ApplicationHandler for App {
     {
       window.request_redraw();
     }
-    event_loop.set_control_flow(ControlFlow::WaitUntil(
-      Instant::now() + Duration::from_millis(16),
-    ));
+    let poll = Instant::now() + Duration::from_millis(16);
+    let wake = self
+      .key_repeat
+      .deadline()
+      .map_or(poll, |deadline| deadline.min(poll));
+    event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
   }
 
   fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
