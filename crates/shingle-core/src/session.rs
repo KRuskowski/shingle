@@ -240,16 +240,11 @@ impl Restore {
   fn add_leaf(
     &mut self,
     window: WindowId,
-    mut state: LeafState,
+    state: LeafState,
     location: &WorkspaceRef,
   ) -> Result<()> {
     if state.tiled_edges > 15 {
       return Err(self.malformed("tiled-edges mask exceeds 15"));
-    }
-    if state.floating.is_some() {
-      state.tiled_edges = 0;
-    } else if state.snapped.is_none() {
-      state.tiled_edges = 15;
     }
     if let Some(geometry) = state.floating {
       geometry.validate().map_err(|_| {
