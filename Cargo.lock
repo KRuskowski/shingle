@@ -3076,6 +3076,8 @@ dependencies = [
  "shingle-config",
  "shingle-core",
  "shingle-render",
+ "shingle-session",
+ "wayland-server",
  "xkbcommon",
 ]
 
@@ -3109,11 +3111,8 @@ dependencies = [
  "pollster 0.4.0",
  "shingle",
  "shingle-config",
- "shingle-core",
  "shingle-frontend",
  "shingle-render",
- "shingle-session",
- "wayland-server",
  "winit 0.30.13",
 ]
 

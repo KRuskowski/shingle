@@ -3,10 +3,11 @@
 //! The frontend's [`Keyboard`] sees only the key events the host window
 //! receives. winit reports no releases for keys held when the window loses
 //! focus and no presses for keys already held when it gains focus; it only
-//! reports the host's modifiers. On focus loss the keyboard forgets its held
-//! keys. On focus gain, modifiers the host reports as held are pressed with
-//! their usual left-hand key, and released once the host stops reporting
-//! them, so a Super held while focusing the window still counts.
+//! reports the host's modifiers. On focus loss the frontend forgets the
+//! held keys (`InputEvent::Reset`). On focus gain, modifiers the host
+//! reports as held are pressed with their usual left-hand key, and
+//! released once the host stops reporting them, so a Super held while
+//! focusing the window still counts.
 
 use shingle_config::Modifiers as ConfigModifiers;
 use shingle_frontend::keyboard::{KeyState, Keyboard};
@@ -34,21 +35,14 @@ pub(crate) struct HostKeyboard {
 }
 
 impl HostKeyboard {
-  /// Handles a host focus change. Returns whether `keyboard`'s modifiers
-  /// changed.
-  pub(crate) fn focus_changed(
-    &mut self,
-    keyboard: &mut Keyboard,
-    focused: bool,
-  ) -> bool {
+  /// Handles a host focus change. On focus loss the stand-ins are gone
+  /// with the rest of the held keys, which the host makes the frontend
+  /// forget with `InputEvent::Reset`.
+  pub(crate) fn focus_changed(&mut self, focused: bool) {
     self.focus_entered = focused;
-    if focused {
-      return false;
+    if !focused {
+      self.stand_ins.clear();
     }
-    self.stand_ins.clear();
-    let before = keyboard.modifiers();
-    keyboard.release_all();
-    keyboard.modifiers() != before
   }
 
   /// Notes a host key event for `code`, before it reaches `Keyboard::key`.
@@ -111,20 +105,23 @@ mod tests {
   }
 
   #[test]
-  fn focus_loss_forgets_held_keys() {
+  fn focus_loss_drops_the_stand_ins() {
     let mut keyboard = keyboard();
     let mut host = HostKeyboard::default();
-    keyboard.key(KEY_LEFTMETA, KeyState::Pressed);
-    assert!(host.focus_changed(&mut keyboard, false));
+    host.focus_changed(true);
+    assert!(host.host_modifiers(&mut keyboard, SUPER));
+    host.focus_changed(false);
+    keyboard.release_all();
+    // The host still reports Super, but no focus was gained since.
+    assert!(!host.host_modifiers(&mut keyboard, SUPER));
     assert_eq!(keyboard.binding_modifiers(), ConfigModifiers::default());
-    assert!(!host.focus_changed(&mut keyboard, false));
   }
 
   #[test]
   fn modifiers_held_on_focus_gain_count_until_the_host_releases_them() {
     let mut keyboard = keyboard();
     let mut host = HostKeyboard::default();
-    host.focus_changed(&mut keyboard, true);
+    host.focus_changed(true);
     assert!(host.host_modifiers(&mut keyboard, SUPER));
     assert_eq!(keyboard.binding_modifiers(), SUPER);
     // Releasing the right-hand Super, which the keyboard never saw.
@@ -139,7 +136,7 @@ mod tests {
   fn a_real_release_of_the_stand_in_key_ends_it() {
     let mut keyboard = keyboard();
     let mut host = HostKeyboard::default();
-    host.focus_changed(&mut keyboard, true);
+    host.focus_changed(true);
     host.host_modifiers(&mut keyboard, SUPER);
     host.key(KEY_LEFTMETA);
     keyboard.key(KEY_LEFTMETA, KeyState::Released);
@@ -151,7 +148,7 @@ mod tests {
   fn host_modifiers_after_focus_gain_do_not_press_keys() {
     let mut keyboard = keyboard();
     let mut host = HostKeyboard::default();
-    host.focus_changed(&mut keyboard, true);
+    host.focus_changed(true);
     host.key(KEY_A);
     keyboard.key(KEY_A, KeyState::Pressed);
     assert!(!host.host_modifiers(&mut keyboard, SUPER));

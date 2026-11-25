@@ -13,6 +13,8 @@ shingle = { path = "../shingle" }
 shingle-config = { path = "../shingle-config" }
 shingle-core = { path = "../shingle-core" }
 shingle-render = { path = "../shingle-render" }
+shingle-session = { path = "../shingle-session" }
+wayland-server.workspace = true
 xkbcommon.workspace = true
 
 [lints]

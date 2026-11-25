@@ -9,11 +9,8 @@ license.workspace = true
 pollster.workspace = true
 shingle = { path = "../shingle" }
 shingle-config = { path = "../shingle-config" }
-shingle-core = { path = "../shingle-core" }
 shingle-frontend = { path = "../shingle-frontend" }
 shingle-render = { path = "../shingle-render" }
-shingle-session = { path = "../shingle-session" }
-wayland-server.workspace = true
 winit.workspace = true
 
 [lints]

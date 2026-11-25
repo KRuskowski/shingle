@@ -1,19 +1,22 @@
 //! Shingle's interactive frontend, shared by the nested and native hosts.
 //!
-//! It knows nothing about winit, DRM or libinput. So far it holds the
-//! self-contained parts: Expo, workspace transitions, extra gestures, Scale's
-//! layout and titles, the icon theme, binding helpers and the xkb keyboard.
-//! The rest of the nested `App` moves here in NB-4 (see the NB-4 entry in
-//! docs/design/native-backend.md).
+//! It knows nothing about winit, DRM or libinput. A host binary creates a
+//! [`Frontend`], registers its seat devices with the compositor, feeds it
+//! [`host::InputEvent`]s and implements [`host::Host`] for the few things
+//! only it can do; see docs/design/native-backend.md, "Frontend split".
 
 #![warn(missing_docs)]
 
 pub mod bindings;
 pub mod expo;
 pub mod extra_gestures;
+mod frontend;
 pub mod host;
 pub mod icon_theme;
 pub mod keyboard;
+pub mod render_target;
 pub mod scale;
 pub mod scale_title;
 pub mod workspace_transition;
+
+pub use frontend::Frontend;
