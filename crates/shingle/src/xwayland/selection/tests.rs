@@ -84,6 +84,16 @@ fn read_all(mut file: std::fs::File) -> Vec<u8> {
 }
 
 #[test]
+fn a_new_data_control_device_hears_both_selections_at_once() {
+  // The protocol sends both events when the device is created, even with
+  // no selection; wl-copy takes the primary one as the sign that primary
+  // is supported.
+  let fixture = Fixture::new();
+  assert_eq!(fixture.client.events.control_selections, [None]);
+  assert_eq!(fixture.client.events.control_primary, [None]);
+}
+
+#[test]
 fn an_x_selection_reaches_data_control_and_its_reads_wait_for_x() {
   let mut fixture = Fixture::new();
   offered(
@@ -166,8 +176,8 @@ fn an_x_primary_selection_reaches_data_control() {
   let receives = &fixture.state().xwayland.selection_receives;
   assert_eq!(receives.len(), 1);
   assert_eq!(receives[0].0, Selection::Primary);
-  // The clipboard is untouched.
-  assert!(fixture.client.events.control_selections.is_empty());
+  // The clipboard is untouched: only its first, empty announcement.
+  assert_eq!(fixture.client.events.control_selections, [None]);
 }
 
 #[test]

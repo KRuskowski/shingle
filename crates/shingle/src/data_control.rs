@@ -26,8 +26,12 @@ struct Source {
 struct Device {
   resource: ZwlrDataControlDeviceV1,
   client: Client,
-  selection: Option<SourceKey>,
-  primary_selection: Option<SourceKey>,
+  /// The selection last announced; `None` before the first, which the
+  /// protocol sends at once, even when there is no selection.
+  selection: Option<Option<SourceKey>>,
+  /// The same for the primary selection, from version 2 on. Its first
+  /// event tells clients such as wl-copy that primary is supported.
+  primary_selection: Option<Option<SourceKey>>,
 }
 
 #[derive(Default)]
@@ -86,63 +90,66 @@ pub(crate) fn create_global(handle: &DisplayHandle) {
 pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {
   let current = data_device::selection(state);
   let primary = crate::primary_selection::selection(state);
+  let current_key = current.as_ref().map(|(id, _)| id.clone());
+  let primary_key = primary.as_ref().map(|(id, _)| id.clone());
   for device in state.data_control.devices.values_mut() {
-    if device.selection != current.as_ref().map(|(id, _)| id.clone()) {
-      device.selection = current.as_ref().map(|(id, _)| id.clone());
-      if let Some((source, mime_types)) = &current {
-        if let Ok(offer) = device
-          .client
-          .create_resource::<ZwlrDataControlOfferV1, (), CompositorState>(
-            handle,
-            1,
-            (),
-          )
-        {
-          device.resource.data_offer(&offer);
-          for mime_type in mime_types {
-            offer.offer(mime_type.clone());
-          }
-          device.resource.selection(Some(&offer));
-          state.data_control.offers.insert(offer.id(), source.clone());
-          state
-            .data_control
-            .offer_clients
-            .insert(offer.id(), device.client.id());
-        }
-      } else {
-        device.resource.selection(None);
+    if device.selection.as_ref() != Some(&current_key) {
+      device.selection = Some(current_key.clone());
+      let offer = current.as_ref().and_then(|(source, mime_types)| {
+        let offer = offer(device, handle, mime_types)?;
+        state.data_control.offers.insert(offer.id(), source.clone());
+        Some(offer)
+      });
+      if let Some(offer) = &offer {
+        state
+          .data_control
+          .offer_clients
+          .insert(offer.id(), device.client.id());
       }
+      device.resource.selection(offer.as_ref());
     }
-    if device.primary_selection != primary.as_ref().map(|(id, _)| id.clone()) {
-      device.primary_selection = primary.as_ref().map(|(id, _)| id.clone());
-      if let Some((source, mime_types)) = &primary {
-        if let Ok(offer) = device
-          .client
-          .create_resource::<ZwlrDataControlOfferV1, (), CompositorState>(
-            handle,
-            1,
-            (),
-          )
-        {
-          device.resource.data_offer(&offer);
-          for mime_type in mime_types {
-            offer.offer(mime_type.clone());
-          }
-          device.resource.primary_selection(Some(&offer));
-          state
-            .data_control
-            .primary_offers
-            .insert(offer.id(), source.clone());
-          state
-            .data_control
-            .offer_clients
-            .insert(offer.id(), device.client.id());
-        }
-      } else if device.resource.version() >= 2 {
-        device.resource.primary_selection(None);
+    if device.resource.version() >= 2
+      && device.primary_selection.as_ref() != Some(&primary_key)
+    {
+      device.primary_selection = Some(primary_key.clone());
+      let offer = primary.as_ref().and_then(|(source, mime_types)| {
+        let offer = offer(device, handle, mime_types)?;
+        state
+          .data_control
+          .primary_offers
+          .insert(offer.id(), source.clone());
+        Some(offer)
+      });
+      if let Some(offer) = &offer {
+        state
+          .data_control
+          .offer_clients
+          .insert(offer.id(), device.client.id());
       }
+      device.resource.primary_selection(offer.as_ref());
     }
   }
+}
+
+/// Introduces a new offer of `mime_types` to `device`'s client.
+fn offer(
+  device: &Device,
+  handle: &DisplayHandle,
+  mime_types: &[String],
+) -> Option<ZwlrDataControlOfferV1> {
+  let offer = device
+    .client
+    .create_resource::<ZwlrDataControlOfferV1, (), CompositorState>(
+      handle,
+      device.resource.version(),
+      (),
+    )
+    .ok()?;
+  device.resource.data_offer(&offer);
+  for mime_type in mime_types {
+    offer.offer(mime_type.clone());
+  }
+  Some(offer)
 }
 
 impl GlobalDispatch<ZwlrDataControlManagerV1, ()> for CompositorState {
