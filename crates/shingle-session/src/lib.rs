@@ -46,7 +46,7 @@ pub enum SessionError {
   /// directory failed.
   #[error("failed to access session state")]
   Io(#[from] io::Error),
-  /// Neither `XDG_STATE_HOME` nor `HOME` is set.
+  /// Neither an absolute `XDG_STATE_HOME` nor a non-empty `HOME` is set.
   #[error("session state location is unavailable")]
   StateDirectoryUnavailable,
   /// A saved window's command could not be spawned, or it has no saved
@@ -87,6 +87,24 @@ fn resolve_session_path(
   }
 }
 
+/// The XDG state directory from the values of `XDG_STATE_HOME` and `HOME`.
+/// The base directory spec says an empty `XDG_STATE_HOME` means
+/// `$HOME/.local/state` and a relative one is invalid and ignored; an
+/// empty `HOME` counts as unset.
+fn state_directory(
+  xdg_state_home: Option<OsString>,
+  home: Option<OsString>,
+) -> Option<PathBuf> {
+  xdg_state_home
+    .map(PathBuf::from)
+    .filter(|path| path.is_absolute())
+    .or_else(|| {
+      home
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(".local/state"))
+    })
+}
+
 /// The location of one session file.
 #[derive(Clone, Debug)]
 pub struct SessionStore {
@@ -105,20 +123,19 @@ impl SessionStore {
   /// exist but `tilefire/session.json` does, the Tilefire file is used for
   /// both loading and saving until it is moved by hand.
   ///
-  /// An empty `XDG_STATE_HOME` is used as is, which makes the path
-  /// relative, rather than ignored as the XDG base directory spec asks.
+  /// An empty or relative `XDG_STATE_HOME` is ignored, as the XDG base
+  /// directory spec asks.
   ///
   /// # Errors
   ///
-  /// [`SessionError::StateDirectoryUnavailable`] if neither variable is set.
+  /// [`SessionError::StateDirectoryUnavailable`] if neither variable gives a
+  /// directory.
   pub fn default_location() -> Result<Self, SessionError> {
-    let state = std::env::var_os("XDG_STATE_HOME")
-      .map(PathBuf::from)
-      .or_else(|| {
-        std::env::var_os("HOME")
-          .map(|home| PathBuf::from(home).join(".local/state"))
-      })
-      .ok_or(SessionError::StateDirectoryUnavailable)?;
+    let state = state_directory(
+      std::env::var_os("XDG_STATE_HOME"),
+      std::env::var_os("HOME"),
+    )
+    .ok_or(SessionError::StateDirectoryUnavailable)?;
     Ok(Self::new(resolve_session_path(&state, |path| {
       path.exists()
     })))
@@ -640,6 +657,26 @@ mod tests {
     store.save(&Shingle::new()).unwrap();
     assert!(store.load().unwrap().is_some());
     fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[test]
+  fn empty_or_relative_xdg_state_home_falls_back_to_home() {
+    let home = Some(OsString::from("/home/user"));
+    let fallback = Some(PathBuf::from("/home/user/.local/state"));
+    for ignored in ["", "relative/state"] {
+      assert_eq!(
+        state_directory(Some(ignored.into()), home.clone()),
+        fallback,
+        "{ignored:?}"
+      );
+    }
+    assert_eq!(state_directory(None, home.clone()), fallback);
+    assert_eq!(
+      state_directory(Some("/state".into()), home),
+      Some(PathBuf::from("/state"))
+    );
+    assert_eq!(state_directory(Some("".into()), Some("".into())), None);
+    assert_eq!(state_directory(None, None), None);
   }
 
   #[test]
