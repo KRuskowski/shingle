@@ -69,7 +69,7 @@ Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are pla
 
 ### Automated
 
-`cargo test --workspace` runs TESTCOUNT unit tests (2026-11-25), 88 of them in `shingle-core` and 50 in `shingle`. Coverage of the other crates is uneven.
+`cargo test --workspace` runs 199 unit tests (2026-11-25), 88 of them in `shingle-core` and 51 in `shingle`. Coverage of the other crates is uneven.
 
 `cargo clippy --workspace --all-targets -- -D warnings` passes (2026-11-25).
 
