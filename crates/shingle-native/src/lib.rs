@@ -17,6 +17,7 @@
 mod diagnostics;
 pub mod host;
 pub mod input;
+pub mod kms;
 pub mod session;
 #[cfg(test)]
 mod test_client;

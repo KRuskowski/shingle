@@ -4,9 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Native backend of the shingle binary: libseat and libinput"
+description = "Native backend of the shingle binary: libseat, libinput and KMS"
 
 [dependencies]
+drm = "0.15.0"
+drm-ffi = "0.9.1"
 input = { version = "0.10.0", default-features = false, features = ["udev", "libinput_1_19"] }
 libseat = "0.2.4"
 log = "0.4"
@@ -17,6 +19,8 @@ shingle-config = { path = "../shingle-config" }
 shingle-core = { path = "../shingle-core" }
 shingle-frontend = { path = "../shingle-frontend" }
 shingle-render = { path = "../shingle-render" }
+wayland-server.workspace = true
+wgpu.workspace = true
 
 [dev-dependencies]
 libc = "0.2"
@@ -24,6 +28,7 @@ serde_json.workspace = true
 shingle-session = { path = "../shingle-session" }
 wayland-client = "0.31"
 wayland-protocols.workspace = true
+wayland-protocols-wlr.workspace = true
 
 [lints]
 workspace = true
