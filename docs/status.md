@@ -1,6 +1,6 @@
 # Status
 
-Last updated 2026-11-25, after the shared frontend crate and xkb keyboard (NB-3).
+Last updated 2026-11-25, after moving the interactive frontend into `shingle-frontend` (NB-4).
 
 ## Readiness
 
@@ -24,7 +24,7 @@ Do not claim that Shingle is more stable or uses fewer resources than Wayfire. N
 - Workspace navigation: directional, last, numbered, carry and send actions, with configurable wraparound.
 - Scale and Expo overviews, vswitch transitions, zoom, inversion, opacity, window rotation, and opening/closing animations.
 - Screencopy, gamma, tearing control, FIFO, commit timing, presentation timing and pointer warp. A client may destroy its FIFO or commit-timer object and create a new one for the same surface, as Mesa's Vulkan WSI does on swapchain recreation; before NB-3 that was a protocol error that disconnected every Mesa Vulkan client on its first resize.
-- `shingle-frontend` (NB-3) holds the frontend parts that never needed winit: Expo, workspace transitions, extra gestures, Scale layout and titles, the icon theme, binding helpers and the shared keyboard. `cargo tree -p shingle-frontend` has no winit.
+- The interactive frontend is `shingle_frontend::Frontend` (NB-4): Scale, Expo, the switchers, drags, animations, effects, the scene build, binding dispatch, key repeat, config reload and session saving, behind a `Host` trait and a neutral `InputEvent` in output pixels and evdev codes, drawing into a `RenderTarget`. `shingle-nested` is a thin winit host: the window and renderer, winit-to-`InputEvent` translation, host focus handling, button emulation and argument parsing. `cargo tree -p shingle-frontend` has no winit. Ctrl+Alt+F1..F12 (`XF86Switch_VT_n`) goes to `Host::switch_vt` first; nested cannot switch, so there the key behaves as before.
 - Text input v3, input-method v1/v2, input panels, foreign-toplevel protocols, ext-workspace, xdg-foreign, security-context filtering and primary-selection controls.
 
 Details are in [features.md](features.md).
@@ -59,7 +59,7 @@ Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are pla
 - YAML is native and rejects unknown fields.
 - Wayfire INI and i3-style imports cover many options and key bindings, but not all of them.
 - Physical-key and case-sensitive `xkb:` bindings are supported.
-- Nested interprets keys with Shingle's own keymap (`shingle_frontend::keyboard`, NB-3), not the host's: ordinary bindings match Wayfire's `KEY_*` names from the evdev code, `xkb:` bindings match the keysym Shingle's layout produces, binding modifiers follow Shingle's keymap options, Scale's filter gets the text of Shingle's layout, and clients get depressed, latched, locked and group masks from that state, so Caps Lock and layout-switching keys now work in nested. Names that only winit used no longer match: `digit1` is `1` (so the default `super+1`..`super+0` work), `period` is `dot`, `bracketleft` is `leftbrace`, `shiftleft` is `leftshift`. Key repeat still comes from the host until NB-4.
+- Nested interprets keys with Shingle's own keymap (`shingle_frontend::keyboard`, NB-3), not the host's: ordinary bindings match Wayfire's `KEY_*` names from the evdev code, `xkb:` bindings match the keysym Shingle's layout produces, binding modifiers follow Shingle's keymap options, Scale's filter gets the text of Shingle's layout, and clients get depressed, latched, locked and group masks from that state, so Caps Lock and layout-switching keys now work in nested. Names that only winit used no longer match: `digit1` is `1` (so the default `super+1`..`super+0` work), `period` is `dot`, `bracketleft` is `leftbrace`, `shiftleft` is `leftshift`. Key repeat for bindings, the overviews and the switchers is the frontend's own timer (NB-4): the most recently pressed repeating key repeats at Shingle's `repeat_rate` and `repeat_delay`, the values clients get, and nested ignores the host's repeats.
 - Comma-separated XKB layouts and per-layout variants become distinct XKB groups.
 - WCM, built on the Gloomy UI library, edits, validates and converts configuration.
 - Live IPC configuration updates are not written back to YAML.
@@ -72,7 +72,9 @@ Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are pla
 
 ### Automated
 
-`cargo test --workspace` runs 265 tests (2026-11-25). Coverage of the other crates is uneven.
+`cargo test --workspace` runs 288 tests (2026-11-25). Coverage of the other crates is uneven.
+
+The `shingle-frontend` input-script tests (`crates/shingle-frontend/src/frontend/tests.rs`) run a `Frontend` around a compositor on a socket in the temporary directory, with an in-process Wayland client mapping `wl_shm` toplevels and a `FakeHost` that records redraw requests, warps, VT switches, device changes and exit. They feed input through `handle_input` and `process` as a host does and cover Scale (keys, pointer hover and click, touch, cancel restoring focus), Expo (keys and a pointer click), both switchers (dimming while held, focus and opacity on release), a move drag that drops one tile onto another, a workspace switch with its transition, key repeat at the configured rate (and no repeat for modifiers or after release), `Reset`, the Ctrl+Alt+F2 VT switch, the zoom wheel, disabling the pointer over IPC and the quit binding. A scene test records the tiles drawn into an `OffscreenRenderer` and checks the tiled windows, then the Scale thumbnails with a title inside each; it is skipped without a GPU adapter. `KeyRepeat` has its own unit tests.
 
 `shingle-render` has 15 unit tests and 8 offscreen pixel tests (`crates/shingle-render/tests/offscreen_pixels.rs`). The pixel tests render fixed scenes (solid, translucent, textured, UV-cropped, transformed and rotated tiles; scale, output transform and zoom; gamma ramp and both inversion modes; nearest filtering) and compare the readback with reference images in `crates/shingle-render/tests/golden`, which were rendered by the renderer before the NB-1 split. They need a wgpu adapter and are skipped without one; set `SHINGLE_RENDER_BLESS=1` to regenerate the references.
 
@@ -159,6 +161,19 @@ Shared keyboard (NB-3), 2026-11-25. STIPC `feed_key` fires only IPC-registered b
 
 10 of 10 checks passed on the branch (the table plus an IPC reply check) and 4 of 10 on `master`. The outer instance sends no `wl_keyboard.modifiers` for STIPC keys, because STIPC does not run through XKB, so `master`, which took modifiers from the host, saw none at all; the branch derives them from the keys. The layout result does not depend on that: `master` matched `xkb:` bindings against the host's layout. The first attempts also found the FIFO and commit-timing protocol errors above, which disconnected the lavapipe client after its first swapchain recreation; the runs above used the fixed outer build for both columns. Not covered: holding modifiers across host focus changes (`crates/shingle-nested/src/host_keyboard.rs`), which needs host input; see step 9 below.
 
+Frontend split (NB-4), 2026-11-25. Before moving any code, a scripted session pinned nested's behaviour. To be independent of the host session, the outer compositor was a small headless Shingle compositor with IPC, STIPC seat devices and a frame every 16 ms (no window on the host at all); the `shingle-nested` under test ran as its Wayland client on lavapipe with a private `XDG_RUNTIME_DIR`, Wayland socket, IPC socket, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `HOME`, with three raw-protocol `wl_shm` clients inside it. Keys, buttons, motion and touch were fed to the outer compositor over STIPC, which delivered them to the nested window as real `wl_keyboard`, `wl_pointer` and `wl_touch` events. The script has 38 steps: both switchers (also while Alt is held), Scale with keys, pointer hover and click, touch and the title filter, Expo with keys and a pointer click, sending a window to workspace 3 and following it, relative workspace switches, directional focus and move, a move drag and a resize drag with the pointer, grid snap and restore, click-to-focus, inversion on and off, a command binding and a held repeatable one, closing the focused window and the quit binding. After every step it recorded four IPC replies (`list-views` without PIDs, `get-focused-view`, `list-wsets`, `get-cursor-position`), a wlr-screencopy capture of nested's own output and one of the outer output, which shows the frame nested actually drew, Scale, Expo, the drop preview and inversion included. Because nested decides after drawing a frame whether an animation needs another, a slow lavapipe frame could end an animation on an intermediate frame; the script therefore changes one view's alpha and sets it back before each capture, which makes nested draw the settled state again.
+
+| Build | IPC replies | Captures | Held binding runs | Quit binding |
+| --- | --- | --- | --- | --- |
+| `master` at `fcefeb9`, run twice | 152/152 identical | 74/74 identical | 46 and 46 | exit 0 |
+| Key repeat moved (second commit) | 152/152 identical to `fcefeb9` | 74/74 identical | 46 | exit 0 |
+| `App` moved into `Frontend` (third commit) | 152/152 identical | 74/74 identical | 46 | exit 0 |
+| Final branch | 152/152 identical | 74/74 identical | 46 | exit 0 |
+
+The held-binding count matches because the outer compositor repeats at Shingle's defaults too. With the nested instance configured for 10 repeats a second after 200 ms, holding the binding for 1.5 s ran it 45 times on `fcefeb9` (the host's 40 a second after 400 ms) and 15 times on the branch, which is the intended change. The nested smoke test on the same setup passed 14/14 on both `fcefeb9` and the branch: `WAYLAND_DISPLAY` printed and served from the private runtime directory, `stipc/get_display`, 77 sorted methods in `list-methods`, 48 globals in `wayland-info` including `xdg_wm_base`, `wl_seat`, `wl_shm` and `zwlr_layer_shell_v1`, one client mapped, focused and filling the output, and SIGTERM ending nested with status 0 after saving the session.
+
+Not covered: real host keyboard focus changes, the left-handed and middle-emulation options (whose button translation changed, see the NB-4 entry in the design), the mouse wheel and relative pointer motion, which STIPC cannot produce; the wheel and zoom are covered by unit tests. Key repeat with physical keys is step 10 below.
+
 #### Needs operator: host input
 
 These checks need physical keyboard, pointer and touch input on the host, which an agent must not inject. Run them from a terminal on the host session, in the repository, after `cargo build -p shingle-nested`; `wev` is in Debian's `wev` package. Each step lists what to look for in `wev`'s output, which appears in the terminal that started Shingle.
@@ -211,7 +226,8 @@ These checks need physical keyboard, pointer and touch input on the host, which 
 7. Touch (ID 3), only with a touchscreen. Run `sleep 4; ipc input/configure-device '{"id": 3, "enabled": false}'` and keep a finger on a `wev` window. Expected: `wl_touch` cancel, not up, at that moment, and no touch events afterwards. Re-enable: touches arrive again.
 8. Clean quit and restore. Note `ipc simple-tile/get-layout '{"wset-index": 1, "workspace": {"x": 0, "y": 0}}'`, then press `ctrl+alt+shift+q` in the nested window. Expected: `shingle-nested` exits and `$T/state/shingle/session.json` exists. Start it again with step 1's command but without `--spawn wev`: both `wev` windows come back in the same tile order and sizes and the same `get-layout` output.
 9. Keyboard focus (NB-3). Hold `ctrl+alt` on the host keyboard, click into a `wev` window inside the nested window, and press `e` while still holding them. Expected: Expo opens, because modifiers held on focus gain are taken over. Close it with `escape`. Then hold `ctrl+alt` in the nested window, click a host window outside it, release them there, come back into the nested window and press `e`: `wev` receives the `e` key with no modifiers held and Expo does not open.
-10. Stop the instance with `pkill -TERM -f "ipc $T/run/ipc.sock"` (it now exits cleanly on SIGTERM) and remove `$T`.
+10. Key repeat (NB-4). Press `ctrl+alt+e` to open Expo and hold `right` (or `l`). Expected: the selection moves once, then after 400 ms about 40 times a second (Shingle's defaults), whatever the host's own repeat settings are. Close Expo with `escape`.
+11. Stop the instance with `pkill -TERM -f "ipc $T/run/ipc.sock"` (it now exits cleanly on SIGTERM) and remove `$T`.
 
 Record each result here, replacing this list.
 

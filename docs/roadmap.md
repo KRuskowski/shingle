@@ -19,7 +19,7 @@ In short, the interactive frontend moves out of `shingle-nested` into a shared `
 1. NB-1 `shingle-render-targets`: shared GPU context and render targets, no winit in `shingle-render`. Done ([status.md](status.md#compositor-and-renderer)).
 2. NB-2 `shingle-compositor-host-api`: done; see [status.md](status.md#backend-host-api).
 3. NB-3 `shingle-frontend-extract`: done; see [status.md](status.md#configuration-and-wcm) and [status.md](status.md#with-real-clients).
-4. NB-4 `shingle-frontend-host`: `App` becomes `Frontend` behind a `Host` trait; nested becomes a thin winit host. It also moves key repeat for bindings into the shared keyboard as a timer, which NB-3 left with the host.
+4. NB-4 `shingle-frontend-host`: done; `App` is `shingle_frontend::Frontend` behind the `Host` trait and `InputEvent`, nested is a thin winit host, and key repeat is the frontend's own timer. See [status.md](status.md#compositor-and-renderer) and [status.md](status.md#with-real-clients).
 5. NB-5 `shingle-input-registry`: done; see [status.md](status.md#backend-host-api).
 6. NB-6 `shingle-native-session`: native backend in the `shingle` binary with libseat, libinput and VT switching, no display. Needs the test machine.
 7. NB-7 `shingle-native-kms`: atomic KMS, copy scanout, page-flip pacing, DPMS and the failure handling (test machine).
@@ -27,7 +27,7 @@ In short, the interactive frontend moves out of `shingle-nested` into a shared `
 9. NB-9 `shingle-native-outputs`: hotplug and Wayfire-compatible mode configuration.
 10. NB-10 `shingle-native-planes`: cursor plane, VRR, tearing and fences.
 
-NB-1, NB-2, NB-3 and NB-5 are done; NB-4 is next. NB-6 onwards waits for the test machine. The operator's decisions are recorded in the design's [Decisions](design/native-backend.md#decisions) section.
+NB-1 to NB-5 are done. NB-6 is next and, like everything after it, waits for the test machine. The operator's decisions are recorded in the design's [Decisions](design/native-backend.md#decisions) section.
 
 ## 4. DMA-BUF
 

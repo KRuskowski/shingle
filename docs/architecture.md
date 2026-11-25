@@ -7,8 +7,8 @@
 | `shingle-core` | Tiling trees, workspaces, geometry and the serializable session model. No Wayland dependency. |
 | `shingle` | Wayland protocol handling, input routing, output state, IPC and the headless compositor event loop. Also the `shingle` binary. |
 | `shingle-render` | wgpu rendering without a windowing dependency: shared `GpuContext`, per-output `RenderState`, the `draw` pass, and window and offscreen targets. |
-| `shingle-frontend` | Frontend logic shared by the nested and (future) native hosts, without winit: Expo, workspace transitions, extra gestures, Scale layout and titles, icon theme, binding helpers and the xkb keyboard. The rest of the frontend moves here in NB-4. |
-| `shingle-nested` | winit host window and, until NB-4, the rest of the interactive frontend: Scale and switcher state, drags, animations, the scene build and binding dispatch. |
+| `shingle-frontend` | The interactive frontend shared by the nested and (future) native hosts, without winit: `Frontend` with Scale, Expo, the switchers, drags, animations, effects, the scene build, binding dispatch, key repeat and session handling, behind the `Host` trait and `InputEvent`. |
+| `shingle-nested` | Thin winit host for `Frontend`: the window and renderer, winit-to-`InputEvent` translation, host focus handling, button emulation and argument parsing. |
 | `shingle-config` | Validated YAML model, Wayfire INI and i3 imports, XKB keymap generation. |
 | `shingle-session` | Atomic session persistence and relaunching saved applications. |
 | `shingle-idle` | Idle, DPMS, fullscreen suppression and lock coordination. |
@@ -31,9 +31,15 @@
 | Seat device registry, per-device holds and gating, `input/*` IPC | `crates/shingle/src/input_device.rs` |
 | XDG roles, map lifecycle, geometry, window rules | `crates/shingle/src/shell.rs` |
 | IPC transport, dispatch, method list, events | `crates/shingle/src/ipc.rs` |
-| Host input, visual state, frontend dispatch | `crates/shingle-nested/src/main.rs` |
+| Host seam: `Host` trait, `InputEvent` | `crates/shingle-frontend/src/host.rs` |
+| `Frontend` struct, public API, input dispatch | `crates/shingle-frontend/src/frontend.rs` |
+| Frontend areas: bindings, Scale, Expo, switcher, drags, effects, animations, scene build, session | `crates/shingle-frontend/src/frontend/*.rs` |
+| What the scene is drawn into (`RenderTarget`) | `crates/shingle-frontend/src/render_target.rs` |
+| Frontend input-script tests (`FakeHost`) | `crates/shingle-frontend/src/frontend/tests.rs` |
+| winit host: window, input translation, button emulation | `crates/shingle-nested/src/main.rs` |
 | Host keyboard focus changes | `crates/shingle-nested/src/host_keyboard.rs` |
 | xkb keyboard state, key names, keysyms, modifier masks | `crates/shingle-frontend/src/keyboard.rs` |
+| Key repeat timer | `crates/shingle-frontend/src/keyboard/repeat.rs` |
 | Evdev code to Wayfire key name table | `crates/shingle-frontend/src/keyboard/names.rs` |
 | Scale layout and title filter | `crates/shingle-frontend/src/scale.rs` |
 | Expo, vswitch transitions, touch gestures | `crates/shingle-frontend/src/expo.rs`, `workspace_transition.rs`, `extra_gestures.rs` |
@@ -47,5 +53,6 @@
 ## Design rules
 
 - The tiling tree in `shingle-core` is the source of truth for layout and is what sessions persist. Temporary visual geometry (Scale thumbnails, Expo, vswitch slides, window rotation) must never be written back into it.
-- Scale's snapshot selection lives in `shingle`, while its interactive state and wgpu thumbnail transforms live in the frontend (`shingle-frontend`, and `shingle-nested` until NB-4).
+- Scale's snapshot selection lives in `shingle`, while its interactive state and wgpu thumbnail transforms live in the frontend (`shingle-frontend`).
+- `shingle-frontend` never depends on winit, DRM or libinput. A host reaches it only through `Frontend`'s public API, `InputEvent` and the `Host` trait, which the native backend will implement in NB-6.
 - Wayfire-facing names stay as they are: `WAYFIRE_SOCKET`, IPC method and event names, and INI section names.

@@ -2,7 +2,7 @@
 
 Status: accepted with the operator's [decisions](#decisions), 2026-11-25. Roadmap item "Native backend" ([roadmap.md](../roadmap.md#3-native-backend)).
 
-Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit). This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1, NB-2, NB-3 and NB-5 are implemented (see [`shingle-render` without winit](#shingle-render-without-winit) and the entries for [NB-2](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor), [NB-3](#nb-3-shingle-frontend-extract-create-the-shared-crate-with-the-pure-modules) and [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)), each with notes on where the code differs from this design; the rest is not.
+Shingle today runs only as a window inside another compositor (`crates/shingle-nested`, winit). This document decides how Shingle drives real hardware from a TTY: DRM/KMS for display, libinput for input, libseat for device access and VT switching. It is the brief for the implementation workspaces listed in [section 8](#8-implementation-plan). NB-1 to NB-5 are implemented (see [`shingle-render` without winit](#shingle-render-without-winit) and the entries for [NB-2](#nb-2-shingle-compositor-host-api-what-a-real-backend-needs-from-compositor), [NB-3](#nb-3-shingle-frontend-extract-create-the-shared-crate-with-the-pure-modules), [NB-4](#nb-4-shingle-frontend-host-move-app-into-frontend) and [NB-5](#nb-5-shingle-input-registry-per-device-seat-devices)), each with notes on where the code differs from this design; the rest is not.
 
 Line numbers refer to branch `shingle-native-design` at `d2568d2`. Crate versions and dates were read from crates.io and GitHub on 2026-11-25; crate APIs were read from the crate sources (wgpu, drm, calloop and xkbcommon from `~/.cargo/registry`, the others from their published `.crate` files).
 
@@ -123,7 +123,7 @@ impl Keyboard {
 }
 ```
 
-- **Key repeat stays with the host until NB-4.** The repeat timer needs `Frontend::next_deadline()`, which only exists once `App` moves. Until then nested passes winit's repeats in as `KeyState::Repeated`, which reports names, keysym and text but never changes the xkb state, so repeats behave exactly as before.
+- **Key repeat stayed with the host until NB-4**, which moved it into the frontend as planned (see the NB-4 entry). The repeat timer needed `Frontend::next_deadline()`, which only existed once `App` moved. Until then nested passed winit's repeats in as `KeyState::Repeated`, which reports names, keysym and text but never changes the xkb state.
 - **Names and keysyms come from the state before the event**, as xkb clients do, which also matches winit's order (key event, then `ModifiersChanged`): pressing Super reports no modifiers, releasing it reports Super. `Key::modifiers_changed` tells the caller to send `Keyboard::modifiers()` and to check whether the switcher's modifiers were released.
 - **The compositor still owns locks and the layout index**, because the initial Caps Lock and Num Lock (`capslock_default`, `numlock_default`) and `wayfire/set-keyboard-state` set them there. Before each key nested calls `sync_locked` with `Compositor::locked_modifiers()` and the new `Compositor::keyboard_layout_index()` (crates/shingle/src/lib.rs), so `xkb:` bindings and Scale text follow an IPC layout switch. Locks and layout changes made by keys (Caps Lock, `grp:` options) now reach clients; before, nested always sent the compositor's initial locks and group 0.
 - **Focus changes are host glue** (crates/shingle-nested/src/host_keyboard.rs). winit reports no releases for keys held when the window loses focus and no presses for keys held when it gains it. On focus loss nested calls `release_all`. On focus gain, the first `ModifiersChanged` presses a left-hand stand-in key for each modifier the host reports held, which is released when the host stops reporting it; this replaces the old "host modifier resync on focus-in". Otherwise the host's modifiers are ignored, so a keymap option such as `ctrl:nocaps` or `altwin:swap_alt_win` in Shingle's keymap decides the binding modifiers.
@@ -589,6 +589,70 @@ Acceptance:
 - `FakeHost` input-script tests cover Scale, Expo, the switcher, a drag and a workspace switch.
 - The nested real-client smoke test (docs/development.md#real-client-tests) passes unchanged.
 
+Done on branch `shingle-frontend-host`. The API as built:
+
+```rust
+// crates/shingle-frontend/src/host.rs
+pub trait Host {
+  fn request_redraw(&mut self);
+  fn warp_pointer(&mut self, x: f64, y: f64);
+  fn switch_vt(&mut self, vt: u32) -> bool;
+  fn input_device_changed(&mut self, device: InputDeviceId, enabled: bool);
+  fn exit(&mut self);
+}
+
+pub enum InputEvent {
+  Key { code: u32, pressed: bool },
+  PointerMotion { dx: f64, dy: f64, dx_unaccel: f64, dy_unaccel: f64 },
+  PointerMotionAbsolute { x: f64, y: f64 },
+  PointerButton { code: u32, pressed: bool },
+  PointerAxis(Axis),
+  Touch(Touch),
+  Swipe(Gesture),
+  Pinch(Gesture),
+  Hold(Gesture),
+  Reset,
+}
+
+// crates/shingle-frontend/src/frontend.rs
+impl Frontend {
+  pub fn new(config, spawn, config_path) -> Result<Self, Box<dyn Error>>;
+  pub fn with_compositor(config, compositor, store, children, config_path)
+    -> Result<Self, Box<dyn Error>>;
+  pub fn handle_input(&mut self, host: &mut dyn Host, device: InputDeviceId,
+    event: InputEvent, time: Option<Duration>);
+  pub fn update_keyboard(&mut self, host: &mut dyn Host,
+    device: InputDeviceId, update: impl FnOnce(&mut Keyboard) -> bool);
+  pub fn process(&mut self, host: &mut dyn Host);
+  pub fn render(&mut self, host: &mut dyn Host,
+    target: &mut dyn RenderTarget) -> Result<(), Box<dyn Error>>;
+  pub fn set_output_size(&mut self, width: u32, height: u32) -> Result<..>;
+  pub fn output_resized(&mut self, width: u32, height: u32) -> Result<..>;
+  pub fn next_deadline(&self) -> Option<Instant>;
+  pub fn shutdown(&mut self);
+  pub fn compositor(&self) -> &Compositor;
+  pub fn compositor_mut(&mut self) -> &mut Compositor;
+  pub fn left_handed_mode(&self) -> bool;
+  pub fn middle_emulation(&self) -> bool;
+}
+```
+
+Where it differs from the plan above, and why:
+
+- **`Host::input_device_changed`** was added. The frontend calls it after dropping its own state for a device that IPC enabled or disabled. Nested resets its button emulation there, which `App` used to do inline; NB-6 needs the same hook to apply libinput's send-events mode.
+- **Event times** are one `Option<Duration>` argument of `handle_input` instead of a `time_usec` in every variant, because nested has none; with `None` clients get the time the compositor received the event, as before. `PointerMotion` is relative motion for `zwp_relative_pointer_v1` and is forwarded only while the pointer is constrained, as in nested; it does not move the pointer, so NB-6 sends `PointerMotionAbsolute` too.
+- **Rendering** goes through a `RenderTarget` trait (crates/shingle-frontend/src/render_target.rs), implemented for `Renderer` and `OffscreenRenderer`, instead of a concrete target type. `render` and `process` take the host so the frontend can ask for the next frame; the frontend collects redraw requests during a call and passes one on at its end.
+- **Construction** is split: `Frontend::new` restores the session, launches clients, prints `WAYLAND_DISPLAY` and starts `--spawn`, as `App::new` did; `Frontend::with_compositor` builds the frontend around an existing compositor, for tests. The host registers its seat devices with `compositor_mut()` afterwards, and the frontend maps device IDs to kinds with `Compositor::input_device` instead of nested's fixed devices. Modifiers are sent for the keyboard the key came from.
+- **Focus handling** stays nested glue, as NB-3 left it: focus loss sends `InputEvent::Reset`, and the stand-in modifier presses on focus gain go through `update_keyboard`, which changes the xkb state without dispatching keys.
+- **Key repeat** is `keyboard::KeyRepeat`, polled in `process` and reported by `next_deadline`. It repeats the most recently pressed key that repeats in Shingle's keymap, at `repeat_rate` and `repeat_delay`, until that key is released or `Reset` arrives, as Wayland clients do. Nested drops winit's repeats. This is the one intended behaviour change: repeats now follow Shingle's settings, not the host's. `next_deadline` covers only key repeat; nested still wakes at least every 16 ms for config reload, the drag and gesture timers and child reaping, and NB-6 should do the same or extend it.
+- **VT switching** is in: a press producing `XF86Switch_VT_1` to `XF86Switch_VT_12` goes to `Host::switch_vt` before anything else, also on the lock screen. Nested returns false, so the key is handled as before.
+- **Module layout.** The `Frontend` glue for Scale, Expo and bindings lives in child modules of `frontend` (crates/shingle-frontend/src/frontend/scale.rs, expo.rs, bindings.rs), next to `switcher.rs`, `drag.rs`, `effects.rs`, `animation.rs`, `scene.rs` and `session.rs`, rather than in the crate-level `scale.rs`, `expo.rs` and `bindings.rs`, which keep the pure layout and helper code. The zoom and alpha wheel handling is `effects.rs`'s `pointer_axis`.
+- **Button emulation** stays in nested (`MouseButtons`) but now translates the button code, as libinput does. Before, `left_handed_mode` swapped only the names bindings matched, clients still got the physical button, and Scale and Expo saw raw buttons before any emulation. Now clients, bindings and the overviews all see the swapped or emulated button, as in Wayfire. Both options are off by default; with them off nothing changes.
+- **The argument parser** stays in nested's `main.rs`; there is no `shingle_frontend::cli` yet, and the switch to one `shingle` binary (decision 4) is left to NB-6, where the second host appears.
+- Nested's `main.rs` is 870 lines, about 600 without its tests.
+
+Behaviour was pinned before the move with a scripted session of 38 steps (switchers, Scale with keys, pointer, touch and the title filter, Expo with keys and pointer, workspace moves, focus and move bindings, a move drag, a resize drag, grid snapping, inversion, command bindings, close and quit), recording IPC replies and screencopy captures of both the inner compositor and the frame nested drew; see [status.md](../status.md#with-real-clients).
+
 ### NB-5 `shingle-input-registry`: per-device seat devices
 
 Replace `DEVICES` and kind gating with the registry: `add_input_device`, `remove_input_device`, `InputDeviceId` on the entry points, per-device held input, and `Event::InputDeviceChanged { id, enabled }`.
@@ -700,5 +764,5 @@ The operator answered the open questions on 2026-11-25:
 1. **No VM testing.** Device-level work is verified on a dedicated test machine the operator is setting up ([7](#layer-2-dedicated-test-machine)). NB-6 onwards waits for it; NB-1 to NB-5 do not.
 2. **Real hardware.** That test machine is the hardware for zero-copy, VRR, the cursor plane and GPU recovery. Until it exists, those criteria stay open in [status.md](../status.md).
 3. **Development headers.** `libinput-dev`, `libseat-dev` and `libpam0g-dev` are installed on the host, so native crates build and unit-test in the normal workspace. They are never run here.
-4. **One binary.** There is a single `shingle` binary that picks its backend the way Wayfire does: nested when `WAYLAND_DISPLAY` (or `DISPLAY`) is set, native from a TTY, and headless with `--headless`, with `--backend nested|native|headless` to override. `shingle-native` and the nested frontend become library crates linked into it, and the separate `shingle-nested` binary is dropped once the switch is in place (NB-4 or NB-6). Session files and docs refer to `shingle` only.
+4. **One binary.** There is a single `shingle` binary that picks its backend the way Wayfire does: nested when `WAYLAND_DISPLAY` (or `DISPLAY`) is set, native from a TTY, and headless with `--headless`, with `--backend nested|native|headless` to override. `shingle-native` and the nested frontend become library crates linked into it, and the separate `shingle-nested` binary is dropped once the switch is in place (NB-6; NB-4 kept the binaries as they were). Session files and docs refer to `shingle` only.
 5. **wgpu `drm` feature.** Removed in NB-1, since Shingle does not use VK_KHR_display. Re-adding it later costs nothing.
