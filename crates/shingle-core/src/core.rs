@@ -863,3 +863,411 @@ impl Shingle {
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  const WORKAREA: Rect = Rect::new(0, 0, 1200, 800);
+  const SECOND: WorkspaceId = WorkspaceId::new(1, 0);
+
+  fn output() -> OutputId {
+    OutputId::from("DP-1")
+  }
+
+  fn shingle() -> Shingle {
+    let mut shingle = Shingle::new();
+    shingle.add_output(output(), WORKAREA).unwrap();
+    shingle.ensure_workspace(&output(), SECOND).unwrap();
+    shingle
+  }
+
+  fn attach(shingle: &mut Shingle, app_id: &str) -> WindowId {
+    shingle
+      .attach_window(&output(), LaunchIdentity::new(app_id))
+      .unwrap()
+  }
+
+  fn order(shingle: &Shingle, workspace: WorkspaceId) -> Vec<WindowId> {
+    shingle.tree(&output(), workspace).unwrap().windows()
+  }
+
+  fn placeholder(shingle: &mut Shingle, window: WindowId) {
+    shingle.reconcile_unmapped(window).unwrap();
+  }
+
+  #[test]
+  fn add_output_validates_identity_and_workarea() {
+    let mut shingle = shingle();
+    assert!(matches!(
+      shingle.add_output(OutputId::new(""), WORKAREA),
+      Err(ShingleError::InvalidOutputId)
+    ));
+    assert!(matches!(
+      shingle.add_output(output(), WORKAREA),
+      Err(ShingleError::OutputExists(_))
+    ));
+    assert!(matches!(
+      shingle.add_output("HDMI-A-1".into(), Rect::new(0, 0, 0, 1)),
+      Err(ShingleError::InvalidWorkarea)
+    ));
+    assert_eq!(shingle.outputs().collect::<Vec<_>>(), vec![&output()]);
+    assert_eq!(
+      shingle.current_workspace(&output()).unwrap(),
+      WorkspaceId::ORIGIN
+    );
+  }
+
+  #[test]
+  fn unknown_output_and_workspace_are_errors() {
+    let mut shingle = shingle();
+    let missing = OutputId::from("missing");
+    assert!(matches!(
+      shingle.output_workarea(&missing),
+      Err(ShingleError::OutputNotFound(_))
+    ));
+    assert!(matches!(
+      shingle.set_current_workspace(&output(), WorkspaceId::new(5, 5)),
+      Err(ShingleError::WorkspaceNotFound)
+    ));
+    assert!(matches!(
+      shingle.attach_window_on(
+        &output(),
+        WorkspaceId::new(5, 5),
+        LaunchIdentity::new("app"),
+      ),
+      Err(ShingleError::WorkspaceNotFound)
+    ));
+    assert_eq!(shingle.window_ids().count(), 0);
+  }
+
+  #[test]
+  fn ensure_workspace_creates_once() {
+    let mut shingle = shingle();
+    assert!(!shingle.ensure_workspace(&output(), SECOND).unwrap());
+    assert!(
+      shingle
+        .ensure_workspace(&output(), WorkspaceId::new(0, 1))
+        .unwrap()
+    );
+    assert_eq!(
+      shingle.workspaces(&output()).unwrap(),
+      vec![WorkspaceId::ORIGIN, WorkspaceId::new(0, 1), SECOND]
+    );
+  }
+
+  #[test]
+  fn attach_uses_current_workspace_and_sequential_ids() {
+    let mut shingle = shingle();
+    let first = attach(&mut shingle, "a");
+    shingle.set_current_workspace(&output(), SECOND).unwrap();
+    let second = attach(&mut shingle, "b");
+    assert_eq!((first.get(), second.get()), (1, 2));
+    assert_eq!(order(&shingle, WorkspaceId::ORIGIN), vec![first]);
+    assert_eq!(order(&shingle, SECOND), vec![second]);
+    let info = shingle.window_info(second).unwrap();
+    assert_eq!(info.presence, WindowPresence::Mapped);
+    assert_eq!(
+      info.location,
+      WorkspaceRef {
+        output: output(),
+        workspace: SECOND,
+      }
+    );
+    assert_eq!(info.identity.app_id, "b");
+  }
+
+  #[test]
+  fn window_ids_are_not_reused() {
+    let mut shingle = shingle();
+    let first = attach(&mut shingle, "a");
+    shingle.detach_window(first).unwrap();
+    assert_eq!(attach(&mut shingle, "b").get(), 2);
+  }
+
+  #[test]
+  fn output_workarea_applies_to_every_workspace() {
+    let mut shingle = shingle();
+    let first = attach(&mut shingle, "a");
+    shingle.set_current_workspace(&output(), SECOND).unwrap();
+    let second = attach(&mut shingle, "b");
+    let workarea = Rect::new(0, 30, 1000, 770);
+    shingle.set_output_workarea(&output(), workarea).unwrap();
+    assert_eq!(shingle.output_workarea(&output()).unwrap(), workarea);
+    assert_eq!(shingle.window_layout(first).unwrap().node, workarea);
+    assert_eq!(shingle.window_layout(second).unwrap().node, workarea);
+    assert!(
+      shingle
+        .set_output_workarea(&output(), Rect::new(0, 0, 0, 0))
+        .is_err()
+    );
+    assert_eq!(shingle.output_workarea(&output()).unwrap(), workarea);
+  }
+
+  #[test]
+  fn detach_and_reattach_keep_identity_state_and_parent() {
+    let mut shingle = shingle();
+    let parent = attach(&mut shingle, "parent");
+    let child = attach(&mut shingle, "child");
+    shingle.set_window_parent(child, Some(parent)).unwrap();
+    shingle.set_sticky(child, true).unwrap();
+    placeholder(&mut shingle, child);
+    let detached = shingle.detach_window(child).unwrap();
+    assert_eq!(detached.presence, WindowPresence::Placeholder);
+    assert!(detached.state.sticky);
+    assert!(shingle.window_info(child).is_err());
+    assert!(
+      !shingle
+        .tree(&output(), WorkspaceId::ORIGIN)
+        .unwrap()
+        .contains(child)
+    );
+
+    shingle
+      .reattach_window(detached.clone(), &output(), SECOND)
+      .unwrap();
+    let info = shingle.window_info(child).unwrap();
+    assert_eq!(info.location.workspace, SECOND);
+    assert_eq!(info.presence, WindowPresence::Placeholder);
+    assert_eq!(info.parent, Some(parent));
+    assert!(info.state.sticky);
+    assert!(matches!(
+      shingle.reattach_window(detached, &output(), SECOND),
+      Err(ShingleError::DuplicateWindow(_))
+    ));
+  }
+
+  #[test]
+  fn reattach_at_places_beside_target_on_its_workspace() {
+    let mut shingle = shingle();
+    let moving = attach(&mut shingle, "moving");
+    shingle.set_current_workspace(&output(), SECOND).unwrap();
+    let left = attach(&mut shingle, "left");
+    let right = attach(&mut shingle, "right");
+    let detached = shingle.detach_window(moving).unwrap();
+    shingle
+      .reattach_window_at(detached, left, Direction::Right)
+      .unwrap();
+    assert_eq!(order(&shingle, SECOND), vec![left, moving, right]);
+    assert_eq!(shingle.window_location(moving).unwrap().workspace, SECOND);
+  }
+
+  #[test]
+  fn drop_window_moves_between_workspaces() {
+    let mut shingle = shingle();
+    let first = attach(&mut shingle, "a");
+    let second = attach(&mut shingle, "b");
+    shingle.set_current_workspace(&output(), SECOND).unwrap();
+    let target = attach(&mut shingle, "c");
+    shingle.set_gaps(first, Gaps::new(3, 1)).unwrap();
+    shingle.drop_window(first, target, Direction::Left).unwrap();
+    assert_eq!(order(&shingle, WorkspaceId::ORIGIN), vec![second]);
+    assert_eq!(order(&shingle, SECOND), vec![first, target]);
+    assert_eq!(shingle.window_location(first).unwrap().workspace, SECOND);
+    assert_eq!(
+      shingle.window_info(first).unwrap().state.gaps,
+      Gaps::new(3, 1)
+    );
+    let tree = shingle.tree(&output(), WorkspaceId::ORIGIN).unwrap();
+    assert_eq!(tree.focused(), Some(second));
+    assert_eq!(tree.stack_order(), &[second]);
+  }
+
+  #[test]
+  fn drop_window_within_workspace_reorders() {
+    let mut shingle = shingle();
+    let first = attach(&mut shingle, "a");
+    let second = attach(&mut shingle, "b");
+    shingle
+      .drop_window(first, second, Direction::Right)
+      .unwrap();
+    assert_eq!(order(&shingle, WorkspaceId::ORIGIN), vec![second, first]);
+    assert!(matches!(
+      shingle.drop_window(first, first, Direction::Right),
+      Err(ShingleError::SameWindow)
+    ));
+  }
+
+  #[test]
+  fn swap_windows_across_workspaces_exchanges_slots() {
+    let mut shingle = shingle();
+    let first = attach(&mut shingle, "a");
+    let other = attach(&mut shingle, "b");
+    shingle.set_current_workspace(&output(), SECOND).unwrap();
+    let second = attach(&mut shingle, "c");
+    shingle
+      .resize_window(first, Direction::Right, 200, 50)
+      .unwrap();
+    shingle.set_maximized(second, true).unwrap();
+    shingle.swap_windows(first, second).unwrap();
+
+    assert_eq!(order(&shingle, WorkspaceId::ORIGIN), vec![second, other]);
+    assert_eq!(order(&shingle, SECOND), vec![first]);
+    assert_eq!(
+      shingle.window_layout(second).unwrap().node,
+      Rect::new(0, 0, 800, 800)
+    );
+    assert!(shingle.window_info(second).unwrap().state.maximized);
+    assert!(!shingle.window_info(first).unwrap().state.maximized);
+    assert_eq!(shingle.window_location(first).unwrap().workspace, SECOND);
+    assert_eq!(
+      shingle.window_location(second).unwrap().workspace,
+      WorkspaceId::ORIGIN
+    );
+    let tree = shingle.tree(&output(), SECOND).unwrap();
+    assert_eq!(tree.focused(), Some(first));
+  }
+
+  #[test]
+  fn floating_round_trip_restores_tiled_slot() {
+    let mut shingle = shingle();
+    let first = attach(&mut shingle, "a");
+    let second = attach(&mut shingle, "b");
+    let third = attach(&mut shingle, "c");
+    shingle
+      .resize_window(first, Direction::Right, 100, 50)
+      .unwrap();
+    let before = shingle.window_layout(second).unwrap();
+    assert!(matches!(
+      shingle.set_floating(second, Some(Rect::new(0, 0, 0, 10))),
+      Err(ShingleError::InvalidWorkarea)
+    ));
+    let geometry = Rect::new(50, 60, 300, 200);
+    shingle.set_floating(second, Some(geometry)).unwrap();
+    let info = shingle.window_info(second).unwrap();
+    assert_eq!(info.state.floating, Some(geometry));
+    assert_eq!(info.state.tiled_edges, 0);
+    assert!(shingle.window_layout(second).is_err());
+    assert_eq!(
+      shingle.window_layout(third).unwrap().node,
+      Rect::new(666, 0, 534, 800)
+    );
+    shingle.set_floating(second, None).unwrap();
+    assert_eq!(shingle.window_layout(second).unwrap(), before);
+    assert_eq!(shingle.window_info(second).unwrap().state.tiled_edges, 15);
+  }
+
+  #[test]
+  fn window_parent_rejects_cycles_and_unknown_parents() {
+    let mut shingle = shingle();
+    let first = attach(&mut shingle, "a");
+    let second = attach(&mut shingle, "b");
+    let third = attach(&mut shingle, "c");
+    assert!(matches!(
+      shingle.set_window_parent(first, Some(first)),
+      Err(ShingleError::SameWindow)
+    ));
+    assert!(matches!(
+      shingle.set_window_parent(first, Some(WindowId(99))),
+      Err(ShingleError::WindowNotFound(99))
+    ));
+    shingle.set_window_parent(second, Some(first)).unwrap();
+    shingle.set_window_parent(third, Some(second)).unwrap();
+    assert!(matches!(
+      shingle.set_window_parent(first, Some(third)),
+      Err(ShingleError::SameWindow)
+    ));
+    assert_eq!(shingle.window_info(first).unwrap().parent, None);
+    shingle.set_window_parent(third, None).unwrap();
+    assert_eq!(shingle.window_info(third).unwrap().parent, None);
+  }
+
+  #[test]
+  fn reconcile_prefers_matching_launch_id() {
+    let mut shingle = shingle();
+    let plain = shingle
+      .attach_window(&output(), LaunchIdentity::new("term"))
+      .unwrap();
+    let tagged = shingle
+      .attach_window(
+        &output(),
+        LaunchIdentity::new("term").with_launch_id("second"),
+      )
+      .unwrap();
+    let other = attach(&mut shingle, "editor");
+    for window in [plain, tagged, other] {
+      placeholder(&mut shingle, window);
+    }
+    assert_eq!(shingle.placeholders(), vec![plain, tagged, other]);
+
+    let identity = LaunchIdentity::new("term").with_launch_id("second");
+    assert_eq!(shingle.reconcile_mapped(&identity), Some(tagged));
+    let identity = LaunchIdentity::new("term").with_launch_id("third");
+    assert_eq!(shingle.reconcile_mapped(&identity), Some(plain));
+    assert_eq!(shingle.reconcile_mapped(&identity), None);
+    assert_eq!(shingle.placeholders(), vec![other]);
+    assert_eq!(
+      shingle.window_info(tagged).unwrap().presence,
+      WindowPresence::Mapped
+    );
+  }
+
+  #[test]
+  fn reconcile_without_launch_id_takes_lowest_placeholder() {
+    let mut shingle = shingle();
+    let first = attach(&mut shingle, "term");
+    let second = attach(&mut shingle, "term");
+    placeholder(&mut shingle, second);
+    placeholder(&mut shingle, first);
+    let identity = LaunchIdentity::new("term");
+    assert_eq!(shingle.reconcile_mapped(&identity), Some(first));
+    assert_eq!(shingle.reconcile_mapped(&identity), Some(second));
+  }
+
+  #[test]
+  fn forget_placeholder_refuses_mapped_windows() {
+    let mut shingle = shingle();
+    let first = attach(&mut shingle, "a");
+    let second = attach(&mut shingle, "b");
+    assert!(matches!(
+      shingle.forget_placeholder(first),
+      Err(ShingleError::WindowStillMapped(1))
+    ));
+    placeholder(&mut shingle, first);
+    let forgotten = shingle.forget_placeholder(first).unwrap();
+    assert_eq!(forgotten.presence, WindowPresence::Placeholder);
+    assert_eq!(order(&shingle, WorkspaceId::ORIGIN), vec![second]);
+    assert!(shingle.placeholders().is_empty());
+  }
+
+  #[test]
+  fn mark_window_mapped_clears_placeholder() {
+    let mut shingle = shingle();
+    let window = attach(&mut shingle, "a");
+    placeholder(&mut shingle, window);
+    shingle.mark_window_mapped(window).unwrap();
+    assert!(shingle.placeholders().is_empty());
+    assert!(shingle.mark_window_mapped(WindowId(9)).is_err());
+  }
+
+  #[test]
+  fn identity_updates_apply_to_record() {
+    let mut shingle = shingle();
+    let window = attach(&mut shingle, "a");
+    shingle.set_window_app_id(window, "b".into()).unwrap();
+    shingle
+      .set_window_title(window, Some("Title".into()))
+      .unwrap();
+    let identity = shingle.window_info(window).unwrap().identity;
+    assert_eq!(identity.app_id, "b");
+    assert_eq!(identity.title.as_deref(), Some("Title"));
+    assert!(shingle.set_window_app_id(WindowId(9), "c".into()).is_err());
+  }
+
+  #[test]
+  fn window_operations_reject_unknown_windows() {
+    let mut shingle = shingle();
+    let missing = WindowId(9);
+    assert!(shingle.detach_window(missing).is_err());
+    assert!(shingle.focus_window(missing).is_err());
+    assert!(shingle.raise_window(missing).is_err());
+    assert!(shingle.lower_window(missing).is_err());
+    assert!(shingle.set_minimized(missing, true).is_err());
+    assert!(shingle.set_snapped(missing, None).is_err());
+    assert!(shingle.set_tiled_edges(missing, 0).is_err());
+    assert!(shingle.set_fullscreen(missing, true).is_err());
+    assert!(shingle.window_layout(missing).is_err());
+    assert!(shingle.reconcile_unmapped(missing).is_err());
+    assert!(shingle.forget_placeholder(missing).is_err());
+  }
+}
