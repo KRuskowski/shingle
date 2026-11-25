@@ -935,6 +935,8 @@ Unit tests cover the atomic request contents for modeset (with and without VRR, 
 
 Add `scanout/gbm.rs`: modifier negotiation (KMS `IN_FORMATS` ∩ Vulkan ∩ single-plane), `texture_from_dmabuf_fd` import, the `PlanarBuffer` wrapper and the automatic fallback to copy.
 
+The Vulkan side (device extensions, the render-modifier query and the import call with its queue-family ownership transfer) is shared with client DMA-BUF import and is built first, as DB-1 of [dmabuf.md](dmabuf.md#db-1-shingle-gpu-dmabuf-vulkan-external-memory-and-modifier-setup); NB-8 then needs NB-7 and DB-1, and `Scanout::prepare` stops taking a CPU `Frame` ([dmabuf.md](dmabuf.md#nb-8-shingle-native-zero-copy-gbm-scanout-revised)). Note that in wgpu 30.0.2 `Device::create_texture_from_hal` takes a third argument, the texture's `initial_state` (wgpu-30.0.2/src/api/device.rs:341).
+
 Acceptance:
 
 - Unit tests for negotiation.
@@ -962,7 +964,7 @@ Acceptance:
 - On the test machine: the cursor moves without full-frame renders (frame counter); VRR toggles `VRR_ENABLED` and the monitor reports it; a tearing client gets async flips.
 - Each feature falls back cleanly where unsupported, verified by forcing each fallback on the test machine.
 
-NB-1, NB-2 and NB-5 do not depend on each other and can run in parallel. NB-3 needs NB-1 (render types in the scene), and NB-4 needs NB-2 and NB-3. NB-6 needs NB-4 and NB-5, and NB-7 needs NB-6. NB-8 and NB-9 both need NB-7 but not each other. NB-10 comes last. The DMA-BUF roadmap item (client buffer import) can start after NB-8, reusing its Vulkan feature setup. Multi-output can start after NB-9.
+NB-1, NB-2 and NB-5 do not depend on each other and can run in parallel. NB-3 needs NB-1 (render types in the scene), and NB-4 needs NB-2 and NB-3. NB-6 needs NB-4 and NB-5, and NB-7 needs NB-6. NB-8 and NB-9 both need NB-7 but not each other. NB-10 comes last. The DMA-BUF roadmap item (client buffer import) was first planned to start after NB-8, reusing its Vulkan feature setup; its design ([dmabuf.md](dmabuf.md#11-implementation-plan)) turns that round, so the shared setup is its DB-1 and NB-8 builds on it. Multi-output can start after NB-9.
 
 ## Decisions
 

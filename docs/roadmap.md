@@ -19,7 +19,7 @@ In short, the interactive frontend moves out of `shingle-nested` into a shared `
 5. NB-5 `shingle-input-registry`: done; see [status.md](status.md#backend-host-api).
 6. NB-6 `shingle-native-session`: built and unit-tested through fakes: `shingle-native` runs the frontend with libseat, libinput and VT switching and draws offscreen, and `shingle` runs it from a VT login and refuses SSH logins ([status.md](status.md#native-backend-seat-and-input)). Open: steps 1 to 8 of [native-testing.md](native-testing.md) on the test machine.
 7. NB-7 `shingle-native-kms`: built and unit-tested through a fake card: one output driven with atomic KMS and copy scanout, page-flip pacing with presentation feedback from the flips, DPMS, pause and resume with a fresh modeset, and the failure handling ([status.md](status.md#native-backend-kms-display)). Open: steps 9 to 15 of [native-testing.md](native-testing.md) on the test machine.
-8. NB-8 `shingle-native-zero-copy`: GBM scanout with modifier negotiation.
+8. NB-8 `shingle-native-zero-copy`: GBM scanout with modifier negotiation, on the Vulkan setup of DMA-BUF's DB-1 ([design/dmabuf.md](design/dmabuf.md#7-scanout-in_formats-and-nb-8)).
 9. NB-9 `shingle-native-outputs`: hotplug and Wayfire-compatible mode configuration.
 10. NB-10 `shingle-native-planes`: cursor plane, VRR, tearing and fences.
 
@@ -27,7 +27,17 @@ NB-1 to NB-5 are done, and so is the single `shingle` binary of decision 4 ([sta
 
 ## 3. DMA-BUF
 
-Add DMA-BUF import and remove unnecessary CPU texture copies.
+Add DMA-BUF import and remove unnecessary CPU texture copies. The design is [design/dmabuf.md](design/dmabuf.md), from 2026-11-25; its open questions wait for the operator.
+
+In short:
+
+- **Vulkan setup.** `shingle-render` opens its device through wgpu-hal with the DMA-BUF feature, `VK_EXT_queue_family_foreign` and `VK_KHR_external_semaphore_fd`, queries which single-plane modifiers Vulkan can import and render to, and has one import call for client buffers and for NB-8's scanout buffers.
+- **Protocol.** `zwp_linux_dmabuf_v1` version 5 with feedback naming the render node, real test imports at `create`, textures cached per buffer. `wl_drm` is not offered: Mesa, Xwayland and NVIDIA's EGL find the device through the feedback.
+- **Sync.** Implicit sync by polling the buffer's fds before a commit applies, and `linux-drm-syncobj-v1`, which Wayfire lacks but this host's NVIDIA clients need. Buffers are released only after the GPU has finished reading them.
+- **CPU copies.** `wl_shm` buffers are uploaded from the client's mapping, damaged rows only, without the RGBA copy and swizzle; screencopy captures the rendered frame.
+- **Testing.** A new GPU offscreen backend lets real NVIDIA clients and nested Shingle run in a namespace with a private `/dev` that holds only the render node, never touching the host's display.
+
+The work is split into seven workspaces, DB-1 to DB-7, each with acceptance criteria in the design: Vulkan setup, offscreen backend and GPU harness, buffer lifetime, `zwp_linux_dmabuf_v1`, `linux-drm-syncobj-v1`, shm uploads without copies, and later direct scanout of client buffers. NB-8 builds on DB-1.
 
 ## 4. XWayland
 

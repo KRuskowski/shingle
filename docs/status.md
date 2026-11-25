@@ -7,7 +7,7 @@ Last updated 2026-11-25, after the native backend's KMS step (NB-7), which, like
 The `shingle` binary runs nested inside an existing Wayland or X11 session, or headless, and is useful for isolated testing. It is **not** yet a drop-in hardware replacement for Wayfire. The largest gaps are:
 
 - Not run on hardware yet: the native backend takes the seat with libseat, reads input with libinput (NB-6) and drives one monitor with atomic KMS and copy scanout (NB-7), but none of it has run on a seat or a GPU yet ([native-testing.md](native-testing.md)), and it has no zero-copy scanout, output hotplug or mode configuration (NB-8, NB-9). Useful sessions need the nested backend.
-- No DMA-BUF; client buffers are shared memory and are copied by the CPU.
+- No DMA-BUF; client buffers are shared memory and are copied by the CPU. The design for DMA-BUF import, explicit sync and fewer copies is [design/dmabuf.md](design/dmabuf.md), not built yet.
 - XWayland runs X11 applications as Shingle windows, with X focus, menus and tooltips, client state requests and a shared clipboard and primary selection (XW-2 to XW-5), but there is no drag and drop between X and Wayland yet (XW-6).
 - Multi-output support is incomplete.
 - Several Wayfire plugins and visual effects are missing, including wrot's 3D mode.
