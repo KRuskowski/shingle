@@ -388,10 +388,14 @@ impl CompositorState {
     );
     self.core.ensure_workspace(&self.output_id, workspace)?;
     let previous = self.core.current_workspace(&self.output_id)?;
-    if previous != workspace {
-      shell::disable_show_desktop(self);
-      self.last_workspace = Some(previous);
+    if previous == workspace {
+      // A request for the current workspace does nothing, as vswitch's
+      // on_set_workspace_request (plugins/vswitch/vswitch.cpp) carries it
+      // out without a change.
+      return Ok(());
     }
+    shell::disable_show_desktop(self);
+    self.last_workspace = Some(previous);
     self
       .core
       .set_current_workspace(&self.output_id, workspace)?;
@@ -520,6 +524,9 @@ impl CompositorState {
     );
     self.core.ensure_workspace(&self.output_id, workspace)?;
     let previous = self.core.window_location(window)?.workspace;
+    if previous == workspace {
+      return Ok(());
+    }
     let from = previous.y * self.workspace_width + previous.x + 1;
     let detached = self.core.detach_window(window)?;
     self

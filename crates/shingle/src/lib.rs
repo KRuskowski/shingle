@@ -2056,7 +2056,8 @@ impl Compositor {
   /// Makes workspace `index` (0-based, row-major) current. Keyboard focus
   /// moves to that workspace's focused window, every toplevel is reconfigured
   /// and [`Event::WorkspaceChanged`] is emitted. Leaving a workspace ends
-  /// show-desktop and remembers it as the last workspace.
+  /// show-desktop and remembers it as the last workspace. Switching to the
+  /// current workspace does nothing.
   ///
   /// # Errors
   ///
@@ -2090,6 +2091,8 @@ impl Compositor {
 
   /// Moves `window` to workspace `index` (0-based), keeping its floating,
   /// snapped and other persistent state, and emits [`Event::WindowMoved`].
+  /// A window already on that workspace stays where it is in the layout,
+  /// and nothing is emitted.
   ///
   /// # Errors
   ///
@@ -3003,6 +3006,40 @@ pub(crate) mod tests {
     shell::set_maximized(&mut compositor.state, window, true).unwrap();
     compositor.set_minimized(window, true).unwrap();
     assert_eq!(changes(&mut compositor), 0);
+  }
+
+  #[test]
+  fn staying_on_a_workspace_reports_and_reorders_nothing() {
+    let (mut compositor, path) = test_compositor();
+    let (mut client, first) = mapped_window(&mut compositor, &path, "first");
+    let second_toplevel = client.toplevel(&mut compositor, "second");
+    client.attach_buffer(&mut compositor, &second_toplevel.surface, 64, 64);
+    let order = |compositor: &Compositor| {
+      let workspace = compositor
+        .state
+        .core
+        .current_workspace(&compositor.state.output_id)
+        .unwrap();
+      compositor
+        .state
+        .core
+        .tree(&compositor.state.output_id, workspace)
+        .unwrap()
+        .windows()
+    };
+    let before = order(&compositor);
+    compositor.drain_events();
+    compositor.switch_workspace(0).unwrap();
+    compositor.move_window_to_workspace(first, 0).unwrap();
+    let events = compositor.drain_events();
+    assert!(
+      !events.iter().any(|event| matches!(
+        event,
+        Event::WorkspaceChanged { .. } | Event::WindowMoved { .. }
+      )),
+      "{events:?}"
+    );
+    assert_eq!(order(&compositor), before);
   }
 
   #[test]
