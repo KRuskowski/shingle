@@ -1018,29 +1018,40 @@ fn resize_node(
   else {
     return Ok(None);
   };
-  let first_index = match direction {
-    Direction::Left | Direction::Up => match window_index.checked_sub(1) {
-      Some(index) => index,
+  // Minimized and floating children take no space, so the edge to move is
+  // the one between the window and its nearest visible sibling.
+  let visible: Vec<usize> = (0..split.children.len())
+    .filter(|index| child_visible(&split.children[*index].node))
+    .collect();
+  let Some(position) = visible.iter().position(|index| *index == window_index)
+  else {
+    return Ok(None);
+  };
+  let first_position = match direction {
+    Direction::Left | Direction::Up => match position.checked_sub(1) {
+      Some(position) => position,
       None => return Ok(None),
     },
-    Direction::Right | Direction::Down => window_index,
+    Direction::Right | Direction::Down => position,
   };
-  if first_index + 1 >= split.children.len() {
+  if first_position + 1 >= visible.len() {
     return Ok(None);
   }
+  let first_index = visible[first_position];
+  let second_index = visible[first_position + 1];
 
   let vertical = split.direction.is_vertical();
   let total = rect.axis_extent(vertical);
   let first_minimum =
     minimum_extent(&split.children[first_index].node, split.direction, minimum);
   let second_minimum = minimum_extent(
-    &split.children[first_index + 1].node,
+    &split.children[second_index].node,
     split.direction,
     minimum,
   );
   let old_first = initial_child_rects[first_index].axis_extent(vertical);
   let pair_extent =
-    old_first + initial_child_rects[first_index + 1].axis_extent(vertical);
+    old_first + initial_child_rects[second_index].axis_extent(vertical);
   if first_minimum as u64 + second_minimum as u64 > pair_extent as u64 {
     return Err(ShingleError::MinimumExtent);
   }
@@ -1058,41 +1069,75 @@ fn resize_node(
   }
 
   let scale = total as u64;
-  for (index, child) in split.children.iter_mut().enumerate() {
+  let old_visible_weight: u128 = visible
+    .iter()
+    .map(|index| split.children[*index].weight as u128)
+    .sum();
+  let mut new_visible_weight = 0_u128;
+  for index in visible.iter().copied() {
     let extent = if index == first_index {
       new_first
-    } else if index == first_index + 1 {
+    } else if index == second_index {
       pair_extent - new_first
     } else {
       initial_child_rects[index].axis_extent(vertical)
     };
-    child.weight = if extent == 0 {
+    let weight = if extent == 0 {
       1
     } else {
       extent as u64 * scale
     };
+    split.children[index].weight = weight;
+    new_visible_weight += weight as u128;
+  }
+  // Hidden children keep their share of the visible total, so they return
+  // at the same relative size when they are shown again.
+  for (index, child) in split.children.iter_mut().enumerate() {
+    if visible.contains(&index) {
+      continue;
+    }
+    child.weight = (child.weight as u128)
+      .checked_mul(new_visible_weight)
+      .map_or(u64::MAX as u128, |product| product / old_visible_weight)
+      .clamp(1, u64::MAX as u128) as u64;
   }
   Ok(Some(true))
 }
 
+/// Returns each child's rectangle as `layout_children` places it. Hidden
+/// children get an empty extent at their position.
 fn child_rects(split: &Split, rect: Rect) -> Vec<Rect> {
+  let vertical = split.direction.is_vertical();
+  let extent = rect.axis_extent(vertical);
+  let origin = rect.axis_origin(vertical);
+  let visible: Vec<bool> = split
+    .children
+    .iter()
+    .map(|child| child_visible(&child.node))
+    .collect();
+  let visible_children = visible.iter().filter(|visible| **visible).count();
   let total_weight: u128 = split
     .children
     .iter()
-    .map(|child| child.weight as u128)
+    .zip(&visible)
+    .filter(|(_, visible)| **visible)
+    .map(|(child, _)| child.weight as u128)
     .sum();
   if total_weight == 0 {
     return vec![rect; split.children.len()];
   }
-  let vertical = split.direction.is_vertical();
-  let extent = rect.axis_extent(vertical);
-  let origin = rect.axis_origin(vertical);
   let mut result = Vec::with_capacity(split.children.len());
   let mut cumulative = 0_u128;
   let mut start = 0_u32;
-  for (index, child) in split.children.iter().enumerate() {
+  let mut visible_index = 0;
+  for (child, visible) in split.children.iter().zip(&visible) {
+    if !visible {
+      result.push(rect.with_axis(vertical, origin + start as i64, 0));
+      continue;
+    }
     cumulative += child.weight as u128;
-    let end = if index + 1 == split.children.len() {
+    visible_index += 1;
+    let end = if visible_index == visible_children {
       extent
     } else {
       (cumulative * extent as u128 / total_weight) as u32
@@ -1106,14 +1151,17 @@ fn child_rects(split: &Split, rect: Rect) -> Vec<Rect> {
 fn minimum_extent(node: &Node, direction: SplitDirection, minimum: u32) -> u32 {
   match node {
     Node::Leaf(_, _) => minimum,
-    Node::Split(split) if split.direction == direction => {
-      split.children.iter().fold(0_u32, |total, child| {
+    Node::Split(split) if split.direction == direction => split
+      .children
+      .iter()
+      .filter(|child| child_visible(&child.node))
+      .fold(0_u32, |total, child| {
         total.saturating_add(minimum_extent(&child.node, direction, minimum))
-      })
-    }
+      }),
     Node::Split(split) => split
       .children
       .iter()
+      .filter(|child| child_visible(&child.node))
       .map(|child| minimum_extent(&child.node, direction, minimum))
       .max()
       .unwrap_or(minimum),
@@ -1648,6 +1696,73 @@ mod tests {
     assert_eq!(tree.window_layout(id(2)).unwrap().node.width, 200);
     assert_eq!(tree.window_layout(id(3)).unwrap().node.width, 100);
     assert_eq!(tree.window_layout(id(4)).unwrap().node.width, 100);
+  }
+
+  #[test]
+  fn resize_ignores_floating_sibling() {
+    let mut tree = tree_with(3);
+    tree.set_floating(id(2), floating()).unwrap();
+    assert_eq!(widths(&tree), vec![600, 600]);
+    assert!(
+      tree
+        .resize_adjacent(id(1), Direction::Right, 100, 50)
+        .unwrap()
+    );
+    assert_eq!(widths(&tree), vec![700, 500]);
+    assert!(
+      tree
+        .resize_adjacent(id(3), Direction::Left, 100, 50)
+        .unwrap()
+    );
+    assert_eq!(widths(&tree), vec![600, 600]);
+    // The tiled pair may use the whole width; the floating window's slot
+    // does not reserve a minimum extent.
+    assert!(
+      tree
+        .resize_adjacent(id(1), Direction::Right, 10_000, 100)
+        .unwrap()
+    );
+    assert_eq!(widths(&tree), vec![1100, 100]);
+  }
+
+  #[test]
+  fn resize_keeps_hidden_window_share() {
+    let mut tree = tree_with(3);
+    tree.set_minimized(id(2), true).unwrap();
+    assert!(
+      tree
+        .resize_adjacent(id(1), Direction::Right, 100, 50)
+        .unwrap()
+    );
+    assert_eq!(widths(&tree), vec![700, 500]);
+    tree.set_minimized(id(2), false).unwrap();
+    assert_eq!(tree.window_layout(id(2)).unwrap().node.width, 400);
+  }
+
+  #[test]
+  fn resize_hidden_window_has_no_edge() {
+    let mut tree = tree_with(2);
+    tree.set_minimized(id(1), true).unwrap();
+    assert!(matches!(
+      tree.resize_adjacent(id(1), Direction::Right, 100, 50),
+      Err(ShingleError::NoAdjacentWindow)
+    ));
+    tree.set_minimized(id(1), false).unwrap();
+    assert_eq!(widths(&tree), vec![600, 600]);
+  }
+
+  #[test]
+  fn resize_minimum_ignores_hidden_windows_in_nested_split() {
+    let mut tree = tree_with(2);
+    tree.attach_at(id(3), id(2), Direction::Down).unwrap();
+    tree.attach_at(id(4), id(3), Direction::Right).unwrap();
+    tree.set_minimized(id(4), true).unwrap();
+    assert!(
+      tree
+        .resize_adjacent(id(1), Direction::Right, 10_000, 100)
+        .unwrap()
+    );
+    assert_eq!(widths(&tree), vec![1100, 100, 100]);
   }
 
   #[test]
