@@ -1562,6 +1562,57 @@ mod tests {
   }
 
   #[test]
+  fn focus_directional_picks_tile_across_edge() {
+    let mut tree = tree_with(2);
+    tree.attach_at(id(3), id(2), Direction::Down).unwrap();
+    // From the top-right tile, the full-height left tile is nearer by
+    // centre, but the tile directly below is the one across the edge.
+    assert_eq!(
+      tree.focus_directional(id(2), Direction::Down).unwrap(),
+      Some(id(3))
+    );
+    assert_eq!(tree.focused(), Some(id(3)));
+    assert_eq!(
+      tree.focus_directional(id(3), Direction::Up).unwrap(),
+      Some(id(2))
+    );
+    assert_eq!(
+      tree.focus_directional(id(3), Direction::Left).unwrap(),
+      Some(id(1))
+    );
+    assert_eq!(
+      tree.focus_directional(id(2), Direction::Left).unwrap(),
+      Some(id(1))
+    );
+    // The left tile's midpoint lies on the boundary; the tile starting
+    // there owns it.
+    assert_eq!(
+      tree.focus_directional(id(1), Direction::Right).unwrap(),
+      Some(id(3))
+    );
+    tree
+      .resize_adjacent(id(2), Direction::Down, 100, 50)
+      .unwrap();
+    assert_eq!(
+      tree.focus_directional(id(1), Direction::Right).unwrap(),
+      Some(id(2))
+    );
+  }
+
+  #[test]
+  fn focus_directional_prefers_adjacent_tile() {
+    let mut tree = tree_with(3);
+    assert_eq!(
+      tree.focus_directional(id(1), Direction::Right).unwrap(),
+      Some(id(2))
+    );
+    assert_eq!(
+      tree.focus_directional(id(3), Direction::Left).unwrap(),
+      Some(id(2))
+    );
+  }
+
+  #[test]
   fn focus_directional_without_neighbour_keeps_focus() {
     let mut tree = tree_with(2);
     tree.set_focus(id(1)).unwrap();

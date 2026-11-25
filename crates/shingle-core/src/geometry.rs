@@ -80,13 +80,6 @@ impl Rect {
       height: (bottom_edge - y).clamp(0, u32::MAX as i64) as u32,
     }
   }
-
-  fn center(self) -> (i64, i64) {
-    (
-      self.x as i64 * 2 + self.width as i64,
-      self.y as i64 * 2 + self.height as i64,
-    )
-  }
 }
 
 #[derive(
@@ -174,14 +167,91 @@ impl Direction {
   }
 
   pub fn score(self, from: Rect, candidate: Rect) -> Option<(i64, i64)> {
-    let (fx, fy) = from.center();
-    let (cx, cy) = candidate.center();
-    let (primary, cross) = match self {
-      Self::Up => (fy - cy, (fx - cx).abs()),
-      Self::Down => (cy - fy, (fx - cx).abs()),
-      Self::Left => (fx - cx, (fy - cy).abs()),
-      Self::Right => (cx - fx, (fy - cy).abs()),
+    let left = |rect: Rect| rect.x as i64;
+    let top = |rect: Rect| rect.y as i64;
+    let right = |rect: Rect| rect.x as i64 + rect.width as i64;
+    let bottom = |rect: Rect| rect.y as i64 + rect.height as i64;
+    let horizontal_midpoint = left(from) + from.width as i64 / 2;
+    let vertical_midpoint = top(from) + from.height as i64 / 2;
+    // Like Wayfire's tile plugin, look past the middle of the edge being
+    // crossed: the gap is measured between facing edges, and the cross
+    // distance is how far that midpoint lies outside the candidate's span.
+    let (gap, midpoint, start, end) = match self {
+      Self::Up => (
+        top(from) - bottom(candidate),
+        horizontal_midpoint,
+        left(candidate),
+        right(candidate),
+      ),
+      Self::Down => (
+        top(candidate) - bottom(from),
+        horizontal_midpoint,
+        left(candidate),
+        right(candidate),
+      ),
+      Self::Left => (
+        left(from) - right(candidate),
+        vertical_midpoint,
+        top(candidate),
+        bottom(candidate),
+      ),
+      Self::Right => (
+        left(candidate) - right(from),
+        vertical_midpoint,
+        top(candidate),
+        bottom(candidate),
+      ),
     };
-    (primary > 0).then_some((primary, cross))
+    if gap < 0 {
+      return None;
+    }
+    let cross = if midpoint < start {
+      start - midpoint
+    } else if midpoint >= end {
+      midpoint - end + 1
+    } else {
+      0
+    };
+    Some((gap, cross))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn score_measures_edge_gap_and_midpoint_offset() {
+    let from = Rect::new(0, 0, 600, 800);
+    let upper = Rect::new(600, 0, 600, 400);
+    let lower = Rect::new(600, 400, 600, 400);
+    assert_eq!(Direction::Right.score(from, upper), Some((0, 1)));
+    assert_eq!(Direction::Right.score(from, lower), Some((0, 0)));
+    assert_eq!(
+      Direction::Right.score(from, Rect::new(700, 900, 10, 10)),
+      Some((100, 500))
+    );
+    assert_eq!(Direction::Left.score(from, upper), None);
+    assert_eq!(Direction::Left.score(upper, from), Some((0, 0)));
+    assert_eq!(Direction::Down.score(upper, lower), Some((0, 0)));
+    assert_eq!(Direction::Up.score(lower, upper), Some((0, 0)));
+    assert_eq!(Direction::Down.score(upper, from), None);
+    assert_eq!(Direction::Up.score(upper, lower), None);
+  }
+
+  #[test]
+  fn rect_validate_rejects_empty_and_overflowing_geometry() {
+    assert!(Rect::new(-50, -50, 10, 10).validate().is_ok());
+    assert!(Rect::new(0, 0, 0, 10).validate().is_err());
+    assert!(Rect::new(0, 0, 10, 0).validate().is_err());
+    assert!(Rect::new(0, i32::MAX - 9, 10, 10).validate().is_err());
+    assert!(Rect::new(0, i32::MAX - 10, 10, 10).validate().is_ok());
+  }
+
+  #[test]
+  fn inset_clamps_to_empty() {
+    let rect = Rect::new(0, 0, 10, 10);
+    assert_eq!(rect.inset(Gaps::new(20, 0)), Rect::new(20, 20, 0, 0));
+    assert_eq!(rect.inset(Gaps::new(2, 0)), Rect::new(2, 2, 6, 6));
   }
 }
