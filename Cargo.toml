@@ -28,7 +28,7 @@ wayland-protocols = { version = "0.32.13", features = ["client", "server", "stag
 wayland-protocols-wlr = { version = "0.3.12", features = ["client", "server"] }
 wayland-protocols-misc = { version = "0.3.12", features = ["client", "server"] }
 wayland-server = "0.31.14"
-wgpu = { version = "30.0.2", default-features = false, features = ["std", "vulkan", "drm", "wgsl"] }
+wgpu = { version = "30.0.2", default-features = false, features = ["std", "vulkan", "wgsl"] }
 winit = { version = "0.30.12", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
 xcursor = "0.3"
 xkbcommon = "0.9"
