@@ -22,7 +22,7 @@ use shingle::{Compositor, InputDeviceId, InputDeviceInfo, InputDeviceKind};
 use shingle_config::{Modifiers as ConfigModifiers, ShingleConfig};
 use shingle_frontend::{
   Frontend,
-  host::{Axis, Host, InputEvent, Touch, TouchPhase},
+  host::{Axis, AxisSource, Host, InputEvent, Touch, TouchPhase},
 };
 use shingle_render::Renderer;
 use winit::{
@@ -36,6 +36,40 @@ use winit::{
   platform::scancode::PhysicalKeyExtScancode,
   window::{Window, WindowAttributes, WindowId},
 };
+
+/// Translates a winit scroll. Line deltas are wheel clicks, ten pixels
+/// each. Pixel deltas come from touchpads, which the host compositor
+/// reports with a finger source, so they are fingers here too, and the end
+/// of the gesture stops both axes.
+fn scroll_axis(
+  delta: MouseScrollDelta,
+  phase: winit::event::TouchPhase,
+) -> Axis {
+  match delta {
+    MouseScrollDelta::LineDelta(x, y) => Axis {
+      horizontal: x as f64 * 10.0,
+      vertical: y as f64 * 10.0,
+      horizontal_steps: x as i32,
+      vertical_steps: y as i32,
+      source: AxisSource::Wheel,
+      ..Axis::default()
+    },
+    MouseScrollDelta::PixelDelta(position) => {
+      let ended = matches!(
+        phase,
+        winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled
+      );
+      Axis {
+        horizontal: position.x,
+        vertical: position.y,
+        source: AxisSource::Finger,
+        horizontal_stop: ended,
+        vertical_stop: ended,
+        ..Axis::default()
+      }
+    }
+  }
+}
 
 /// `BTN_LEFT`.
 const BTN_LEFT: u32 = 0x110;
@@ -449,21 +483,8 @@ impl ApplicationHandler for App {
           }),
         );
       }
-      WindowEvent::MouseWheel { delta, .. } => {
-        let axis = match delta {
-          MouseScrollDelta::LineDelta(x, y) => Axis {
-            horizontal: x as f64 * 10.0,
-            vertical: y as f64 * 10.0,
-            horizontal_steps: x as i32,
-            vertical_steps: y as i32,
-          },
-          MouseScrollDelta::PixelDelta(position) => Axis {
-            horizontal: position.x,
-            vertical: position.y,
-            horizontal_steps: 0,
-            vertical_steps: 0,
-          },
-        };
+      WindowEvent::MouseWheel { delta, phase, .. } => {
+        let axis = scroll_axis(delta, phase);
         self.input(self.devices.pointer, InputEvent::PointerAxis(axis));
       }
       _ => {}
@@ -575,6 +596,24 @@ mod tests {
   use winit::event::TouchPhase;
 
   use super::*;
+
+  #[test]
+  fn touchpad_scrolls_are_fingers_that_stop_and_wheels_are_wheels() {
+    let wheel =
+      scroll_axis(MouseScrollDelta::LineDelta(0.0, 2.0), TouchPhase::Moved);
+    assert_eq!(wheel.source, AxisSource::Wheel);
+    assert_eq!((wheel.vertical, wheel.vertical_steps), (20.0, 2));
+    let pixels = PhysicalPosition::new(0.0, 7.5);
+    let finger =
+      scroll_axis(MouseScrollDelta::PixelDelta(pixels), TouchPhase::Moved);
+    assert_eq!(finger.source, AxisSource::Finger);
+    assert_eq!((finger.vertical, finger.vertical_steps), (7.5, 0));
+    assert!(!finger.vertical_stop && !finger.horizontal_stop);
+    let end = PhysicalPosition::new(0.0, 0.0);
+    let ended =
+      scroll_axis(MouseScrollDelta::PixelDelta(end), TouchPhase::Ended);
+    assert!(ended.vertical_stop && ended.horizontal_stop);
+  }
 
   /// The `input/list-devices` reply of the nested backend before the device
   /// registry, recorded byte for byte from a real run of `master` at

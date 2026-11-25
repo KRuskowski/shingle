@@ -108,7 +108,7 @@ use calloop::{
   generic::{FdWrapper, Generic},
   signals::{Signal, Signals},
 };
-pub use input::Modifiers;
+pub use input::{Axis, AxisSource, Modifiers};
 pub use input_device::{InputDeviceId, InputDeviceInfo, InputDeviceKind};
 pub use shingle_core::{Direction, StackingMode, WindowId};
 use shingle_core::{Gaps, Rect, Shingle, WorkspaceId};
@@ -1546,7 +1546,8 @@ impl Compositor {
     input_device::pointer_button(&mut self.state, device, button, pressed);
   }
 
-  /// Scrolls by continuous axis values, without discrete wheel steps; see
+  /// Scrolls by continuous axis values, without discrete wheel steps or an
+  /// end, reported as an [`AxisSource::Continuous`] source; see
   /// [`Compositor::pointer_axis_detailed`].
   pub fn pointer_axis(
     &mut self,
@@ -1557,10 +1558,12 @@ impl Compositor {
     input_device::pointer_axis_detailed(
       &mut self.state,
       device,
-      horizontal,
-      vertical,
-      0,
-      0,
+      Axis {
+        horizontal,
+        vertical,
+        source: AxisSource::Continuous,
+        ..Axis::default()
+      },
     );
   }
 
@@ -1568,23 +1571,10 @@ impl Compositor {
   /// `wl_pointer.axis` values (positive is right and down) and the `_steps`
   /// are wheel clicks, sent as `axis_discrete` and `axis_value120`. Values are
   /// multiplied by the configured scroll speed and negated for natural
-  /// scrolling. The axis source is always reported as a wheel.
-  pub fn pointer_axis_detailed(
-    &mut self,
-    device: InputDeviceId,
-    horizontal: f64,
-    vertical: f64,
-    horizontal_steps: i32,
-    vertical_steps: i32,
-  ) {
-    input_device::pointer_axis_detailed(
-      &mut self.state,
-      device,
-      horizontal,
-      vertical,
-      horizontal_steps,
-      vertical_steps,
-    );
+  /// scrolling. The source is sent as `wl_pointer.axis_source`, and the end
+  /// of a finger or continuous scroll on an axis as `wl_pointer.axis_stop`.
+  pub fn pointer_axis_detailed(&mut self, device: InputDeviceId, axis: Axis) {
+    input_device::pointer_axis_detailed(&mut self.state, device, axis);
   }
 
   /// Starts touch point `id` at `(x, y)` in layout logical pixels, on the

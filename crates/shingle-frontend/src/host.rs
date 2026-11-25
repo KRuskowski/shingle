@@ -9,6 +9,7 @@
 //! libinput.
 
 use shingle::InputDeviceId;
+pub use shingle::{Axis, AxisSource};
 
 /// What a frontend binary provides to the shared frontend.
 ///
@@ -97,19 +98,6 @@ pub enum InputEvent {
   /// The host lost keyboard focus or the seat: the keys the frontend
   /// thinks are held are forgotten without releases, and key repeat stops.
   Reset,
-}
-
-/// A scroll event.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Axis {
-  /// Horizontal scroll distance in pixels; positive scrolls right.
-  pub horizontal: f64,
-  /// Vertical scroll distance in pixels; positive scrolls down.
-  pub vertical: f64,
-  /// Horizontal wheel steps, or 0 for smooth scrolling.
-  pub horizontal_steps: i32,
-  /// Vertical wheel steps, or 0 for smooth scrolling.
-  pub vertical_steps: i32,
 }
 
 /// What happened to a touch point.

@@ -33,12 +33,7 @@ impl Frontend {
     if self.expo.is_some() {
       return;
     }
-    let Axis {
-      horizontal,
-      vertical,
-      horizontal_steps,
-      vertical_steps,
-    } = axis;
+    let Axis { vertical, .. } = axis;
     if self.scale.is_some() {
       if vertical != 0.0 {
         self.select_scale_relative(vertical > 0.0);
@@ -83,12 +78,6 @@ impl Frontend {
       self.request_redraw();
       return;
     }
-    self.compositor.pointer_axis_detailed(
-      device,
-      horizontal,
-      vertical,
-      horizontal_steps,
-      vertical_steps,
-    );
+    self.compositor.pointer_axis_detailed(device, axis);
   }
 }

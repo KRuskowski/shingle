@@ -484,19 +484,10 @@ pub(crate) fn pointer_button(
 pub(crate) fn pointer_axis_detailed(
   state: &mut CompositorState,
   id: InputDeviceId,
-  horizontal: f64,
-  vertical: f64,
-  horizontal_steps: i32,
-  vertical_steps: i32,
+  axis: input::Axis,
 ) {
   if delivers(state, id, InputDeviceKind::Pointer) {
-    input::pointer_axis_detailed(
-      state,
-      horizontal,
-      vertical,
-      horizontal_steps,
-      vertical_steps,
-    );
+    input::pointer_axis_detailed(state, axis);
   }
 }
 

@@ -32,6 +32,60 @@ const DEFAULT_KEYMAP: &str = r#"xkb_keymap {
   xkb_symbols "us" { include "pc+us+inet(evdev)" };
 };"#;
 
+/// What produced a scroll, as `wl_pointer.axis_source` reports it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AxisSource {
+  /// A mouse wheel, in discrete steps.
+  #[default]
+  Wheel,
+  /// Fingers on a touchpad; the sequence ends with an axis stop.
+  Finger,
+  /// Continuous motion, such as button scrolling; it ends with an axis
+  /// stop too.
+  Continuous,
+  /// A tilting wheel, sideways, in discrete steps.
+  WheelTilt,
+}
+
+impl AxisSource {
+  fn wl_source(self) -> wl_pointer::AxisSource {
+    match self {
+      AxisSource::Wheel => wl_pointer::AxisSource::Wheel,
+      AxisSource::Finger => wl_pointer::AxisSource::Finger,
+      AxisSource::Continuous => wl_pointer::AxisSource::Continuous,
+      AxisSource::WheelTilt => wl_pointer::AxisSource::WheelTilt,
+    }
+  }
+
+  /// Whether the protocol ends this source's scroll sequences with
+  /// `wl_pointer.axis_stop`.
+  fn stops(self) -> bool {
+    matches!(self, AxisSource::Finger | AxisSource::Continuous)
+  }
+}
+
+/// One scroll event.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Axis {
+  /// Horizontal scroll distance in pixels; positive scrolls right.
+  pub horizontal: f64,
+  /// Vertical scroll distance in pixels; positive scrolls down.
+  pub vertical: f64,
+  /// Horizontal wheel steps, or 0 for smooth scrolling.
+  pub horizontal_steps: i32,
+  /// Vertical wheel steps, or 0 for smooth scrolling.
+  pub vertical_steps: i32,
+  /// What produced the scroll.
+  pub source: AxisSource,
+  /// The horizontal scroll sequence of a [`AxisSource::Finger`] or
+  /// [`AxisSource::Continuous`] source ended, as libinput reports with a
+  /// zero value; sent as `wl_pointer.axis_stop`.
+  pub horizontal_stop: bool,
+  /// The vertical scroll sequence ended; see
+  /// [`Axis::horizontal_stop`].
+  pub vertical_stop: bool,
+}
+
 /// Serialized xkb modifier state, as `wl_keyboard.modifiers` sends it.
 /// The frontend computes it with its own xkb state and passes it to
 /// `Compositor::keyboard_modifiers`; the masks are only meaningful with the
@@ -1013,13 +1067,16 @@ pub(crate) fn pointer_button(
   }
 }
 
-pub(crate) fn pointer_axis_detailed(
-  state: &mut CompositorState,
-  horizontal: f64,
-  vertical: f64,
-  horizontal_steps: i32,
-  vertical_steps: i32,
-) {
+pub(crate) fn pointer_axis_detailed(state: &mut CompositorState, axis: Axis) {
+  let Axis {
+    horizontal,
+    vertical,
+    horizontal_steps,
+    vertical_steps,
+    source,
+    horizontal_stop,
+    vertical_stop,
+  } = axis;
   activity(state);
   let Some(target) = state.input.pointer_focus.clone() else {
     return;
@@ -1042,15 +1099,21 @@ pub(crate) fn pointer_axis_detailed(
   let time = timestamp(state);
   for pointer in pointers_for(state, &target) {
     if pointer.version() >= 5 {
-      pointer.axis_source(wl_pointer::AxisSource::Wheel);
+      pointer.axis_source(source.wl_source());
     }
-    for (axis, value, steps) in [
+    for (axis, value, steps, stop) in [
       (
         wl_pointer::Axis::HorizontalScroll,
         horizontal,
         horizontal_steps,
+        horizontal_stop,
       ),
-      (wl_pointer::Axis::VerticalScroll, vertical, vertical_steps),
+      (
+        wl_pointer::Axis::VerticalScroll,
+        vertical,
+        vertical_steps,
+        vertical_stop,
+      ),
     ] {
       if steps != 0 {
         if pointer.version() >= 5 {
@@ -1062,6 +1125,11 @@ pub(crate) fn pointer_axis_detailed(
       }
       if value != 0.0 {
         pointer.axis(time, axis, value);
+      }
+      // Only finger and continuous sequences end with axis_stop, as
+      // wlroots' wlr_seat_pointer_notify_axis sends it.
+      if stop && source.stops() && pointer.version() >= 5 {
+        pointer.axis_stop(time, axis);
       }
     }
     pointer_frame(state, &pointer);
@@ -1693,6 +1761,91 @@ mod tests {
 
   fn us_de() -> Vec<String> {
     vec!["English (US)".to_owned(), "German".to_owned()]
+  }
+
+  #[test]
+  fn scrolls_report_their_source_and_touchpad_scrolls_stop() {
+    use wayland_client::{
+      WEnum,
+      protocol::{wl_pointer, wl_seat::WlSeat},
+    };
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let device = compositor.add_input_device(crate::InputDeviceInfo {
+      name: "test pointer".into(),
+      vendor: None,
+      product: None,
+      kind: crate::InputDeviceKind::Pointer,
+    });
+    let mut client =
+      crate::test_client::TestClient::connect(&mut compositor, &path);
+    let seat = client.bind::<WlSeat>(8);
+    let _pointer = seat.get_pointer(&client.handle, ());
+    let toplevel = client.toplevel(&mut compositor, "scrolled");
+    client.attach_buffer(&mut compositor, &toplevel.surface, 64, 64);
+    compositor.pointer_motion(device, 10.0, 10.0);
+    client.roundtrip(&mut compositor);
+    let scroll = |compositor: &mut crate::Compositor,
+                  client: &mut crate::test_client::TestClient,
+                  axis: Axis| {
+      client.events.pointer.clear();
+      compositor.pointer_axis_detailed(device, axis);
+      client.roundtrip(compositor);
+      let sources = client
+        .events
+        .pointer
+        .iter()
+        .filter_map(|event| match event {
+          wl_pointer::Event::AxisSource {
+            axis_source: WEnum::Value(source),
+          } => Some(*source),
+          _ => None,
+        })
+        .collect::<Vec<_>>();
+      let stops = client
+        .events
+        .pointer
+        .iter()
+        .filter_map(|event| match event {
+          wl_pointer::Event::AxisStop {
+            axis: WEnum::Value(axis),
+            ..
+          } => Some(*axis),
+          _ => None,
+        })
+        .collect::<Vec<_>>();
+      (sources, stops)
+    };
+
+    let wheel = Axis {
+      vertical: 10.0,
+      vertical_steps: 1,
+      ..Axis::default()
+    };
+    assert_eq!(
+      scroll(&mut compositor, &mut client, wheel),
+      (vec![wl_pointer::AxisSource::Wheel], vec![])
+    );
+    let finger = Axis {
+      vertical: 3.0,
+      source: AxisSource::Finger,
+      ..Axis::default()
+    };
+    assert_eq!(
+      scroll(&mut compositor, &mut client, finger),
+      (vec![wl_pointer::AxisSource::Finger], vec![])
+    );
+    let lifted = Axis {
+      source: AxisSource::Finger,
+      vertical_stop: true,
+      ..Axis::default()
+    };
+    assert_eq!(
+      scroll(&mut compositor, &mut client, lifted),
+      (
+        vec![wl_pointer::AxisSource::Finger],
+        vec![wl_pointer::Axis::VerticalScroll]
+      )
+    );
   }
 
   #[test]
