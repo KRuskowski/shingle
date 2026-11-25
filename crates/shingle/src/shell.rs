@@ -595,6 +595,8 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
   }
   if has_buffer {
     request_map(state, object);
+  } else {
+    unmap_toplevel(state, object);
   }
   let pending = state.surfaces.get_mut(object).and_then(|surface| {
     surface.buffer.as_ref()?;
@@ -671,6 +673,49 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
   }
 }
 
+/// Unmaps a toplevel that committed a null buffer while mapped or waiting
+/// to map, as xdg-shell defines it: the window leaves the model as if it had
+/// been destroyed, emitting [`Event::WindowDestroyed`] if it was mapped,
+/// and the xdg_surface returns to its unconfigured state, so a remap starts
+/// with an initial commit and maps as a new window. Wayfire likewise
+/// detaches an unmapped view from its tiling tree and attaches it again on
+/// the next map (plugins/tile/tile-plugin.cpp, `on_view_unmapped` and
+/// `on_view_mapped`).
+fn unmap_toplevel(state: &mut CompositorState, object: &ObjectId) {
+  let Some((id, role, window)) =
+    state.surfaces.get(object).and_then(|surface| {
+      let window = surface.role.toplevel()?.window()?;
+      Some((surface.id, surface.role.clone(), window))
+    })
+  else {
+    return;
+  };
+  let mapped = state
+    .core
+    .window_info(window)
+    .is_ok_and(|info| info.presence == WindowPresence::Mapped);
+  if !mapped && !state.pending_maps.contains_key(&window) {
+    return;
+  }
+  if let Some(surface) = state.surfaces.get_mut(object)
+    && let Role::Xdg {
+      kind: Some(XdgKind::Toplevel(toplevel)),
+      serials,
+      initial_acked,
+      ..
+    } = &mut surface.role
+  {
+    toplevel.window = WindowId(0);
+    toplevel.tiled = true;
+    toplevel.configured_geometry = None;
+    toplevel.created_rules_pending = None;
+    serials.clear();
+    *initial_acked = false;
+  }
+  remove_window(state, id, &role);
+  crate::input::sync_focus(state);
+}
+
 pub(crate) fn destroy_role(state: &mut CompositorState, surface: &Surface) {
   crate::foreign::surface_destroyed(state, &Resource::id(&surface.resource));
   detach_toplevel(state, surface.id, &surface.role);
@@ -697,24 +742,32 @@ fn detach_toplevel(
       crate::dialog::toplevel_destroyed(state, &id);
       crate::toplevel_icon::toplevel_destroyed(state, &id);
     }
-    if let Some(window) = toplevel.window() {
-      let mapped = state
-        .core
-        .window_info(window)
-        .is_ok_and(|info| info.presence == WindowPresence::Mapped);
-      if state.core.detach_window(window).is_ok() {
-        state.pending_maps.remove(&window);
-        state.delayed_maps.remove(&window);
-        state.focus_recency.remove(&window);
-        state.view_properties.remove(&window);
-        if mapped {
-          state
-            .events
-            .push(Event::WindowDestroyed { window, surface });
-        }
-        reconfigure_all(state);
-      }
+    remove_window(state, surface, role);
+  }
+}
+
+/// Removes the window of a toplevel role from the model, emitting
+/// [`Event::WindowDestroyed`] if it was mapped.
+fn remove_window(state: &mut CompositorState, surface: SurfaceId, role: &Role) {
+  let Some(window) = role.toplevel().and_then(|toplevel| toplevel.window())
+  else {
+    return;
+  };
+  let mapped = state
+    .core
+    .window_info(window)
+    .is_ok_and(|info| info.presence == WindowPresence::Mapped);
+  if state.core.detach_window(window).is_ok() {
+    state.pending_maps.remove(&window);
+    state.delayed_maps.remove(&window);
+    state.focus_recency.remove(&window);
+    state.view_properties.remove(&window);
+    if mapped {
+      state
+        .events
+        .push(Event::WindowDestroyed { window, surface });
     }
+    reconfigure_all(state);
   }
 }
 
@@ -2667,6 +2720,62 @@ mod tests {
 
   fn presence(state: &CompositorState, window: WindowId) -> WindowPresence {
     state.core.window_info(window).unwrap().presence
+  }
+
+  #[test]
+  fn null_buffer_unmaps_the_toplevel_and_a_new_buffer_maps_it_again() {
+    use crate::Event;
+
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let width = u64::from(compositor.state.output.width);
+    let stays = client.toplevel(&mut compositor, "stays");
+    client.attach_buffer(&mut compositor, &stays.surface, 64, 64);
+    let hides = client.toplevel(&mut compositor, "hides");
+    client.attach_buffer(&mut compositor, &hides.surface, 64, 64);
+    let stays_id = windows_with(&compositor.state, "stays")[0];
+    let hides_id = windows_with(&compositor.state, "hides")[0];
+    assert_eq!(layout_tiles(&mut compositor.state).len(), 2);
+    compositor.drain_events();
+
+    // xdg-shell: committing a null buffer unmaps the toplevel.
+    hides.surface.attach(None, 0, 0);
+    hides.surface.commit();
+    client.roundtrip(&mut compositor);
+    let destroyed = compositor
+      .drain_events()
+      .into_iter()
+      .filter_map(|event| match event {
+        Event::WindowDestroyed { window, .. } => Some(window),
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(destroyed, [hides_id]);
+    assert!(windows_with(&compositor.state, "hides").is_empty());
+    assert_eq!(
+      layout_tiles(&mut compositor.state),
+      vec![(stays_id.0, width)]
+    );
+    assert_eq!(
+      crate::input::focused_window(&compositor.state),
+      Some(stays_id)
+    );
+
+    // Remapping starts over: an initial commit, then a buffer.
+    hides.surface.commit();
+    client.roundtrip(&mut compositor);
+    client.attach_buffer(&mut compositor, &hides.surface, 64, 64);
+    let remapped = windows_with(&compositor.state, "hides");
+    assert_eq!(remapped.len(), 1);
+    assert_eq!(
+      presence(&compositor.state, remapped[0]),
+      WindowPresence::Mapped
+    );
+    assert!(compositor.drain_events().iter().any(|event| matches!(
+      event,
+      Event::WindowCreated { window, .. } if *window == remapped[0]
+    )));
+    assert_eq!(layout_tiles(&mut compositor.state).len(), 2);
   }
 
   #[test]

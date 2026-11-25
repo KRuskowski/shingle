@@ -585,10 +585,10 @@ pub enum Event {
     /// Its toplevel surface.
     surface: SurfaceId,
   },
-  /// A mapped toplevel's role or surface was destroyed (IPC
-  /// `view-unmapped`). Toplevels that never mapped, including views still
-  /// blocked, produce no event. Attaching a null buffer does not count:
-  /// the window keeps its tile and is only no longer drawn.
+  /// A mapped toplevel's role or surface was destroyed, or it committed a
+  /// null buffer (IPC `view-unmapped`). Toplevels that never mapped,
+  /// including views still blocked, produce no event. An unmapped toplevel
+  /// leaves its tile; when it maps again it is a new window with a new id.
   WindowDestroyed {
     /// The window that is gone.
     window: WindowId,
