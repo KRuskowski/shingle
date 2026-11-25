@@ -903,8 +903,13 @@ fn update_title(state: &mut CompositorState, object: &ObjectId, title: String) {
   };
   toplevel.title = title.clone();
   toplevel.identity.title = Some(title.clone());
+  // A title alone must not create the window: clients often send it before
+  // their app ID, and a window created from the launch template's app ID
+  // never claims the restored placeholder saved under the real one. The
+  // title is kept in the identity and applied when the window is created.
+  let window = toplevel.window();
   let surface = surface.id;
-  if let Some(window) = materialize_toplevel(state, object) {
+  if let Some(window) = window {
     let _ = state.core.set_window_title(window, Some(title.clone()));
     state.events.push(Event::TitleChanged {
       window,
@@ -965,6 +970,11 @@ pub(crate) fn materialize_toplevel(
     }
   };
   state.core.reconcile_unmapped(window).ok()?;
+  // A claimed placeholder still has the saved title; the client may have
+  // sent a newer one before the window existed.
+  if !created && identity.title.is_some() {
+    let _ = state.core.set_window_title(window, identity.title.clone());
+  }
   let restored_state =
     state.core.window_info(window).ok().map(|info| info.state);
   let restored_parent = state
@@ -2394,5 +2404,174 @@ impl Dispatch<ExtSessionLockSurfaceV1, SessionLockSurfaceData>
       }
       _ => {}
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::{
+    collections::HashMap,
+    io::{Read, Write},
+    os::unix::net::UnixStream,
+    sync::{Arc, Mutex},
+  };
+
+  use shingle_core::LaunchIdentity;
+  use wayland_server::Display;
+
+  use crate::state::{ClientDataImpl, CompositorState};
+
+  /// Minimal wire-protocol client on one end of a socket pair.
+  struct WireClient {
+    stream: UnixStream,
+    globals: HashMap<String, (u32, u32)>,
+  }
+
+  fn string_arg(value: &str) -> Vec<u8> {
+    let length = value.len() + 1;
+    let mut bytes = (length as u32).to_ne_bytes().to_vec();
+    bytes.extend_from_slice(value.as_bytes());
+    bytes.resize(4 + length.next_multiple_of(4), 0);
+    bytes
+  }
+
+  impl WireClient {
+    fn send(&mut self, object: u32, opcode: u16, args: &[u8]) {
+      let size = (8 + args.len()) as u32;
+      let mut message = object.to_ne_bytes().to_vec();
+      message.extend_from_slice(&((size << 16) | opcode as u32).to_ne_bytes());
+      message.extend_from_slice(args);
+      self.stream.write_all(&message).unwrap();
+    }
+
+    /// Reads pending events and records the globals that the registry,
+    /// object 2, announced.
+    fn read_globals(&mut self) {
+      let mut bytes = Vec::new();
+      let mut buffer = [0_u8; 4096];
+      while let Ok(read) = self.stream.read(&mut buffer) {
+        bytes.extend_from_slice(&buffer[..read]);
+        if read < buffer.len() {
+          break;
+        }
+      }
+      let word =
+        |at: usize| u32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap());
+      let mut at = 0;
+      while at + 8 <= bytes.len() {
+        let (object, header) = (word(at), word(at + 4));
+        if object == 2 && header & 0xffff == 0 {
+          let length = word(at + 12) as usize;
+          let interface = &bytes[at + 16..at + 15 + length];
+          let version = word(at + 16 + length.next_multiple_of(4));
+          self.globals.insert(
+            String::from_utf8_lossy(interface).into_owned(),
+            (word(at + 8), version),
+          );
+        }
+        at += (header >> 16) as usize;
+      }
+    }
+
+    fn bind(&mut self, interface: &str, version: u32, id: u32) {
+      let (name, available) = self.globals[interface];
+      let mut args = name.to_ne_bytes().to_vec();
+      args.extend(string_arg(interface));
+      args.extend_from_slice(&version.min(available).to_ne_bytes());
+      args.extend_from_slice(&id.to_ne_bytes());
+      self.send(2, 0, &args);
+    }
+  }
+
+  fn roundtrip(
+    display: &mut Display<CompositorState>,
+    state: &mut CompositorState,
+  ) {
+    display.dispatch_clients(state).unwrap();
+    display.flush_clients().unwrap();
+  }
+
+  #[test]
+  fn title_before_app_id_claims_the_restored_placeholder() {
+    let mut state = crate::input_device::tests::test_state();
+    let output = state.output_id.clone();
+    let identity = LaunchIdentity {
+      app_id: "restore.test".into(),
+      launch_id: Some("shingle-restore-1".into()),
+      ..LaunchIdentity::default()
+    };
+    let placeholder = state.core.attach_window(&output, identity).unwrap();
+    state.core.reconcile_unmapped(placeholder).unwrap();
+
+    let mut display = Display::<CompositorState>::new().unwrap();
+    state.create_globals(&display.handle());
+    let (server, client) = UnixStream::pair().unwrap();
+    client.set_nonblocking(true).unwrap();
+    let client_id = display
+      .handle()
+      .insert_client(
+        server,
+        Arc::new(ClientDataImpl {
+          disconnected: Arc::new(Mutex::new(Vec::new())),
+          sandbox: None,
+          privileged_protocols: Arc::default(),
+        }),
+      )
+      .unwrap()
+      .id();
+    // launch::capture names the program, not the app ID, as a real
+    // restored client's template does.
+    state.launch_templates.insert(
+      client_id,
+      LaunchIdentity {
+        app_id: "python3".into(),
+        launch_id: Some("shingle-restore-1".into()),
+        ..LaunchIdentity::default()
+      },
+    );
+    let mut wire = WireClient {
+      stream: client,
+      globals: HashMap::new(),
+    };
+    // wl_display.get_registry(2).
+    wire.send(1, 1, &2_u32.to_ne_bytes());
+    roundtrip(&mut display, &mut state);
+    wire.read_globals();
+    wire.bind("wl_compositor", 4, 3);
+    wire.bind("xdg_wm_base", 2, 4);
+    // wl_compositor.create_surface(5), xdg_wm_base.get_xdg_surface(6, 5)
+    // and xdg_surface.get_toplevel(7).
+    wire.send(3, 0, &5_u32.to_ne_bytes());
+    let mut args = 6_u32.to_ne_bytes().to_vec();
+    args.extend_from_slice(&5_u32.to_ne_bytes());
+    wire.send(4, 2, &args);
+    wire.send(6, 1, &7_u32.to_ne_bytes());
+    // xdg_toplevel.set_title before set_app_id.
+    wire.send(7, 2, &string_arg("Restored"));
+    roundtrip(&mut display, &mut state);
+    assert_eq!(
+      state.core.window_ids().collect::<Vec<_>>(),
+      vec![placeholder],
+      "a title alone must not create a window"
+    );
+    // xdg_toplevel.set_app_id, then wl_surface.commit.
+    wire.send(7, 3, &string_arg("restore.test"));
+    wire.send(5, 6, &[]);
+    roundtrip(&mut display, &mut state);
+
+    assert_eq!(
+      state.core.window_ids().collect::<Vec<_>>(),
+      vec![placeholder]
+    );
+    // The toplevel claimed the placeholder; it stays unmapped until its
+    // first buffer.
+    assert!(state.surfaces.values().any(|surface| {
+      surface
+        .role
+        .toplevel()
+        .is_some_and(|toplevel| toplevel.window() == Some(placeholder))
+    }));
+    let info = state.core.window_info(placeholder).unwrap();
+    assert_eq!(info.identity.title.as_deref(), Some("Restored"));
   }
 }
