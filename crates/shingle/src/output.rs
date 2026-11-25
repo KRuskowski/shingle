@@ -144,7 +144,7 @@ pub struct OutputPlacement {
 impl OutputPlacement {
   /// Converts a configured output entry.
   pub fn from_config(config: &shingle_config::OutputConfig) -> Self {
-    let (width, height) = config.size();
+    let (width, height) = configured_size(config);
     Self {
       x: config.x,
       y: config.y,
@@ -154,6 +154,23 @@ impl OutputPlacement {
       transform: crate::parse_output_transform(&config.transform),
       refresh_mhz: explicit_refresh(config),
     }
+  }
+}
+
+/// The logical size before the transform of a configured output: its
+/// explicit mode, which is in physical pixels, divided by its scale, else
+/// its `width` by `height`.
+pub(crate) fn configured_size(
+  config: &shingle_config::OutputConfig,
+) -> (u32, u32) {
+  match config.mode.size() {
+    Some((width, height)) => crate::output_transform::logical_size(
+      width,
+      height,
+      config.scale,
+      wl_output::Transform::Normal,
+    ),
+    None => (config.width, config.height),
   }
 }
 

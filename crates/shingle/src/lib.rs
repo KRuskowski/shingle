@@ -341,8 +341,9 @@ impl From<shingle_config::ShingleConfig> for Config {
         Some((name, OutputPlacement::from_config(output)))
       })
       .collect();
+    let (width, height) = output::configured_size(&config.output);
     Self {
-      output: config.output.rect(),
+      output: Rect::new(config.output.x, config.output.y, width, height),
       output_refresh_mhz: output::explicit_refresh(&config.output),
       output_placements,
       background_color: config.background_color,

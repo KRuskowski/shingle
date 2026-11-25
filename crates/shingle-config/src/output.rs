@@ -242,8 +242,9 @@ pub struct OutputConfig {
   pub name: Option<String>,
   /// How the mode is chosen. `[output:NAME] mode`; default `auto`. On a
   /// native output this picks the KMS mode (`off` leaves the output dark);
-  /// in nested and headless an explicit size replaces `width` and
-  /// `height`, and its refresh rate is the one clients are told.
+  /// in nested and headless an explicit size, in physical pixels, replaces
+  /// `width` and `height` times `scale`, the nested window opens at that
+  /// size, and its refresh rate is the one clients are told.
   pub mode: OutputMode,
   /// Horizontal position of the output's top-left corner in the global layout.
   /// `[output:NAME] position`; default 0.
@@ -316,8 +317,8 @@ impl OutputConfig {
     }
   }
 
-  /// The untransformed size: the explicit mode's size if `mode` names one,
-  /// else `width` by `height`.
+  /// The explicit mode's size if `mode` names one, else `width` by
+  /// `height`, without scale or transform.
   pub fn size(&self) -> (u32, u32) {
     self.mode.size().unwrap_or((self.width, self.height))
   }

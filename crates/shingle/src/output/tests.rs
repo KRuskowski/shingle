@@ -206,6 +206,13 @@ fn an_explicit_configured_mode_sizes_headless_and_sets_its_refresh() {
   compositor.apply_config(Config::from(reloaded)).unwrap();
   assert_eq!(compositor.output(), Rect::new(0, 0, 800, 600));
   assert_eq!(compositor.output_info().refresh_mhz, 50_000);
+  // A mode is in physical pixels; the scale divides it.
+  let mut scaled = shingle_config::ShingleConfig::default();
+  scaled.output.mode = "1920x1080".parse().unwrap();
+  scaled.output.scale = 2.0;
+  compositor.apply_config(Config::from(scaled)).unwrap();
+  assert_eq!(compositor.output(), Rect::new(0, 0, 960, 540));
+  assert_eq!(compositor.output_info().refresh_mhz, 50_000, "kept");
 }
 
 /// A client bound to output management, with its manager.
