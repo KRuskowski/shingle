@@ -12,3 +12,9 @@ workspace = true
 [dependencies]
 rustix = { workspace = true, features = ["pipe"] }
 x11rb = { version = "0.14", features = ["composite", "res"] }
+
+# The X11 probe client for tools/xwayland_test/run.py; its own unit tests
+# run with the workspace's.
+[[example]]
+name = "xw_probe"
+test = true
