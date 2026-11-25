@@ -7,7 +7,7 @@ use wayland_protocols_wlr::foreign_toplevel::v1::server::{
 };
 use wayland_server::{
   Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
-  backend::ObjectId,
+  backend::ObjectId, protocol::wl_output::WlOutput,
 };
 
 use crate::{input, shell, state::CompositorState};
@@ -42,6 +42,37 @@ pub(crate) struct ForeignToplevels {
 pub(crate) fn create_global(handle: &DisplayHandle) {
   handle
     .create_global::<CompositorState, ZwlrForeignToplevelManagerV1, ()>(3, ());
+}
+
+/// Tells the toplevel handles of `output`'s client that their toplevels
+/// left it.
+pub(crate) fn output_removed(state: &mut CompositorState, output: &WlOutput) {
+  for_client_handles(state, output, |resource| resource.output_leave(output));
+}
+
+/// Tells the toplevel handles of `output`'s client that their toplevels
+/// are on the newly bound `output`.
+pub(crate) fn output_bound(state: &mut CompositorState, output: &WlOutput) {
+  for_client_handles(state, output, |resource| resource.output_enter(output));
+}
+
+fn for_client_handles(
+  state: &CompositorState,
+  output: &WlOutput,
+  mut send: impl FnMut(&ZwlrForeignToplevelHandleV1),
+) {
+  let Some(client) = output.client().map(|client| client.id()) else {
+    return;
+  };
+  for handle in state.foreign_toplevels.handles.values() {
+    if handle.window.is_some()
+      && handle.resource.client().map(|owner| owner.id())
+        == Some(client.clone())
+    {
+      send(&handle.resource);
+      handle.resource.done();
+    }
+  }
 }
 
 pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {

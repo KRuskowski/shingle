@@ -65,6 +65,7 @@ mod input_panel;
 mod ipc;
 mod launch;
 mod layer_shell;
+mod output;
 mod output_management;
 mod output_power;
 mod output_transform;
@@ -111,6 +112,10 @@ use calloop::{
 };
 pub use input::{Axis, AxisSource, Modifiers};
 pub use input_device::{InputDeviceId, InputDeviceInfo, InputDeviceKind};
+pub use output::{
+  OutputInfo, OutputModeInfo, OutputPlacement, OutputRequest, OutputRequestId,
+  RequestedMode,
+};
 pub use shingle_core::{Direction, StackingMode, WindowId};
 use shingle_core::{Gaps, Rect, Shingle, WorkspaceId};
 use shingle_idle::{Config as IdleConfig, IdleCoordinator};
@@ -126,8 +131,8 @@ use state::{ClientDataImpl, CompositorState};
 pub use xwayland::XwaylandSettings;
 
 /// The output name used until a backend calls
-/// [`Compositor::set_output_info`]. The core's output ID stays this name
-/// even after that, so sessions and workspaces keep their key.
+/// [`Compositor::set_output_info`], which renames the core's output after
+/// the backend's output, so sessions are saved per connector name.
 pub const OUTPUT_NAME: &str = "HEADLESS-1";
 /// Default logical output width in pixels, used by [`Config::default`].
 pub const OUTPUT_WIDTH: u32 = 1280;
@@ -154,61 +159,6 @@ pub struct PresentInfo {
   /// How the frame was presented: `Vsync`, `HwClock`, `HwCompletion`,
   /// `ZeroCopy`.
   pub flags: PresentationFlags,
-}
-
-/// What clients are told about the physical output: its identity, size and
-/// refresh rate. A backend describes its output with
-/// [`Compositor::set_output_info`]; nested and headless compositors keep
-/// the default, a 60 Hz output named [`OUTPUT_NAME`].
-///
-/// The output's position and logical size still come from
-/// [`Compositor::set_output`], and its scale and transform from their own
-/// setters, so the mode clients see is the output rectangle in physical
-/// pixels at `refresh_mhz`.
-#[derive(Clone, Debug, PartialEq)]
-pub struct OutputInfo {
-  /// Connector name, such as `DP-1`. Reported as the `wl_output`,
-  /// xdg-output, output-management and IPC output name.
-  pub name: String,
-  /// Manufacturer, from the EDID on real hardware.
-  pub make: String,
-  /// Model name, from the EDID on real hardware.
-  pub model: String,
-  /// Serial number, if the EDID has one.
-  pub serial: Option<String>,
-  /// Physical width and height in millimetres, or zero when unknown.
-  pub physical_size_mm: (u32, u32),
-  /// Subpixel layout of the panel.
-  pub subpixel: wayland_server::protocol::wl_output::Subpixel,
-  /// Refresh rate of the current mode in millihertz, or zero when unknown.
-  pub refresh_mhz: u32,
-}
-
-impl Default for OutputInfo {
-  fn default() -> Self {
-    Self {
-      name: OUTPUT_NAME.into(),
-      make: "Shingle".into(),
-      model: "Headless output".into(),
-      serial: None,
-      physical_size_mm: (310, 175),
-      subpixel: wayland_server::protocol::wl_output::Subpixel::Unknown,
-      refresh_mhz: 60_000,
-    }
-  }
-}
-
-impl OutputInfo {
-  /// Returns the human-readable description sent to clients, built like
-  /// wlroots' output description: make, model, serial and name.
-  pub fn description(&self) -> String {
-    match &self.serial {
-      Some(serial) => {
-        format!("{} {} {} ({})", self.make, self.model, serial, self.name)
-      }
-      None => format!("{} {} ({})", self.make, self.model, self.name),
-    }
-  }
 }
 
 /// What a directional workspace switch does at the edge of the grid
@@ -256,6 +206,14 @@ pub struct Config {
   pub output_scale: f64,
   /// Output transform, as `wl_output` reports it.
   pub output_transform: wayland_server::protocol::wl_output::Transform,
+  /// Refresh rate in millihertz clients are told while no backend
+  /// describes the output, as in nested and headless; zero keeps 60 Hz.
+  /// From an explicit `output.mode` such as `1920x1080@75`.
+  pub output_refresh_mhz: u32,
+  /// Placements of named outputs, keyed by output name, which replace
+  /// `output`, `output_scale` and `output_transform` while the output has
+  /// that name. Converted from [`shingle_config::ShingleConfig::outputs`].
+  pub output_placements: std::collections::BTreeMap<String, OutputPlacement>,
   /// Multiplier for pointer axis values; negative or non-finite values are
   /// ignored and keep the previous speed.
   pub mouse_scroll_speed: f64,
@@ -339,6 +297,8 @@ impl Default for Config {
       workspace_wraparound: WorkspaceWraparound::Disabled,
       output_scale: 1.0,
       output_transform: wayland_server::protocol::wl_output::Transform::Normal,
+      output_refresh_mhz: 0,
+      output_placements: std::collections::BTreeMap::new(),
       mouse_scroll_speed: 1.0,
       mouse_natural_scroll: false,
       cursor_theme: "default".into(),
@@ -373,8 +333,18 @@ impl Default for Config {
 
 impl From<shingle_config::ShingleConfig> for Config {
   fn from(config: shingle_config::ShingleConfig) -> Self {
+    let output_placements = config
+      .outputs
+      .iter()
+      .filter_map(|output| {
+        let name = output.name.clone()?;
+        Some((name, OutputPlacement::from_config(output)))
+      })
+      .collect();
     Self {
       output: config.output.rect(),
+      output_refresh_mhz: output::explicit_refresh(&config.output),
+      output_placements,
       background_color: config.background_color,
       workspace_width: config.workspaces.width,
       workspace_height: config.workspaces.height,
@@ -942,7 +912,7 @@ impl Compositor {
       Display::new().map_err(|error| Error::Display(error.to_string()))?;
     let xwayland = xwayland::Xwayland::bind(&config.xwayland);
     let disconnected = Arc::new(Mutex::new(Vec::new()));
-    let state =
+    let mut state =
       CompositorState::new(config, core, disconnected.clone(), &socket_name)?;
     state.create_globals(&display.handle());
 
@@ -1163,6 +1133,11 @@ impl Compositor {
     self.register_security_listeners()?;
     self.accept_security_clients()?;
     self.state.cleanup_disconnected();
+    output::remove_retired(
+      &mut self.state,
+      &self.display.handle(),
+      std::time::Instant::now(),
+    );
     if let Some(ipc) = &mut self.ipc {
       ipc.poll(&mut self.state);
     }
@@ -1399,11 +1374,31 @@ impl Compositor {
     if !config.output_scale.is_finite() || config.output_scale <= 0.0 {
       return Err(Error::InvalidOutputScale);
     }
-    let mut output = config.output;
-    if output_transform::is_quarter_turn(config.output_transform) {
-      std::mem::swap(&mut output.width, &mut output.height);
+    let placements = output::Placements::new(&config);
+    let placement = placements.get(&self.state.output_info.name);
+    if !placement.scale.is_finite() || placement.scale <= 0.0 {
+      return Err(Error::InvalidOutputScale);
     }
+    // A backend with a mode list sets the size; the configuration places
+    // it.
+    let (width, height) = match self.state.output_info.current() {
+      Some(mode) => output_transform::logical_size(
+        mode.width,
+        mode.height,
+        placement.scale,
+        placement.transform,
+      ),
+      None if output_transform::is_quarter_turn(placement.transform) => {
+        (placement.height, placement.width)
+      }
+      None => (placement.width, placement.height),
+    };
+    let output = Rect::new(placement.x, placement.y, width, height);
     output.validate()?;
+    self.state.placements = placements;
+    if self.state.output_info.modes.is_empty() && placement.refresh_mhz > 0 {
+      self.state.output_info.refresh_mhz = placement.refresh_mhz;
+    }
     self.state.background_color = config.background_color;
     self.state.workspace_wraparound = config.workspace_wraparound;
     self.state.tile_by_default = config.tile_by_default;
@@ -1457,8 +1452,8 @@ impl Compositor {
     }
     let commands = self.state.idle.set_config(config.idle);
     self.state.process_idle_commands(commands);
-    self.state.set_output_transform(config.output_transform);
-    self.state.set_output_scale(config.output_scale)?;
+    self.state.set_output_transform(placement.transform);
+    self.state.set_output_scale(placement.scale)?;
     self.state.set_output(output)?;
     shell::reconfigure_all(&mut self.state);
     Ok(())
@@ -2718,13 +2713,64 @@ impl Compositor {
   }
 
   /// Describes the physical output to clients: `wl_output` geometry, mode,
-  /// name and description, xdg-output, wlr-output-management heads and the
-  /// IPC output name. Outputs and heads that clients have already bound get
-  /// the new geometry, refresh rate and description at once. Their name
-  /// does not change, because Wayland names an output once per binding, so
-  /// a backend describes its output before clients connect.
+  /// name and description, xdg-output, wlr-output-management heads and
+  /// modes, and the IPC output name. Outputs and heads that clients have
+  /// already bound get the new geometry, refresh rate, description and mode
+  /// list at once.
+  ///
+  /// A new name is a new output. Wayland names an output once per binding,
+  /// so the `wl_output` global is replaced: clients see the old one removed
+  /// and a new one announced, surfaces leave the old output, and its
+  /// xdg-outputs, power and gamma controls, output-management heads and
+  /// workspace groups are finished. The core output is renamed, so windows
+  /// keep their tiling trees and the session is saved under the new name,
+  /// and the configured placement for that name (position, scale,
+  /// transform) is applied. A backend that knows its output at startup
+  /// describes it before clients connect, so they never see the default.
+  ///
+  /// A backend that lists modes ([`OutputInfo::modes`]) also decides the
+  /// output's size: it passes the mode's size to
+  /// [`Compositor::set_output`] (through the frontend), config reloads keep
+  /// it, and wlr-output-management mode changes become
+  /// [`Compositor::take_output_requests`].
   pub fn set_output_info(&mut self, info: OutputInfo) {
-    self.state.set_output_info(info);
+    let renamed = info.name != self.state.output_info.name;
+    let modes_changed = info.modes != self.state.output_info.modes;
+    let handle = self.display.handle();
+    if !renamed {
+      self.state.set_output_info(info);
+      if modes_changed {
+        output_management::modes_changed(&mut self.state, &handle);
+      }
+      return;
+    }
+    let name = info.name.clone();
+    self.state.output_info = info;
+    if let Err(error) = output::rename(&mut self.state, &handle, &name) {
+      eprintln!("shingle: renaming the output to {name} failed: {error}");
+    }
+    let placement = self.state.placements.get(&name);
+    let physical = output::physical_size(&self.state);
+    if let Err(error) = output::place(&mut self.state, placement, physical) {
+      eprintln!("shingle: placing output {name} failed: {error}");
+    }
+  }
+
+  /// Takes the mode changes wlr-output-management clients asked for since
+  /// the last call. Only a backend that lists modes in [`OutputInfo`] gets
+  /// any. It tests each one, for a native output with a KMS `TEST_ONLY`
+  /// commit, and unless [`OutputRequest::test_only`] makes it, describes the
+  /// new current mode with [`Compositor::set_output_info`] and resizes the
+  /// output, and then calls [`Compositor::finish_output_request`].
+  pub fn take_output_requests(&mut self) -> Vec<OutputRequest> {
+    std::mem::take(&mut self.state.output_requests)
+  }
+
+  /// Answers the client behind `request`: `failed` unless `ok`, else
+  /// `succeeded`, after applying the position, scale and transform it asked
+  /// for around the current mode, unless it only tested.
+  pub fn finish_output_request(&mut self, request: OutputRequestId, ok: bool) {
+    output_management::finish_request(&mut self.state, request, ok);
   }
 
   fn workspace_index(&self, workspace: WorkspaceId) -> usize {
@@ -2959,7 +3005,7 @@ fn tick_timer() -> Result<OwnedFd, Error> {
   Ok(timer)
 }
 
-fn parse_output_transform(
+pub(crate) fn parse_output_transform(
   value: &str,
 ) -> wayland_server::protocol::wl_output::Transform {
   use wayland_server::protocol::wl_output::Transform;
@@ -3004,6 +3050,11 @@ pub(crate) mod tests {
   /// directory, so tests need no `XDG_RUNTIME_DIR`. Returns the socket path
   /// for clients to connect to.
   pub(crate) fn test_compositor() -> (Compositor, PathBuf) {
+    test_compositor_with(Config::default())
+  }
+
+  /// [`test_compositor`] with `config`.
+  pub(crate) fn test_compositor_with(config: Config) -> (Compositor, PathBuf) {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let name = format!(
       "shingle-test-{}-{}",
@@ -3013,13 +3064,9 @@ pub(crate) mod tests {
     let path = std::env::temp_dir().join(&name);
     let socket = ListeningSocket::bind_absolute(path.clone())
       .expect("the temporary directory accepts a test socket");
-    let compositor = Compositor::with_socket(
-      Config::default(),
-      Shingle::new(),
-      socket,
-      name.into(),
-    )
-    .expect("the default config builds a compositor");
+    let compositor =
+      Compositor::with_socket(config, Shingle::new(), socket, name.into())
+        .expect("the config builds a compositor");
     (compositor, path)
   }
 
@@ -3429,6 +3476,7 @@ pub(crate) mod tests {
       physical_size_mm: (597, 336),
       subpixel: wayland_server::protocol::wl_output::Subpixel::HorizontalRgb,
       refresh_mhz: 59_951,
+      ..OutputInfo::default()
     }
   }
 
@@ -3560,14 +3608,17 @@ pub(crate) mod tests {
   }
 
   #[test]
-  fn output_info_updates_bound_outputs_but_keeps_their_name() {
+  fn output_info_with_the_same_name_updates_bound_outputs() {
     use wayland_client::protocol::wl_output::{Event, WlOutput};
     let (mut compositor, path) = test_compositor();
     let mut client = test_client::TestClient::connect(&mut compositor, &path);
     let _output = client.bind::<WlOutput>(4);
     client.roundtrip(&mut compositor);
     client.events.output.clear();
-    compositor.set_output_info(dell_output());
+    compositor.set_output_info(OutputInfo {
+      name: OUTPUT_NAME.into(),
+      ..dell_output()
+    });
     client.roundtrip(&mut compositor);
     let events = &client.events.output;
     assert!(events.iter().any(|event| matches!(
@@ -3579,9 +3630,11 @@ pub(crate) mod tests {
     )));
     assert!(events.iter().any(|event| matches!(
       event,
-      Event::Description { description } if description.ends_with("(DP-1)")
+      Event::Description { description }
+        if description.ends_with("ABC123 (HEADLESS-1)")
     )));
     assert!(matches!(events.last(), Some(Event::Done)));
+    assert!(client.events.globals_removed.is_empty());
     assert!(
       !events
         .iter()

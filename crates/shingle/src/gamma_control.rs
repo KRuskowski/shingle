@@ -24,6 +24,7 @@ pub(crate) struct GammaControl {
 struct ActiveControl {
   id: ObjectId,
   client: ClientId,
+  resource: ZwlrGammaControlV1,
 }
 
 pub(crate) fn create_global(handle: &DisplayHandle) {
@@ -45,6 +46,15 @@ pub(crate) fn cleanup_client(state: &mut CompositorState, client: &ClientId) {
     .as_ref()
     .is_some_and(|active| active.client == *client)
   {
+    restore(state);
+  }
+}
+
+/// Fails the active control, which belongs to an output that was
+/// replaced, and restores the identity ramp.
+pub(crate) fn output_removed(state: &mut CompositorState) {
+  if let Some(active) = state.gamma_control.active.take() {
+    active.resource.failed();
     restore(state);
   }
 }
@@ -109,6 +119,7 @@ fn create_control(
   state.gamma_control.active = Some(ActiveControl {
     id: control.id(),
     client: client.id(),
+    resource: control,
   });
 }
 

@@ -153,6 +153,12 @@ pub(crate) struct CompositorState {
   pub(crate) default_cursor: bool,
   pub(crate) output_id: OutputId,
   pub(crate) output_info: crate::OutputInfo,
+  /// Where the configuration puts the output, by name.
+  pub(crate) placements: crate::output::Placements,
+  pub(crate) output_globals: crate::output::OutputGlobals,
+  /// Mode changes waiting for the backend.
+  pub(crate) output_requests: Vec<crate::OutputRequest>,
+  pub(crate) next_output_request: u64,
   pub(crate) output_power: crate::output_power::OutputPower,
   pub(crate) output_management: crate::output_management::OutputManagement,
   pub(crate) started: Instant,
@@ -250,6 +256,12 @@ impl CompositorState {
     if config.workspace_width == 0 || config.workspace_height == 0 {
       return Err(crate::Error::InvalidWorkspaceGrid);
     }
+    let placements = crate::output::Placements::new(&config);
+    let initial = placements.get(OUTPUT_NAME);
+    config.output =
+      Rect::new(initial.x, initial.y, initial.width, initial.height);
+    config.output_scale = initial.scale;
+    config.output_transform = initial.transform;
     if !config.output_scale.is_finite() || config.output_scale <= 0.0 {
       return Err(crate::Error::InvalidOutputScale);
     }
@@ -257,11 +269,21 @@ impl CompositorState {
       std::mem::swap(&mut config.output.width, &mut config.output.height);
     }
     let output_id = OutputId::new(OUTPUT_NAME);
-    if core.outputs().any(|output| output == &output_id) {
-      core.set_output_workarea(&output_id, config.output)?;
-    } else {
+    if !core.outputs().any(|output| output == &output_id) {
       core.add_output(output_id.clone(), config.output)?;
     }
+    // Shingle drives one output, so the windows of a session saved under
+    // another output name, such as a native connector, join this one. A
+    // native backend renames it after its connector before clients connect.
+    let others: Vec<OutputId> = core
+      .outputs()
+      .filter(|output| **output != output_id)
+      .cloned()
+      .collect();
+    for other in others {
+      core.rename_output(&other, output_id.clone())?;
+    }
+    core.set_output_workarea(&output_id, config.output)?;
     let started = Instant::now();
     let idle = IdleCoordinator::new(config.idle, Duration::ZERO);
     Ok(Self {
@@ -290,7 +312,17 @@ impl CompositorState {
       cursor_size: config.cursor_size,
       default_cursor: false,
       output_id,
-      output_info: Default::default(),
+      output_info: crate::OutputInfo {
+        refresh_mhz: match initial.refresh_mhz {
+          0 => crate::OutputInfo::default().refresh_mhz,
+          refresh => refresh,
+        },
+        ..Default::default()
+      },
+      placements,
+      output_globals: Default::default(),
+      output_requests: Vec::new(),
+      next_output_request: 0,
       output_power: Default::default(),
       output_management: Default::default(),
       started,
@@ -548,7 +580,7 @@ impl CompositorState {
     Ok(())
   }
 
-  pub(crate) fn create_globals(&self, handle: &DisplayHandle) {
+  pub(crate) fn create_globals(&mut self, handle: &DisplayHandle) {
     crate::activation::create_global(handle);
     crate::foreign::create_globals(handle);
     crate::foreign_toplevel::create_global(handle);
@@ -557,7 +589,7 @@ impl CompositorState {
     crate::xdg_output::create_global(handle);
     handle.create_global::<CompositorState, WlCompositor, ()>(6, ());
     handle.create_global::<CompositorState, WlShm, ()>(2, ());
-    handle.create_global::<CompositorState, WlOutput, ()>(4, ());
+    crate::output::create_global(self, handle);
     crate::output_power::create_global(handle);
     crate::output_management::create_global(handle);
     crate::security_context::create_global(handle);
@@ -1910,15 +1942,20 @@ impl Dispatch<WlBuffer, BufferData> for CompositorState {
   }
 }
 
-impl GlobalDispatch<WlOutput, ()> for CompositorState {
-  crate::security_context::protocol_can_view!("wl_output");
+impl GlobalDispatch<WlOutput, crate::output::OutputGlobal> for CompositorState {
+  fn can_view(client: Client, _: &crate::output::OutputGlobal) -> bool {
+    crate::security_context::can_view(client, "wl_output")
+  }
 
+  /// Binds the output. An output bound from a replaced global, which a
+  /// client may still bind for a few seconds, is described once but not
+  /// kept: it stands for an output that is gone.
   fn bind(
     state: &mut Self,
     _handle: &DisplayHandle,
     _client: &Client,
     resource: New<WlOutput>,
-    _global_data: &(),
+    global_data: &crate::output::OutputGlobal,
     data_init: &mut DataInit<'_, Self>,
   ) {
     let resource = data_init.init(resource, OutputData);
@@ -1946,7 +1983,10 @@ impl GlobalDispatch<WlOutput, ()> for CompositorState {
     if resource.version() >= 2 {
       resource.done();
     }
-    state.outputs.insert(resource.id(), resource);
+    if global_data.generation == state.output_globals.generation {
+      crate::foreign_toplevel::output_bound(state, &resource);
+      state.outputs.insert(resource.id(), resource);
+    }
   }
 }
 

@@ -8,6 +8,7 @@ use wayland_protocols::ext::workspace::v1::server::{
 use wayland_server::{
   Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
   backend::{ClientId, ObjectId},
+  protocol::wl_output::WlOutput,
 };
 
 use crate::state::CompositorState;
@@ -21,6 +22,8 @@ struct Manager {
   resource: ExtWorkspaceManagerV1,
   pending_activation: Option<usize>,
   grid: (u32, u32),
+  /// The output name in the workspace ids sent so far.
+  output_name: String,
   stopped: bool,
 }
 
@@ -69,7 +72,10 @@ pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {
     {
       continue;
     }
-    if state.ext_workspaces.managers[&manager_id].grid != grid {
+    let manager = &state.ext_workspaces.managers[&manager_id];
+    // Workspace ids carry the output name, so a renamed output gets new
+    // workspaces, as a replaced output does in Wayfire.
+    if manager.grid != grid || manager.output_name != state.output_info.name {
       rebuild_manager(state, handle, &manager_id);
       rebuilt.insert(manager_id);
       continue;
@@ -102,6 +108,22 @@ pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {
   }
   for manager_id in dirty.difference(&rebuilt) {
     if let Some(manager) = state.ext_workspaces.managers.get(manager_id) {
+      manager.resource.done();
+    }
+  }
+}
+
+/// Tells workspace groups that `output` is gone.
+pub(crate) fn output_removed(state: &mut CompositorState, output: &WlOutput) {
+  let mut dirty = HashSet::new();
+  for group in state.ext_workspaces.groups.values_mut() {
+    if group.outputs.remove(&output.id()) {
+      group.resource.output_leave(output);
+      dirty.insert(group.manager.clone());
+    }
+  }
+  for manager in dirty {
+    if let Some(manager) = state.ext_workspaces.managers.get(&manager) {
       manager.resource.done();
     }
   }
@@ -200,6 +222,7 @@ fn create_manager_contents(
   let grid = (state.workspace_width, state.workspace_height);
   if let Some(manager) = state.ext_workspaces.managers.get_mut(manager_id) {
     manager.grid = grid;
+    manager.output_name.clone_from(&state.output_info.name);
   }
   let Ok(group) = client
     .create_resource::<ExtWorkspaceGroupHandleV1, (), CompositorState>(
@@ -324,6 +347,7 @@ impl GlobalDispatch<ExtWorkspaceManagerV1, ()> for CompositorState {
         resource: manager,
         pending_activation: None,
         grid: (0, 0),
+        output_name: String::new(),
         stopped: false,
       },
     );

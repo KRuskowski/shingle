@@ -22,6 +22,13 @@ pub(crate) fn create_global(handle: &DisplayHandle) {
   handle.create_global::<CompositorState, ZwlrOutputPowerManagerV1, ()>(1, ());
 }
 
+/// Fails every control: they belong to an output that was replaced.
+pub(crate) fn output_removed(state: &mut CompositorState) {
+  for (_, control) in state.output_power.controls.drain() {
+    control.failed();
+  }
+}
+
 pub(crate) fn sync(state: &mut CompositorState) {
   let mode = mode(state.idle.dpms_state());
   for control in state.output_power.controls.values() {
