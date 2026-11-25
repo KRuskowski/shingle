@@ -1,6 +1,6 @@
 # Status
 
-Last updated 2026-11-25, after replacing the separate binaries with one `shingle` binary that selects its backend.
+Last updated 2026-11-25, after replacing the separate binaries with one `shingle` binary and documenting the public API of every library crate.
 
 ## Readiness
 
@@ -71,6 +71,10 @@ Views blocked before their first map (see [ipc.md](ipc.md#map-blocking)) are pla
 ### Wayfire IPC
 
 77 methods and the Wayfire event set, including `input/list-devices` and `input/configure-device` for the registered seat devices (in nested, its keyboard, pointer and touch input). Disabling a device releases the input it holds. See [ipc.md](ipc.md).
+
+### API documentation
+
+Every library crate enforces `#![warn(missing_docs)]`: `shingle`, `shingle-core`, `shingle-frontend`, `shingle-config`, `shingle-render`, `shingle-session`, `shingle-idle` and `shingle-auth`. `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps` passes. The docs give units and coordinate spaces, invariants, the protocol request or Wayfire file an item follows, and each error case; the crate docs of `shingle` and `shingle-idle` describe the compositor lifecycle a backend drives and the lock state machine. `shingle-nested` and the binaries `shingle-lock` and `shingle-wcm` are not covered. Bugs found while documenting are listed under "Bugs found while documenting the crates" in [roadmap.md](roadmap.md).
 
 ## Verification
 

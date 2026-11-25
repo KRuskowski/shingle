@@ -90,7 +90,7 @@ Today nested matches bindings against winit's names. `binding_key_name` (main.rs
 A shared `keyboard` module will hold an `xkb::State` built from `config.input.load_keymap()`. Both frontends feed it evdev codes; nested already gets them from `PhysicalKey::to_scancode()`. The module produces:
 
 - the Wayfire key name, from an evdev-code table replacing `binding_key_name` (Wayfire names keys after `KEY_*`, so the table follows `linux/input-event-codes.h`);
-- the keysym name for `xkb:` bindings (`matches_xkb`, crates/shingle-config/src/lib.rs:1434);
+- the keysym name for `xkb:` bindings (`matches_xkb`, crates/shingle-config/src/lib.rs:2032);
 - the UTF-8 text for the Scale filter;
 - real depressed, latched, locked and group masks for `Compositor::keyboard_modifiers` (crates/shingle/src/lib.rs:929).
 
@@ -340,7 +340,7 @@ All `time_usec` values are passed through, so clients see libinput timestamps in
 
 - libinput does acceleration; Shingle never accelerates in software.
 - On `Added`, the native crate applies Wayfire's `[input]` options (wayfire/metadata/input.xml) through `Device::config_*`: `mouse_accel_profile`, `mouse_cursor_speed`, `touchpad_accel_profile`, `touchpad_cursor_speed`, `tap_to_click`, `click_method`, `scroll_method`, `natural_scroll`, `disable_touchpad_while_typing`, `drag_lock`, `tap_and_drag`, `left_handed_mode` and `middle_emulation`.
-- Only `mouse_scroll_speed`, `mouse_natural_scroll`, `left_handed_mode` and `middle_emulation` exist in `InputConfig` today (crates/shingle-config/src/lib.rs:1320). NB-6 adds the rest to `InputConfig` and to the Wayfire importer (crates/shingle-config/src/wayfire.rs:188-219).
+- Only `mouse_scroll_speed`, `mouse_natural_scroll`, `left_handed_mode` and `middle_emulation` exist in `InputConfig` today (crates/shingle-config/src/lib.rs:1860). NB-6 adds the rest to `InputConfig` and to the Wayfire importer (crates/shingle-config/src/wayfire.rs:188-219).
 - Left-handed mode and middle emulation come from libinput on native. Nested keeps its software `MouseButtons`.
 
 **Input-device IPC** (crates/shingle/src/input_device.rs).
