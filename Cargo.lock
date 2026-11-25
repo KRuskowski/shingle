@@ -3047,6 +3047,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shingle-bin"
+version = "0.1.0"
+dependencies = [
+ "shingle",
+ "shingle-config",
+ "shingle-nested",
+ "shingle-session",
+]
+
+[[package]]
 name = "shingle-config"
 version = "0.1.0"
 dependencies = [

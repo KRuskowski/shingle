@@ -1,15 +1,19 @@
-//! `shingle-nested`: Shingle in a window inside another Wayland session.
+//! The nested backend: Shingle in a window inside another Wayland or X11
+//! session.
 //!
-//! This binary is a thin winit host for [`shingle_frontend::Frontend`]: it
+//! This library is a thin winit host for [`shingle_frontend::Frontend`]: it
 //! creates the window and renderer, turns winit events into
-//! [`InputEvent`]s in output pixels and evdev codes, keeps the host-only
+//! [`InputEvent`]s in output pixels and evdev codes, and keeps the host-only
 //! state (keyboard focus changes, button emulation and the pointer-warp
-//! echo filter) and parses its arguments.
+//! echo filter). The `shingle` binary (crates/shingle-bin) parses the
+//! command line, selects this backend and calls [`run`].
 
 mod host_keyboard;
 
 use std::{
   error::Error,
+  ffi::OsString,
+  path::{Path, PathBuf},
   sync::Arc,
   time::{Duration, Instant},
 };
@@ -185,8 +189,8 @@ struct App {
 impl App {
   fn new(
     config: ShingleConfig,
-    spawn: Vec<std::ffi::OsString>,
-    config_path: Option<std::path::PathBuf>,
+    spawn: Vec<OsString>,
+    config_path: Option<PathBuf>,
   ) -> Result<Self, Box<dyn Error>> {
     let mut frontend = Frontend::new(config, spawn, config_path)?;
     let devices = SeatDevices::register(frontend.compositor_mut());
@@ -537,49 +541,25 @@ fn window_event_device(event: &WindowEvent) -> Option<InputDeviceKind> {
   }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-  let mut args = std::env::args_os().skip(1);
-  let mut config_path = None;
-  let mut ipc_path = None;
-  let mut spawn = Vec::new();
-  while let Some(argument) = args.next() {
-    match argument.to_str() {
-      Some("--config") => {
-        let Some(path) = args.next() else {
-          return Err("--config needs a path".into());
-        };
-        config_path = Some(std::path::PathBuf::from(path));
-      }
-      Some("--ipc") => {
-        let Some(path) = args.next() else {
-          return Err("--ipc needs a path".into());
-        };
-        ipc_path = Some(std::path::PathBuf::from(path));
-      }
-      Some("--spawn") => {
-        spawn.extend(args);
-        if spawn.is_empty() {
-          return Err("--spawn needs a program".into());
-        }
-        break;
-      }
-      _ => {
-        eprintln!(
-          "usage: shingle-nested [--config PATH] [--ipc PATH] \
-           [--spawn PROGRAM [ARGS...]]"
-        );
-        return Err("invalid arguments".into());
-      }
-    }
-  }
-  let config = ShingleConfig::load(config_path.as_deref())?;
+/// Runs Shingle nested in a window of the current host session until it
+/// quits, the window is closed or a SIGINT or SIGTERM arrives.
+///
+/// `config` was loaded from `config_path`, which config reloads read again.
+/// With `ipc_path`, Wayfire IPC is served there; the caller exports it as
+/// `WAYFIRE_SOCKET` before any client starts. `spawn`, if not empty, is a
+/// program and its arguments to start as a client.
+pub fn run(
+  config: ShingleConfig,
+  config_path: Option<PathBuf>,
+  ipc_path: Option<&Path>,
+  spawn: Vec<OsString>,
+) -> Result<(), Box<dyn Error>> {
+  // Connect to the host first, so that no client is started when there is
+  // no session to show it in.
   let event_loop = EventLoop::new()?;
   let mut app = App::new(config, spawn, config_path)?;
   if let Some(path) = ipc_path {
-    app.frontend.compositor_mut().enable_ipc(&path)?;
-    unsafe {
-      std::env::set_var("WAYFIRE_SOCKET", &path);
-    }
+    app.frontend.compositor_mut().enable_ipc(path)?;
   }
   event_loop.run_app(&mut app)?;
   Ok(())
@@ -590,7 +570,6 @@ mod tests {
   use std::{
     io::{Read, Write},
     os::unix::net::UnixStream,
-    path::PathBuf,
     sync::atomic::{AtomicU32, Ordering},
   };
 
@@ -599,7 +578,7 @@ mod tests {
 
   use super::*;
 
-  /// The `input/list-devices` reply of `shingle-nested` before the device
+  /// The `input/list-devices` reply of the nested backend before the device
   /// registry, recorded byte for byte from a real run of `master` at
   /// 7189b50.
   const NESTED_LIST_DEVICES: &str = concat!(

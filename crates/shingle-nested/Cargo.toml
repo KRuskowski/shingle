@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Nested winit backend of the shingle binary"
 
 [dependencies]
 pollster.workspace = true

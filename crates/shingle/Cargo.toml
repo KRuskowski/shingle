@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Pure-Rust headless Wayland compositor for Shingle"
+description = "Wayland protocol, input, output and IPC core of Shingle"
 
 [lints]
 workspace = true

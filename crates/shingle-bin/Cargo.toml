@@ -1,0 +1,26 @@
+[package]
+name = "shingle-bin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The shingle binary: argument parsing and backend selection"
+
+# The binary is named after the compositor. It lives in its own package
+# because the `shingle` library must not depend on the backends (winit in
+# the nested one), and the backends depend on the library.
+[[bin]]
+name = "shingle"
+path = "src/main.rs"
+# `cargo doc` would otherwise document this binary and the `shingle` library
+# into the same directory.
+doc = false
+
+[dependencies]
+shingle = { path = "../shingle" }
+shingle-config = { path = "../shingle-config" }
+shingle-nested = { path = "../shingle-nested" }
+shingle-session = { path = "../shingle-session" }
+
+[lints]
+workspace = true
