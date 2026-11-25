@@ -58,6 +58,9 @@ pub(crate) struct InputState {
   pub(crate) cursor_surface: Option<ObjectId>,
   pub(crate) cursor_hotspot: (i32, i32),
   pub(crate) cursor_shape: Option<crate::cursor_shape::Shape>,
+  /// Whether the client under the pointer has set a cursor, possibly an
+  /// empty one, since the pointer entered its surface.
+  pub(crate) cursor_set: bool,
   pub(crate) pointer_serial: u32,
   pointer_batch_depth: usize,
   pointer_event_time: Option<u32>,
@@ -91,6 +94,7 @@ impl InputState {
       cursor_surface: None,
       cursor_hotspot: (0, 0),
       cursor_shape: None,
+      cursor_set: false,
       pointer_serial: 0,
       pointer_batch_depth: 0,
       pointer_event_time: None,
@@ -357,6 +361,7 @@ impl Dispatch<WlPointer, PointerData> for CompositorState {
         state.input.cursor_hotspot = (hotspot_x, hotspot_y);
         state.input.cursor_surface = surface.as_ref().map(Resource::id);
         state.input.cursor_shape = None;
+        state.input.cursor_set = true;
         if let Some(surface) = surface
           && let Some(surface) = state.surfaces.get_mut(&surface.id())
           && matches!(surface.role, Role::None | Role::Cursor)
@@ -1349,6 +1354,7 @@ fn set_pointer_focus(state: &mut CompositorState, target: Option<ObjectId>) {
   if state.input.pointer_focus == target {
     return;
   }
+  state.input.cursor_set = false;
   let old = state.input.pointer_focus.take();
   if let Some(old) = old
     && let Some(resource) = state

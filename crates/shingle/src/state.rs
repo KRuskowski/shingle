@@ -142,6 +142,7 @@ pub(crate) struct CompositorState {
   pub(crate) output_transform: wl_output::Transform,
   pub(crate) cursor_theme: String,
   pub(crate) cursor_size: u32,
+  pub(crate) default_cursor: bool,
   pub(crate) output_id: OutputId,
   pub(crate) output_info: crate::OutputInfo,
   pub(crate) output_power: crate::output_power::OutputPower,
@@ -271,6 +272,7 @@ impl CompositorState {
       output_transform: config.output_transform,
       cursor_theme: config.cursor_theme,
       cursor_size: config.cursor_size,
+      default_cursor: false,
       output_id,
       output_info: Default::default(),
       output_power: Default::default(),
@@ -709,7 +711,9 @@ impl CompositorState {
     } else {
       self.append_layers(&mut snapshots, &[Layer::Top, Layer::Overlay]);
     }
-    if let Some(object) = &self.input.cursor_surface
+    if let Some(snapshot) = crate::cursor_shape::default_snapshot(self) {
+      snapshots.push(snapshot);
+    } else if let Some(object) = &self.input.cursor_surface
       && self
         .surfaces
         .get(object)

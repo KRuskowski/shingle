@@ -1822,6 +1822,17 @@ impl Compositor {
     self.state.set_output(output)
   }
 
+  /// Makes the compositor draw the cursor theme's default arrow at the
+  /// pointer whenever no client cursor applies: over the background, and
+  /// over a client that has not set a cursor since the pointer entered it.
+  /// A client that hides its cursor still gets none. Nested leaves this off,
+  /// because the host draws its own cursor; a native backend turns it on.
+  /// The arrow appears among [`Compositor::visible_surfaces`] as a
+  /// [`SurfaceRole::Cursor`] surface.
+  pub fn set_default_cursor(&mut self, enabled: bool) {
+    self.state.default_cursor = enabled;
+  }
+
   /// Returns the description of the output clients currently see.
   pub fn output_info(&self) -> &OutputInfo {
     &self.state.output_info
@@ -2428,6 +2439,28 @@ pub(crate) mod tests {
         .iter()
         .any(|event| matches!(event, Event::Presented { .. }))
     );
+  }
+
+  #[test]
+  fn client_cursor_replaces_the_default_cursor() {
+    let (mut compositor, path) = test_compositor();
+    let cursors = |compositor: &Compositor| {
+      compositor
+        .visible_surfaces()
+        .into_iter()
+        .filter(|surface| surface.role == SurfaceRole::Cursor)
+        .map(|surface| surface.id)
+        .collect::<Vec<_>>()
+    };
+    assert!(cursors(&compositor).is_empty());
+    compositor.set_default_cursor(true);
+    let default = cursors(&compositor);
+    assert_eq!(default.len(), 1);
+    let mut client = test_client::TestClient::connect(&mut compositor, &path);
+    client.cursor_surface(&mut compositor);
+    let current = cursors(&compositor);
+    assert_eq!(current.len(), 1);
+    assert_ne!(current, default);
   }
 
   #[test]

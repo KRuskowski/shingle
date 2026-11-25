@@ -30,10 +30,24 @@ pub(crate) fn create_global(handle: &DisplayHandle) {
   handle.create_global::<CompositorState, WpCursorShapeManagerV1, ()>(2, ());
 }
 
+/// Returns the cursor a client chose with `wp_cursor_shape_device_v1`.
 pub(crate) fn snapshot(state: &CompositorState) -> Option<SurfaceSnapshot> {
-  let shape = state.input.cursor_shape?;
+  Some(shape_snapshot(state, state.input.cursor_shape?))
+}
+
+/// Returns the theme's default arrow (`default`, or `left_ptr` in older
+/// themes) when the compositor draws a default cursor and the client under
+/// the pointer, if any, has not set one.
+pub(crate) fn default_snapshot(
+  state: &CompositorState,
+) -> Option<SurfaceSnapshot> {
+  (state.default_cursor && !state.input.cursor_set)
+    .then(|| shape_snapshot(state, Shape::Default))
+}
+
+fn shape_snapshot(state: &CompositorState, shape: Shape) -> SurfaceSnapshot {
   let image = image(shape, &state.cursor_theme, state.cursor_size);
-  Some(SurfaceSnapshot {
+  SurfaceSnapshot {
     id: SurfaceId(u64::MAX - shape as u64),
     window: None,
     parent: None,
@@ -59,7 +73,7 @@ pub(crate) fn snapshot(state: &CompositorState) -> Option<SurfaceSnapshot> {
       offset_x: 0,
       offset_y: 0,
     }),
-  })
+  }
 }
 
 impl GlobalDispatch<WpCursorShapeManagerV1, ()> for CompositorState {
@@ -129,6 +143,7 @@ impl Dispatch<WpCursorShapeDeviceV1, ()> for CompositorState {
       if focused {
         state.input.cursor_shape = Some(shape);
         state.input.cursor_surface = None;
+        state.input.cursor_set = true;
       }
     }
   }
@@ -173,7 +188,12 @@ fn image(
 }
 
 fn load_image(shape: Shape, theme: &str, size: u32) -> Option<CursorImage> {
-  let path = xcursor::CursorTheme::load(theme).load_icon(shape_name(shape))?;
+  let theme = xcursor::CursorTheme::load(theme);
+  let path = theme.load_icon(shape_name(shape)).or_else(|| {
+    (shape == Shape::Default)
+      .then(|| theme.load_icon("left_ptr"))
+      .flatten()
+  })?;
   let bytes = std::fs::read(path).ok()?;
   let images = xcursor::parser::parse_xcursor(&bytes)?;
   let image = images
@@ -256,5 +276,64 @@ fn shape_name(shape: Shape) -> &'static str {
     Shape::DndAsk => "dnd-ask",
     Shape::AllResize => "all-resize",
     _ => "default",
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use wayland_server::backend::ObjectId;
+
+  use super::*;
+  use crate::input_device::tests::test_state;
+
+  fn cursors(state: &CompositorState) -> Vec<SurfaceSnapshot> {
+    state
+      .visible_surfaces()
+      .into_iter()
+      .filter(|snapshot| snapshot.role == SurfaceRole::Cursor)
+      .collect()
+  }
+
+  #[test]
+  fn no_cursor_is_drawn_without_the_default_cursor() {
+    let state = test_state();
+    assert!(cursors(&state).is_empty());
+  }
+
+  #[test]
+  fn default_cursor_follows_the_pointer() {
+    let mut state = test_state();
+    state.default_cursor = true;
+    crate::input::pointer_motion(&mut state, 100.0, 50.0);
+    let cursors = cursors(&state);
+    assert_eq!(cursors.len(), 1);
+    let cursor = &cursors[0];
+    let buffer = cursor.buffer.as_ref().expect("the cursor has pixels");
+    assert!(buffer.width > 0 && buffer.height > 0);
+    assert!(cursor.geometry.x <= 100 && cursor.geometry.y <= 50);
+    assert!(
+      cursor.geometry.x + cursor.geometry.width as i32 > 100
+        && cursor.geometry.y + cursor.geometry.height as i32 > 50
+    );
+  }
+
+  #[test]
+  fn a_hidden_client_cursor_is_not_replaced_by_the_default() {
+    let mut state = test_state();
+    state.default_cursor = true;
+    // What wl_pointer.set_cursor with a null surface leaves behind.
+    state.input.cursor_set = true;
+    assert!(cursors(&state).is_empty());
+  }
+
+  #[test]
+  fn leaving_a_client_brings_back_the_default_cursor() {
+    let mut state = test_state();
+    state.default_cursor = true;
+    state.input.pointer_focus = Some(ObjectId::null());
+    state.input.cursor_set = true;
+    crate::input::pointer_motion(&mut state, 10.0, 10.0);
+    assert_eq!(state.input.pointer_focus, None);
+    assert_eq!(cursors(&state).len(), 1);
   }
 }
