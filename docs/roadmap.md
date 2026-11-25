@@ -39,7 +39,7 @@ In short:
 
 The work is split into seven workspaces, DB-1 to DB-7, each with acceptance criteria in the design: Vulkan setup, offscreen backend and GPU harness, buffer lifetime, `zwp_linux_dmabuf_v1`, `linux-drm-syncobj-v1`, shm uploads without copies, and later direct scanout of client buffers. NB-8 builds on DB-1.
 
-DB-1 `shingle-gpu-dmabuf` is done ([status.md](status.md#compositor-and-renderer), [design/dmabuf.md](design/dmabuf.md#db-1-as-built)); its GPU namespace, tools/gpu_test/run.py, is where DB-2 starts. DB-2 and DB-3 are next and do not depend on each other.
+DB-1 `shingle-gpu-dmabuf` is done ([status.md](status.md#compositor-and-renderer), [design/dmabuf.md](design/dmabuf.md#db-1-as-built)). DB-2 `shingle-offscreen-backend` is done too ([status.md](status.md#the-shingle-binary), [design/dmabuf.md](design/dmabuf.md#db-2-as-built)): `shingle --backend offscreen`, screencopy from drawn frames, and `tools/gpu_test/run.py --checks`, which records that without linux-dmabuf NVIDIA's Vulkan WSI cannot present and its EGL is not used. DB-3 is next; DB-4 needs it.
 
 ## 4. XWayland
 

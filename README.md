@@ -22,8 +22,9 @@ There is one binary, `shingle`, which picks its backend the way Wayfire does:
 | nested, a window in the host session | `WAYLAND_DISPLAY`, `WAYLAND_SOCKET` or `DISPLAY` is set |
 | native, libseat, libinput and KMS | none of them is set, as on a TTY. It takes the seat, its input devices and one monitor (atomic KMS with copy scanout; not yet run on hardware); from an SSH login it refuses with "no seat" and exits with status 1 |
 | headless, no display or input devices | `--headless` |
+| offscreen, headless but drawing with the GPU into an offscreen target that only screencopy shows, for GPU clients in tests | `--backend offscreen` |
 
-`--backend nested|native|headless` overrides the choice, and so does the `SHINGLE_BACKEND` environment variable with the same values; the command line wins over the variable. Other options are `--config PATH`, `--ipc PATH` (Wayfire IPC, exported to clients as `WAYFIRE_SOCKET`) and `--spawn PROGRAM [ARG]...`, which starts a client; `shingle --help` lists them all. The separate `shingle-nested` binary is gone: run `shingle`, or `shingle --backend nested` to be explicit.
+`--backend nested|native|headless|offscreen` overrides the choice, and so does the `SHINGLE_BACKEND` environment variable with the same values; the command line wins over the variable. Other options are `--config PATH`, `--ipc PATH` (Wayfire IPC, exported to clients as `WAYFIRE_SOCKET`) and `--spawn PROGRAM [ARG]...`, which starts a client; `shingle --help` lists them all. The separate `shingle-nested` binary is gone: run `shingle`, or `shingle --backend nested` to be explicit.
 
 ## Configuration
 

@@ -8,7 +8,7 @@
 | `shingle` | Wayland protocol handling, input routing, output state, IPC and the compositor event loop. Library only; no winit. |
 | `shingle-render` | wgpu rendering without a windowing dependency: shared `GpuContext`, per-output `RenderState`, the `draw` pass, window and offscreen targets, and DMA-BUF import with its Vulkan setup. |
 | `shingle-frontend` | The interactive frontend shared by the nested and native hosts, without winit: `Frontend` with Scale, Expo, the switchers, drags, animations, effects, the scene build, binding dispatch, key repeat and session handling, behind the `Host` trait and `InputEvent`. |
-| `shingle-bin` | The `shingle` binary: argument parsing, backend selection and the headless backend. Its own package because the `shingle` library must not depend on the backends that depend on it. |
+| `shingle-bin` | The `shingle` binary: argument parsing, backend selection and the headless and offscreen backends. Its own package because the `shingle` library must not depend on the backends that depend on it. |
 | `shingle-native` | Native backend library: libseat session and VT switching, libinput devices with udev hotplug, atomic KMS with copy scanout and page-flip pacing, DRM hotplug and the configured choice of output and mode, the Vulkan renderer for it, and the event loop that runs `Frontend` on a seat, each device interaction behind a trait (`Session`, `InputSource`, `KmsDevice`, `DeviceMonitor`, `FrameRenderer`) with fakes in the tests. Entry point `shingle_native::run`. |
 | `shingle-nested` | Nested backend library, a thin winit host for `Frontend`: the window and renderer, winit-to-`InputEvent` translation, host focus handling and button emulation. Entry point `shingle_nested::run`. |
 | `shingle-xwayland` | XWayland without `wayland-server`: X display sockets and lock, the supervised Xwayland process with its restart rule, and the X window manager (x11rb) behind an `XConnection` trait: property parsers, classification, `Pairing` of windows and surfaces by serial, the `ConfigureRequest` policy, ICCCM focus and the `FocusIn` guard, client messages, restacking and the root cursor, the clipboard and primary selection bridge with its MIME mapping and non-blocking transfers, and the `xw_probe` test client (examples/). |
@@ -56,6 +56,9 @@
 | Backend selection from arguments and environment | `crates/shingle-bin/src/backend.rs` |
 | What a start does (print, fail or run a backend) | `crates/shingle-bin/src/main.rs` |
 | Headless backend | `crates/shingle-bin/src/headless.rs` |
+| Offscreen backend: the frontend on the GPU without a display, frame pacing, presentation | `crates/shingle-bin/src/offscreen.rs` |
+| Screencopy: CPU composite, or frame capture answered by the frontend (`set_frame_capture`, `finish_capture`) | `crates/shingle/src/screencopy.rs`; the frontend's capture draw in `crates/shingle-frontend/src/frontend/scene.rs` (`answer_captures`), `shingle_render::capture_frame` in `crates/shingle-render/src/target.rs` |
+| GPU namespace and DB-2's real-client checks (offscreen, nested, baseline) | `tools/gpu_test/run.py`, `tools/gpu_test/checks.py` |
 | winit host: window, input translation, button emulation | `crates/shingle-nested/src/lib.rs` |
 | Native seat: `Session`, libseat, startup checks (SSH, enable timeout, backend) | `crates/shingle-native/src/session.rs` |
 | libinput events, translation to `InputEvent`, device options | `crates/shingle-native/src/input.rs`, `input/libinput.rs` |
