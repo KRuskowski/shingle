@@ -15,9 +15,12 @@
 #![warn(missing_docs)]
 
 mod diagnostics;
+pub mod gpu;
 pub mod host;
 pub mod input;
 pub mod kms;
+pub mod pacing;
+pub mod scanout;
 pub mod session;
 #[cfg(test)]
 mod test_client;
