@@ -269,7 +269,14 @@ impl<S: Session, I: InputSource> Backend<S, I> {
   /// Runs one turn of the loop without waiting. Returns false once the
   /// frontend asked to exit.
   pub fn step(&mut self) -> bool {
-    let now = Instant::now();
+    self.step_at(Instant::now())
+  }
+
+  /// [`Backend::step`] at `now`, the time the page-flip timeout, frame
+  /// pacing and GPU health are judged by. Tests pass a fixed time, so
+  /// that a slow machine cannot make a pending flip time out between two
+  /// of their steps.
+  pub(crate) fn step_at(&mut self, now: Instant) -> bool {
     self.dispatch_session();
     self.dispatch_input();
     self.dispatch_display(now);

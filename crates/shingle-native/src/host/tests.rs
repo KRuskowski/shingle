@@ -2,7 +2,11 @@
 //! real frontend, compositor and Wayland client on a private socket.
 
 use std::{
-  cell::RefCell, collections::VecDeque, path::PathBuf, rc::Rc, time::Duration,
+  cell::RefCell,
+  collections::VecDeque,
+  path::PathBuf,
+  rc::Rc,
+  time::{Duration, Instant},
 };
 
 use shingle::{Compositor, Config, InputDeviceId, InputDeviceKind, WindowId};
@@ -72,6 +76,9 @@ struct Fixture {
   base: PathBuf,
   /// The fake DRM hotplug monitor.
   monitor: FakeMonitor,
+  /// The time every step runs at. It stands still, so a page flip left
+  /// pending never times out (1 s) however slowly the test runs.
+  now: Instant,
 }
 
 /// A rendering setup with fake renderers that share `failures` and
@@ -166,6 +173,7 @@ impl Fixture {
       toplevel,
       base,
       monitor,
+      now: Instant::now(),
     };
     fixture.step();
     fixture
@@ -173,7 +181,7 @@ impl Fixture {
 
   /// Runs one turn of the loop and lets the client read what it got.
   fn step(&mut self) -> bool {
-    let running = self.backend.step();
+    let running = self.backend.step_at(self.now);
     self
       .client
       .roundtrip(self.backend.frontend_mut().compositor_mut());
