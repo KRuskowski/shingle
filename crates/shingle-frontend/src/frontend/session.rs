@@ -55,6 +55,7 @@ impl Frontend {
     })();
     match result {
       Ok(config) => {
+        self.reloaded_config = Some(config.clone());
         self.finish_switcher();
         self.cancel_scale();
         self.clear_expo();

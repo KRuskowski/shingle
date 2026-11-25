@@ -144,6 +144,8 @@ pub struct Frontend {
   config_path: Option<std::path::PathBuf>,
   config_watcher: ConfigWatcher,
   auto_reload_config: bool,
+  /// The last configuration a reload applied, until the host takes it.
+  reloaded_config: Option<ShingleConfig>,
   config_reload_delay: Duration,
   last_config_poll: Instant,
   quit: bool,
@@ -351,6 +353,7 @@ impl Frontend {
       ),
       config_path,
       auto_reload_config: config.behavior.auto_reload,
+      reloaded_config: None,
       config_reload_delay: Duration::from_millis(
         config.behavior.config_reload_delay,
       ),
@@ -731,17 +734,25 @@ impl Frontend {
   }
 
   /// Sets the output to a `width` by `height` pixel display, in logical
-  /// size after the output scale. The host calls this once it knows its
-  /// display size.
+  /// size after the output scale, keeping its position. The host calls
+  /// this once it knows its display size.
   pub fn set_output_size(
     &mut self,
     width: u32,
     height: u32,
   ) -> Result<(), shingle::Error> {
     let (width, height) = self.compositor.logical_output_size(width, height);
+    let output = self.compositor.output();
     self
       .compositor
-      .set_output(shingle_core::Rect::new(0, 0, width, height))
+      .set_output(shingle_core::Rect::new(output.x, output.y, width, height))
+  }
+
+  /// Takes the configuration the last config reload applied, if one was
+  /// reloaded since the last call. The native host follows the output
+  /// modes in it.
+  pub fn take_reloaded_config(&mut self) -> Option<ShingleConfig> {
+    self.reloaded_config.take()
   }
 
   /// Handles a resize of the host's display to `width` by `height`
