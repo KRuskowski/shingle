@@ -34,6 +34,7 @@ The socket path is exported as `WAYFIRE_SOCKET` to every client Shingle starts, 
 - `wf/alpha/*` query and set per-window opacity, clamped to the inclusive 0–1 range.
 - `get-view-property` and `set-view-property` store typed runtime metadata: booleans, signed and unsigned integers, strings and floats. Changing an existing property's type is rejected, and properties are removed with their view.
 - Invalid outputs, coordinates, alpha values and unmapped views return errors.
+- X11 views are ordinary `toplevel` views: `app-id` is the class part of `WM_CLASS`, `title` is `_NET_WM_NAME` (else `WM_NAME`), `min-size` and `max-size` come from `WM_NORMAL_HINTS`, and `pid` is the X client's PID (from XRes, else `_NET_WM_PID`), as Wayfire reports it. Wayland views still report `pid` -1. `close-view` closes an X11 view with `WM_DELETE_WINDOW`, or disconnects its client (`KillClient`) when the window does not list that protocol. Override-redirect windows (menus, tooltips) are not listed, unlike Wayfire's `"type": "x-or"` views.
 
 ## Window actions
 

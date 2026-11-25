@@ -46,13 +46,13 @@ The work is split into seven workspaces, each with acceptance criteria in the de
 
 1. XW-1 `shingle-toplevel-handle`: done; the toplevel role is shell-neutral and every child gets one client environment, which stopped the host `DISPLAY` and `WAYFIRE_SOCKET` leaks. See [status.md](status.md#the-shingle-binary) and [status.md](status.md#with-real-clients).
 2. XW-2 `shingle-xwayland-server`: done; Shingle binds its X display, supervises Xwayland (eager or lazy, with the restart rule) and brings its XWM up; `DISPLAY`, the `stipc` display methods, `xwayland-ready` and the startup script work. See [status.md](status.md#with-real-clients).
-3. XW-3 `shingle-xwayland-windows`: `xwayland_shell_v1`, serial pairing, and managed X11 toplevels as Shingle windows with configure, close, IPC and session identity.
+3. XW-3 `shingle-xwayland-windows`: done; `xwayland_shell_v1` pairs X windows with surfaces, and managed X11 toplevels are Shingle windows with configure, `_NET_WM_STATE`, close, IPC (class, title, PID) and session identity. See [status.md](status.md#with-real-clients).
 4. XW-4 `shingle-xwayland-behaviour`: ICCCM focus, override-redirect windows, `_NET_WM_STATE`, move and resize requests, transients and dialogs, and checks with Scale, Expo, rules and session restore.
 5. XW-5 `shingle-xwayland-selection`: clipboard and primary selection in both directions, with INCR.
 6. XW-6 `shingle-xwayland-dnd`: Xdnd drag and drop (later).
 7. XW-7 `shingle-xwayland-hidpi`: optional zero-scaling HiDPI mode.
 
-XW-3 is next.
+XW-4 is next; XW-5 can run in parallel with it.
 
 ## 5. Multi-output
 

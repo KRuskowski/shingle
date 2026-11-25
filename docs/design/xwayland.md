@@ -1,8 +1,8 @@
 # XWayland design
 
-Status: accepted, 2026-11-25; the operator's answers to the former open questions are under [Decisions](#decisions). Roadmap item "XWayland" ([roadmap.md](../roadmap.md#4-xwayland)). XW-1 and XW-2 are done (2026-11-25); their deviations from this design are listed in their entries ([XW-1](#xw-1-shingle-toplevel-handle-shell-neutral-toplevel-and-client-environment), [XW-2](#xw-2-shingle-xwayland-server-sockets-process-configuration-and-xwm-bring-up)).
+Status: accepted, 2026-11-25; the operator's answers to the former open questions are under [Decisions](#decisions). Roadmap item "XWayland" ([roadmap.md](../roadmap.md#4-xwayland)). XW-1, XW-2 and XW-3 are done (2026-11-25); their deviations from this design are listed in their entries ([XW-1](#xw-1-shingle-toplevel-handle-shell-neutral-toplevel-and-client-environment), [XW-2](#xw-2-shingle-xwayland-server-sockets-process-configuration-and-xwm-bring-up), [XW-3](#xw-3-shingle-xwayland-windows-association-and-managed-toplevels)).
 
-Shingle has no XWayland, so X11 applications cannot run under it. `stipc/get_display` returns an empty `xwayland` value (crates/shingle/src/ipc.rs:2676). This document decides how Shingle starts and supervises `Xwayland`, how its own X window manager (XWM) turns X11 windows into Shingle windows, and how input, selections and scaling work for them. It is the brief for the implementation workspaces in [section 8](#8-implementation-plan). Sections 1 and 2 up to the XWM bring-up are implemented (XW-2); the rest is not yet.
+Shingle has no XWayland, so X11 applications cannot run under it. `stipc/get_display` returns an empty `xwayland` value (crates/shingle/src/ipc.rs:2676). This document decides how Shingle starts and supervises `Xwayland`, how its own X window manager (XWM) turns X11 windows into Shingle windows, and how input, selections and scaling work for them. It is the brief for the implementation workspaces in [section 8](#8-implementation-plan). Sections 1 to 4 are implemented for managed windows (XW-2 and XW-3); override-redirect windows, focus and client state requests (XW-4), selections (XW-5), drag and drop (XW-6) and HiDPI (XW-7) are not yet.
 
 Line numbers refer to branch `shingle-xwayland-design`, cut from `master` at `8df73d6`.
 
@@ -245,7 +245,7 @@ Whichever of the three comes last calls `xwayland::try_map`. For a managed windo
 
 - **Surface destroyed before pairing.** The serial entry is dropped and the X window waits for a serial that never comes. Xwayland creates a new surface and sends a new serial if the window maps again.
 - **X window destroyed first.** The surface stays role-less, inert as wlroots' surfaces are, and is cleaned up when it is destroyed.
-- **Unmap, then remap.** Xwayland destroys the `wl_surface` on unmap and creates a new one with a new serial on map. So an unmap dissociates; the Shingle window becomes unmapped, and a later pair re-associates it with the same `WindowId` while the X window lives. This is the `associate`/`dissociate` cycle Wayfire listens to (xwayland.cpp:88-101).
+- **Unmap, then remap.** Xwayland destroys the `wl_surface` on unmap and creates a new one with a new serial on map. So an unmap dissociates; the Shingle window becomes unmapped, and a later pair re-associates it with the same `WindowId` while the X window lives. (XW-3 removes the Shingle window on unmap instead, and a remap creates a new one; see its entry.) This is the `associate`/`dissociate` cycle Wayfire listens to (xwayland.cpp:88-101).
 - **Commit before the serial pair.** Buffers are kept on the surface but not drawn, since a role-less or unpaired `Role::Xwayland` surface is not in `visible_surfaces` (crates/shingle/src/state.rs:600).
 
 ### Rejected alternatives
@@ -304,7 +304,7 @@ The frontend sees an X11 toplevel as a `SurfaceSnapshot` with `role: SurfaceRole
 | `Move`, `Resize` | `_NET_WM_MOVERESIZE`, giving the same `Event::BeginMove` and `Event::BeginResize`. |
 | `xdg_toplevel.destroy`, surface destroyed | Dissociate, DestroyNotify or server exit, through `detach_toplevel`. |
 
-Any X11 window that stays unmapped (WM `Withdrawn`) while its X id lives keeps its `WindowId`. It is unmapped in the core (`reconcile_unmapped`) and claimed again on remap, the way a Wayland toplevel that unmaps and maps again is.
+Any X11 window that stays unmapped (WM `Withdrawn`) while its X id lives keeps its `WindowId`. It is unmapped in the core (`reconcile_unmapped`) and claimed again on remap, the way a Wayland toplevel that unmaps and maps again is. (Not so in XW-3, which follows what a Wayland toplevel that unmaps really does: see the XW-3 entry.)
 
 **Tiling, floating and fullscreen.** These come from the same `LeafState` and the same `reconfigure_all`. What differs is the configure:
 
@@ -479,7 +479,7 @@ It is the X11 counterpart of the in-process Wayland client.
   - `xterm`, `xeyes` and `xlogo` map, tile in mapping order and fill the workarea.
   - `xwininfo -id` matches `view-info` geometry.
   - `list-views` shows `app-id` `XTerm` and a real `pid`.
-  - `close-view` closes `xterm` through `WM_DELETE_WINDOW` and kills `xeyes`, which does not list it.
+  - `close-view` closes `xterm` through `WM_DELETE_WINDOW` and kills `xeyes`, which does not list it. (On this host `xeyes` lists it too, so `KillClient` is checked with the probe client and `--no-delete`.)
   - `configure-view` reaches the X geometry.
 - **Behaviour (XW-4).**
   - Keys from `stipc/feed_key` reach the focused `xterm`, checked by `xterm -e sh -c 'read l; echo "$l" > out'`.
@@ -566,6 +566,21 @@ Acceptance:
 - Unit tests for pairing, parsers, classification and configure policy, plus `shingle` tests with a fake XWM.
 - Real runs: `xterm`, `xeyes` and `xlogo` tile and match `xwininfo`; titles and classes appear in `list-views` with real PIDs; `close-view` uses `WM_DELETE_WINDOW` or `KillClient`; `configure-view` and `simple-tile/set-layout` reach X geometry; a `view-pre-map` subscriber holds an X window until `unblock-map`.
 - An X window destroyed before its surface commits, and a surface destroyed before the serial message, both leave no stray window. This is checked with the probe client.
+
+Done, 2026-11-25 (branch `shingle-xwayland-windows`). Results are in [status.md](../status.md#with-real-clients): the namespace harness passed 87/87 checks with `xterm`, `xeyes`, `xlogo`, `xprop`, `xwininfo` and the probe client, including the XW-2 groups. Where the code differs from the text above, the code was followed:
+
+- **Unmap removes the Shingle window.** On `UnmapNotify` the X window is dissociated, its toplevel role dropped and its Shingle window removed, and a remap creates a new `WindowId`, as a Wayland toplevel that commits a null buffer gets one (`unmap_toplevel`). Keeping the `WindowId` as a placeholder (`reconcile_unmapped`) would let another window of the same class claim it through `reconcile_mapped` while the first is withdrawn, and the core has no "unmapped but owned" state. XW-4 can add one if session restore or rules need the ID to survive.
+- **Module layout.** The glue is `crates/shingle/src/xwayland/` with `mod.rs` (XW-2's server glue), `shell.rs` (`xwayland_shell_v1`, `XwaylandRole`) and `windows.rs` (events, pairing, `try_map`, the X half of configure, close). `Role::Xwayland(Box<XwaylandRole>)` holds the role resource, the pending and committed serials, the paired window and, for a managed window, `Option<Box<ToplevelRole>>`, which `Role::toplevel` returns. `Pairing<S>` is generic over the surface key, and `shingle` uses `SurfaceId`.
+- **Requests are queued in `CompositorState`.** The XWM is owned by `Compositor`, not the state, so `configure_toplevel`, `close_window` and the `ConfigureRequest` handler push `XRequest`s (configure, `_NET_WM_STATE`, close) to `state.xwayland.requests`, and `Xwayland::flush` hands them to the XWM once per turn. The XWM drops a configure or state identical to the last one it sent, so `reconfigure_all` causes no needless X traffic; a `ConfigureRequest` is always answered. X windows on other workspaces are therefore not singled out, as section 4 proposed: they keep their rectangle because their tile does not change, and nothing is sent for an X window before it is a Shingle window.
+- **`ConfigureRequest`** carries the current geometry with the masked fields applied. Before the window is a Shingle window the request is granted and becomes its `floating_geometry`, used if it floats; the stacking fields are ignored until XW-4 restacks.
+- **Initial `_NET_WM_STATE`** is parsed into `WindowInfo` but not applied; client state requests in both directions are XW-4. So are all client messages except `WL_SURFACE_SERIAL`, including `_NET_CLOSE_WINDOW`. `_NET_CLIENT_LIST_STACKING` has the same contents as `_NET_CLIENT_LIST` until XW-4 restacks X windows.
+- **Unmanaged windows** keep `Role::Xwayland` with no toplevel, so they are paired but neither drawn nor listed; `SurfaceRole::Unmanaged` comes with drawing them in XW-4.
+- **`pid` in view JSON** is set for X11 views only (`ToplevelRole.pid`); Wayland views keep -1, so `wayland_toplevels_look_unchanged` still matches its recording.
+- **Role object first.** Xwayland destroys `xwayland_surface_v1` before the `wl_surface`; destroying it marks the role dead for `has_live_role`, so the surface may go without the `defunct_role_object` error, and the association stays as the protocol says.
+- **Quiet `BadWindow`.** Every close produced a `BadWindow` for `WM_STATE` on the `UnmapNotify` that precedes `DestroyNotify`; the XWM no longer reports `BadWindow` errors for windows it has already forgotten, as wlroots ignores them.
+- **`WL_SURFACE_ID`** is not interned, so the XWM cannot recognise it; it logs once that it ignored an unknown client message type and that a `WL_SURFACE_ID` would mean an Xwayland older than 23.1.
+- **The probe client** is `crates/shingle-xwayland/examples/xw_probe.rs`, driven by command-line options and stdin commands; it already sends the XW-4 messages (`_NET_WM_STATE`, `_NET_ACTIVE_WINDOW`, `WM_CHANGE_STATE`, `_NET_WM_MOVERESIZE`). It refuses to run unless `SHINGLE_XWAYLAND_TEST_NAMESPACE=1`, which only the harness sets.
+- **X clients run as uid 1000** in a nested user namespace inside the harness's, because `xterm` run as the namespace's root tries to give its pty to group `tty`, which is not mapped, and exits. The harness's signals all go through `signal_checked` (PID above 1 and the expected `/proc/<pid>/comm`), which `kill_xwayland` now uses.
 
 ### XW-4 `shingle-xwayland-behaviour`: focus, unmanaged windows and states
 
