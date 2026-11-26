@@ -55,25 +55,41 @@
 //!   [`Display::apply_configuration`]): wlr-output-management mode changes
 //!   and outputs turned on or off, across heads, pass one `TEST_ONLY`
 //!   modeset of the whole new configuration before it is made.
+//! - **Planes and flips** (NB-10): each output's cursor plane shows the
+//!   cursor ([`Display::set_cursor`]), moved by flips of the cursor plane
+//!   alone when no frame is drawn ([`Display::commit_cursor`]);
+//!   `VRR_ENABLED` follows the output's `vrr` where the monitor is
+//!   capable; frames of outputs whose clients ask for tearing
+//!   ([`Display::set_tearing`]) flip with `PAGE_FLIP_ASYNC` where the
+//!   driver takes it; and zero-copy frames hand the plane their render
+//!   fence as `IN_FENCE_FD` ([`Drawn::Fenced`]). A commit the card refuses
+//!   with one of them is made again without it, which stays off for that
+//!   output (async flips, the cursor plane) or the card (fences) with a
+//!   logged reason; [`PlaneFeatures`] turns each off from the start.
 //!
 //! The calls without an output name ([`Display::size`],
 //! [`Display::present`], [`Display::test_mode`] and the like) mean the
 //! first lit output.
 
-use std::{collections::BTreeMap, fmt, io, path::PathBuf, time::Instant};
+use std::{
+  collections::BTreeMap, fmt, io, os::fd::AsRawFd, path::PathBuf, time::Instant,
+};
 
 use shingle::{
   HeadState, OutputInfo, PresentInfo, PresentationFlags, RequestedMode,
 };
 use shingle_config::OutputMode;
+use shingle_frontend::CursorImage;
 use wayland_server::protocol::wl_output;
 
 use crate::{
+  cursor::CursorBuffers,
   diagnostics,
+  features::PlaneFeatures,
   kms::{
     AtomicRequest, BlobId, CommitFlags, Connection, ConnectorInfo, CrtcId,
-    KmsDevice, Mode, PlaneId, Subpixel,
-    atomic::{self, ModesetState, OutputProps, Teardown},
+    FramebufferId, KmsDevice, Mode, PlaneId, Subpixel,
+    atomic::{self, CursorState, Flip, ModesetState, OutputProps, Teardown},
     edid::Edid,
     modes::{self, ModeChoice},
     output::{self, Card, Output, OutputError, Wanted},
@@ -81,8 +97,9 @@ use crate::{
   outputs::{self, ConnectorChange, ConnectorState, OutputPolicy},
   pacing::{FrameScheduler, State},
   scanout::{
-    DrawTarget, Drawn, Scanout, ScanoutChoice, ScanoutImporter, ScanoutStatus,
-    allocator::BufferAllocator, copy::CopyScanout, gbm::GbmScanout,
+    DrawTarget, Drawn, RenderFence, Scanout, ScanoutChoice, ScanoutImporter,
+    ScanoutStatus, allocator::BufferAllocator, copy::CopyScanout,
+    gbm::GbmScanout,
   },
 };
 
@@ -199,6 +216,31 @@ impl Sequence {
   }
 }
 
+/// An output's cursor plane: what it shows and what it should show.
+#[derive(Default)]
+struct CursorPlane {
+  /// The buffers, made when the cursor is first shown.
+  buffers: Option<CursorBuffers>,
+  /// What the plane shows, as last committed; `None` while it is off.
+  shown: Option<CursorState>,
+  /// The image it should show, at its place; `None` for none.
+  wanted: Option<CursorImage>,
+  /// Whether a commit showing the cursor was accepted with these buffers;
+  /// before that each one is tested first.
+  tested: bool,
+  /// Why the plane is not used any more: the card refused it.
+  refused: Option<String>,
+}
+
+/// What the flip in flight of an output was.
+#[derive(Clone, Copy, Debug, Default)]
+struct InFlight {
+  /// It changed only the cursor plane: no frame was presented.
+  cursor_only: bool,
+  /// It was a `PAGE_FLIP_ASYNC` flip, not synchronized with the vblank.
+  tearing: bool,
+}
+
 /// One output being driven, with its own frame cycle.
 struct Lit {
   output: Output,
@@ -216,9 +258,46 @@ struct Lit {
   /// Why its zero-copy scanout must give way to copy scanout, once the
   /// output is ready for the flip that does it.
   fallback: Option<String>,
+  /// Whether `VRR_ENABLED` is on.
+  vrr: bool,
+  /// The cursor plane.
+  cursor: CursorPlane,
+  /// Whether a client on it asks for tearing.
+  tearing: bool,
+  /// Why its flips are not async any more: the card refused one.
+  async_refused: Option<String>,
+  /// What the flip in flight was.
+  in_flight: InFlight,
 }
 
 impl Lit {
+  /// An output lit with `mode` on fresh copy buffers.
+  fn new(
+    output: Output,
+    mode: Mode,
+    (blob, scanout): (BlobId, CopyScanout),
+    wanted_dpms: bool,
+    vrr: bool,
+  ) -> Self {
+    Self {
+      output,
+      mode,
+      blob,
+      scanout: Box::new(scanout),
+      scheduler: FrameScheduler::default(),
+      sequence: Sequence::default(),
+      dpms_on: true,
+      wanted_dpms,
+      status: ScanoutStatus::Untried,
+      fallback: None,
+      vrr,
+      cursor: CursorPlane::default(),
+      tearing: false,
+      async_refused: None,
+      in_flight: InFlight::default(),
+    }
+  }
+
   fn name(&self) -> &str {
     &self.output.connector.name
   }
@@ -238,14 +317,31 @@ impl Lit {
       framebuffer: self.scanout.current(),
       size: self.mode.size(),
       active: self.wanted_dpms,
-      vrr: false,
+      vrr: self.vrr,
+      cursor: self.cursor.shown,
     }
   }
 
   /// Frees its buffers and mode blob.
   fn destroy(mut self, device: &mut dyn KmsDevice) {
     self.scanout.destroy(device);
+    if let Some(mut buffers) = self.cursor.buffers.take() {
+      buffers.destroy(device);
+    }
     let _ = device.destroy_blob(self.blob);
+  }
+
+  /// Why its cursor plane cannot show the cursor, if it cannot.
+  fn cursor_unusable(&self) -> Option<String> {
+    if let Some(reason) = &self.cursor.refused {
+      return Some(reason.clone());
+    }
+    self
+      .output
+      .props
+      .cursor
+      .is_none()
+      .then(|| format!("{}'s CRTC has no cursor plane", self.name()))
   }
 }
 
@@ -293,13 +389,15 @@ fn fresh_state(
   mode: &Mode,
   blob: BlobId,
   scanout: &CopyScanout,
+  vrr: bool,
 ) -> ModesetState {
   ModesetState {
     mode: blob,
     framebuffer: scanout.current(),
     size: mode.size(),
     active: true,
-    vrr: false,
+    vrr,
+    cursor: None,
   }
 }
 
@@ -442,6 +540,16 @@ pub struct Display {
   zero_copy: ZeroCopySetup,
   /// The serial of the last scanout buffer made.
   serial: u64,
+  /// The size of the card's cursor buffers.
+  cursor_size: (u32, u32),
+  /// Whether the driver takes async page flips.
+  async_flips: bool,
+  /// Which features an override turned off.
+  features: PlaneFeatures,
+  /// Why the card refused `IN_FENCE_FD`, which no frame gets since.
+  fences_refused: Option<String>,
+  /// Whether the log said that tearing is asked for but cannot be had.
+  told_no_tearing: bool,
 }
 
 impl Display {
@@ -470,6 +578,8 @@ impl Display {
       .enable_atomic()
       .map_err(|error| StartError::NoAtomic(error.to_string()))?;
     let monotonic = device.monotonic_timestamps();
+    let cursor_size = device.cursor_size();
+    let async_flips = device.async_page_flips();
     if !monotonic {
       diagnostics::log(
         "page-flip times are not CLOCK_MONOTONIC; presentation times come \
@@ -492,6 +602,11 @@ impl Display {
       monotonic,
       zero_copy: ZeroCopySetup::Off("zero-copy scanout was not enabled".into()),
       serial: 0,
+      cursor_size,
+      async_flips,
+      features: PlaneFeatures::default(),
+      fences_refused: None,
+      told_no_tearing: false,
     };
     let ranked = display.ranked();
     if ranked.is_empty() {
@@ -632,6 +747,8 @@ impl Display {
       .card
       .output_on(connector, crtc, plane, &mut |blob| device.blob(blob).ok())
       .map_err(LightError::Output)?;
+    let output = self.claim_cursor(output, None);
+    let vrr = self.vrr_for(&output);
     let choice = self.choice(&connector.name).unwrap_or_default();
     let candidates = modes::candidates(
       &output.connector.modes,
@@ -647,25 +764,21 @@ impl Display {
           continue;
         }
       };
-      let state = fresh_state(&mode, blob, &scanout);
+      let state = fresh_state(&mode, blob, &scanout, vrr);
       let request = self.request(&[(&output.props, state)], &[]);
       match self.device.commit(
         &request,
         CommitFlags::TEST_ONLY | CommitFlags::ALLOW_MODESET,
       ) {
         Ok(()) => {
-          self.lit.push(Lit {
+          let wanted_dpms = self.wanted_dpms;
+          self.lit.push(Lit::new(
             output,
             mode,
-            blob,
-            scanout: Box::new(scanout),
-            scheduler: FrameScheduler::default(),
-            sequence: Sequence::default(),
-            dpms_on: true,
-            wanted_dpms: self.wanted_dpms,
-            status: ScanoutStatus::Untried,
-            fallback: None,
-          });
+            (blob, scanout),
+            wanted_dpms,
+            vrr,
+          ));
           return Ok(());
         }
         Err(error) => {
@@ -744,6 +857,52 @@ impl Display {
       lit.name(),
       f64::from(lit.mode.refresh_mhz()) / 1000.0
     ));
+    self.log_vrr(lit);
+  }
+
+  /// Says whether output `lit` got the variable refresh it is configured
+  /// for, and why not.
+  fn log_vrr(&self, lit: &Lit) {
+    if !self.policy.vrr(lit.name()) {
+      return;
+    }
+    let name = lit.name();
+    diagnostics::log(&if lit.vrr {
+      format!("output {name}: variable refresh rate on")
+    } else if !lit.output.vrr_capable {
+      format!(
+        "output {name}: variable refresh rate stays off, because the \
+         monitor or the driver is not VRR-capable (vrr_capable is not 1)"
+      )
+    } else {
+      format!(
+        "output {name}: variable refresh rate stays off, because the CRTC \
+         has no VRR_ENABLED property"
+      )
+    });
+  }
+
+  /// Whether `output` gets `VRR_ENABLED`: it is configured with `vrr`,
+  /// its connector is `vrr_capable` and its CRTC has the property.
+  fn vrr_for(&self, output: &Output) -> bool {
+    self.policy.vrr(&output.connector.name)
+      && output.vrr_capable
+      && output.props.crtc.vrr_enabled.is_some()
+  }
+
+  /// `output` without a cursor plane if a lit output other than the one
+  /// at `except` uses that plane, as on cards whose CRTCs share one.
+  fn claim_cursor(&self, mut output: Output, except: Option<usize>) -> Output {
+    let taken = self.lit.iter().enumerate().any(|(index, lit)| {
+      Some(index) != except
+        && lit.output.props.cursor.is_some()
+        && lit.output.props.cursor.map(|cursor| cursor.id)
+          == output.props.cursor.map(|cursor| cursor.id)
+    });
+    if taken {
+      output.props.cursor = None;
+    }
+    output
   }
 
   /// Makes the modeset that `prepare` tested, showing a black frame on
@@ -987,9 +1146,12 @@ impl Display {
   /// Puts the frame `drawn` for [`Display::draw_target`] on screen on
   /// output `name` at its next vblank: copies its pixels into the buffer
   /// off screen on copy scanout, and commits a flip of its CRTC to the
-  /// buffer. A refused commit drops the frame, and makes a zero-copy
-  /// output fall back to copy scanout; one refused for lack of DRM master
-  /// pauses the output until the seat resumes it.
+  /// buffer, with the cursor plane's change if it has one, the frame's
+  /// fence and, if a client there asks for tearing, `PAGE_FLIP_ASYNC`. A
+  /// commit refused with one of those is made again without it. A refused
+  /// commit drops the frame, and makes a zero-copy output fall back to
+  /// copy scanout; one refused for lack of DRM master pauses the output
+  /// until the seat resumes it.
   pub fn present_on(&mut self, name: &str, drawn: &Drawn, now: Instant) {
     let Some(index) = self.lit.iter().position(|lit| lit.name() == name) else {
       return;
@@ -1003,26 +1165,316 @@ impl Display {
         return;
       }
     };
-    let request = atomic::flip(&lit.output.props, framebuffer);
-    match self.device.commit(
-      &request,
-      CommitFlags::NONBLOCK | CommitFlags::PAGE_FLIP_EVENT,
-    ) {
-      Ok(()) => lit.scheduler.committed(now),
-      Err(error) if not_master(&error) => {
-        diagnostics::log(&format!(
-          "the page flip was refused ({error}); waiting for the seat"
-        ));
-        lit.scheduler.pause();
-      }
-      Err(error) => {
-        diagnostics::log(&format!("the page flip of {name} failed: {error}"));
-        if lit.scanout.zero_copy() {
-          lit.fallback =
-            Some(format!("the page flip to a GBM buffer failed: {error}"));
-        }
+    let fence = match drawn {
+      Drawn::Fenced(fence) => Some(fence),
+      _ => None,
+    };
+    self.flip(index, Some(framebuffer), fence, now);
+  }
+
+  /// Commits a flip of lit output `index`, whose frame was started: to
+  /// `framebuffer` if a frame was drawn, waiting for `fence`, and with
+  /// the cursor plane's change. Each optional part the card refuses is
+  /// left out of the next try and stays off.
+  fn flip(
+    &mut self,
+    index: usize,
+    framebuffer: Option<FramebufferId>,
+    fence: Option<&RenderFence>,
+    now: Instant,
+  ) {
+    let mut cursor = self.cursor_change(index);
+    let mut tearing =
+      framebuffer.is_some() && cursor.is_none() && self.may_tear(index);
+    let plane_fence = self.lit[index].output.props.plane.in_fence_fd;
+    let mut use_fence = fence.filter(|_| {
+      plane_fence.is_some()
+        && self.fences_refused.is_none()
+        && self.features.no_in_fence.is_none()
+    });
+    if let Some(fence) = fence
+      && use_fence.is_none()
+    {
+      wait_for(fence);
+    }
+    let name = self.lit[index].name().to_owned();
+    loop {
+      let lit = &mut self.lit[index];
+      let flip = Flip {
+        framebuffer,
+        fence: use_fence.map(|fence| fence.fd().as_raw_fd()),
+        cursor,
+      };
+      let request = atomic::page_flip(&lit.output.props, &flip);
+      if request.is_empty() {
         lit.scheduler.abandon();
+        return;
       }
+      let mut flags = CommitFlags::NONBLOCK | CommitFlags::PAGE_FLIP_EVENT;
+      if tearing {
+        flags = flags | CommitFlags::PAGE_FLIP_ASYNC;
+      }
+      let shows_cursor = matches!(cursor, Some(Some(_)));
+      // A cursor plane is tested the first time it shows the cursor; a
+      // test may not ask for a page-flip event.
+      let test = (shows_cursor && !lit.cursor.tested).then(|| {
+        let mut test = CommitFlags::TEST_ONLY;
+        if tearing {
+          test = test | CommitFlags::PAGE_FLIP_ASYNC;
+        }
+        test
+      });
+      let device = self.device.as_mut();
+      let result = test
+        .map_or(Ok(()), |test| device.commit(&request, test))
+        .and_then(|()| device.commit(&request, flags));
+      match result {
+        Ok(()) => {
+          lit.scheduler.committed(now);
+          lit.in_flight = InFlight {
+            cursor_only: framebuffer.is_none(),
+            tearing,
+          };
+          if let Some(state) = cursor {
+            lit.cursor.shown = state;
+            lit.cursor.tested |= shows_cursor;
+            if let Some(buffers) = &mut lit.cursor.buffers {
+              buffers.committed();
+            }
+          }
+          return;
+        }
+        Err(error) if not_master(&error) => {
+          if let Some(buffers) = &mut lit.cursor.buffers {
+            buffers.abandon();
+          }
+          diagnostics::log(&format!(
+            "the page flip was refused ({error}); waiting for the seat"
+          ));
+          lit.scheduler.pause();
+          return;
+        }
+        Err(error) if tearing => {
+          let reason = format!("the card refused an async page flip: {error}");
+          diagnostics::log(&format!(
+            "output {name}: frames wait for the vblank again, because \
+             {reason}"
+          ));
+          lit.async_refused = Some(reason);
+          tearing = false;
+        }
+        Err(error) if use_fence.is_some() => {
+          let reason = format!("the card refused IN_FENCE_FD: {error}");
+          diagnostics::log(&format!(
+            "frames wait for the GPU before their flip again, because \
+             {reason}"
+          ));
+          self.fences_refused = Some(reason);
+          if let Some(fence) = use_fence.take() {
+            wait_for(fence);
+          }
+        }
+        Err(error) if shows_cursor => {
+          if let Some(buffers) = &mut lit.cursor.buffers {
+            buffers.abandon();
+          }
+          let reason = format!("the cursor plane refused the cursor: {error}");
+          diagnostics::log(&format!(
+            "output {name}: the cursor is drawn into the frame, because \
+             {reason}"
+          ));
+          lit.cursor.refused = Some(reason);
+          lit.cursor.wanted = None;
+          // Turn the plane off if it shows an older cursor.
+          cursor = lit.cursor.shown.is_some().then_some(None);
+        }
+        Err(error) if cursor.is_some() => {
+          diagnostics::log(&format!(
+            "output {name}: turning the cursor plane off failed: {error}"
+          ));
+          cursor = None;
+        }
+        Err(error) => {
+          diagnostics::log(&format!("the page flip of {name} failed: {error}"));
+          if lit.scanout.zero_copy() {
+            lit.fallback =
+              Some(format!("the page flip to a GBM buffer failed: {error}"));
+          }
+          lit.scheduler.abandon();
+          return;
+        }
+      }
+    }
+  }
+
+  /// Whether a frame of lit output `index` may flip with
+  /// `PAGE_FLIP_ASYNC`: a client there asks for tearing, the driver takes
+  /// async flips, and neither an override nor a refusal turned them off.
+  fn may_tear(&mut self, index: usize) -> bool {
+    let lit = &self.lit[index];
+    if !lit.tearing
+      || lit.async_refused.is_some()
+      || self.features.no_async_flips.is_some()
+    {
+      return false;
+    }
+    if !self.async_flips {
+      if !self.told_no_tearing {
+        diagnostics::log(
+          "a client asks for tearing, but the driver has no atomic async \
+           page flips; its frames wait for the vblank",
+        );
+        self.told_no_tearing = true;
+      }
+      return false;
+    }
+    true
+  }
+
+  /// What the cursor plane of lit output `index` must change to show what
+  /// it should: `Some(None)` turns it off, `None` changes nothing. A new
+  /// image is written into the buffer off screen. Without a cursor plane,
+  /// or with buffers that cannot be made or written, nothing changes and
+  /// the plane is given up.
+  fn cursor_change(&mut self, index: usize) -> Option<Option<CursorState>> {
+    let device = self.device.as_mut();
+    let lit = &mut self.lit[index];
+    lit.output.props.cursor?;
+    let off = lit.cursor.shown.is_some().then_some(None);
+    let Some(image) = lit.cursor.wanted.clone() else {
+      return off;
+    };
+    if lit.cursor.buffers.is_none() {
+      match CursorBuffers::new(device, self.cursor_size) {
+        Ok(buffers) => lit.cursor.buffers = Some(buffers),
+        Err(error) => {
+          let reason = format!("no cursor buffers: {error}");
+          diagnostics::log(&format!(
+            "output {}: the cursor is drawn into the frame, because {reason}",
+            lit.output.connector.name
+          ));
+          lit.cursor.refused = Some(reason);
+          lit.cursor.wanted = None;
+          return off;
+        }
+      }
+    }
+    let buffers = lit.cursor.buffers.as_mut()?;
+    let framebuffer = match buffers.prepare(device, &image) {
+      Ok(framebuffer) => framebuffer,
+      Err(error) => {
+        let reason = format!("writing the cursor failed: {error}");
+        diagnostics::log(&format!(
+          "output {}: the cursor is drawn into the frame, because {reason}",
+          lit.output.connector.name
+        ));
+        lit.cursor.refused = Some(reason);
+        lit.cursor.wanted = None;
+        return off;
+      }
+    };
+    let state = CursorState {
+      framebuffer,
+      size: buffers.size(),
+      x: image.position.0,
+      y: image.position.1,
+    };
+    if lit.cursor.shown == Some(state) {
+      buffers.abandon();
+      return None;
+    }
+    Some(Some(state))
+  }
+
+  /// The size of output `name`'s cursor plane, which takes cursors up to
+  /// that size, or why it cannot show the cursor: an override, no cursor
+  /// plane on its CRTC, or the card refused it.
+  pub fn cursor_plane_size(&self, name: &str) -> Result<(u32, u32), String> {
+    if let Some(reason) = &self.features.no_cursor_plane {
+      return Err(reason.clone());
+    }
+    let lit = self
+      .find(name)
+      .ok_or_else(|| format!("{name} is not lit"))?;
+    match lit.cursor_unusable() {
+      Some(reason) => Err(reason),
+      None => Ok(self.cursor_size),
+    }
+  }
+
+  /// Makes output `name`'s cursor plane show `image` at its place, or
+  /// nothing. The change goes out with the output's next flip, or with
+  /// [`Display::commit_cursor`] when no frame is drawn. Ignored where the
+  /// plane cannot be used ([`Display::cursor_plane_size`]).
+  pub fn set_cursor(&mut self, name: &str, image: Option<CursorImage>) {
+    let usable = self.cursor_plane_size(name).is_ok();
+    if let Some(lit) = self.find_mut(name) {
+      lit.cursor.wanted = image.filter(|_| usable);
+    }
+  }
+
+  /// Whether output `name`'s cursor plane does not show yet what it
+  /// should.
+  pub fn cursor_pending(&self, name: &str) -> bool {
+    let Some(lit) = self.find(name) else {
+      return false;
+    };
+    if lit.output.props.cursor.is_none() {
+      return false;
+    }
+    match (&lit.cursor.wanted, &lit.cursor.shown) {
+      (None, shown) => shown.is_some(),
+      (Some(_), None) => true,
+      (Some(image), Some(shown)) => {
+        (shown.x, shown.y) != image.position
+          || !lit
+            .cursor
+            .buffers
+            .as_ref()
+            .is_some_and(|buffers| buffers.shows(image))
+      }
+    }
+  }
+
+  /// Moves or changes output `name`'s cursor plane without a frame: a
+  /// flip of the cursor plane alone, if the output is ready for a commit
+  /// and its cursor changed. Its page flip presents nothing to clients.
+  /// Returns whether it committed.
+  pub fn commit_cursor(&mut self, name: &str, now: Instant) -> bool {
+    if !self.cursor_pending(name) || !self.begin_frame_on(name) {
+      return false;
+    }
+    let Some(index) = self.lit.iter().position(|lit| lit.name() == name) else {
+      return false;
+    };
+    self.flip(index, None, None, now);
+    self.lit[index].scheduler.flip_pending()
+  }
+
+  /// Says whether a client on output `name` asks for tearing, which its
+  /// frames then get with `PAGE_FLIP_ASYNC` where the driver takes it.
+  pub fn set_tearing(&mut self, name: &str, tearing: bool) {
+    if let Some(lit) = self.find_mut(name) {
+      lit.tearing = tearing;
+    }
+  }
+
+  /// Turns the features `features` names off from now on.
+  pub fn set_features(&mut self, features: PlaneFeatures) {
+    self.features = features;
+  }
+
+  /// Whether zero-copy frames may hand the plane a render fence, or why
+  /// not: an override, or the card refused one.
+  pub fn fences_allowed(&self) -> Result<(), String> {
+    match self
+      .features
+      .no_in_fence
+      .as_ref()
+      .or(self.fences_refused.as_ref())
+    {
+      Some(reason) => Err(reason.clone()),
+      None => Ok(()),
     }
   }
 
@@ -1221,9 +1673,17 @@ impl Display {
       if !lit.scheduler.page_flip() {
         continue;
       }
+      // A flip of the cursor plane alone showed no frame.
+      let in_flight = std::mem::take(&mut lit.in_flight);
+      if in_flight.cursor_only {
+        continue;
+      }
       lit.scanout.presented();
-      let mut flags =
-        PresentationFlags::Vsync | PresentationFlags::HwCompletion;
+      let mut flags = PresentationFlags::HwCompletion;
+      // An async flip did not wait for the vblank.
+      if !in_flight.tearing {
+        flags |= PresentationFlags::Vsync;
+      }
       let time = if self.monotonic {
         flags |= PresentationFlags::HwClock;
         flip.time
@@ -1235,7 +1695,9 @@ impl Display {
       }
       let info = PresentInfo {
         time,
-        refresh_ns: lit.mode.refresh_ns(),
+        // wp_presentation: zero for an output without a constant refresh
+        // rate, as with variable refresh.
+        refresh_ns: if lit.vrr { 0 } else { lit.mode.refresh_ns() },
         seq: lit.sequence.extend(flip.sequence),
         flags,
       };
@@ -1353,8 +1815,10 @@ impl Display {
 
   /// Keeps the lit outputs whose connector is still connected, still
   /// offers their mode, is not off and passes `keep`, re-reading their
-  /// properties, on their CRTCs. The others are dropped, to be turned off
-  /// by the next full modeset. Returns whether any was dropped.
+  /// properties, on their CRTCs, with `VRR_ENABLED` as their
+  /// configuration and monitor now say. The others are dropped, to be
+  /// turned off by the next full modeset. Returns whether any was dropped
+  /// or changed its `VRR_ENABLED`, which needs that modeset.
   fn keep_lit(
     &mut self,
     keep: &dyn Fn(&Self, &Lit, &ConnectorInfo) -> bool,
@@ -1384,7 +1848,14 @@ impl Display {
       });
       match refreshed {
         Some(output) => {
+          // Another monitor on the connector may differ in VRR.
+          let vrr = self.vrr_for(&output);
           lit.output = output;
+          if vrr != lit.vrr {
+            lit.vrr = vrr;
+            dropped = true;
+            self.log_vrr(&lit);
+          }
           kept.push(lit);
         }
         None => {
@@ -1620,18 +2091,11 @@ impl Display {
     }
     let added_count = added.len();
     for (output, mode, blob, scanout) in added {
-      self.lit.push(Lit {
-        output,
-        mode,
-        blob,
-        scanout: Box::new(scanout),
-        scheduler: FrameScheduler::default(),
-        sequence: Sequence::default(),
-        dpms_on: true,
-        wanted_dpms: self.wanted_dpms,
-        status: ScanoutStatus::Untried,
-        fallback: None,
-      });
+      let vrr = self.vrr_for(&output);
+      let wanted_dpms = self.wanted_dpms;
+      self
+        .lit
+        .push(Lit::new(output, mode, (blob, scanout), wanted_dpms, vrr));
     }
     match self.modeset() {
       Ok(()) => {
@@ -1793,7 +2257,7 @@ impl Display {
         match self.card.output_on(&connector, crtc, plane, &mut |blob| {
           device.blob(blob).ok()
         }) {
-          Ok(output) => output,
+          Ok(output) => self.claim_cursor(output, None),
           Err(error) => {
             plan.discard(self.device.as_mut());
             return Err(error.to_string());
@@ -1823,13 +2287,15 @@ impl Display {
         let lit = &self.lit[*index];
         let state = ModesetState {
           active: lit.wanted_dpms,
-          ..fresh_state(mode, *blob, scanout)
+          cursor: lit.cursor.shown,
+          ..fresh_state(mode, *blob, scanout, lit.vrr)
         };
         (&lit.output.props, state)
       })
       .collect();
     extra.extend(plan.added.iter().map(|(output, mode, blob, scanout)| {
-      (&output.props, fresh_state(mode, *blob, scanout))
+      let vrr = self.vrr_for(output);
+      (&output.props, fresh_state(mode, *blob, scanout, vrr))
     }));
     // Outputs whose mode changes are in `extra` with the new mode, so the
     // teardown of those left out spares them.
@@ -1926,12 +2392,26 @@ fn change_name(change: &ConnectorChange) -> &str {
   }
 }
 
+/// Waits at most [`crate::gpu::GPU_WAIT`] for `fence`, for a frame whose
+/// plane cannot wait for it itself.
+fn wait_for(fence: &RenderFence) {
+  if !fence.wait(crate::gpu::GPU_WAIT) {
+    diagnostics::log(&format!(
+      "the frame's render fence did not signal within {} ms; flipping \
+       anyway",
+      crate::gpu::GPU_WAIT.as_millis()
+    ));
+  }
+}
+
 /// The current `CLOCK_MONOTONIC` time.
 fn monotonic_now() -> std::time::Duration {
   let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
   std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
 }
 
+#[cfg(test)]
+mod planes_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

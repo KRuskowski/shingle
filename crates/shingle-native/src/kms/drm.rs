@@ -332,6 +332,58 @@ impl KmsDevice for DrmDevice {
     Ok(fb)
   }
 
+  fn create_argb_framebuffer(
+    &mut self,
+    width: u32,
+    height: u32,
+  ) -> io::Result<DumbFramebuffer> {
+    let mut buffer =
+      self.create_dumb_buffer((width, height), DrmFourcc::Argb8888, 32)?;
+    // Depth 32 at 32 bits per pixel is ARGB8888 for the legacy call.
+    let framebuffer =
+      match control::Device::add_framebuffer(self, &buffer, 32, 32) {
+        Ok(framebuffer) => framebuffer,
+        Err(error) => {
+          let _ = self.destroy_dumb_buffer(buffer);
+          return Err(error);
+        }
+      };
+    if let Ok(mut mapping) = self.map_dumb_buffer(&mut buffer) {
+      mapping.fill(0);
+    }
+    let id = u32::from(framebuffer);
+    let fb = DumbFramebuffer {
+      buffer: BufferId(buffer.handle().into()),
+      framebuffer: FramebufferId(id),
+      width,
+      height,
+      stride: buffer.pitch(),
+    };
+    self.buffers.insert(id, buffer);
+    Ok(fb)
+  }
+
+  fn cursor_size(&mut self) -> (u32, u32) {
+    let size = |capability| {
+      self
+        .get_driver_capability(capability)
+        .ok()
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(64)
+    };
+    (
+      size(DriverCapability::CursorWidth),
+      size(DriverCapability::CursorHeight),
+    )
+  }
+
+  fn async_page_flips(&mut self) -> bool {
+    self
+      .get_driver_capability(DriverCapability::AtomicASyncPageFlip)
+      .is_ok_and(|value| value == 1)
+  }
+
   fn write_dumb_framebuffer(
     &mut self,
     buffer: &DumbFramebuffer,

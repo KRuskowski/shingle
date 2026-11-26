@@ -4,7 +4,8 @@
 //! VT switching ([`session`]), libinput for input devices ([`input`]) with
 //! hotplug through libinput's udev backend ([`udev`]), atomic KMS for the
 //! display ([`kms`], [`display`]) with zero-copy or copy scanout
-//! ([`scanout`]) and
+//! ([`scanout`]), a hardware cursor ([`cursor`]), variable refresh, async
+//! page flips and render fences ([`features`] turns them off),
 //! page-flip pacing ([`pacing`]), DRM hotplug ([`hotplug`]) and the
 //! configured choice of output and mode ([`outputs`]), a Vulkan renderer
 //! on the card's GPU ([`gpu`]), and the event loop in [`host`]
@@ -21,8 +22,10 @@
 #![warn(missing_docs)]
 
 pub mod crtcs;
+pub mod cursor;
 mod diagnostics;
 pub mod display;
+pub mod features;
 pub mod gpu;
 pub mod host;
 pub mod hotplug;
@@ -54,6 +57,7 @@ pub use display::{Fatal, StartError};
 pub use session::{NoSeat, preflight};
 
 use crate::{
+  features::PlaneFeatures,
   gpu::{Card, FrameRenderer, GpuRenderer, RendererFactory},
   host::{Backend, Rendering},
   hotplug::UdevMonitor,
@@ -218,6 +222,20 @@ pub fn run(
   }
   let mut display = display;
   display.set_scanout_choice(choice);
+  let (features, warnings) =
+    PlaneFeatures::from_env(&|name| std::env::var_os(name));
+  for line in warnings.iter().chain(
+    [
+      &features.no_cursor_plane,
+      &features.no_async_flips,
+      &features.no_in_fence,
+    ]
+    .into_iter()
+    .flatten(),
+  ) {
+    diagnostics::log(line);
+  }
+  display.set_features(features);
   let mut backend =
     Backend::new(frontend, session, input, input_config, display, rendering)?;
   // Clients start once linux-dmabuf is offered, which Backend::new does.

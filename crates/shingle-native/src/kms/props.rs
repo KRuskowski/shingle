@@ -81,6 +81,9 @@ impl PropertyTable {
 /// The `type` property's value for a primary plane.
 pub const PLANE_TYPE_PRIMARY: u64 = 1;
 
+/// The `type` property's value for a cursor plane.
+pub const PLANE_TYPE_CURSOR: u64 = 2;
+
 /// A connector's property ids.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConnectorProps {
@@ -158,6 +161,9 @@ pub struct PlaneProps {
   pub crtc_h: PropertyId,
   /// `IN_FORMATS`, where the driver has it.
   pub in_formats: Option<PropertyId>,
+  /// `IN_FENCE_FD`, where the driver has it: a sync_file the plane waits
+  /// for before it scans out a new framebuffer.
+  pub in_fence_fd: Option<PropertyId>,
 }
 
 impl PlaneProps {
@@ -179,6 +185,7 @@ impl PlaneProps {
       crtc_w: table.require("CRTC_W")?,
       crtc_h: table.require("CRTC_H")?,
       in_formats: table.id("IN_FORMATS"),
+      in_fence_fd: table.id("IN_FENCE_FD"),
     })
   }
 }

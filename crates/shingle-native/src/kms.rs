@@ -314,6 +314,10 @@ pub struct CommitFlags(pub u32);
 impl CommitFlags {
   /// `DRM_MODE_PAGE_FLIP_EVENT`: send a page-flip event when done.
   pub const PAGE_FLIP_EVENT: Self = Self(0x01);
+  /// `DRM_MODE_PAGE_FLIP_ASYNC`: flip at once rather than at the next
+  /// vblank, which may tear; only for flips that change nothing but the
+  /// primary plane's framebuffer.
+  pub const PAGE_FLIP_ASYNC: Self = Self(0x02);
   /// `DRM_MODE_ATOMIC_TEST_ONLY`: only check the request.
   pub const TEST_ONLY: Self = Self(0x0100);
   /// `DRM_MODE_ATOMIC_NONBLOCK`: return before the commit is done.
@@ -391,6 +395,24 @@ pub trait KmsDevice {
     write: &mut dyn FnMut(&mut [u8]),
   ) -> io::Result<()>;
 
+  /// Allocates a `width` by `height` ARGB8888 dumb buffer and a
+  /// framebuffer for it, for a cursor plane. Its contents start
+  /// transparent. [`KmsDevice::write_dumb_framebuffer`] fills it and
+  /// [`KmsDevice::destroy_dumb_framebuffer`] frees it.
+  fn create_argb_framebuffer(
+    &mut self,
+    width: u32,
+    height: u32,
+  ) -> io::Result<DumbFramebuffer>;
+
+  /// The size of the buffers cursor planes take (`DRM_CAP_CURSOR_WIDTH`
+  /// and `DRM_CAP_CURSOR_HEIGHT`), 64 by 64 where the driver does not say.
+  fn cursor_size(&mut self) -> (u32, u32);
+
+  /// Whether the driver takes `DRM_MODE_PAGE_FLIP_ASYNC` in atomic commits
+  /// (`DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP`).
+  fn async_page_flips(&mut self) -> bool;
+
   /// Removes a framebuffer and frees its dumb buffer.
   fn destroy_dumb_framebuffer(
     &mut self,
@@ -423,6 +445,9 @@ pub trait KmsDevice {
 
 /// The `drm_fourcc` code of XRGB8888, the format Shingle scans out.
 pub const FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
+
+/// The `drm_fourcc` code of ARGB8888, the format of cursor planes.
+pub const FORMAT_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
 
 /// The linear modifier, `DRM_FORMAT_MOD_LINEAR`.
 pub const MODIFIER_LINEAR: u64 = 0;
@@ -480,6 +505,8 @@ pub(crate) mod tests {
     assert_eq!(flags.0, 0x201);
     assert!(flags.contains(CommitFlags::NONBLOCK));
     assert!(!flags.contains(CommitFlags::ALLOW_MODESET));
+    assert_eq!(CommitFlags::PAGE_FLIP_ASYNC.0, 0x02);
     assert_eq!(FORMAT_XRGB8888, 0x3432_5258);
+    assert_eq!(FORMAT_ARGB8888, 0x3432_5241);
   }
 }

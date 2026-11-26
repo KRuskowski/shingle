@@ -4,7 +4,10 @@
 //! The builders here produce every request the backend sends, so their
 //! exact contents are unit-tested: a full modeset of one output
 //! ([`modeset`]) or of several at once ([`modeset_all`]), a page flip
-//! ([`flip`]) and DPMS ([`set_active`]).
+//! ([`flip`], or [`page_flip`] with a render fence and the cursor plane)
+//! and DPMS ([`set_active`]). Every output's cursor plane, where it has
+//! one, is set in each modeset, shown or off, and moved or changed in
+//! flips.
 
 use super::{
   BlobId, FramebufferId, Object, PropertyId,
@@ -56,7 +59,8 @@ impl AtomicRequest {
   }
 }
 
-/// The properties of the connector, CRTC and primary plane Shingle drives.
+/// The properties of the connector, CRTC, primary plane and cursor plane
+/// Shingle drives.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutputProps {
   /// The connector's properties.
@@ -65,6 +69,22 @@ pub struct OutputProps {
   pub crtc: CrtcProps,
   /// The primary plane's properties.
   pub plane: PlaneProps,
+  /// The CRTC's cursor plane, if it has one that scans out ARGB8888.
+  pub cursor: Option<PlaneProps>,
+}
+
+/// What the cursor plane shows: a framebuffer of `size` pixels with its
+/// top-left corner at (`x`, `y`) of the CRTC, which may lie outside it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CursorState {
+  /// The cursor buffer's framebuffer.
+  pub framebuffer: FramebufferId,
+  /// The buffer's size, which the plane shows unscaled.
+  pub size: (u32, u32),
+  /// The left edge in the CRTC's pixels.
+  pub x: i32,
+  /// The top edge in the CRTC's pixels.
+  pub y: i32,
 }
 
 /// Objects left on by another session that a modeset turns off, so only
@@ -94,12 +114,15 @@ pub struct ModesetState {
   /// Whether variable refresh is on. Applied only where the CRTC has
   /// `VRR_ENABLED`.
   pub vrr: bool,
+  /// What the cursor plane shows, or `None` to turn it off. Applied only
+  /// where the output has a cursor plane.
+  pub cursor: Option<CursorState>,
 }
 
 /// The full state of the output for an `ALLOW_MODESET` commit: connector
 /// on the CRTC, mode, `ACTIVE`, the primary plane showing `framebuffer`
-/// over the whole mode, `VRR_ENABLED` where it exists, and everything in
-/// `teardown` turned off.
+/// over the whole mode, `VRR_ENABLED` where it exists, the cursor plane
+/// where it exists, and everything in `teardown` turned off.
 pub fn modeset(
   output: &OutputProps,
   state: &ModesetState,
@@ -129,7 +152,15 @@ pub fn modeset_all(
     request.set(object, other.active, 0);
     request.set(object, other.mode_id, 0);
   }
+  // The outputs set their own cursor planes, shown or off.
+  let cursors: Vec<_> = outputs
+    .iter()
+    .filter_map(|(output, _)| output.cursor.map(|cursor| cursor.id))
+    .collect();
   for other in &teardown.planes {
+    if cursors.contains(&other.id) {
+      continue;
+    }
     let object = Object::Plane(other.id);
     request.set(object, other.fb_id, 0);
     request.set(object, other.crtc_id, 0);
@@ -169,17 +200,82 @@ fn set_output(
   request.set(plane, p.crtc_y, 0);
   request.set(plane, p.crtc_w, u64::from(width));
   request.set(plane, p.crtc_h, u64::from(height));
+  if let Some(cursor) = &output.cursor {
+    set_cursor(request, cursor, output.crtc.id, state.cursor);
+  }
+}
+
+/// Shows `state` on the cursor plane `cursor` of `crtc`, or turns the
+/// plane off.
+fn set_cursor(
+  request: &mut AtomicRequest,
+  cursor: &PlaneProps,
+  crtc: super::CrtcId,
+  state: Option<CursorState>,
+) {
+  let plane = Object::Plane(cursor.id);
+  let Some(state) = state else {
+    request.set(plane, cursor.fb_id, 0);
+    request.set(plane, cursor.crtc_id, 0);
+    return;
+  };
+  let (width, height) = state.size;
+  request.set(plane, cursor.fb_id, u64::from(state.framebuffer.0));
+  request.set(plane, cursor.crtc_id, u64::from(crtc.0));
+  request.set(plane, cursor.src_x, 0);
+  request.set(plane, cursor.src_y, 0);
+  request.set(plane, cursor.src_w, u64::from(width) << 16);
+  request.set(plane, cursor.src_h, u64::from(height) << 16);
+  // CRTC_X and CRTC_Y are signed: the kernel reads the value as an i64.
+  request.set(plane, cursor.crtc_x, i64::from(state.x) as u64);
+  request.set(plane, cursor.crtc_y, i64::from(state.y) as u64);
+  request.set(plane, cursor.crtc_w, u64::from(width));
+  request.set(plane, cursor.crtc_h, u64::from(height));
+}
+
+/// What one page flip changes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Flip {
+  /// The primary plane's new framebuffer, if a frame was drawn.
+  pub framebuffer: Option<FramebufferId>,
+  /// A sync_file the primary plane waits for before it shows the new
+  /// framebuffer (`IN_FENCE_FD`), if the frame's rendering may still run.
+  /// Ignored without a framebuffer or where the plane lacks the property.
+  pub fence: Option<i32>,
+  /// The cursor plane's new state, `Some(None)` to turn it off, if it
+  /// changes. Ignored where the output has no cursor plane.
+  pub cursor: Option<Option<CursorState>>,
 }
 
 /// A page flip: the primary plane shows `framebuffer`. Everything else
 /// keeps its state.
 pub fn flip(output: &OutputProps, framebuffer: FramebufferId) -> AtomicRequest {
+  page_flip(
+    output,
+    &Flip {
+      framebuffer: Some(framebuffer),
+      ..Flip::default()
+    },
+  )
+}
+
+/// A page flip of what `flip` changes: the primary plane's framebuffer
+/// with its fence, and the cursor plane. Everything else keeps its state.
+pub fn page_flip(output: &OutputProps, flip: &Flip) -> AtomicRequest {
   let mut request = AtomicRequest::new();
-  request.set(
-    Object::Plane(output.plane.id),
-    output.plane.fb_id,
-    u64::from(framebuffer.0),
-  );
+  let plane = Object::Plane(output.plane.id);
+  if let Some(framebuffer) = flip.framebuffer {
+    request.set(plane, output.plane.fb_id, u64::from(framebuffer.0));
+    if let (Some(fence), Some(property)) =
+      (flip.fence, output.plane.in_fence_fd)
+    {
+      // A descriptor, which the kernel reads as a signed value.
+      request.set(plane, property, i64::from(fence) as u64);
+    }
+  }
+  if let (Some(state), Some(cursor)) = (flip.cursor, &output.cursor) {
+    set_cursor(&mut request, cursor, output.crtc.id, state);
+  }
   request
 }
 
@@ -226,8 +322,52 @@ pub(crate) mod tests {
         crtc_w: PropertyId(38),
         crtc_h: PropertyId(39),
         in_formats: None,
+        in_fence_fd: None,
       },
+      cursor: None,
     }
+  }
+
+  /// [`output_props`] with a cursor plane 4 (properties 70..) and the
+  /// primary plane's `IN_FENCE_FD` (property 40).
+  pub(crate) fn props_with_cursor() -> OutputProps {
+    let mut props = output_props(false);
+    props.plane.in_fence_fd = Some(PropertyId(40));
+    props.cursor = Some(PlaneProps {
+      id: PlaneId(4),
+      fb_id: PropertyId(70),
+      crtc_id: PropertyId(71),
+      src_x: PropertyId(72),
+      src_y: PropertyId(73),
+      src_w: PropertyId(74),
+      src_h: PropertyId(75),
+      crtc_x: PropertyId(76),
+      crtc_y: PropertyId(77),
+      crtc_w: PropertyId(78),
+      crtc_h: PropertyId(79),
+      in_formats: None,
+      in_fence_fd: None,
+    });
+    props
+  }
+
+  fn cursor_state(x: i32, y: i32) -> CursorState {
+    CursorState {
+      framebuffer: FramebufferId(80),
+      size: (64, 64),
+      x,
+      y,
+    }
+  }
+
+  /// The cursor plane's properties as `(property, value)` pairs.
+  fn cursor_entries(request: &AtomicRequest) -> Vec<(u32, u64)> {
+    request
+      .entries()
+      .iter()
+      .filter(|(object, ..)| *object == Object::Plane(PlaneId(4)))
+      .map(|(_, property, value)| (property.0, *value))
+      .collect()
   }
 
   fn state() -> ModesetState {
@@ -237,6 +377,7 @@ pub(crate) mod tests {
       size: (1920, 1080),
       active: true,
       vrr: false,
+      cursor: None,
     }
   }
 
@@ -341,6 +482,7 @@ pub(crate) mod tests {
         id: PlaneId(9),
         ..first.plane
       },
+      cursor: None,
     };
     let small = ModesetState {
       mode: BlobId(51),
@@ -379,6 +521,114 @@ pub(crate) mod tests {
         (Object::Crtc(CrtcId(5)), PropertyId(41), 0),
       ]
     );
+  }
+
+  #[test]
+  fn a_modeset_shows_the_cursor_plane_or_turns_it_off() {
+    let props = props_with_cursor();
+    let request = modeset(&props, &state(), &Teardown::default());
+    assert_eq!(request.entries().len(), 13 + 2);
+    assert_eq!(cursor_entries(&request), [(70, 0), (71, 0)], "off");
+    let shown = ModesetState {
+      cursor: Some(cursor_state(100, 200)),
+      ..state()
+    };
+    let request = modeset(&props, &shown, &Teardown::default());
+    assert_eq!(
+      cursor_entries(&request),
+      [
+        (70, 80),
+        (71, 2),
+        (72, 0),
+        (73, 0),
+        (74, 64 << 16),
+        (75, 64 << 16),
+        (76, 100),
+        (77, 200),
+        (78, 64),
+        (79, 64),
+      ]
+    );
+  }
+
+  #[test]
+  fn the_teardown_spares_the_cursor_planes_of_the_outputs() {
+    let props = props_with_cursor();
+    let cursor = props.cursor.expect("a cursor plane");
+    let other = PlaneProps {
+      id: PlaneId(6),
+      ..cursor
+    };
+    let teardown = Teardown {
+      planes: vec![cursor, other],
+      ..Teardown::default()
+    };
+    let shown = ModesetState {
+      cursor: Some(cursor_state(1, 2)),
+      ..state()
+    };
+    let request = modeset(&props, &shown, &teardown);
+    assert_eq!(
+      request.get(Object::Plane(PlaneId(4)), PropertyId(70)),
+      Some(80),
+      "the console's cursor plane is now ours, and shown"
+    );
+    assert_eq!(
+      request.get(Object::Plane(PlaneId(6)), PropertyId(70)),
+      Some(0),
+      "another CRTC's is turned off"
+    );
+  }
+
+  #[test]
+  fn a_flip_moves_the_cursor_and_hands_the_plane_its_fence() {
+    let props = props_with_cursor();
+    let request = page_flip(
+      &props,
+      &Flip {
+        framebuffer: Some(FramebufferId(61)),
+        fence: Some(17),
+        cursor: Some(Some(cursor_state(-10, -3))),
+      },
+    );
+    let plane = Object::Plane(PlaneId(3));
+    assert_eq!(
+      request.entries()[..2],
+      [(plane, PropertyId(30), 61), (plane, PropertyId(40), 17)]
+    );
+    let cursor = cursor_entries(&request);
+    assert_eq!(cursor.len(), 10);
+    assert_eq!(cursor[6], (76, -10_i64 as u64), "signed, sign-extended");
+    assert_eq!(cursor[7], (77, -3_i64 as u64));
+    // A cursor move alone touches only the cursor plane.
+    let request = page_flip(
+      &props,
+      &Flip {
+        cursor: Some(None),
+        ..Flip::default()
+      },
+    );
+    assert_eq!(
+      request.entries(),
+      [
+        (Object::Plane(PlaneId(4)), PropertyId(70), 0),
+        (Object::Plane(PlaneId(4)), PropertyId(71), 0),
+      ]
+    );
+  }
+
+  #[test]
+  fn fences_and_cursors_need_their_properties() {
+    let props = output_props(false);
+    let request = page_flip(
+      &props,
+      &Flip {
+        framebuffer: Some(FramebufferId(61)),
+        fence: Some(17),
+        cursor: Some(Some(cursor_state(0, 0))),
+      },
+    );
+    assert_eq!(request, flip(&props, FramebufferId(61)));
   }
 
   #[test]

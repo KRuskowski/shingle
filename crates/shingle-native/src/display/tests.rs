@@ -469,6 +469,7 @@ fn policy(named: &[(&str, &str)]) -> OutputPolicy {
       .iter()
       .map(|(name, mode)| ((*name).to_owned(), mode.parse().unwrap()))
       .collect(),
+    ..OutputPolicy::default()
   }
 }
 

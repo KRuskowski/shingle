@@ -31,7 +31,8 @@ pub mod gbm;
 use std::{
   ffi::OsStr,
   io,
-  os::fd::{AsFd, OwnedFd},
+  os::fd::{AsFd, BorrowedFd, OwnedFd},
+  rc::Rc,
 };
 
 use crate::kms::{FramebufferId, KmsDevice};
@@ -102,7 +103,61 @@ pub enum Drawn {
   /// The frame is in the [`DrawTarget::Dmabuf`] buffer, finished by the
   /// GPU.
   InPlace,
+  /// The frame is being drawn into the [`DrawTarget::Dmabuf`] buffer, and
+  /// the fence signals when the GPU has finished it: the plane waits for
+  /// it (`IN_FENCE_FD`) instead of the renderer.
+  Fenced(RenderFence),
 }
+
+impl Drawn {
+  /// Whether the frame is in the scanout buffer itself.
+  pub fn in_place(&self) -> bool {
+    matches!(self, Self::InPlace | Self::Fenced(_))
+  }
+}
+
+/// A sync_file that signals when the GPU has finished a frame.
+#[derive(Clone, Debug)]
+pub struct RenderFence(Rc<OwnedFd>);
+
+impl RenderFence {
+  /// Wraps a sync_file.
+  pub fn new(fd: OwnedFd) -> Self {
+    Self(Rc::new(fd))
+  }
+
+  /// The sync_file, for `IN_FENCE_FD` or to wait on.
+  pub fn fd(&self) -> BorrowedFd<'_> {
+    self.0.as_fd()
+  }
+
+  /// Waits at most `timeout` for the fence to signal, which makes the
+  /// sync_file readable. Returns whether it did.
+  pub fn wait(&self, timeout: std::time::Duration) -> bool {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    let mut fds = [PollFd::new(&*self.0, PollFlags::IN)];
+    let timeout = Timespec {
+      tv_sec: timeout.as_secs() as i64,
+      tv_nsec: i64::from(timeout.subsec_nanos()),
+    };
+    loop {
+      match poll(&mut fds, Some(&timeout)) {
+        Ok(ready) => return ready > 0,
+        Err(rustix::io::Errno::INTR) => continue,
+        Err(_) => return false,
+      }
+    }
+  }
+}
+
+/// Fences are the same if they are the same sync_file.
+impl PartialEq for RenderFence {
+  fn eq(&self, other: &Self) -> bool {
+    Rc::ptr_eq(&self.0, &other.0)
+  }
+}
+
+impl Eq for RenderFence {}
 
 /// Buffers the primary plane scans out of.
 pub trait Scanout {

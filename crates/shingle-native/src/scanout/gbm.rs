@@ -273,7 +273,7 @@ impl Scanout for GbmScanout {
     _device: &mut dyn KmsDevice,
     drawn: &Drawn,
   ) -> io::Result<FramebufferId> {
-    if *drawn != Drawn::InPlace {
+    if !drawn.in_place() {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         "zero-copy scanout takes frames drawn into its buffers",

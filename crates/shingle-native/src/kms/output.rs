@@ -12,14 +12,14 @@
 use std::{fmt, io};
 
 use super::{
-  ConnectorId, ConnectorInfo, CrtcId, CrtcInfo, FORMAT_XRGB8888, KmsDevice,
-  Mode, Object, PlaneId, PlaneInfo,
+  ConnectorId, ConnectorInfo, CrtcId, CrtcInfo, FORMAT_ARGB8888,
+  FORMAT_XRGB8888, KmsDevice, Mode, Object, PlaneId, PlaneInfo,
   atomic::{OutputProps, Teardown},
   edid::{self, Edid},
   in_formats::{self, InFormats},
   props::{
-    ConnectorProps, CrtcProps, MissingProperty, PLANE_TYPE_PRIMARY, PlaneProps,
-    PropertyTable,
+    ConnectorProps, CrtcProps, MissingProperty, PLANE_TYPE_CURSOR,
+    PLANE_TYPE_PRIMARY, PlaneProps, PropertyTable,
   },
 };
 use crate::{crtcs, kms::Connection};
@@ -117,6 +117,9 @@ pub struct Output {
   pub current_mode: Option<Mode>,
   /// The primary plane's `IN_FORMATS`, if it has a readable one.
   pub in_formats: Option<InFormats>,
+  /// Whether the connector's `vrr_capable` is 1: the monitor and the
+  /// driver can vary the refresh rate.
+  pub vrr_capable: bool,
 }
 
 impl Card {
@@ -187,6 +190,27 @@ impl Card {
       return Err(OutputError::NoCrtc(connector.name.clone()));
     };
     self.output_on(connector, crtc, plane.id, reading)
+  }
+
+  /// The cursor plane for `crtc`: a plane of type cursor that can be on
+  /// it and scans out ARGB8888, preferring one on it already, then one
+  /// that only this CRTC can use.
+  pub fn cursor_plane(&self, crtc: CrtcId) -> Option<PlaneId> {
+    let cursors = self.planes.iter().filter(|(info, table)| {
+      table.value("type") == Some(PLANE_TYPE_CURSOR)
+        && info.possible_crtcs.contains(&crtc)
+        && info.formats.contains(&FORMAT_ARGB8888)
+    });
+    cursors
+      .clone()
+      .find(|(info, _)| info.current_crtc == Some(crtc))
+      .or_else(|| {
+        cursors
+          .clone()
+          .find(|(info, _)| info.possible_crtcs == [crtc])
+      })
+      .or_else(|| cursors.clone().next())
+      .map(|(info, _)| info.id)
   }
 
   /// The CRTC and primary plane for each of `wants`, in priority order,
@@ -289,10 +313,17 @@ impl Card {
       .find(|(info, _)| info.id == connector.id)
       .map(|(_, table)| table)
       .ok_or_else(|| OutputError::NoCrtc(connector.name.clone()))?;
+    // A cursor plane that lacks a property is not used: the cursor is
+    // drawn into the frame instead.
+    let cursor = self.cursor_plane(crtc).and_then(|id| {
+      let (_, table) = self.planes.iter().find(|(info, _)| info.id == id)?;
+      PlaneProps::new(id, table).ok()
+    });
     let props = OutputProps {
       connector: ConnectorProps::new(connector.id, connector_table)?,
       crtc: CrtcProps::new(crtc, crtc_table)?,
       plane: PlaneProps::new(plane.id, plane_table)?,
+      cursor,
     };
     let in_formats = plane_table
       .value("IN_FORMATS")
@@ -305,6 +336,7 @@ impl Card {
       props,
       current_mode: crtc_info.mode.clone(),
       in_formats,
+      vrr_capable: connector_table.value("vrr_capable") == Some(1),
     })
   }
 

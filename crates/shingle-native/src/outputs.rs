@@ -20,26 +20,45 @@ use crate::kms::{
   output::Card,
 };
 
-/// The configured mode of each output, by connector name.
+/// The configured mode and variable refresh rate of each output, by
+/// connector name.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OutputPolicy {
   /// The mode of outputs without their own entry.
   pub default: OutputMode,
   /// The named entries in configuration order.
   pub named: Vec<(String, OutputMode)>,
+  /// Whether outputs without their own entry want variable refresh
+  /// (`[output] vrr`).
+  pub default_vrr: bool,
+  /// The `vrr` of the named entries, by name.
+  pub named_vrr: Vec<(String, bool)>,
 }
 
 impl OutputPolicy {
-  /// The modes of `config`'s default output and named outputs.
+  /// The modes and `vrr` of `config`'s default output and named outputs.
   pub fn from_config(config: &ShingleConfig) -> Self {
-    Self {
-      default: config.output.mode,
-      named: config
+    let named = || {
+      config
         .outputs
         .iter()
-        .filter_map(|output| Some((output.name.clone()?, output.mode)))
-        .collect(),
+        .filter_map(|output| Some((output.name.clone()?, output)))
+    };
+    Self {
+      default: config.output.mode,
+      named: named().map(|(name, output)| (name, output.mode)).collect(),
+      default_vrr: config.output.vrr,
+      named_vrr: named().map(|(name, output)| (name, output.vrr)).collect(),
     }
+  }
+
+  /// Whether the output `name` is configured for variable refresh.
+  pub fn vrr(&self, name: &str) -> bool {
+    self
+      .named_vrr
+      .iter()
+      .find(|(named, _)| named == name)
+      .map_or(self.default_vrr, |(_, vrr)| *vrr)
   }
 
   /// The configured mode of the output `name`.
@@ -271,7 +290,25 @@ mod tests {
         .iter()
         .map(|(name, mode)| ((*name).to_owned(), mode.parse().unwrap()))
         .collect(),
+      ..OutputPolicy::default()
     }
+  }
+
+  #[test]
+  fn vrr_comes_from_the_default_and_named_entries() {
+    let mut config = ShingleConfig::default();
+    let mut dp = config.output.clone();
+    dp.name = Some("DP-1".into());
+    dp.vrr = true;
+    config.outputs.push(dp);
+    let policy = OutputPolicy::from_config(&config);
+    assert!(policy.vrr("DP-1"));
+    assert!(!policy.vrr("HDMI-A-1"));
+    config.output.vrr = true;
+    config.outputs[0].vrr = false;
+    let policy = OutputPolicy::from_config(&config);
+    assert!(!policy.vrr("DP-1"), "the entry wins");
+    assert!(policy.vrr("HDMI-A-1"), "the default");
   }
 
   /// HDMI-A-1, a DP-1 monitor and an internal eDP-1 panel, all connected.
@@ -343,7 +380,7 @@ mod tests {
     assert_eq!(chosen(&card, &off, Some("DP-1")), "HDMI-A-1");
     let all_off = OutputPolicy {
       default: OutputMode::Off,
-      named: Vec::new(),
+      ..OutputPolicy::default()
     };
     assert_eq!(chosen(&card, &all_off, None), "");
   }

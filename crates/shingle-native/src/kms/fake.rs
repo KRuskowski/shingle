@@ -13,10 +13,10 @@ use std::{
 
 use super::{
   AtomicRequest, BlobId, BufferId, CommitFlags, Connection, ConnectorId,
-  ConnectorInfo, CrtcId, CrtcInfo, DumbFramebuffer, FORMAT_XRGB8888,
-  FramebufferId, KmsDevice, MODE_TYPE_PREFERRED, Mode, Object, PageFlip,
-  PlanarFramebuffer, PlaneId, PlaneInfo, Property, PropertyId, Resources,
-  Subpixel,
+  ConnectorInfo, CrtcId, CrtcInfo, DumbFramebuffer, FORMAT_ARGB8888,
+  FORMAT_XRGB8888, FramebufferId, KmsDevice, MODE_TYPE_PREFERRED, Mode, Object,
+  PageFlip, PlanarFramebuffer, PlaneId, PlaneInfo, Property, PropertyId,
+  Resources, Subpixel,
 };
 use crate::scanout::allocator::{AllocatedBuffer, BufferAllocator};
 
@@ -175,6 +175,15 @@ pub(crate) struct FakeKms {
   pub(crate) no_atomic: bool,
   /// Whether the CRTC has `VRR_ENABLED`.
   pub(crate) vrr: bool,
+  /// Every connector's `vrr_capable`.
+  pub(crate) vrr_capable: bool,
+  /// What `DRM_CAP_CURSOR_WIDTH` and `_HEIGHT` say.
+  pub(crate) cursor_size: (u32, u32),
+  /// Whether the driver takes `DRM_MODE_PAGE_FLIP_ASYNC`; commits with it
+  /// fail with `EINVAL` otherwise.
+  pub(crate) async_flips: bool,
+  /// The framebuffers of ARGB8888 dumb buffers, for cursor planes.
+  pub(crate) argb: BTreeSet<u32>,
   /// Property values by object id and name.
   values: BTreeMap<u32, BTreeMap<String, u64>>,
   property_ids: HashMap<String, PropertyId>,
@@ -223,6 +232,10 @@ impl FakeKms {
       in_formats: None,
       no_atomic: false,
       vrr: false,
+      vrr_capable: false,
+      cursor_size: (64, 64),
+      async_flips: false,
+      argb: BTreeSet::new(),
       values: BTreeMap::new(),
       property_ids: HashMap::new(),
       commits: Vec::new(),
@@ -366,6 +379,21 @@ impl FakeKms {
     self.pending.clear();
   }
 
+  /// Adds a cursor plane that only `crtc` can use, and returns it.
+  pub(crate) fn add_cursor_plane(&mut self, crtc: CrtcId) -> PlaneId {
+    self.add_shared_cursor_plane(vec![crtc])
+  }
+
+  /// Adds a cursor plane that each of `crtcs` can use, and returns it.
+  pub(crate) fn add_shared_cursor_plane(
+    &mut self,
+    crtcs: Vec<CrtcId>,
+  ) -> PlaneId {
+    let plane = PlaneId(self.alloc());
+    self.extra_planes.push((plane, 2, crtcs));
+    plane
+  }
+
   /// Adds a CRTC with a primary plane of its own, and returns both ids.
   pub(crate) fn add_crtc(&mut self) -> (CrtcId, PlaneId) {
     let crtc = CrtcId(self.alloc());
@@ -456,7 +484,7 @@ impl FakeKms {
 
   fn property_names(&self, object: Object) -> Vec<&'static str> {
     match object {
-      Object::Connector(_) => vec!["CRTC_ID", "DPMS", "EDID"],
+      Object::Connector(_) => vec!["CRTC_ID", "DPMS", "EDID", "vrr_capable"],
       Object::Crtc(_) => {
         let mut names = vec!["MODE_ID", "ACTIVE", "GAMMA_LUT"];
         if self.vrr {
@@ -477,6 +505,7 @@ impl FakeKms {
         "CRTC_W",
         "CRTC_H",
         "IN_FORMATS",
+        "IN_FENCE_FD",
       ],
     }
   }
@@ -576,11 +605,17 @@ impl KmsDevice for FakeKms {
         .map(|(_, _, crtcs)| crtcs.clone())
         .unwrap_or_default()
     };
+    // Cursor planes scan out ARGB8888.
+    let formats = if self.plane_type(id) == 2 {
+      vec![FORMAT_ARGB8888]
+    } else {
+      self.plane_formats.clone()
+    };
     Ok(PlaneInfo {
       id,
       possible_crtcs,
       current_crtc: (crtc != 0).then_some(CrtcId(crtc as u32)),
-      formats: self.plane_formats.clone(),
+      formats,
     })
   }
 
@@ -598,6 +633,7 @@ impl KmsDevice for FakeKms {
         {
           5000 + u64::from(connector.0)
         }
+        (Object::Connector(_), "vrr_capable") => u64::from(self.vrr_capable),
         _ => self.value(id, name),
       };
       properties.push(Property {
@@ -656,12 +692,21 @@ impl KmsDevice for FakeKms {
       // The kernel allows one pending commit per CRTC.
       error = Some(16);
     }
-    let modeset = request.entries().iter().any(|(_, property, _)| {
+    // Modes and routing need ALLOW_MODESET; turning planes on and off
+    // does not.
+    let modeset = request.entries().iter().any(|(object, property, _)| {
       matches!(
-        names.get(property).map(String::as_str),
-        Some("MODE_ID" | "ACTIVE" | "CRTC_ID")
+        (object, names.get(property).map(String::as_str)),
+        (Object::Crtc(_), Some("MODE_ID" | "ACTIVE"))
+          | (Object::Connector(_), Some("CRTC_ID"))
       )
     });
+    if error.is_none()
+      && flags.contains(CommitFlags::PAGE_FLIP_ASYNC)
+      && !self.async_flips
+    {
+      error = Some(libc_einval());
+    }
     if error.is_none() && modeset && !flags.contains(CommitFlags::ALLOW_MODESET)
     {
       error = Some(libc_einval());
@@ -708,6 +753,24 @@ impl KmsDevice for FakeKms {
     Ok(fb)
   }
 
+  fn create_argb_framebuffer(
+    &mut self,
+    width: u32,
+    height: u32,
+  ) -> io::Result<DumbFramebuffer> {
+    let buffer = self.create_dumb_framebuffer(width, height)?;
+    self.argb.insert(buffer.framebuffer.0);
+    Ok(buffer)
+  }
+
+  fn cursor_size(&mut self) -> (u32, u32) {
+    self.cursor_size
+  }
+
+  fn async_page_flips(&mut self) -> bool {
+    self.async_flips
+  }
+
   fn write_dumb_framebuffer(
     &mut self,
     buffer: &DumbFramebuffer,
@@ -725,6 +788,7 @@ impl KmsDevice for FakeKms {
     &mut self,
     buffer: &DumbFramebuffer,
   ) -> io::Result<()> {
+    self.argb.remove(&buffer.framebuffer.0);
     self
       .buffers
       .remove(&buffer.framebuffer.0)
@@ -827,6 +891,22 @@ impl KmsDevice for Rc<RefCell<FakeKms>> {
     height: u32,
   ) -> io::Result<DumbFramebuffer> {
     self.borrow_mut().create_dumb_framebuffer(width, height)
+  }
+
+  fn create_argb_framebuffer(
+    &mut self,
+    width: u32,
+    height: u32,
+  ) -> io::Result<DumbFramebuffer> {
+    self.borrow_mut().create_argb_framebuffer(width, height)
+  }
+
+  fn cursor_size(&mut self) -> (u32, u32) {
+    self.borrow_mut().cursor_size()
+  }
+
+  fn async_page_flips(&mut self) -> bool {
+    self.borrow_mut().async_page_flips()
   }
 
   fn write_dumb_framebuffer(
