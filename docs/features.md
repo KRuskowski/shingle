@@ -187,6 +187,10 @@ Each Wayfire `[output:NAME]` section, i3 `output NAME` line or YAML `outputs` en
 
 `wp_commit_timing_v1` accepts monotonic target timestamps and applies updates as closely as possible without presenting early. Pending updates preserve content order, share FIFO frame processing, and drive nested redraw scheduling. Invalid or duplicate timestamps and destroyed surfaces use the protocol's error codes.
 
+### GPU client buffers
+
+`zwp_linux_dmabuf_v1` version 5, as Wayfire's wlroots offers it, lets GPU clients hand Shingle their buffers without a copy. It is offered when the renderer can import DMA-BUFs and has a render node to name: nested and native on a GPU, and `--backend offscreen`; not headless, not on lavapipe, and not with `SHINGLE_DMABUF=0`. Clients get one feedback tranche on the render node with every format and modifier the renderer samples (8-bit ARGB, XRGB, ABGR and XBGR with their single-plane modifiers). Buffers are imported when the client creates them, so a buffer the renderer cannot use is refused with `failed`, and a commit waits until the client's GPU has finished writing the buffer (implicit sync). A buffer goes back to its client only after the GPU has finished every frame that showed it. `wl_drm` is not offered, as Wayfire does not by default. `SHINGLE_TRACE_BUFFERS=1` logs which path each client buffer takes.
+
 ### Resource limits
 
 `behavior.max_buffer_size` limits either dimension of a shared-memory client buffer and defaults to 16384 pixels, matching Wayfire. Oversized buffers are rejected before mapping or GPU upload. The limit is also editable in WCM.

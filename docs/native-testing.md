@@ -433,6 +433,18 @@ Acceptance: "`wlr-randr` (or an equivalent client) can change the mode."
 1. With Shingle lit on A, `sudo chvt 2`, unplug A, plug in B, `sudo chvt 1`. Expected: hotplug events while away are dropped (no `connected` line until the resume), the resume lights B, and `wlr-randr` lists `CONN_B`.
 2. While on tty1, plug and unplug B during a busy `present_probe` run: no `modeset failed` or `page flip failed` lines, since a hotplug waits for the pending flip.
 
+## DMA-BUF clients on the native output (DB-4)
+
+These steps check `zwp_linux_dmabuf_v1` ([design/dmabuf.md](design/dmabuf.md#db-4-as-built)) where the GPU namespace on the development host cannot: with the card node present, so that NVIDIA's EGL clients can run too. Install `vulkan-tools`, `mesa-utils-bin`, `wayland-utils` and `kitty`.
+
+### Step 23: GPU clients present DMA-BUFs, across a VT switch and a GPU loss
+
+1. Start Shingle on tty1 as in step 9 with `SHINGLE_TRACE_BUFFERS=1` in its environment. The log has `linux-dmabuf version 5 on render node M:m, N format and modifier pairs`, and `wayland-info` over SSH (with Shingle's `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR`) lists `zwp_linux_dmabuf_v1` version 5 with that main device and N pairs.
+2. Start `vkcube --wsi wayland`, then `es2gears_wayland` and `kitty`, each with `ipc stipc/run`. Expected: each draws on the monitor, and for each the log has one `dmabuf import` per buffer followed by `dmabuf cached` lines and no `shm upload` for its surface. Record which EGL vendor `es2gears_wayland -info` reports.
+3. While `vkcube` runs, switch VT away and back (`sudo chvt 2; sleep 5; sudo chvt 1`). Expected: the cube keeps turning after the resume without new `dmabuf import` lines, and no client exits.
+4. With the clients running, trigger a GPU loss as in step 15's row 5 where the driver allows it. Expected: `recreating the GPU context`, then `dmabuf import` lines again for the buffers on screen (imported again from their kept fds), and the clients keep drawing. Record if the driver has no trigger.
+5. Repeat 2 with `SHINGLE_DMABUF=0`: the log says `SHINGLE_DMABUF=0 forces wl_shm`, `wayland-info` has no `zwp_linux_dmabuf_v1` and the clients fall back to `wl_shm` (`shm upload` lines) or fail as DB-2's baseline recorded.
+
 ## Results
 
 Record results in [status.md](status.md#with-real-clients). None of the steps above has been run yet: the test machine does not exist so far.
