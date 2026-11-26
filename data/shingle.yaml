@@ -241,6 +241,8 @@ keybindings:
   reload: super+shift+r
   quit: super+shift+q
   workspace_switch: [super+1, super+2, super+3, super+4, super+5, super+6, super+7, super+8, super+9, super+0]
+  # Sends the focused window to workspace N and stays, as i3 does; the
+  # workspace_move_* bindings below carry it and follow.
   workspace_move: [super+shift+1, super+shift+2, super+shift+3, super+shift+4, super+shift+5, super+shift+6, super+shift+7, super+shift+8, super+shift+9, super+shift+0]
   workspace_next: super+alt+right
   workspace_previous: super+alt+left

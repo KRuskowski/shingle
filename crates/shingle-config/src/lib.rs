@@ -1740,9 +1740,11 @@ impl CommandBinding {
 /// Each field is one [`Binding`], where [`Binding::disabled`] (written `none`
 /// or empty) turns the action off; `Vec` fields accept several alternatives, as
 /// Wayfire activators separated by `|` do. Defaults are given per field, with
-/// `super` written for the logo key. Movement and workspace bindings follow
-/// Wayfire's vswitch naming: `move` carries the focused window to the target
-/// workspace and follows it, `send` moves the window but stays.
+/// `super` written for the logo key. Directional and last-workspace
+/// bindings follow Wayfire's vswitch naming: `move` carries the focused
+/// window to the target workspace and follows it, `send` moves the window
+/// but stays. The numbered `workspace_move` is the exception: it sends the
+/// window and stays, as i3's `move container to workspace N` does.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Keybindings {
@@ -1893,9 +1895,10 @@ pub struct Keybindings {
   /// Switch to workspace 1 to 10, in order; exactly ten entries. Defaults
   /// `super+1` … `super+9`, `super+0`. i3 `workspace N`.
   pub workspace_switch: Vec<Binding>,
-  /// Carry the focused window to workspace 1 to 10 and follow it; exactly ten
-  /// entries. Defaults `super+shift+1` … `super+shift+0`. i3 `move container to
-  /// workspace N`.
+  /// Send the focused window to workspace 1 to 10 without following it, as
+  /// i3 does; exactly ten entries. Defaults `super+shift+1` …
+  /// `super+shift+0`. i3 `move container to workspace N`. Wayfire's
+  /// following `[vswitch] with_win_N` is `vswitch.workspace_bindings_win`.
   pub workspace_move: Vec<Binding>,
   /// Switch to the workspace to the right. `[vswitch] binding_right`; default
   /// `super+alt+right`.

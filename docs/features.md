@@ -84,6 +84,8 @@ vswitch:
 
 Wayfire's `[vswitch]` `duration`, `gap`, and `background` options are imported. The corresponding i3 variables are `$vswitch_duration_ms`, `$vswitch_gap`, and `$vswitch_background`. A zero duration switches immediately.
 
+Shingle's own numbered bindings, `keybindings.workspace_switch` (`super+1` to `super+0` in data/shingle.yaml) and `keybindings.workspace_move` (`super+shift+1` to `super+shift+0`), switch to workspace N and send the focused window to workspace N. `workspace_move` does not follow the window: the current workspace stays, as with i3's `move container to workspace N`. The directional and last-workspace `workspace_move_*` bindings carry the window and follow it, as Wayfire's `with_win_*` do, and `workspace_send_*` send it without following; Wayfire's numbered `with_win_N` and `send_win_N` are described under [Importing Wayfire configuration](#importing-wayfire-configuration).
+
 ### Window rotation
 
 The wrot 2D effect rotates a window around its center with Super+Ctrl and the right mouse button. Super+R resets the focused window; Super+Ctrl+R resets all windows. Moving within `effects.wrot_reset_radius` pixels of the center removes rotation. These visual transforms never change persistent tiling geometry.

@@ -743,6 +743,19 @@ fn numbered_vswitch_bindings_switch_carry_and_send() {
 }
 
 #[test]
+fn workspace_move_sends_the_window_without_following_it() {
+  // The operator kept i3's behaviour for super+shift+N.
+  let mut fixture = Fixture::new(ShingleConfig::default());
+  fixture.window("alpha");
+  let alpha = fixture.focused().expect("alpha is focused");
+  fixture.tap(KEY_2, &[KEY_LEFTMETA, KEY_LEFTSHIFT]);
+  assert_eq!(fixture.workspace(), 0, "the workspace stays");
+  let info = fixture.frontend.compositor().core().window_info(alpha);
+  let location = info.expect("alpha exists").location.workspace;
+  assert_eq!((location.x, location.y), (1, 0));
+}
+
+#[test]
 fn plugins_wayfire_does_not_load_do_nothing() {
   let config = wayfire_config("[core]\nplugins = vswitch\n");
   let mut fixture = Fixture::new(config);

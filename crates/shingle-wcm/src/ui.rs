@@ -720,7 +720,7 @@ pub fn build(model: &UiModel<'_>) -> Widget {
         ),
         (
           "workspace_move",
-          "Move window to workspace",
+          "Send window to workspace (stay)",
           &config.keybindings.workspace_move,
         ),
       ] {
