@@ -604,7 +604,7 @@ pub struct RuntimeBinding {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SurfaceRole {
   /// No role yet, or a role Shingle does not draw by itself (such as a
-  /// drag icon).
+  /// Wayland client's drag icon).
   Unassigned,
   /// An `xdg_toplevel`; its snapshot carries the [`WindowId`].
   Toplevel,
@@ -624,6 +624,10 @@ pub enum SurfaceRole {
   /// chose. It has no [`WindowId`]; its snapshot carries the X class as
   /// `app_id`.
   Unmanaged,
+  /// An X client's drag icon (`_NET_WM_WINDOW_TYPE_DND`), drawn above
+  /// every layer at the position the X client moves it to, and taking no
+  /// input. Like [`SurfaceRole::Unmanaged`] it has no [`WindowId`].
+  DragIcon,
 }
 
 /// What a [`BufferSnapshot`] holds of its buffer (docs/design/dmabuf.md,

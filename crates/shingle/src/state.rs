@@ -968,6 +968,16 @@ impl CompositorState {
       }
     }
     self.append_layers(&mut snapshots, id, primary, &[Layer::Overlay]);
+    // X drag icons are above everything but the cursor, where Wayfire
+    // puts them (wayfire_dnd_xwayland_view).
+    for object in crate::xwayland::unmanaged::drag_icons(self) {
+      if let Some(snapshot) = self.snapshot(&object)
+        && crate::surface_outputs::unmanaged_output(self, snapshot.geometry)
+          == *id
+      {
+        snapshots.push(snapshot);
+      }
+    }
     if crate::surface_outputs::pointer_output(self) != *id {
       return snapshots;
     }

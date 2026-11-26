@@ -299,10 +299,13 @@ pub(crate) fn snapshot_metadata(
       (SurfaceRole::SessionLock, None, None, None, None)
     }
     Role::Xwayland(role) => {
+      let kind = if role.is_drag_icon() {
+        SurfaceRole::DragIcon
+      } else {
+        SurfaceRole::Unmanaged
+      };
       match crate::xwayland::unmanaged::names(state, role) {
-        Some((class, title)) => {
-          (SurfaceRole::Unmanaged, None, None, Some(class), Some(title))
-        }
+        Some((class, title)) => (kind, None, None, Some(class), Some(title)),
         None => (SurfaceRole::Unassigned, None, None, None, None),
       }
     }

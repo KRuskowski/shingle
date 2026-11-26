@@ -42,7 +42,8 @@ pub(crate) struct XwaylandRole {
 }
 
 /// An unmanaged X window (override-redirect, or a parented popup), drawn
-/// in the Unmanaged layer above Top and below Overlay, at its X position.
+/// in the Unmanaged layer above Top and below Overlay, at its X position;
+/// or a drag icon, drawn above everything.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct UnmanagedRole {
   /// It may take keyboard focus
@@ -52,6 +53,10 @@ pub(crate) struct UnmanagedRole {
   pub(crate) focus_pending: bool,
   /// When it was mapped, for stacking: later windows are drawn on top.
   pub(crate) sequence: u64,
+  /// A `_NET_WM_WINDOW_TYPE_DND` window: a drag icon, which takes no
+  /// input and is drawn above every layer, as Wayfire's
+  /// `wayfire_dnd_xwayland_view` is.
+  pub(crate) drag_icon: bool,
 }
 
 impl XwaylandRole {
@@ -70,9 +75,16 @@ impl XwaylandRole {
   }
 
   /// Whether the surface takes pointer input: every managed or unmanaged
-  /// window does.
+  /// window does, apart from drag icons, which are under the pointer
+  /// while they follow it.
   pub(crate) fn accepts_pointer(&self) -> bool {
-    self.toplevel.is_some() || self.unmanaged.is_some()
+    self.toplevel.is_some()
+      || self.unmanaged.is_some_and(|unmanaged| !unmanaged.drag_icon)
+  }
+
+  /// Whether the surface is a drag icon's.
+  pub(crate) fn is_drag_icon(&self) -> bool {
+    self.unmanaged.is_some_and(|unmanaged| unmanaged.drag_icon)
   }
 }
 

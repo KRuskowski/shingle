@@ -20,6 +20,7 @@ use crate::{Event, SurfaceRole, shell, test_client::TestClient};
 
 const MENU: Window = 0x400100;
 const DIALOG: Window = 0x400200;
+const ICON: Window = 0x400300;
 
 /// The surface object of an X window.
 fn object_of(fixture: &mut Fixture, window: Window) -> ObjectId {
@@ -472,4 +473,42 @@ fn scale_and_expo_surfaces_include_x_windows() {
     assert_eq!(surfaces.len(), 1);
     assert_eq!(surfaces[0].window, Some(xterm));
   }
+}
+
+#[test]
+fn drag_icons_are_drawn_on_top_and_take_no_input() {
+  let mut fixture = Fixture::new();
+  map(&mut fixture, XTERM, "XTerm", 5);
+  let xterm = object_of(&mut fixture, XTERM);
+  let geometry = Geometry::new(100, 100, 32, 32);
+  let icon = override_redirect(&[WindowType::Dnd], geometry);
+  map_info(&mut fixture, ICON, icon, 6);
+  let top = drawn(&fixture).pop().unwrap();
+  assert_eq!(top.role, SurfaceRole::DragIcon);
+  assert_eq!(top.window, None);
+  assert_eq!(top.geometry, shingle_core::Rect::new(100, 100, 32, 32));
+  // Not in the Unmanaged layer, and not a view.
+  let state = fixture.state();
+  assert!(super::unmanaged::drawn(state).is_empty());
+  assert_eq!(super::unmanaged::drag_icons(state).len(), 1);
+  let views = fixture.call("window-rules/list-views", json!({}));
+  assert_eq!(views.as_array().unwrap().len(), 1);
+  // The pointer under it is on xterm, which keeps the keyboard.
+  let state = fixture.state();
+  crate::input::pointer_motion(state, 110.0, 110.0);
+  assert_eq!(state.input.pointer_focus.as_ref(), Some(&xterm));
+  assert_eq!(state.input.keyboard_focus.as_ref(), Some(&xterm));
+  // Moving it asks for a redraw.
+  state.events.clear();
+  let mut moved = override_redirect(&[WindowType::Dnd], geometry);
+  moved.geometry.x = 140;
+  fixture.apply(XwmEvent::Changed {
+    window: ICON,
+    info: moved,
+  });
+  assert_eq!(drawn(&fixture).pop().unwrap().geometry.x, 140);
+  assert!(fixture.state().events.iter().any(|event| matches!(
+    event,
+    Event::SurfaceCommitted(snapshot) if snapshot.role == SurfaceRole::DragIcon
+  )));
 }

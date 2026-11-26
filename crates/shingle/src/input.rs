@@ -1667,7 +1667,12 @@ fn hit_at(state: &CompositorState, x: f64, y: f64) -> Option<Hit> {
     .visible_surfaces_on(&output)
     .into_iter()
     .rev()
-    .filter(|snapshot| snapshot.role != crate::SurfaceRole::Cursor)
+    .filter(|snapshot| {
+      !matches!(
+        snapshot.role,
+        crate::SurfaceRole::Cursor | crate::SurfaceRole::DragIcon
+      )
+    })
     .find_map(|snapshot| {
       let object = state.surface_ids.get(&snapshot.id)?;
       let surface = state.surfaces.get(object)?;

@@ -248,8 +248,10 @@ fn try_map(state: &mut CompositorState, window: Window, from_commit: bool) {
       super::unmanaged::map(state, window, &object, from_commit);
       return;
     }
-    // Drag icons come with drag and drop (XW-6).
-    Kind::DragIcon => return,
+    Kind::DragIcon => {
+      super::unmanaged::map_icon(state, &object);
+      return;
+    }
   }
   let toplevel = new_toplevel(state, window, entry);
   let Some(surface) = state.surfaces.get_mut(&object) else {
@@ -408,8 +410,9 @@ fn changed(state: &mut CompositorState, window: Window, info: WindowInfo) {
     try_map(state, window, false);
     return;
   }
-  if info.kind() == Kind::Unmanaged {
-    super::unmanaged::changed(state, window);
+  if matches!(info.kind(), Kind::Unmanaged | Kind::DragIcon) {
+    let moved = old.geometry != info.geometry;
+    super::unmanaged::changed(state, window, moved);
     return;
   }
   if state
