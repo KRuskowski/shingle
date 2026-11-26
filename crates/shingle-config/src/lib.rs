@@ -26,6 +26,7 @@ mod config_watcher;
 mod i3;
 mod import;
 mod ini;
+mod input_devices;
 mod layout;
 mod multi_output;
 mod output;
@@ -36,13 +37,16 @@ mod wayfire_options;
 mod window_rule;
 
 pub use config_watcher::ConfigWatcher;
+pub use input_devices::{
+  DEVICE_OPTIONS, InputDeviceConfig, UDEV_PROPERTIES, matching_device,
+  parse_calibration,
+};
 pub use layout::{
   LayoutOutput, closest_point, disjoint, layout, layout_warnings, logical_size,
   output_in_direction, output_relative, overlapping,
 };
 pub use multi_output::{
-  InputDeviceConfig, OswitchConfig, OutputLayoutConfig, UnplugPolicy,
-  WsetBinding, WsetsConfig,
+  OswitchConfig, OutputLayoutConfig, UnplugPolicy, WsetBinding, WsetsConfig,
 };
 pub use output::{OutputConfig, OutputMode, OutputPosition};
 pub use plugins::PLUGINS;
@@ -148,9 +152,9 @@ pub struct ShingleConfig {
   pub oswitch: OswitchConfig,
   /// Workspace set bindings (`[wsets]`).
   pub wsets: WsetsConfig,
-  /// Per-device input settings by device name, from Wayfire's
-  /// `[input-device:NAME]` sections and i3 `input NAME` lines. Default
-  /// empty.
+  /// Per-device input settings by device name or udev property, from
+  /// Wayfire's `[input:NAME]` and `[input-device:NAME]` sections and i3
+  /// `input NAME` lines ([`matching_device`]). Default empty.
   pub input_devices: BTreeMap<String, InputDeviceConfig>,
   /// Colour shown where no surface covers the output. `[core]
   /// background_color`; default `[0.1, 0.1, 0.1, 1.0]`.
@@ -554,7 +558,7 @@ impl ShingleConfig {
     }
     self.validate_outputs()?;
     self.wsets.validate()?;
-    multi_output::validate_input_devices(&self.input_devices)?;
+    input_devices::validate(&self.input_devices)?;
     if self.behavior.max_buffer_size == 0 {
       return Err(ConfigError::Invalid(
         "behavior.max_buffer_size must be nonzero".into(),

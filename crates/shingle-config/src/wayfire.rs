@@ -10,7 +10,8 @@ use crate::{
 
 /// The sections the importer reads, or whose plugin Shingle implements
 /// without options. Any other section's options are reported once per
-/// section. `output:NAME` and `input-device:NAME` are matched by prefix.
+/// section. `output:NAME`, `input:NAME` and `input-device:NAME` are matched
+/// by prefix.
 const SECTIONS: &[&str] = &[
   "alpha",
   "animate",
@@ -62,6 +63,7 @@ const SECTIONS: &[&str] = &[
 fn supported(name: &str) -> bool {
   SECTIONS.contains(&name)
     || name.starts_with("output:")
+    || name.starts_with("input:")
     || name.starts_with("input-device:")
 }
 
@@ -1155,6 +1157,34 @@ fn apply(
           .output = Some(value.to_owned());
       }
     }
+    (_, "calibration") if section.starts_with("input-device:") => {
+      let name = section_name["input-device:".len()..].trim();
+      let calibration = crate::parse_calibration(value)?;
+      if !name.is_empty() {
+        config
+          .input_devices
+          .entry(name.to_owned())
+          .or_default()
+          .calibration = calibration;
+      }
+    }
+    _ if section.starts_with("input:") => {
+      let name = section_name["input:".len()..].trim();
+      if name.is_empty() {
+        return Ok(());
+      }
+      let mut device =
+        config.input_devices.get(name).cloned().unwrap_or_default();
+      if device_option(&mut device, key, value)? {
+        config.input_devices.insert(name.to_owned(), device);
+      } else {
+        notes.push(format!(
+          "Shingle sets only libinput options per device ({}); {key} \
+           follows [input]",
+          crate::DEVICE_OPTIONS.join(", ")
+        ));
+      }
+    }
     _ if section == "output" || section.starts_with("output:") => {
       let output = match section_name[6..].strip_prefix(':').map(str::trim) {
         Some(name) if !name.is_empty() => config.named_output(name),
@@ -1253,6 +1283,45 @@ pub(crate) fn normalize_key(key: &str) -> String {
     "esc" => "escape".into(),
     _ => key,
   }
+}
+
+/// Reads libinput option `key` of an `[input:NAME]` section into `device`,
+/// as the `[input]` arms read it. Returns `Ok(false)` for an option that
+/// is not one of [`crate::DEVICE_OPTIONS`].
+fn device_option(
+  device: &mut crate::InputDeviceConfig,
+  key: &str,
+  value: &str,
+) -> Result<bool, ConfigError> {
+  match key {
+    "left_handed_mode" => device.left_handed_mode = Some(boolean(value)?),
+    "middle_emulation" => device.middle_emulation = Some(boolean(value)?),
+    "mouse_accel_profile" => device.mouse_accel_profile = Some(value.into()),
+    "mouse_cursor_speed" => device.mouse_cursor_speed = Some(number(value)?),
+    "mouse_natural_scroll" => {
+      device.mouse_natural_scroll = Some(boolean(value)?)
+    }
+    "touchpad_accel_profile" => {
+      device.touchpad_accel_profile = Some(value.into())
+    }
+    "touchpad_cursor_speed" => {
+      device.touchpad_cursor_speed = Some(number(value)?)
+    }
+    "tap_to_click" => device.tap_to_click = Some(boolean(value)?),
+    "click_method" => device.click_method = Some(value.into()),
+    "scroll_method" => device.scroll_method = Some(value.into()),
+    "natural_scroll" => device.natural_scroll = Some(boolean(value)?),
+    "disable_touchpad_while_typing" => {
+      device.disable_touchpad_while_typing = Some(boolean(value)?)
+    }
+    "disable_touchpad_while_mouse" => {
+      device.disable_touchpad_while_mouse = Some(boolean(value)?)
+    }
+    "tap_and_drag" => device.tap_and_drag = Some(boolean(value)?),
+    "drag_lock" => device.drag_lock = Some(boolean(value)?),
+    _ => return Ok(false),
+  }
+  Ok(true)
 }
 
 fn number<T: std::str::FromStr>(value: &str) -> Result<T, ConfigError> {

@@ -1,8 +1,6 @@
 //! Configuration of several outputs: what happens to an unplugged output's
-//! windows, Wayfire's `oswitch` and `wsets` plugins, and which output an
-//! absolute input device maps to.
-
-use std::collections::BTreeMap;
+//! windows and Wayfire's `oswitch` and `wsets` plugins. Which output an
+//! absolute input device maps to is in [`crate::InputDeviceConfig`].
 
 use serde::Deserialize;
 
@@ -151,36 +149,6 @@ impl WsetsConfig {
     }
     Ok(())
   }
-}
-
-/// Settings of one input device, Wayfire's `[input-device:NAME]`.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct InputDeviceConfig {
-  /// The output an absolute device (touch screen, tablet) maps to.
-  /// `[input-device:NAME] output`; by default the output the device names
-  /// itself, else the whole layout.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub output: Option<String>,
-}
-
-/// Checks that no device maps to an empty output name.
-pub(crate) fn validate_input_devices(
-  devices: &BTreeMap<String, InputDeviceConfig>,
-) -> Result<(), ConfigError> {
-  for (name, device) in devices {
-    if name.is_empty() {
-      return Err(ConfigError::Invalid(
-        "input_devices needs device names".into(),
-      ));
-    }
-    if device.output.as_deref() == Some("") {
-      return Err(ConfigError::Invalid(format!(
-        "input_devices.{name}.output must name an output"
-      )));
-    }
-  }
-  Ok(())
 }
 
 #[cfg(test)]
