@@ -21,6 +21,8 @@ pub mod scale_title;
 mod shm;
 #[cfg(test)]
 mod test_client;
+#[cfg(test)]
+mod test_gpu;
 pub mod workspace_transition;
 
 pub use frontend::Frontend;

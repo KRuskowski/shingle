@@ -6,7 +6,10 @@ use std::{
   io::{Read, Write},
   os::unix::net::UnixStream,
   path::PathBuf,
-  sync::atomic::{AtomicU32, Ordering},
+  sync::{
+    MutexGuard,
+    atomic::{AtomicU32, Ordering},
+  },
   thread,
   time::{Duration, Instant},
 };
@@ -18,8 +21,8 @@ use shingle::{
 use shingle_config::{ConfigFormat, ShingleConfig};
 use shingle_core::WindowId as TileWindowId;
 use shingle_render::{
-  GpuTexture, OffscreenRenderer, RenderError, RenderRect, RenderTile,
-  TextureTransform,
+  GpuContext, GpuTexture, OffscreenTarget, RenderError, RenderRect,
+  RenderState, RenderTile, TextureTransform,
 };
 use shingle_session::SessionStore;
 use wayland_client::Proxy;
@@ -766,9 +769,13 @@ fn stipc_keys_are_dropped_while_the_session_is_inactive() {
   assert!(fixture.frontend.scale.is_some());
 }
 
-/// Records the tiles of every frame drawn into an offscreen renderer.
+/// Records the tiles of every frame drawn into a 1000x800 offscreen
+/// target on the test binary's one GPU context, which it holds for as
+/// long as it lives (crates/shingle-frontend/src/test_gpu.rs).
 struct RecordingTarget {
-  renderer: OffscreenRenderer,
+  gpu: MutexGuard<'static, GpuContext>,
+  state: RenderState,
+  target: OffscreenTarget,
   frames: Vec<Vec<(RenderRect, bool)>>,
   /// The alpha of every tile of every frame.
   alphas: Vec<Vec<f32>>,
@@ -778,34 +785,40 @@ struct RecordingTarget {
   captures: Vec<(u32, u32)>,
 }
 
+impl RecordingTarget {
+  /// The GPU context the target draws with.
+  fn gpu(&self) -> &GpuContext {
+    &self.gpu
+  }
+}
+
 impl RenderTarget for RecordingTarget {
   fn set_scale_factor(&mut self, scale: f64) {
-    self.renderer.set_scale_factor(scale);
+    self.state.set_scale_factor(scale);
   }
 
   fn set_output_transform(&mut self, transform: TextureTransform) {
-    self.renderer.set_output_transform(transform);
+    self.state.set_output_transform(transform);
   }
 
   fn set_nearest_filter(&mut self, nearest: bool) -> bool {
-    self.renderer.set_nearest_filter(nearest)
+    self.state.set_nearest_filter(nearest)
   }
 
   fn set_zoom(&mut self, factor: f32, origin_x: f32, origin_y: f32) {
-    self.renderer.set_zoom(factor, origin_x, origin_y);
+    self.state.set_zoom(factor, origin_x, origin_y);
   }
 
   fn set_gamma_ramp(&mut self, ramp: &[u16]) -> Result<(), RenderError> {
-    self.renderer.set_gamma_ramp(ramp)
+    self.gpu.set_gamma_ramp(ramp)
   }
 
   fn set_inversion(&mut self, inverted: bool, preserve_hue: bool) {
-    self.renderer.set_inversion(inverted, preserve_hue);
+    self.gpu.set_inversion(inverted, preserve_hue);
   }
 
-  fn set_tearing(&mut self, tearing: bool) {
-    RenderTarget::set_tearing(&mut self.renderer, tearing);
-  }
+  // Offscreen frames cannot tear.
+  fn set_tearing(&mut self, _tearing: bool) {}
 
   fn create_texture(
     &self,
@@ -813,7 +826,9 @@ impl RenderTarget for RecordingTarget {
     height: u32,
     rgba: &[u8],
   ) -> Result<GpuTexture, RenderError> {
-    self.renderer.create_texture(width, height, rgba)
+    self
+      .gpu
+      .create_texture(width, height, rgba, self.state.texture_filter())
   }
 
   fn update_texture(
@@ -821,7 +836,7 @@ impl RenderTarget for RecordingTarget {
     texture: &GpuTexture,
     rgba: &[u8],
   ) -> Result<(), RenderError> {
-    RenderTarget::update_texture(&self.renderer, texture, rgba)
+    self.gpu.update_texture(texture, rgba)
   }
 
   fn render(
@@ -839,7 +854,8 @@ impl RenderTarget for RecordingTarget {
       .alphas
       .push(tiles.iter().map(|tile| tile.color[3]).collect());
     thread::sleep(self.delay);
-    RenderTarget::render(&mut self.renderer, tiles, clear)
+    self.target.render(&self.gpu, &self.state, tiles, clear);
+    self.target.read_rgba(&self.gpu).map(|_| true)
   }
 
   fn capture(
@@ -849,26 +865,25 @@ impl RenderTarget for RecordingTarget {
     size: (u32, u32),
   ) -> Result<Vec<u8>, RenderError> {
     self.captures.push(size);
-    RenderTarget::capture(&mut self.renderer, tiles, clear, size)
+    shingle_render::capture_frame(&self.gpu, &self.state, size, tiles, clear)
   }
 }
 
-/// An offscreen recording target, or `None` without a GPU adapter.
+/// A recording target, or `None` without a GPU adapter. It waits while
+/// another test holds the GPU.
 fn recording_target() -> Option<RecordingTarget> {
-  match pollster::block_on(OffscreenRenderer::new(1000, 800)) {
-    Ok(renderer) => Some(RecordingTarget {
-      renderer,
-      frames: Vec::new(),
-      alphas: Vec::new(),
-      delay: Duration::ZERO,
-      captures: Vec::new(),
-    }),
-    Err(RenderError::RequestAdapter(error)) => {
-      eprintln!("skipping scene test, no GPU adapter: {error}");
-      None
-    }
-    Err(error) => panic!("offscreen renderer failed: {error}"),
-  }
+  let gpu = crate::test_gpu::lock()?;
+  let target =
+    OffscreenTarget::new(&gpu, 1000, 800).expect("a 1000x800 offscreen target");
+  Some(RecordingTarget {
+    gpu,
+    state: RenderState::default(),
+    target,
+    frames: Vec::new(),
+    alphas: Vec::new(),
+    delay: Duration::ZERO,
+    captures: Vec::new(),
+  })
 }
 
 #[test]
@@ -1234,7 +1249,7 @@ fn shm_fixture(target: &RecordingTarget) -> Fixture {
   config.tiling.animation_duration = 0;
   config.vswitch.duration_ms = 0;
   let mut fixture = Fixture::new(config);
-  fixture.frontend.attach_gpu(target.renderer.gpu());
+  fixture.frontend.attach_gpu(target.gpu());
   fixture
 }
 

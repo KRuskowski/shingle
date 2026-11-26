@@ -5,12 +5,12 @@ use std::{
   cell::{Cell, RefCell},
   ffi::OsStr,
   rc::Rc,
-  sync::{Arc, OnceLock},
+  sync::Arc,
 };
 
 use shingle::{DmabufBuffer, DmabufFeedback, DmabufFormat, DmabufPlane};
 use shingle_render::{
-  DmabufCaps, DmabufUnavailable, GpuTexture, OffscreenRenderer, TextureFilter,
+  DmabufCaps, DmabufUnavailable, GpuTexture, TextureFilter,
   dmabuf::{FormatCaps, ModifierCaps},
 };
 
@@ -73,22 +73,11 @@ impl Import for FakeImport {
   fn poll(&self) {}
 }
 
-/// A fake importer with a 1x1 texture, or `None` without a GPU adapter.
-/// The cache tests share one device: NVIDIA's driver crashed now and then
-/// (SIGSEGV) when each test opened and closed its own while the scene
-/// tests ran in parallel.
+/// A fake importer with a 1x1 texture on the test binary's one GPU
+/// context (crates/shingle-frontend/src/test_gpu.rs), or `None` without a
+/// GPU adapter.
 pub(crate) fn fake_import() -> Option<FakeImport> {
-  static TEXTURE: OnceLock<Option<GpuTexture>> = OnceLock::new();
-  TEXTURE
-    .get_or_init(|| {
-      let renderer = pollster::block_on(OffscreenRenderer::new(1, 1)).ok()?;
-      let texture = renderer.create_texture(1, 1, &[255; 4]).ok();
-      // The device lives as long as the test process.
-      std::mem::forget(renderer);
-      texture
-    })
-    .clone()
-    .map(FakeImport::new)
+  crate::test_gpu::white_texture().map(FakeImport::new)
 }
 
 /// The feedback the fake importer's tests advertise.
