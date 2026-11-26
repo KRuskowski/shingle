@@ -550,7 +550,14 @@ fn dispatch_until(
       };
       if matches!(rustix::event::poll(&mut fds, Some(&timeout)), Ok(n) if n > 0)
       {
-        guard.read().map_err(|error| error.to_string())?;
+        match guard.read() {
+          Ok(_) => {}
+          // Readable, but only part of a message (or of its fds) has
+          // arrived, so nothing could be dispatched yet: not an error.
+          Err(wayland_client::backend::WaylandError::Io(error))
+            if error.kind() == std::io::ErrorKind::WouldBlock => {}
+          Err(error) => return Err(error.to_string()),
+        }
       }
     }
     queue
