@@ -880,6 +880,9 @@ def run_soak(mode, duration, binary, wl_probe, xw_probe, seed, output,
   options = {'mode': mode, 'duration': f'{duration / 60:.0f} min',
              'seed': seed, 'binary': binary,
              'steps': ' '.join(context.steps),
+             'Vulkan validation layer': (
+                 'disabled' if 'validation' in os.environ.get(
+                     'VK_LOADER_LAYERS_DISABLE', '') else 'as built'),
              'started': time.strftime('%Y-%m-%d %H:%M',
                                       time.localtime(started))}
   info = {'cycles': context.cycles,

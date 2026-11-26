@@ -84,6 +84,22 @@ STEPS = ('x', 'clipboard', 'dnd', 'windows', 'outputs', 'vkcube',
 # so it refuses to run anywhere but the native test machine
 # (docs/native-testing.md), which tools/native_test/uinput.py marks the
 # same way.
+# Debug builds of Shingle turn on wgpu's validation, which loads the
+# Khronos validation layer; its own bookkeeping grows the heap by about
+# 1 MiB a minute under the workload while Shingle's does not
+# (docs/status.md#soak-tests). The loader leaves it out with this, unless
+# `--validation` asks for it.
+VALIDATION_VARIABLE = 'VK_LOADER_LAYERS_DISABLE'
+VALIDATION_LAYERS = '*validation*'
+
+def without_validation(environment, validation):
+  """`environment` with the Vulkan validation layer disabled for every
+  process of the run, unless `validation`."""
+  environment = dict(environment)
+  if not validation:
+    environment[VALIDATION_VARIABLE] = VALIDATION_LAYERS
+  return environment
+
 TEST_MACHINE_MARKER = '/etc/shingle-native-test-machine'
 
 def lower_priority(niceness=NICENESS):
@@ -110,6 +126,9 @@ def parse_options(arguments):
   parser.add_argument('--steps', default=','.join(STEPS),
                       help='the cycle steps to run, comma-separated '
                       f'(default {",".join(STEPS)})')
+  parser.add_argument('--validation', action='store_true',
+                      help='keep the Vulkan validation layer that debug '
+                      'builds load')
   parser.add_argument('--ipc', help='attach: the running Shingle\'s IPC '
                       'socket')
   parser.add_argument('--pid', type=int, help='attach: its PID')
@@ -256,7 +275,8 @@ def main(arguments=None):
       '--output', output]
   print(f'soak: {options.mode} for {options.minutes} min into {output}',
         flush=True)
-  process = subprocess.Popen(command)
+  process = subprocess.Popen(
+      command, env=without_validation(os.environ, options.validation))
   sampler = GpuSampler(output, process.pid)
   sampler.start()
   try:

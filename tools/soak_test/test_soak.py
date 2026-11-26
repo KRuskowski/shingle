@@ -243,6 +243,11 @@ class RunTest(unittest.TestCase):
     with self.assertRaises(SystemExit):
       run.parse_options(['--mode', 'attach', '--ipc', '/tmp/ipc'])
 
+  def test_validation_is_off_unless_asked(self):
+    self.assertEqual(run.without_validation({'A': '1'}, False),
+                     {'A': '1', 'VK_LOADER_LAYERS_DISABLE': '*validation*'})
+    self.assertEqual(run.without_validation({'A': '1'}, True), {'A': '1'})
+
   def test_lower_priority_never_raises_it(self):
     before = os.nice(0)
     self.assertGreaterEqual(run.lower_priority(before), before)
