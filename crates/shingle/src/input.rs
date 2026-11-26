@@ -129,6 +129,11 @@ pub(crate) struct InputState {
   keyboard_event_time: Option<u32>,
   event_time: Option<Duration>,
   pub(crate) pressed_keys: BTreeSet<u32>,
+  /// The pointer buttons held down.
+  pub(crate) pressed_buttons: BTreeSet<u32>,
+  /// The surface with the pointer focus when the first of them was
+  /// pressed.
+  pub(crate) button_surface: Option<ObjectId>,
   pub(crate) modifiers: Modifiers,
   keymap: OwnedFd,
   keymap_size: u32,
@@ -167,6 +172,8 @@ impl InputState {
       keyboard_event_time: None,
       event_time: None,
       pressed_keys: BTreeSet::new(),
+      pressed_buttons: BTreeSet::new(),
+      button_surface: None,
       modifiers: Modifiers {
         locked: locked_modifiers,
         ..Modifiers::default()
@@ -1047,10 +1054,17 @@ fn pointer_motion_inner(
   state.input.pointer_x = x;
   state.input.pointer_y = y;
   crate::wayfire_shell::input_moved(state, x, y);
-  let hit = hit_at(state, x, y);
+  // During an X client's drag the X surface keeps the pointer, so that
+  // Xwayland sees the motion and the release wherever the pointer goes.
+  let grab = crate::data_device::pointer_grab(state);
+  let hit = if grab.is_some() {
+    None
+  } else {
+    hit_at(state, x, y)
+  };
   let target = match &hit {
     Some(Hit::Surface(object)) => Some(object.clone()),
-    _ => None,
+    _ => grab,
   };
   set_pointer_focus(state, target.clone());
   let frame = match hit {
@@ -1072,6 +1086,51 @@ fn pointer_motion_inner(
 }
 
 pub(crate) fn pointer_button(
+  state: &mut CompositorState,
+  button: u32,
+  pressed: bool,
+) {
+  if pressed {
+    if state.input.pressed_buttons.is_empty() {
+      state.input.button_surface = state.input.pointer_focus.clone();
+    }
+    state.input.pressed_buttons.insert(button);
+  } else {
+    state.input.pressed_buttons.remove(&button);
+  }
+  pointer_button_inner(state, button, pressed);
+  if state.input.pressed_buttons.is_empty() {
+    state.input.button_surface = None;
+    // An X client's drag lets the pointer go: it moves to whatever is
+    // under it.
+    if crate::data_device::release_grab(state) {
+      let (x, y) = (state.input.pointer_x, state.input.pointer_y);
+      pointer_warp(state, x, y);
+    }
+  }
+}
+
+/// The surface a drag is over: the one under the pointer that takes
+/// pointer input, whichever surface has the pointer focus.
+pub(crate) fn drag_target(state: &CompositorState) -> Option<ObjectId> {
+  let (x, y) = (state.input.pointer_x, state.input.pointer_y);
+  surface_at(state, x, y).filter(|object| pointer_allowed(state, object))
+}
+
+/// The X surface a button is held on, where an X client's drag starts.
+pub(crate) fn x_drag_origin(state: &CompositorState) -> Option<ObjectId> {
+  if state.input.pressed_buttons.is_empty() {
+    return None;
+  }
+  let object = state.input.button_surface.clone()?;
+  state
+    .surfaces
+    .get(&object)
+    .is_some_and(|surface| matches!(surface.role, Role::Xwayland(_)))
+    .then_some(object)
+}
+
+fn pointer_button_inner(
   state: &mut CompositorState,
   button: u32,
   pressed: bool,

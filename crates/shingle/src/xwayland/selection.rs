@@ -39,7 +39,7 @@ pub(crate) fn offered(
     Selection::Primary => {
       primary_selection::set_x11_selection(state, mime_types);
     }
-    // An X drag's types come with its XdndEnter.
+    // An X drag's types come with its XdndEnter (dnd.rs).
     Selection::Dnd => {}
   }
 }
@@ -63,7 +63,7 @@ pub(crate) fn wayland_side(
   let current = match selection {
     Selection::Clipboard => data_device::selection(state),
     Selection::Primary => primary_selection::selection(state),
-    // A drag is not a selection.
+    // The drag is not a selection; dnd.rs reports it.
     Selection::Dnd => None,
   };
   match current {
@@ -79,6 +79,13 @@ pub(crate) fn wayland_side(
 /// When the selection has changed to none or to an X client's since,
 /// the descriptor is dropped, which ends the transfer with no data.
 pub(crate) fn send(state: &mut CompositorState, send: SelectionSend) {
+  if send.selection == Selection::Dnd {
+    // An X drop target asks for a Wayland drag's data.
+    if let Some(view) = data_device::drag_view(state).filter(|view| !view.x11) {
+      data_device::receive_from(state, &view.source, send.mime_type, send.fd);
+    }
+    return;
+  }
   let (Some(key), Some(_)) = wayland_side(state, send.selection) else {
     return;
   };

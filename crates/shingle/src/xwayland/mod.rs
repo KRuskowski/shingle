@@ -11,10 +11,12 @@
 //!
 //! [`shell`] is the `xwayland_shell_v1` protocol and [`windows`] turns
 //! managed X windows into Shingle toplevels (sections 3 and 4).
-//! [`selection`] bridges the clipboard and primary selection (section 5).
+//! [`selection`] bridges the clipboard and primary selection, and [`dnd`]
+//! drag and drop (section 5).
 
 #[cfg(test)]
 mod behaviour_tests;
+pub(crate) mod dnd;
 #[cfg(test)]
 pub(crate) mod fixture;
 pub(crate) mod focus;
@@ -145,6 +147,8 @@ pub(crate) struct Xwayland {
   xwm_source: Option<RegistrationToken>,
   /// The selection bridge's glue for the current window manager.
   bridge: selection::Bridge,
+  /// The drag and drop bridge's glue for the current window manager.
+  drag: dnd::DragBridge,
 }
 
 /// The start mode of an enabled [`XwaylandMode`].
@@ -184,6 +188,7 @@ impl Xwayland {
       readiness_source: None,
       xwm_source: None,
       bridge: selection::Bridge::default(),
+      drag: dnd::DragBridge::default(),
     })
   }
 
@@ -279,6 +284,7 @@ impl Xwayland {
       }
     }
     let result = result
+      .and_then(|()| self.drag.sync(state, xwm))
       .and_then(|()| self.bridge.sync(state, xwm))
       .and_then(|()| match focus {
         focus::Target::Window(window) => xwm.set_focus(window),
@@ -410,6 +416,7 @@ impl Xwayland {
           .and_then(Xwm::start)
           .and_then(|mut xwm| {
             xwm.bridge_selections(bridged)?;
+            xwm.bridge_dnd()?;
             Ok(xwm)
           });
         match started {
@@ -545,7 +552,9 @@ impl Xwayland {
   ) {
     remove(handle, &mut self.xwm_source);
     self.bridge.clear(handle);
+    self.drag.clear();
     if self.xwm.take().is_some() {
+      dnd::forget_x11(state);
       windows::forget_all(state);
       selection::forget_x11(state);
     }

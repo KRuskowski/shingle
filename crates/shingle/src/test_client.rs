@@ -13,9 +13,10 @@ use wayland_client::{
   Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
   backend::ObjectId,
   protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer,
-    wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface,
-    wl_surface, wl_touch,
+    wl_buffer, wl_callback, wl_compositor, wl_data_device,
+    wl_data_device_manager, wl_data_offer, wl_data_source, wl_keyboard,
+    wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool,
+    wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
   },
 };
 use wayland_protocols::{
@@ -212,6 +213,17 @@ pub(crate) struct Events {
   pub(crate) wayfire_shell: Vec<(ObjectId, String)>,
   /// `zxdg_toplevel_decoration_v1.configure` modes, with their object.
   pub(crate) decoration_modes: Vec<(ObjectId, u32)>,
+  /// `wl_data_device` drag events, in order: `enter`, `leave`, `motion`
+  /// and `drop`.
+  pub(crate) drag: Vec<&'static str>,
+  /// The offer of each `wl_data_device.enter`, in order.
+  pub(crate) drag_offers: Vec<Option<wl_data_offer::WlDataOffer>>,
+  /// `wl_data_source` events, in order: `target MIME` (or `target -`),
+  /// `action BITS`, `send MIME`, `dnd_drop_performed`, `dnd_finished` and
+  /// `cancelled`.
+  pub(crate) data_source: Vec<String>,
+  /// `wl_data_source.send` descriptors, in order.
+  pub(crate) data_sends: Vec<OwnedFd>,
   synced: bool,
 }
 
@@ -715,6 +727,96 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Events {
     _: &QueueHandle<Self>,
   ) {
     events.pointer.push(event);
+  }
+}
+
+impl Dispatch<wl_data_device_manager::WlDataDeviceManager, ()> for Events {
+  fn event(
+    _: &mut Self,
+    _: &wl_data_device_manager::WlDataDeviceManager,
+    _: wl_data_device_manager::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+  }
+}
+
+impl Dispatch<wl_data_device::WlDataDevice, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &wl_data_device::WlDataDevice,
+    event: wl_data_device::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      wl_data_device::Event::Enter { id, .. } => {
+        events.drag.push("enter");
+        events.drag_offers.push(id);
+      }
+      wl_data_device::Event::Leave => events.drag.push("leave"),
+      wl_data_device::Event::Motion { .. } => events.drag.push("motion"),
+      wl_data_device::Event::Drop => events.drag.push("drop"),
+      _ => {}
+    }
+  }
+
+  wayland_client::event_created_child!(Events, wl_data_device::WlDataDevice, [
+    wl_data_device::EVT_DATA_OFFER_OPCODE => (wl_data_offer::WlDataOffer, ()),
+  ]);
+}
+
+impl Dispatch<wl_data_offer::WlDataOffer, ()> for Events {
+  fn event(
+    events: &mut Self,
+    offer: &wl_data_offer::WlDataOffer,
+    event: wl_data_offer::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wl_data_offer::Event::Offer { mime_type } = event {
+      events
+        .offer_types
+        .entry(offer.id())
+        .or_default()
+        .push(mime_type);
+    }
+  }
+}
+
+impl Dispatch<wl_data_source::WlDataSource, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &wl_data_source::WlDataSource,
+    event: wl_data_source::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    let line = match event {
+      wl_data_source::Event::Target { mime_type } => {
+        format!("target {}", mime_type.as_deref().unwrap_or("-"))
+      }
+      wl_data_source::Event::Action { dnd_action } => {
+        let bits = match dnd_action {
+          WEnum::Value(action) => action.bits(),
+          WEnum::Unknown(bits) => bits,
+        };
+        format!("action {bits}")
+      }
+      wl_data_source::Event::Send { mime_type, fd } => {
+        events.data_sends.push(fd);
+        format!("send {mime_type}")
+      }
+      wl_data_source::Event::DndDropPerformed => "dnd_drop_performed".into(),
+      wl_data_source::Event::DndFinished => "dnd_finished".into(),
+      wl_data_source::Event::Cancelled => "cancelled".into(),
+      _ => return,
+    };
+    events.data_source.push(line);
   }
 }
 
