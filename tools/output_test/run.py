@@ -657,8 +657,9 @@ WCM_FIXTURE = os.path.join(
 # 332) is not read since WG-2. Since WG-4 the `<super>` of line 61 and
 # the `[wayfire-shell]` section of line 412 are read, and since WG-5
 # the `[vswipe]` section of line 376 belongs to a plugin Shingle has
-# that the list leaves out, which is not read.
-WCM_WARNING_LINES = (14, 24, 40, 93, 110, 141, 154, 175, 305, 417, 430)
+# that the list leaves out, which is not read. Since WG-6 the
+# `[decoration]` section of line 110 is read.
+WCM_WARNING_LINES = (14, 24, 40, 93, 141, 154, 175, 305, 417, 430)
 # Wayfire's options (tools/wayfire_options/generate.py).
 OPTION_TABLE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..', 'crates',
