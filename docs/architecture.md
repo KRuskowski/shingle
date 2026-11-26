@@ -28,7 +28,7 @@
 | Workspace sets: attaching, parking, moving windows between sets, unplug transfers, away records and their return, finding a parked set | `crates/shingle-core/src/wset.rs` |
 | Session snapshot format (version 2, and loading version 1) | `crates/shingle-core/src/session.rs` |
 | Background session writes: coalescing, order, final save, error reporting (`SessionWriter`) | `crates/shingle-session/src/writer.rs`; frontend callers in `crates/shingle-frontend/src/frontend/session.rs` and `Frontend::shutdown` |
-| Environment of every child process (`ClientEnvironment`), launching clients | `crates/shingle-session/src/environment.rs`, `crates/shingle-session/src/lib.rs` |
+| Environment of every child process (`ClientEnvironment`, with Wayfire's variables from `with_desktop`), launching clients | `crates/shingle-session/src/environment.rs`, `crates/shingle-session/src/lib.rs` |
 | Public compositor API and renderer events | `crates/shingle/src/lib.rs` |
 | Protocol timestamps (`CLOCK_MONOTONIC`) | `crates/shingle/src/clock.rs` |
 | In-process Wayland test client | `crates/shingle/src/test_client.rs` |
