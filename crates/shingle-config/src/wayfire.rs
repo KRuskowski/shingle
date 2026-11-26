@@ -642,6 +642,73 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
       ("command", key) if key.starts_with("command_") => {
         commands.insert(key[8..].to_owned(), value.to_owned());
       }
+      ("core", "plugins") => {
+        // Without preserve-output Wayfire moves an unplugged output's
+        // windows for good; Shingle's default brings them back, so only
+        // the plugin's own behaviour is imported.
+        if value
+          .split_whitespace()
+          .any(|plugin| plugin == "preserve-output")
+        {
+          config.output_layout.unplug = crate::UnplugPolicy::Park;
+        }
+      }
+      ("preserve-output", "last_output_focus_timeout") => {
+        config.output_layout.last_output_focus_timeout =
+          number(value, line_number)?;
+      }
+      ("oswitch", "next_output") => {
+        config.oswitch.next_output = binding(value)?;
+      }
+      ("oswitch", "next_output_with_win") => {
+        config.oswitch.next_output_with_win = binding(value)?;
+      }
+      ("oswitch", "prev_output") => {
+        config.oswitch.prev_output = binding(value)?;
+      }
+      ("oswitch", "prev_output_with_win") => {
+        config.oswitch.prev_output_with_win = binding(value)?;
+      }
+      ("oswitch", "left_output") => {
+        config.oswitch.left_output = binding(value)?;
+      }
+      ("oswitch", "right_output") => {
+        config.oswitch.right_output = binding(value)?;
+      }
+      ("oswitch", "above_output") => {
+        config.oswitch.above_output = binding(value)?;
+      }
+      ("oswitch", "below_output") => {
+        config.oswitch.below_output = binding(value)?;
+      }
+      ("wsets", "label_duration") => {
+        config.wsets.label_duration = duration_ms(value, line_number)?;
+      }
+      ("wsets", key) if key.starts_with("send_to_wset_") => {
+        config.wsets.send_window_bindings.push(crate::WsetBinding {
+          wset: number(&key["send_to_wset_".len()..], line_number)?,
+          binding: binding(value)?,
+        });
+      }
+      ("wsets", key) if key.starts_with("wset_") => {
+        config.wsets.wsets_bindings.push(crate::WsetBinding {
+          wset: number(&key["wset_".len()..], line_number)?,
+          binding: binding(value)?,
+        });
+      }
+      ("workarounds", "remove_output_limits") => {
+        config.behavior.remove_output_limits = boolean(value, line_number)?;
+      }
+      (_, "output") if section.starts_with("input-device:") => {
+        let name = section_name["input-device:".len()..].trim();
+        if !name.is_empty() && !value.is_empty() {
+          config
+            .input_devices
+            .entry(name.to_owned())
+            .or_default()
+            .output = Some(value.to_owned());
+        }
+      }
       _ if section == "output" || section.starts_with("output:") => {
         let output = match section_name[6..].strip_prefix(':').map(str::trim) {
           Some(name) if !name.is_empty() => config.named_output(name),

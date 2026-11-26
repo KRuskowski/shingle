@@ -16,6 +16,33 @@ outputs: []
 #    position: {x: 0, y: 0}
 #    scale: 1.25
 
+# What happens to an unplugged output's windows: move (Wayfire's default),
+# park (Wayfire's preserve-output) or return (they join the focused
+# output and go back when it returns).
+output_layout:
+  unplug: return
+  last_output_focus_timeout: 10000
+
+oswitch:
+  next_output: super+o
+  next_output_with_win: super+shift+o
+  prev_output: none
+  prev_output_with_win: none
+  left_output: none
+  right_output: none
+  above_output: none
+  below_output: none
+
+wsets:
+  wsets_bindings: []
+  send_window_bindings: []
+  label_duration: 2000
+
+# Which output an absolute device such as a touch screen maps to.
+input_devices: {}
+#  "Wacom Pen":
+#    output: DP-1
+
 background_color: [0.1, 0.1, 0.1, 1.0]
 
 behavior:
@@ -29,6 +56,7 @@ behavior:
   force_preferred_decoration_mode: false
   focus_main_surface_instead_of_popup: false
   disable_primary_selection: false
+  remove_output_limits: false
 
 xwayland:
   mode: lazy

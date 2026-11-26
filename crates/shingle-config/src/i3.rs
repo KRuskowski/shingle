@@ -409,6 +409,29 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
           "$cursor_size" => {
             config.input.cursor_size = number(&value, line_number)?
           }
+          "$output_unplug" => {
+            config.output_layout.unplug = match value.as_str() {
+              "move" => crate::UnplugPolicy::Move,
+              "park" => crate::UnplugPolicy::Park,
+              "return" => crate::UnplugPolicy::Return,
+              _ => {
+                return Err(ConfigError::Invalid(format!(
+                  "line {line_number}: $output_unplug must be move, park \
+                   or return"
+                )));
+              }
+            }
+          }
+          "$last_output_focus_timeout" => {
+            config.output_layout.last_output_focus_timeout =
+              number(&value, line_number)?
+          }
+          "$remove_output_limits" => {
+            config.behavior.remove_output_limits = boolean(&value, line_number)?
+          }
+          "$wsets_label_duration" => {
+            config.wsets.label_duration = number(&value, line_number)?
+          }
           _ => {
             variables.insert(name, value);
           }
@@ -493,6 +516,21 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
           "wrot reset" => config.keybindings.wrot_reset = binding,
           "wrot reset-one" | "wrot reset one" => {
             config.keybindings.wrot_reset_one = binding
+          }
+          "focus output next" => config.oswitch.next_output = binding,
+          "focus output prev" | "focus output previous" => {
+            config.oswitch.prev_output = binding
+          }
+          "focus output left" => config.oswitch.left_output = binding,
+          "focus output right" => config.oswitch.right_output = binding,
+          "focus output up" => config.oswitch.above_output = binding,
+          "focus output down" => config.oswitch.below_output = binding,
+          "move container to output next" => {
+            config.oswitch.next_output_with_win = binding
+          }
+          "move container to output prev"
+          | "move container to output previous" => {
+            config.oswitch.prev_output_with_win = binding
           }
           "focus left" => config.keybindings.focus_left = binding,
           "focus right" => config.keybindings.focus_right = binding,
@@ -584,6 +622,18 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
               && let Some(index) = workspace_index(workspace)
             {
               config.keybindings.workspace_move[index] = binding;
+            } else if let Some(wset) = command.strip_prefix("wset ") {
+              config.wsets.wsets_bindings.push(crate::WsetBinding {
+                wset: number(wset, line_number)?,
+                binding,
+              });
+            } else if let Some(wset) =
+              command.strip_prefix("move container to wset ")
+            {
+              config.wsets.send_window_bindings.push(crate::WsetBinding {
+                wset: number(wset, line_number)?,
+                binding,
+              });
             } else if command == "exec shingle-lock"
               || command == "exec --no-startup-id shingle-lock"
             {
@@ -602,6 +652,13 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
             }
           }
         }
+      }
+      "input" if tokens.len() == 4 && tokens[2] == "map_to_output" => {
+        config
+          .input_devices
+          .entry(tokens[1].clone())
+          .or_default()
+          .output = Some(tokens[3].clone());
       }
       "output" => {
         let output = match tokens.get(1).map(String::as_str) {

@@ -20,6 +20,7 @@
 mod config_watcher;
 mod i3;
 mod layout;
+mod multi_output;
 mod output;
 mod view_matcher;
 mod wayfire;
@@ -30,11 +31,16 @@ pub use layout::{
   LayoutOutput, closest_point, disjoint, layout, layout_warnings, logical_size,
   output_in_direction, output_relative, overlapping,
 };
+pub use multi_output::{
+  InputDeviceConfig, OswitchConfig, OutputLayoutConfig, UnplugPolicy,
+  WsetBinding, WsetsConfig,
+};
 pub use output::{OutputConfig, OutputMode, OutputPosition};
 pub use view_matcher::{ViewMatcher, ViewProperties};
 pub use window_rule::{RuleAction, RuleEvent, WindowRule};
 
 use std::{
+  collections::BTreeMap,
   fs, io,
   path::{Path, PathBuf},
   time::Duration,
@@ -102,6 +108,17 @@ pub struct ShingleConfig {
   /// and i3's `output NAME` lines; see
   /// [`ShingleConfig::output_config`]. Default empty.
   pub outputs: Vec<OutputConfig>,
+  /// What happens to the windows of an output that goes, and focus when it
+  /// returns.
+  pub output_layout: OutputLayoutConfig,
+  /// Bindings that focus another output (`[oswitch]`).
+  pub oswitch: OswitchConfig,
+  /// Workspace set bindings (`[wsets]`).
+  pub wsets: WsetsConfig,
+  /// Per-device input settings by device name, from Wayfire's
+  /// `[input-device:NAME]` sections and i3 `input NAME` lines. Default
+  /// empty.
+  pub input_devices: BTreeMap<String, InputDeviceConfig>,
   /// Colour shown where no surface covers the output. `[core]
   /// background_color`; default `[0.1, 0.1, 0.1, 1.0]`.
   pub background_color: [f64; 4],
@@ -183,6 +200,10 @@ impl Default for ShingleConfig {
     Self {
       output: OutputConfig::default(),
       outputs: Vec::new(),
+      output_layout: OutputLayoutConfig::default(),
+      oswitch: OswitchConfig::default(),
+      wsets: WsetsConfig::default(),
+      input_devices: BTreeMap::new(),
       background_color: [0.1, 0.1, 0.1, 1.0],
       behavior: BehaviorConfig::default(),
       xwayland: XwaylandConfig::default(),
@@ -416,6 +437,8 @@ impl ShingleConfig {
       return Err(ConfigError::Invalid("unknown placement mode".into()));
     }
     self.validate_outputs()?;
+    self.wsets.validate()?;
+    multi_output::validate_input_devices(&self.input_devices)?;
     if self.behavior.max_buffer_size == 0 {
       return Err(ConfigError::Invalid(
         "behavior.max_buffer_size must be nonzero".into(),
@@ -884,6 +907,9 @@ pub struct BehaviorConfig {
   pub focus_main_surface_instead_of_popup: bool,
   /// Do not advertise primary selection; changes require a restart.
   pub disable_primary_selection: bool,
+  /// Draw windows on every output they overlap instead of clipping them to
+  /// their own output. `[workarounds] remove_output_limits`; default false.
+  pub remove_output_limits: bool,
 }
 
 impl Default for BehaviorConfig {
@@ -899,6 +925,7 @@ impl Default for BehaviorConfig {
       force_preferred_decoration_mode: false,
       focus_main_surface_instead_of_popup: false,
       disable_primary_selection: false,
+      remove_output_limits: false,
     }
   }
 }
@@ -2148,7 +2175,7 @@ impl InputConfig {
 /// written `xkb:NAME` matches the case-sensitive XKB keysym name instead, so
 /// layout-dependent symbols such as `xkb:XF86AudioMute` can be bound. An empty
 /// string or `none` is the disabled binding.
-#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Binding {
   /// Lower-case key or button name, `xkb:` followed by a keysym name, or empty
