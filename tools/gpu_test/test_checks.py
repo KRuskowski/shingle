@@ -190,6 +190,7 @@ class PatternTest(unittest.TestCase):
     import drag_icon_checks
     import colour_checks
     import focus_checks
+    import nested_clipboard_checks
     import nested_output_checks
     import output_checks
     import switcher_checks
@@ -211,13 +212,15 @@ class PatternTest(unittest.TestCase):
     self.assertEqual(set(drag_icon_checks.GROUPS),
                      set(drag_icon_checks.CHECKS))
     self.assertEqual(set(resize_checks.GROUPS), set(resize_checks.CHECKS))
+    self.assertEqual(set(nested_clipboard_checks.GROUPS),
+                     set(nested_clipboard_checks.CHECKS))
     self.assertEqual(
         checks.GROUPS + dmabuf_checks.GROUPS + output_checks.GROUPS
         + nested_output_checks.GROUPS + wayfire_checks.GROUPS
         + vswipe_checks.GROUPS + decoration_checks.GROUPS
         + switcher_checks.GROUPS + colour_checks.GROUPS
         + focus_checks.GROUPS + drag_icon_checks.GROUPS
-        + resize_checks.GROUPS,
+        + resize_checks.GROUPS + nested_clipboard_checks.GROUPS,
         checks.run.CHECK_GROUPS)
     # Every DB-4 and DB-5 group runs NVIDIA Vulkan clients but `syncobj`.
     self.assertEqual(tuple(group for group in dmabuf_checks.GROUPS

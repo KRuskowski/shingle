@@ -30,7 +30,7 @@ namespaces:
                nested-gpu|nodmabuf|weston|syncobj|nosyncobj|outputs|
                nested-outputs|nested-smoke|wayfire-plugins|wayfire-shell|
                vswipe|decoration|switcher|colours|minimize-focus|
-               drag-icon|resize|nested-scaled ...
+               drag-icon|resize|nested-scaled|nested-clipboard ...
 
 For example, DB-1's import test:
 
@@ -78,6 +78,12 @@ in a headless Shingle whose output has scale 1.5 and then 2: nested's
 output must take the window's scale and logical size, the host pointer
 must land at the same logical point in nested, and a Super+drag through
 the headless Shingle must move the window it starts on.
+`--checks nested-clipboard` (nested_clipboard_checks.py) copies with
+`wl-copy` and pastes with `wl-paste` between a headless Shingle and
+nested Shingle in it, both ways, for the clipboard and the primary
+selection at 10 bytes and 1 MiB, with a slow reader that must not
+stall either compositor, and checks `disable_primary_selection` and
+`behavior.host_clipboard: false`.
 
 It exits with the command's status, or 1 when a check failed. With
 `--checks` it prints one PASS or FAIL line per check and INFO lines for
@@ -89,7 +95,8 @@ test_dmabuf_checks.py, test_output_checks.py,
 test_nested_output_checks.py, test_wayfire_checks.py,
 test_vswipe_checks.py, test_decoration_checks.py,
 test_switcher_checks.py, test_colour_checks.py, test_focus_checks.py,
-test_drag_icon_checks.py, test_resize_checks.py).
+test_drag_icon_checks.py, test_resize_checks.py,
+test_nested_clipboard_checks.py).
 The work directory under `target/` is removed afterwards unless `--keep`
 is given.
 """
@@ -117,14 +124,16 @@ SAMPLE_INTERVAL = 0.05
 # nested_output_checks.GROUPS, wayfire_checks.GROUPS,
 # vswipe_checks.GROUPS, decoration_checks.GROUPS and
 # switcher_checks.GROUPS, colour_checks.GROUPS, focus_checks.GROUPS and
-# drag_icon_checks.GROUPS and resize_checks.GROUPS, kept here so that
+# drag_icon_checks.GROUPS, resize_checks.GROUPS and
+# nested_clipboard_checks.GROUPS, kept here so that
 # `--help` works without importing them.
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
                 'weston', 'syncobj', 'nosyncobj', 'outputs', 'nested-outputs',
                 'nested-smoke', 'nested-scaled', 'wayfire-plugins',
                 'wayfire-shell', 'vswipe', 'decoration', 'switcher',
-                'colours', 'minimize-focus', 'drag-icon', 'resize')
+                'colours', 'minimize-focus', 'drag-icon', 'resize',
+                'nested-clipboard')
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset; `syncobj` runs no Vulkan client.
 MODESET_GROUPS = ('dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
