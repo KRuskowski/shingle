@@ -783,6 +783,43 @@ Since WG-9 a device takes the libinput options of the `[input:NAME]` section (YA
 6. Unplug and replug the first mouse: the log shows `options from [input:MOUSE]` again and it is fast again.
 7. Record the devices, their properties and whether each behaved as configured.
 
+## Soak test on the native backend
+
+tools/soak_test/run.py soaks headless, offscreen and nested Shingle on a development host inside tools/gpu_test/run.py's namespace ([status.md](status.md#soak-tests)). Native Shingle needs the card, the seat and the input devices, so its soak runs here: `--mode attach` runs the same workload and sampler against a Shingle that is already running, outside any namespace. It refuses to start unless `/etc/shingle-native-test-machine` exists (step 0), never signals or stops the Shingle it is attached to, and stops only the clients it started itself.
+
+### Step 53: a two-hour soak of native Shingle
+
+1. In addition to steps 0 and 9, install `vkcube` (`vulkan-tools`), `wl-clipboard`, `xclip`, `grim` and Xwayland 23.1 or newer, and build the probes next to the binary:
+
+   ```sh
+   cargo build --manifest-path ~/shingle/Cargo.toml -p shingle --example wl_probe
+   cargo build --manifest-path ~/shingle/Cargo.toml -p shingle-xwayland \
+     --example xw_probe
+   ```
+
+2. Give the soak its own config, `~/.config/shingle/soak.yaml`, with lazy Xwayland and four workspaces, as the harness's own runs use:
+
+   ```sh
+   printf 'session: {restore: false}\nxwayland: {mode: lazy}\nworkspaces: {width: 2, height: 2}\nbehavior: {auto_reload: false}\n' \
+     > ~/.config/shingle/soak.yaml
+   ```
+
+3. Start Shingle on tty1 as in step 9, with `--config ~/.config/shingle/soak.yaml` and `--spawn true`, and leave the machine alone: no input from the physical keyboard or mouse during the run, since STIPC's pointer drags in the workload.
+4. Over SSH, with the variables of step 0:
+
+   ```sh
+   cd ~/shingle
+   nice -n 19 tools/soak_test/run.py --mode attach --minutes 120 \
+     --ipc "$IPC" --pid "$(pidof shingle)" \
+     --log ~/.local/state/shingle/native.log \
+     --session ~/.local/state/shingle/session.json \
+     --output ~/soak-native
+   ```
+
+   Every minute it prints a `soak: sample` line. Expected at the end: `Result: **PASS**` in `~/soak-native/summary.md`: no flagged growth of RSS, fds, threads, GPU memory or any `stipc/object_counts` count, no `FAIL` line (a window that did not map, a paste that did not match, a drag that did not drop, a protocol error or a panic in the log), and Shingle still running. On NVIDIA the GPU memory column comes from `nvidia-smi`; on other GPUs it stays empty.
+5. While it runs, watch the monitor now and then: windows open and close, vkcube spins for a few seconds each cycle, and Scale and Expo open and close. Record anything drawn wrong, and whether the picture ever froze.
+6. Afterwards, end Shingle with `kill -TERM`: `exit=0`. Record in [status.md](status.md#soak-tests) the commit, the GPU, the duration, the cycles, the first and last RSS and fds, the CPU per minute, the frame latency line and the result, from `summary.md` and `samples.csv`.
+
 ## Results
 
 Record results in [status.md](status.md#with-real-clients). None of the steps above has been run yet: the test machine does not exist so far.
