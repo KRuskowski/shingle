@@ -98,6 +98,8 @@ device_fds = _HARNESS.device_fds
 parse_ppm = _HARNESS.parse_ppm
 signal_checked = _HARNESS.signal_checked
 wait_for = _HARNESS.wait_for
+hide_host_runtime = _HARNESS.hide_host_runtime
+host_uid_environment = _HARNESS.host_uid_environment
 
 INNER_FLAG = '--inner'
 HOST_VARIABLES = ('WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'DISPLAY',
@@ -648,9 +650,10 @@ def auto_layout_checks(results, binary):
                      backend=('--headless', '--outputs', '2'))
   try:
     methods = shingle.ipc.call('list-methods').get('methods', [])
-    # 81 after MO-2; MO-4 added the two wsets methods.
-    results.check('MO-4: list-methods returns 83 methods',
-                  len(methods) == 83, str(len(methods)))
+    # 81 after MO-2, 83 with MO-4's wsets methods and 85 with MO-6's
+    # stipc methods for nested windows.
+    results.check('MO-6: list-methods returns 85 methods',
+                  len(methods) == 85, str(len(methods)))
     positions = shingle.positions()
     results.check('MO-2: wlr-randr lists both outputs at auto positions',
                   positions == {'HEADLESS-1': (0, 0),
@@ -1266,9 +1269,12 @@ def inner(binary):
   for device in ('/dev/dri', '/dev/input'):
     if os.path.isdir(device):
       subprocess.run(['mount', '-t', 'tmpfs', 'none', device], check=True)
+  runtime = hide_host_runtime()
   results = Results()
   results.check('/dev/dri is empty in the namespace',
                 not os.path.isdir('/dev/dri') or not os.listdir('/dev/dri'))
+  results.check('the host runtime directory is hidden',
+                runtime is None or os.listdir(runtime) == [])
   results.check('no host display variable is set',
                 not any(name in os.environ for name in HOST_VARIABLES))
   wl_probe = os.environ.get('OUTPUT_TEST_WL_PROBE')
@@ -1337,7 +1343,8 @@ def main():
                '--pid', '--fork', '--mount-proc', '--',
                sys.executable, os.path.abspath(__file__),
                '--binary', binary, INNER_FLAG]
-    return subprocess.run(command, env=environment).returncode
+    return subprocess.run(command,
+                          env=host_uid_environment(environment)).returncode
   finally:
     if not options.keep:
       shutil.rmtree(work, ignore_errors=True)

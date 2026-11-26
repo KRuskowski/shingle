@@ -334,5 +334,26 @@ class ListMonitorsTest(unittest.TestCase):
     ])
     self.assertEqual(run.parse_listmonitors('Monitors: 0\n'), [])
 
+class HostRuntimeTest(unittest.TestCase):
+  """Passing the host uid into the namespace."""
+
+  def test_the_host_uid_is_added_to_the_environment(self):
+    environment = run.host_uid_environment({'PATH': '/bin'})
+    self.assertEqual(environment, {
+        'PATH': '/bin',
+        run.HOST_UID_VARIABLE: str(os.getuid()),
+    })
+
+  def test_nothing_is_mounted_without_a_numeric_uid(self):
+    saved = os.environ.pop(run.HOST_UID_VARIABLE, None)
+    try:
+      self.assertIsNone(run.hide_host_runtime())
+      os.environ[run.HOST_UID_VARIABLE] = '1000; rm -rf /'
+      self.assertIsNone(run.hide_host_runtime())
+    finally:
+      os.environ.pop(run.HOST_UID_VARIABLE, None)
+      if saved is not None:
+        os.environ[run.HOST_UID_VARIABLE] = saved
+
 if __name__ == '__main__':
   unittest.main()

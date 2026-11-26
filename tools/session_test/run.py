@@ -65,6 +65,8 @@ Results = _OUTPUT.Results
 signal_checked = _OUTPUT.signal_checked
 wait_for = _OUTPUT.wait_for
 HOST_VARIABLES = _OUTPUT.HOST_VARIABLES
+hide_host_runtime = _OUTPUT.hide_host_runtime
+host_uid_environment = _OUTPUT.host_uid_environment
 LAVAPIPE = _OUTPUT._HARNESS.LAVAPIPE
 
 INNER_FLAG = '--inner'
@@ -412,9 +414,12 @@ def inner(binary, wl_probe, delay, names=('slow',), master_binary=None):
   for device in ('/dev/dri', '/dev/input'):
     if os.path.isdir(device):
       subprocess.run(['mount', '-t', 'tmpfs', 'none', device], check=True)
+  runtime = hide_host_runtime()
   results = Results()
   results.check('/dev/dri is empty in the namespace',
                 not os.path.isdir('/dev/dri') or not os.listdir('/dev/dri'))
+  results.check('the host runtime directory is hidden',
+                runtime is None or os.listdir(runtime) == [])
   results.check('no host display variable is set',
                 not any(name in os.environ for name in HOST_VARIABLES))
   for name, checks in check_groups(names, binary, wl_probe, delay,
@@ -471,7 +476,8 @@ def main():
                '--delay', str(options.delay), '--checks', *options.checks,
                *(['--master-binary', master_binary] if master_binary
                  else []), INNER_FLAG]
-    return subprocess.run(command, env=environment).returncode
+    return subprocess.run(command,
+                          env=host_uid_environment(environment)).returncode
   finally:
     if not options.keep:
       shutil.rmtree(work, ignore_errors=True)

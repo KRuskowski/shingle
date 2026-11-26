@@ -315,6 +315,31 @@ def same_geometry(first, second):
   return all(first.get(key) == second.get(key)
              for key in ('x', 'y', 'width', 'height'))
 
+# The host user's uid, passed into the namespace, where the user is
+# root, so that its /run/user directory can be covered there.
+HOST_UID_VARIABLE = 'SHINGLE_TEST_HOST_UID'
+
+def host_uid_environment(environment):
+  """`environment` with the host uid for `hide_host_runtime`."""
+  environment = dict(environment)
+  environment[HOST_UID_VARIABLE] = str(os.getuid())
+  return environment
+
+def hide_host_runtime():
+  """Covers the host user's /run/user/<uid> with an empty tmpfs inside
+  the mount namespace, so that no process in it reaches the host's
+  Wayland, D-Bus or PipeWire sockets even by absolute path. Returns the
+  directory, or None when the host has none or no uid was passed."""
+  uid = os.environ.get(HOST_UID_VARIABLE)
+  if not uid or not uid.isdigit():
+    return None
+  runtime = f'/run/user/{uid}'
+  if not os.path.isdir(runtime):
+    return None
+  subprocess.run(['mount', '-t', 'tmpfs', '-o', 'mode=0700', 'none',
+                  runtime], check=True)
+  return runtime
+
 def wait_for(predicate, timeout=10.0, interval=0.05):
   """Polls `predicate` until it returns something true; returns that."""
   deadline = time.monotonic() + timeout
@@ -718,7 +743,7 @@ def lazy_checks(results, binary, work):
   spawn = ['sh', '-c', f'echo "${{DISPLAY-unset}}" > {spawn_out}']
   shingle = Shingle(binary, work, 'lazy', config, spawn=spawn)
   methods = shingle.call('list-methods')['methods']
-  results.check('list-methods returns 83 methods', len(methods) == 83,
+  results.check('list-methods returns 85 methods', len(methods) == 85,
                 f'{len(methods)}')
   results.check(
       'list-methods has the XWayland methods',
@@ -2652,7 +2677,10 @@ def inner(binary, probe, wl_probe, work, groups):
       subprocess.run(['mount', '-t', 'tmpfs', 'none', device], check=True)
   os.mkdir('/tmp/.X11-unix', 0o1777)
   os.chmod('/tmp/.X11-unix', 0o1777)
+  runtime = hide_host_runtime()
   results = Results()
+  results.check('the host runtime directory is hidden',
+                runtime is None or os.listdir(runtime) == [])
   results.check('the namespace shows an empty /tmp/.X11-unix',
                 os.listdir('/tmp/.X11-unix') == [])
   results.check('/dev/dri is empty in the namespace',
@@ -2716,7 +2744,8 @@ def main():
                INNER_FLAG, work]
     for group in groups:
       command += ['--only', group]
-    return subprocess.run(command).returncode
+    return subprocess.run(
+        command, env=host_uid_environment(os.environ)).returncode
   finally:
     if not options.keep:
       shutil.rmtree(work, ignore_errors=True)
