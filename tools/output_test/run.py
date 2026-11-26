@@ -33,6 +33,12 @@ returns the imported `core/background_color` and
 `simple-tile/inner_gap_size`; since WG-2 `list-config-options` lists
 every option of crates/shingle-config/data/wayfire-options.tsv and an
 option of a plugin the file does not load reports the file's text.
+WG-3 runs `env` through `stipc/run`: under a YAML config the child gets
+`XDG_CURRENT_DESKTOP=wayfire`, the configured `XCURSOR_THEME` and
+`XCURSOR_SIZE`, Shingle's sockets and no `WAYFIRE_CONFIG_FILE` (a host
+one is removed), and a size `set-config-options` changes; under a
+Wayfire file it gets the file as `WAYFIRE_CONFIG_FILE` and keeps the
+`XDG_CURRENT_DESKTOP` and cursor theme Shingle itself was started with.
 Headless
 Shingle does not reload its config, so a nested Shingle on lavapipe,
 running as a client of a headless one inside the namespace, checks the
@@ -227,11 +233,14 @@ class Headless:
   `backend` says otherwise."""
 
   def __init__(self, binary, name, config_text, extension,
-               backend=('--headless',), extra_environment=None):
+               backend=('--headless',), extra_environment=None,
+               removed_environment=()):
     self.directory = os.path.join('/tmp', name)
     for sub in ('runtime', 'config', 'state', 'home'):
       os.makedirs(os.path.join(self.directory, sub), mode=0o700)
     self.environment = private_environment(self.directory)
+    for variable in removed_environment:
+      self.environment.pop(variable, None)
     self.environment.update(extra_environment or {})
     self.runtime = self.environment['XDG_RUNTIME_DIR']
     self.config_path = os.path.join(self.directory, f'shingle.{extension}')
@@ -706,6 +715,121 @@ def wcm_ini_checks(results, binary):
   results.check('SIGTERM exits with status 0 (WCM-style config)', status == 0,
                 str(status))
   return shingle.log_text()
+
+# The variables WG-3 adds to the client environment, which every run
+# removes from Shingle's own environment unless it sets them on purpose.
+DESKTOP_VARIABLES = ('XDG_CURRENT_DESKTOP', 'XCURSOR_THEME', 'XCURSOR_SIZE',
+                     'WAYFIRE_CONFIG_FILE')
+ENV_LINE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+def parse_env(text):
+  """The variables `env` printed in `text`, by name. Lines without `=`
+  continue the previous value, as a value with a newline prints."""
+  variables = {}
+  name = None
+  for line in text.splitlines():
+    if ENV_LINE.match(line):
+      name, value = line.split('=', 1)
+      variables[name] = value
+    elif name is not None:
+      variables[name] += '\n' + line
+  return variables
+
+def child_environment(shingle, name):
+  """What a child `stipc/run` starts finds in its environment, by name,
+  or None when it did not run."""
+  path = os.path.join(shingle.directory, f'{name}.env')
+  # Renamed into place, so a partly written file is never read.
+  command = f'env > {path}.new && mv {path}.new {path}'
+  reply = shingle.ipc.call('stipc/run', {'cmd': command})
+  if reply.get('result') != 'ok':
+    return None
+  if not wait_for(lambda: os.path.exists(path) or None):
+    return None
+  with open(path) as file:
+    return parse_env(file.read())
+
+def environment_mismatches(found, expected):
+  """The `name: found != expected` differences of `found` from
+  `expected`, where an expected None means the variable is unset."""
+  return [f'{name}: {found.get(name)!r} != {value!r}'
+          for name, value in expected.items() if found.get(name) != value]
+
+def environment_detail(found, mismatches):
+  """The detail of an environment check."""
+  if not found:
+    return 'the child wrote no environment'
+  return '; '.join(mismatches) or 'as expected'
+
+def client_environment_checks(results, binary):
+  """WG-3: `stipc/run` children get Wayfire's variables, and Shingle's own
+  XDG_CURRENT_DESKTOP when it has one."""
+  yaml = json.loads(yaml_config({'mode': '1280x720'}))
+  yaml['input'] = {'cursor_theme': 'Adwaita', 'cursor_size': 32}
+  host_ini = '/tmp/host-session/wayfire.ini'
+  shingle = Headless(binary, 'environment-yaml', json.dumps(yaml), 'yaml',
+                     removed_environment=DESKTOP_VARIABLES,
+                     extra_environment={'WAYFIRE_CONFIG_FILE': host_ini})
+  try:
+    found = child_environment(shingle, 'first') or {}
+    display = os.path.basename(shingle.wayland_display() or '')
+    mismatches = environment_mismatches(found, {
+        'XDG_CURRENT_DESKTOP': 'wayfire',
+        'XCURSOR_THEME': 'Adwaita',
+        'XCURSOR_SIZE': '32',
+        'WAYFIRE_CONFIG_FILE': None,
+        'WAYLAND_DISPLAY': display,
+        'WAYLAND_SOCKET': None,
+        'DISPLAY': None,
+        'WAYFIRE_SOCKET': shingle.ipc_path,
+        '_JAVA_AWT_WM_NONREPARENTING': '1',
+    })
+    results.check('a YAML run exports wayfire, the cursor and the sockets, '
+                  'and no WAYFIRE_CONFIG_FILE', found and not mismatches,
+                  environment_detail(found, mismatches))
+    reply = shingle.ipc.call('wayfire/set-config-options',
+                             {'input/cursor_size': '40'})
+    found = child_environment(shingle, 'second') or {}
+    results.check('set-config-options changes XCURSOR_SIZE for a later child',
+                  reply.get('result') == 'ok'
+                  and found.get('XCURSOR_SIZE') == '40',
+                  f'{reply} {found.get("XCURSOR_SIZE")!r}')
+  finally:
+    status = shingle.stop()
+  results.check('SIGTERM exits with status 0 (environment, YAML)',
+                status == 0, str(status))
+  log = shingle.log_text()
+  ini = '\n'.join([
+      '[core]',
+      'xwayland = false',
+      '[autostart]',
+      'autostart_wf_shell = false',
+      '[input]',
+      'cursor_size = 28',
+      '',
+  ])
+  shingle = Headless(binary, 'environment-ini', ini, 'ini',
+                     removed_environment=DESKTOP_VARIABLES,
+                     extra_environment={
+                         'XDG_CURRENT_DESKTOP': 'GNOME:test',
+                         'XCURSOR_THEME': 'inherited-theme',
+                     })
+  try:
+    found = child_environment(shingle, 'first') or {}
+    mismatches = environment_mismatches(found, {
+        'XDG_CURRENT_DESKTOP': 'GNOME:test',
+        'XCURSOR_THEME': 'inherited-theme',
+        'XCURSOR_SIZE': '28',
+        'WAYFIRE_CONFIG_FILE': shingle.config_path,
+    })
+    results.check('a Wayfire run keeps the host XDG_CURRENT_DESKTOP and '
+                  'theme and exports its file', found and not mismatches,
+                  environment_detail(found, mismatches))
+  finally:
+    status = shingle.stop()
+  results.check('SIGTERM exits with status 0 (environment, Wayfire)',
+                status == 0, str(status))
+  return log + shingle.log_text()
 
 def multi_config(outputs=None, session_path=None):
   """A YAML config (as JSON) with Xwayland off, the named `outputs`
@@ -1388,7 +1512,8 @@ def inner(binary):
       return focus_checks(results, binary, wl_probe)
     multi += [restored_session_checks, mo3_protocol_checks, mo4_focus_checks]
   for checks in (randr_checks, configured_checks, wayfire_checks,
-                 wcm_ini_checks, nested_checks, *multi):
+                 wcm_ini_checks, client_environment_checks, nested_checks,
+                 *multi):
     try:
       log = checks(results, binary)
     except Exception as error:  # pylint: disable=broad-except

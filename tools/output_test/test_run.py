@@ -159,5 +159,35 @@ class ConfigWarningTest(unittest.TestCase):
     self.assertFalse(run.close_colour(None, (0, 0, 0, 0)))
     self.assertFalse(run.close_colour('a b c d', (0, 0, 0, 0)))
 
+class EnvironmentTest(unittest.TestCase):
+  """parse_env and environment_mismatches."""
+
+  def test_variables_and_continued_values(self):
+    text = ('XDG_CURRENT_DESKTOP=wayfire\nMULTI=one\ntwo=\n'
+            'EMPTY=\nEQUALS=a=b\n')
+    self.assertEqual(run.parse_env(text), {
+        'XDG_CURRENT_DESKTOP': 'wayfire',
+        'MULTI': 'one',
+        'two': '',
+        'EMPTY': '',
+        'EQUALS': 'a=b',
+    })
+    self.assertEqual(run.parse_env('A=1\n continued\n=x\n'),
+                     {'A': '1\n continued\n=x'})
+
+  def test_mismatches_name_wrong_and_unexpected_variables(self):
+    found = {'A': '1', 'B': '2'}
+    self.assertEqual(run.environment_mismatches(found, {'A': '1', 'C': None}),
+                     [])
+    self.assertEqual(
+        run.environment_mismatches(found, {'A': '2', 'B': None}),
+        ["A: '1' != '2'", "B: '2' != None"])
+
+  def test_detail(self):
+    self.assertEqual(run.environment_detail({}, []),
+                     'the child wrote no environment')
+    self.assertEqual(run.environment_detail({'A': '1'}, []), 'as expected')
+    self.assertEqual(run.environment_detail({'A': '1'}, ['x', 'y']), 'x; y')
+
 if __name__ == '__main__':
   unittest.main()
