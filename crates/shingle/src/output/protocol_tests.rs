@@ -1007,3 +1007,23 @@ fn a_toplevel_handle_is_on_its_windows_output() {
   assert_eq!(on(&client), ["HEADLESS-1"], "it joined the active output");
   let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn outputs_at_negative_positions_are_warned_about_for_x() {
+  let (mut compositor, _path) = two_outputs();
+  assert!(
+    super::negative_positions(compositor.state.outputs.iter()).is_empty()
+  );
+  compositor
+    .state
+    .set_rect_of(
+      &id("HEADLESS-2"),
+      shingle_core::Rect::new(-800, 0, 800, 600),
+      true,
+    )
+    .unwrap();
+  assert_eq!(
+    super::negative_positions(compositor.state.outputs.iter()),
+    ["HEADLESS-2 is at -800,0; X windows cannot be shown there"]
+  );
+}

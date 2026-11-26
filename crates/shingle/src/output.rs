@@ -502,7 +502,31 @@ pub(crate) fn relayout(state: &mut CompositorState) -> Vec<OutputId> {
       moved.push(output.id.clone());
     }
   }
+  if !moved.is_empty() && state.xwayland.display.is_some() {
+    for warning in negative_positions(state.outputs.iter()) {
+      eprintln!("shingle: output layout: {warning}");
+    }
+  }
   moved
+}
+
+/// A warning for each output at a negative position, which X clients
+/// cannot reach: Xwayland's root window starts at 0,0
+/// (docs/design/multi-output.md, section 9).
+fn negative_positions<'a>(
+  outputs: impl Iterator<Item = &'a OutputState>,
+) -> Vec<String> {
+  outputs
+    .filter(|output| output.rect.x < 0 || output.rect.y < 0)
+    .map(|output| {
+      format!(
+        "{} is at {},{}; X windows cannot be shown there",
+        output.id.as_str(),
+        output.rect.x,
+        output.rect.y
+      )
+    })
+    .collect()
 }
 
 /// What clients and the core learn after output `id` moved or was
