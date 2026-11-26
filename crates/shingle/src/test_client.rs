@@ -28,6 +28,10 @@ use wayland_protocols::{
       zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1,
       zwp_linux_dmabuf_v1,
     },
+    linux_drm_syncobj::v1::client::{
+      wp_linux_drm_syncobj_manager_v1, wp_linux_drm_syncobj_surface_v1,
+      wp_linux_drm_syncobj_timeline_v1,
+    },
     presentation_time::client::{wp_presentation, wp_presentation_feedback},
     single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1,
     viewporter::client::{wp_viewport, wp_viewporter},
@@ -258,6 +262,17 @@ impl TestClient {
       }
     }
     None
+  }
+
+  /// The errno that ended the connection, if it ended without a protocol
+  /// error, as libwayland ends it on a `wl_display` error.
+  pub(crate) fn connection_errno(&self) -> Option<rustix::io::Errno> {
+    match self.connection.flush() {
+      Err(wayland_client::backend::WaylandError::Io(error)) => error
+        .raw_os_error()
+        .map(rustix::io::Errno::from_raw_os_error),
+      _ => None,
+    }
   }
 
   /// Binds the first global of interface `I` at `version`.
@@ -961,6 +976,9 @@ ignore_events!(
   wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1,
   wp_commit_timing_manager_v1::WpCommitTimingManagerV1,
   wp_commit_timer_v1::WpCommitTimerV1,
+  wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1,
+  wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
+  wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1,
   xwayland_shell_v1::XwaylandShellV1,
   xwayland_surface_v1::XwaylandSurfaceV1,
   ZwlrDataControlManagerV1,

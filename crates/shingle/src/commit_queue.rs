@@ -11,9 +11,9 @@
 //!
 //! FIFO barriers (crate::fifo) and commit-timing deadlines
 //! (crate::commit_timing) wait here too, as wlroots queues them, and
-//! DB-4's implicit-sync wait (crate::linux_dmabuf) is a [`BlockerSource`]
-//! that waits on an fd through [`FdWait`]; DB-5's syncobj waits will be
-//! another.
+//! DB-4's implicit-sync wait (crate::linux_dmabuf) and DB-5's syncobj
+//! acquire wait (crate::linux_drm_syncobj) are [`BlockerSource`]s, both
+//! waiting on an fd through [`FdWait`].
 
 use std::{
   cell::Cell,
@@ -185,6 +185,10 @@ impl CommitQueues {
 /// blocks it and nothing waits before it, and queues it otherwise.
 pub(crate) fn commit(state: &mut CompositorState, object: &ObjectId) {
   if !state.surfaces.contains_key(object) {
+    return;
+  }
+  // The syncobj commit rules; a violation ended the client.
+  if !crate::linux_drm_syncobj::commit(state, object) {
     return;
   }
   // FIFO barriers and commit-timing deadlines, as wlroots queues them.

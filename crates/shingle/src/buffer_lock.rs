@@ -8,7 +8,9 @@
 //! lock drops, the buffer joins the [`ReleaseQueue`], which sends
 //! `wl_buffer.release` at the end of the compositor's turn. Replacing,
 //! merging or dropping state therefore releases what it held, whichever
-//! path did it.
+//! path did it. A buffer committed with `linux-drm-syncobj-v1` release
+//! points gets them signalled then too, every point it was committed with
+//! since its last release (crate::linux_drm_syncobj).
 
 use std::{
   fmt,
@@ -20,26 +22,36 @@ use std::{
 
 use wayland_server::{Resource, protocol::wl_buffer::WlBuffer};
 
+use crate::linux_drm_syncobj::SyncPoint;
+
+/// A buffer whose last lock dropped, with the release points to signal.
+type Released = (WlBuffer, Vec<SyncPoint>);
+
 /// Buffers whose last lock dropped, waiting for `wl_buffer.release`.
 #[derive(Clone, Default)]
-pub(crate) struct ReleaseQueue(Arc<Mutex<Vec<WlBuffer>>>);
+pub(crate) struct ReleaseQueue(Arc<Mutex<Vec<Released>>>);
 
 impl ReleaseQueue {
-  fn push(&self, buffer: WlBuffer) {
+  fn push(&self, released: Released) {
     self
       .0
       .lock()
       .unwrap_or_else(PoisonError::into_inner)
-      .push(buffer);
+      .push(released);
   }
 
-  /// Sends `release` to every queued buffer that still exists, in the
-  /// order their last locks dropped. A destroyed buffer gets nothing.
+  /// Signals the release points of every queued buffer and sends
+  /// `release` to those that still exist, in the order their last locks
+  /// dropped. A destroyed buffer gets no event, but its points are
+  /// signalled, since the client waits on the timeline.
   pub(crate) fn flush(&self) {
     let buffers = std::mem::take(
       &mut *self.0.lock().unwrap_or_else(PoisonError::into_inner),
     );
-    for buffer in buffers {
+    for (buffer, points) in buffers {
+      for point in points {
+        crate::linux_drm_syncobj::signal_release(&point);
+      }
       if buffer.is_alive() {
         crate::trace::buffer(format_args!("release {}", buffer.id()));
         buffer.release();
@@ -53,6 +65,8 @@ pub(crate) struct BufferLocks {
   resource: WlBuffer,
   count: AtomicUsize,
   queue: ReleaseQueue,
+  /// Release points to signal when the count drops to zero.
+  release_points: Mutex<Vec<SyncPoint>>,
 }
 
 impl BufferLocks {
@@ -62,6 +76,7 @@ impl BufferLocks {
       resource,
       count: AtomicUsize::new(0),
       queue,
+      release_points: Mutex::new(Vec::new()),
     })
   }
 
@@ -85,6 +100,19 @@ impl BufferLocks {
 /// samples and drops the clone once the GPU has finished that frame.
 pub struct BufferLock(Arc<BufferLocks>);
 
+impl BufferLock {
+  /// Signals `point` once the buffer is released, with every other point
+  /// added since its last release.
+  pub(crate) fn add_release_point(&self, point: SyncPoint) {
+    self
+      .0
+      .release_points
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .push(point);
+  }
+}
+
 impl Clone for BufferLock {
   fn clone(&self) -> Self {
     self.0.lock()
@@ -94,7 +122,14 @@ impl Clone for BufferLock {
 impl Drop for BufferLock {
   fn drop(&mut self) {
     if self.0.count.fetch_sub(1, Ordering::AcqRel) == 1 {
-      self.0.queue.push(self.0.resource.clone());
+      let points = std::mem::take(
+        &mut *self
+          .0
+          .release_points
+          .lock()
+          .unwrap_or_else(PoisonError::into_inner),
+      );
+      self.0.queue.push((self.0.resource.clone(), points));
     }
   }
 }

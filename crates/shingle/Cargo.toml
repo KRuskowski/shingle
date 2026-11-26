@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 calloop.workspace = true
+drm = "0.15.0"
+drm-ffi = "0.9.1"
 rustix.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

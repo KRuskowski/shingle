@@ -102,6 +102,9 @@ pub(crate) struct PendingSurface {
   pub(crate) fifo_wait_barrier: bool,
   /// `wp_commit_timer_v1.set_timestamp` for this update.
   pub(crate) timestamp: Option<std::time::Duration>,
+  /// The `linux-drm-syncobj-v1` acquire point the buffer of this update
+  /// waits for; its release point is with the buffer's lock.
+  pub(crate) acquire: Option<crate::linux_drm_syncobj::SyncPoint>,
 }
 
 impl Default for PendingSurface {
@@ -121,6 +124,7 @@ impl Default for PendingSurface {
       fifo_set_barrier: false,
       fifo_wait_barrier: false,
       timestamp: None,
+      acquire: None,
     }
   }
 }
@@ -188,6 +192,8 @@ pub(crate) struct CompositorState {
   pub(crate) commit_queue: crate::commit_queue::CommitQueues,
   /// `zwp_linux_dmabuf_v1`, once a frontend enabled it.
   pub(crate) dmabuf: Option<crate::linux_dmabuf::DmabufState>,
+  /// `wp_linux_drm_syncobj_manager_v1`, once a frontend enabled it.
+  pub(crate) syncobj: Option<crate::linux_drm_syncobj::SyncobjState>,
   pub(crate) outputs: HashMap<ObjectId, WlOutput>,
   pub(crate) xdg_outputs: HashMap<ObjectId, ZxdgOutputV1>,
   pub(crate) events: Vec<Event>,
@@ -354,6 +360,7 @@ impl CompositorState {
       buffers: HashMap::new(),
       buffer_releases: ReleaseQueue::default(),
       dmabuf: None,
+      syncobj: None,
       commit_queue: Default::default(),
       outputs: HashMap::new(),
       xdg_outputs: HashMap::new(),
@@ -1209,6 +1216,7 @@ impl CompositorState {
     };
     self.surface_ids.remove(&surface.id);
     crate::commit_queue::surface_destroyed(self, object);
+    crate::linux_drm_syncobj::surface_destroyed(self, object);
     crate::fifo::surface_destroyed(self, object);
     crate::commit_timing::surface_destroyed(self, object);
     crate::presentation::surface_destroyed(self, surface.id);
@@ -1526,6 +1534,9 @@ pub(crate) fn merge_pending(
   cached.fifo_wait_barrier |= std::mem::take(&mut pending.fifo_wait_barrier);
   if pending.timestamp.is_some() {
     cached.timestamp = pending.timestamp.take();
+  }
+  if pending.acquire.is_some() {
+    cached.acquire = pending.acquire.take();
   }
 }
 

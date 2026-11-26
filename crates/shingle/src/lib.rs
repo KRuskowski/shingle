@@ -68,6 +68,7 @@ mod ipc;
 mod launch;
 mod layer_shell;
 mod linux_dmabuf;
+mod linux_drm_syncobj;
 mod output;
 mod output_management;
 mod output_power;
@@ -937,6 +938,9 @@ pub enum Error {
   /// `zwp_linux_dmabuf_v1` could not be offered.
   #[error("DMA-BUF error: {0}")]
   Dmabuf(String),
+  /// `wp_linux_drm_syncobj_manager_v1` could not be offered.
+  #[error("syncobj error: {0}")]
+  Syncobj(String),
 }
 
 /// A Wayland compositor with one output, run by a host frontend; see the
@@ -1930,6 +1934,44 @@ impl Compositor {
   /// Whether `zwp_linux_dmabuf_v1` is offered.
   pub fn dmabuf_enabled(&self) -> bool {
     self.state.dmabuf.is_some()
+  }
+
+  /// Offers `wp_linux_drm_syncobj_manager_v1` version 1, explicit sync
+  /// for DMA-BUFs (docs/design/dmabuf.md, section 3), on the render node
+  /// [`Compositor::enable_dmabuf`] advertises as the main device. The
+  /// compositor opens that node itself, never a card node, and offers
+  /// the global only if it has timeline syncobjs and
+  /// `DRM_IOCTL_SYNCOBJ_EVENTFD`. Returns the line to log. Calling it
+  /// again, as after a GPU loss, opens the node again for later imports
+  /// and keeps the global.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::Syncobj`] when linux-dmabuf is not offered, or the render
+  /// node cannot be opened or lacks either feature; clients then use
+  /// implicit sync.
+  pub fn enable_syncobj(&mut self) -> Result<String, Error> {
+    let main_device = self
+      .state
+      .dmabuf
+      .as_ref()
+      .map(|dmabuf| dmabuf.main_device())
+      .ok_or_else(|| Error::Syncobj("linux-dmabuf is not offered".into()))?;
+    let node = linux_drm_syncobj::open_render_node(main_device)
+      .map_err(Error::Syncobj)?;
+    linux_drm_syncobj::enable(
+      &mut self.state,
+      &self.display.handle(),
+      &self.event_loop.handle(),
+      Box::new(node),
+    )
+    .map_err(Error::Syncobj)?;
+    Ok(linux_drm_syncobj::offered(main_device))
+  }
+
+  /// Whether `wp_linux_drm_syncobj_manager_v1` is offered.
+  pub fn syncobj_enabled(&self) -> bool {
+    self.state.syncobj.is_some()
   }
 
   /// Makes wlr-screencopy `copy` and `copy_with_damage` emit

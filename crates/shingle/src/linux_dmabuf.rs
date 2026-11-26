@@ -13,7 +13,9 @@
 //!
 //! Implicit synchronisation: a commit whose DMA-BUF still has pending
 //! write fences (its fd does not poll readable) waits in the surface's
-//! commit queue until it does, as smithay's `DmabufBlocker` does it.
+//! commit queue until it does, as smithay's `DmabufBlocker` does it. A
+//! commit with a `linux-drm-syncobj-v1` acquire point waits for that
+//! instead (crate::linux_drm_syncobj).
 
 use std::{
   collections::HashSet,
@@ -217,6 +219,11 @@ pub(crate) struct DmabufState {
 }
 
 impl DmabufState {
+  /// The `dev_t` of the render node advertised as the main device.
+  pub(crate) fn main_device(&self) -> u64 {
+    self.feedback.main_device
+  }
+
   /// The modifier limits of an advertised pair.
   fn advertised(&self, format: u32, modifier: u64) -> Option<&DmabufFormat> {
     self
@@ -785,6 +792,10 @@ impl BlockerSource for ImplicitSync {
     surface: &ObjectId,
     pending: &PendingSurface,
   ) -> Result<Vec<Box<dyn Blocker>>, String> {
+    // An explicit acquire point replaces the implicit fences.
+    if pending.acquire.is_some() {
+      return Ok(Vec::new());
+    }
     let PendingBuffer::Attach(attachment, _) = &pending.buffer else {
       return Ok(Vec::new());
     };
