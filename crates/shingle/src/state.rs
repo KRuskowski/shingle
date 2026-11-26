@@ -216,6 +216,8 @@ pub(crate) struct CompositorState {
   pub(crate) pending_maps: HashMap<WindowId, PendingMap>,
   pub(crate) delayed_maps: HashSet<WindowId>,
   pub(crate) frame_callbacks: Vec<FrameCallback>,
+  /// An xdg toplevel has a configure for `shell::flush_configures`.
+  pub(crate) configures_pending: bool,
   /// Whether shm commits keep their buffers for the frontend to upload
   /// (`Compositor::set_shm_upload`).
   pub(crate) shm_upload: bool,
@@ -414,6 +416,7 @@ impl CompositorState {
       pending_maps: HashMap::new(),
       delayed_maps: HashSet::new(),
       frame_callbacks: Vec::new(),
+      configures_pending: false,
       shm_upload: false,
       disconnected,
       foreign_toplevels: Default::default(),

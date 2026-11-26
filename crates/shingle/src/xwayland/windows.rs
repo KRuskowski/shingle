@@ -307,6 +307,7 @@ fn new_toplevel(
     min_size: info.size_hints.min.unwrap_or((0, 0)),
     max_size: info.size_hints.max.unwrap_or((0, 0)),
     configured_geometry: None,
+    configure: crate::shell::ConfigureState::default(),
     created_rules_pending: None,
     unmapped: false,
     pid,

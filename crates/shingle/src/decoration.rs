@@ -110,6 +110,21 @@ pub(crate) fn configured(
   }
 }
 
+/// Whether a decoration of toplevel surface `object` was sent a mode that
+/// waits for the next `xdg_surface.configure`.
+pub(crate) fn awaiting_configure(
+  state: &CompositorState,
+  object: &ObjectId,
+) -> bool {
+  let Some(id) = crate::decorator::xdg_toplevel_id(state, object) else {
+    return false;
+  };
+  state
+    .decorations
+    .values()
+    .any(|decoration| decoration.toplevel == id && decoration.awaiting)
+}
+
 /// The client of toplevel surface `object` acknowledged `serial`: a mode
 /// sent before it now applies, which may give the window a frame or take
 /// it away.

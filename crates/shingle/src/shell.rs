@@ -184,6 +184,29 @@ impl ToplevelStates {
   }
 }
 
+/// The size and states of one `xdg_toplevel.configure`.
+type XdgConfigure = (i32, i32, ToplevelStates);
+
+/// When an xdg toplevel is configured. Configures are sent once per
+/// compositor turn, in [`flush_configures`], with the toplevel's latest
+/// size and states, and only when those differ from the last configure
+/// sent or the client asked for one, as wlroots schedules them on idle and
+/// Wayfire configures only a size that changed
+/// (wayfire:src/view/xdg-shell/xdg-toplevel.cpp,
+/// `configure_surface_with_state`). A pointer resize that moves many
+/// times between two frames thus sends one configure to the window it
+/// resizes and none to the windows whose size stays the same.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ConfigureState {
+  /// What the next configure would say, set during the turn.
+  pending: Option<XdgConfigure>,
+  /// What the last configure said.
+  sent: Option<XdgConfigure>,
+  /// The client asked for a configure, as `set_maximized` and the other
+  /// state requests do, so one goes out even if nothing changed.
+  requested: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct ToplevelRole {
   pub(crate) handle: ToplevelHandle,
@@ -198,6 +221,9 @@ pub(crate) struct ToplevelRole {
   pub(crate) min_size: (i32, i32),
   pub(crate) max_size: (i32, i32),
   pub(crate) configured_geometry: Option<Rect>,
+  /// The xdg configure waiting for the end of the turn, and the last one
+  /// sent.
+  pub(crate) configure: ConfigureState,
   pub(crate) created_rules_pending: Option<bool>,
   /// A null buffer unmapped the toplevel, so its next commit without a
   /// buffer is a new initial commit, which xdg-shell answers with a
@@ -878,6 +904,7 @@ fn unmap_toplevel(state: &mut CompositorState, object: &ObjectId) -> bool {
         toplevel.window = WindowId(0);
         toplevel.tiled = true;
         toplevel.configured_geometry = None;
+        toplevel.configure = ConfigureState::default();
         toplevel.created_rules_pending = None;
         toplevel.unmapped = true;
         serials.clear();
@@ -911,6 +938,7 @@ fn reconfigure_remapping(state: &mut CompositorState, object: &ObjectId) {
     .is_some_and(|toplevel| std::mem::take(&mut toplevel.unmapped));
   if remapping {
     reconfigure_all(state);
+    request_configure(state, object);
   }
 }
 
@@ -1122,7 +1150,6 @@ fn configure_toplevel(
   geometry: Rect,
   states: ToplevelStates,
 ) {
-  let serial = state.serial();
   let Some(surface) = state.surfaces.get_mut(object) else {
     return;
   };
@@ -1134,9 +1161,6 @@ fn configure_toplevel(
   let handle = toplevel.handle.clone();
   // The client gets the window's geometry less its frame.
   let content = crate::decorator::margins(state, object).shrink(geometry);
-  let Some(surface) = state.surfaces.get_mut(object) else {
-    return;
-  };
   match handle {
     ToplevelHandle::X11(x_window) => {
       // No acknowledgement: X11 has no configure serials.
@@ -1144,22 +1168,20 @@ fn configure_toplevel(
         state, x_window, window, content, states,
       );
     }
-    ToplevelHandle::Xdg(xdg_toplevel) => {
-      xdg_toplevel.configure(
-        content.width.min(i32::MAX as u32) as i32,
-        content.height.min(i32::MAX as u32) as i32,
-        states.xdg_states(),
-      );
-      // The xdg_surface half of the configure, which the client
-      // acknowledges with this serial.
-      if let Role::Xdg {
-        resource, serials, ..
-      } = &mut surface.role
+    ToplevelHandle::Xdg(_) => {
+      // Sent at the end of the turn by flush_configures.
+      if let Some(toplevel) = state
+        .surfaces
+        .get_mut(object)
+        .and_then(|surface| surface.role.toplevel_mut())
       {
-        resource.configure(serial);
-        serials.insert(serial);
+        toplevel.configure.pending = Some((
+          content.width.min(i32::MAX as u32) as i32,
+          content.height.min(i32::MAX as u32) as i32,
+          states,
+        ));
       }
-      crate::decoration::configured(state, &xdg_toplevel, serial);
+      state.configures_pending = true;
     }
   }
   if let (Some(window), Some(old_geometry)) = (window, previous)
@@ -1170,6 +1192,87 @@ fn configure_toplevel(
       old_geometry,
     });
   }
+}
+
+/// Sends the xdg toplevel configures of this turn ([`ConfigureState`]):
+/// one per toplevel whose size or states changed since its last
+/// configure, whose client asked for one, or whose decoration mode
+/// waits for one.
+pub(crate) fn flush_configures(state: &mut CompositorState) {
+  if !std::mem::take(&mut state.configures_pending) {
+    return;
+  }
+  let mut objects = state
+    .surfaces
+    .iter()
+    .filter_map(|(object, surface)| {
+      let toplevel = surface.role.toplevel()?;
+      toplevel.configure.pending?;
+      Some((object.clone(), toplevel.window()))
+    })
+    .collect::<Vec<_>>();
+  // In window order, as reconfigure_all configures them.
+  objects.sort_by_key(|(object, window)| {
+    (window.unwrap_or(WindowId(u64::MAX)), object.protocol_id())
+  });
+  for (object, _) in objects {
+    let awaiting = crate::decoration::awaiting_configure(state, &object);
+    let serial = state.serial();
+    let Some(surface) = state.surfaces.get_mut(&object) else {
+      continue;
+    };
+    let Role::Xdg {
+      resource,
+      serials,
+      kind: Some(XdgKind::Toplevel(toplevel)),
+      ..
+    } = &mut surface.role
+    else {
+      continue;
+    };
+    let ToplevelHandle::Xdg(xdg_toplevel) = toplevel.handle.clone() else {
+      continue;
+    };
+    let configure = &mut toplevel.configure;
+    let Some(pending) = configure.pending.take() else {
+      continue;
+    };
+    if configure.sent == Some(pending) && !configure.requested && !awaiting {
+      continue;
+    }
+    configure.sent = Some(pending);
+    configure.requested = false;
+    let (width, height, states) = pending;
+    xdg_toplevel.configure(width, height, states.xdg_states());
+    // The xdg_surface half of the configure, which the client
+    // acknowledges with this serial.
+    resource.configure(serial);
+    serials.insert(serial);
+    crate::decoration::configured(state, &xdg_toplevel, serial);
+  }
+}
+
+/// Makes the next [`flush_configures`] send toplevel `object` a configure
+/// even if nothing about it changed, as xdg-shell's state requests expect.
+pub(crate) fn request_configure(
+  state: &mut CompositorState,
+  object: &ObjectId,
+) {
+  let Some(toplevel) = state
+    .surfaces
+    .get_mut(object)
+    .and_then(|surface| surface.role.toplevel_mut())
+  else {
+    return;
+  };
+  if !matches!(toplevel.handle, ToplevelHandle::Xdg(_)) {
+    return;
+  }
+  toplevel.configure.requested = true;
+  if toplevel.configure.pending.is_none() {
+    toplevel.configure.pending = toplevel.configure.sent;
+  }
+  state.configures_pending = true;
 }
 
 pub(crate) fn reconfigure_lock_surfaces(state: &mut CompositorState) {
@@ -2270,6 +2373,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
               min_size: (0, 0),
               max_size: (0, 0),
               configured_geometry: None,
+              configure: ConfigureState::default(),
               created_rules_pending: None,
               unmapped: false,
               pid: None,
@@ -2494,6 +2598,7 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
           return;
         };
         let _ = set_maximized(state, window, maximized);
+        request_configure(state, &object);
       }
       xdg_toplevel::Request::SetFullscreen { .. }
       | xdg_toplevel::Request::UnsetFullscreen => {
@@ -2510,6 +2615,7 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
           fullscreen_on(state, window, &output);
         }
         let _ = set_fullscreen(state, window, fullscreen);
+        request_configure(state, &object);
       }
       _ => {}
     }
@@ -3559,5 +3665,90 @@ mod tests {
     }));
     let info = state.core.window_info(placeholder).unwrap();
     assert_eq!(info.identity.title.as_deref(), Some("Restored"));
+  }
+
+  /// The configures `toplevel` got from index `from` of the client's
+  /// events on, as (width, height).
+  fn configures_of(
+    client: &TestClient,
+    toplevel: &crate::test_client::Toplevel,
+    from: usize,
+  ) -> Vec<(i32, i32)> {
+    let id = wayland_client::Proxy::id(&toplevel.toplevel);
+    client.events.configures[from..]
+      .iter()
+      .filter(|(object, ..)| *object == id)
+      .map(|(_, width, height)| (*width, *height))
+      .collect()
+  }
+
+  #[test]
+  fn a_pointer_resize_configures_once_per_turn_and_only_changed_windows() {
+    use shingle_core::Direction;
+
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let mut toplevels = Vec::new();
+    for app_id in ["left", "right", "floater"] {
+      let toplevel = client.toplevel(&mut compositor, app_id);
+      client.attach_buffer(&mut compositor, &toplevel.surface, 64, 64);
+      toplevels.push(toplevel);
+    }
+    let floater = windows_with(&compositor.state, "floater")[0];
+    let reply = crate::ipc::respond(
+      &mut compositor.state,
+      &serde_json::json!({
+        "method": "window-rules/configure-view",
+        "data": {"id": floater.0, "geometry":
+          {"x": 900, "y": 400, "width": 300, "height": 200}},
+      }),
+    );
+    assert_eq!(reply["result"], "ok", "{reply}");
+    client.roundtrip(&mut compositor);
+    let left = windows_with(&compositor.state, "left")[0];
+    let width = layout_tiles(&mut compositor.state)[0].1 as i32;
+    let from = client.events.configures.len();
+    // Eight pointer motions between two frames, as a fast mouse sends.
+    for _ in 0..8 {
+      crate::input::resize_window(
+        &mut compositor.state,
+        left,
+        Direction::Right,
+        5,
+        1,
+      )
+      .expect("the tile resizes");
+    }
+    client.roundtrip(&mut compositor);
+    assert_eq!(
+      configures_of(&client, &toplevels[0], from),
+      [(width + 40, 720)],
+      "one configure with the last size"
+    );
+    assert_eq!(configures_of(&client, &toplevels[1], from).len(), 1);
+    assert_eq!(
+      configures_of(&client, &toplevels[2], from),
+      [],
+      "the floating window, whose size and states stay, gets none"
+    );
+  }
+
+  #[test]
+  fn state_requests_get_a_configure_even_when_nothing_changes() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let toplevel = client.toplevel(&mut compositor, "solo");
+    client.attach_buffer(&mut compositor, &toplevel.surface, 64, 64);
+    client.roundtrip(&mut compositor);
+    let from = client.events.configures.len();
+    // A tiled window that is not fullscreen asks not to be fullscreen.
+    toplevel.toplevel.unset_fullscreen();
+    client.roundtrip(&mut compositor);
+    assert_eq!(configures_of(&client, &toplevel, from).len(), 1);
+    // Nothing else changed, so nothing else is sent.
+    let from = client.events.configures.len();
+    crate::shell::reconfigure_all(&mut compositor.state);
+    client.roundtrip(&mut compositor);
+    assert_eq!(configures_of(&client, &toplevel, from), []);
   }
 }

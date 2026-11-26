@@ -1618,6 +1618,7 @@ impl Compositor {
     if let Some(xwayland) = &mut self.xwayland {
       xwayland.flush(&mut self.state, &self.event_loop.handle());
     }
+    shell::flush_configures(&mut self.state);
     self.state.buffer_releases.flush();
     self.display.flush_clients()?;
     Ok(dispatched)
