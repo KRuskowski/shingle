@@ -306,6 +306,27 @@ fn crtcs_that_share_a_cursor_plane_give_it_to_the_first() {
   );
 }
 
+#[test]
+fn an_output_turned_off_turns_its_cursor_plane_off() {
+  let mut fake = FakeKms::single_output();
+  let dp = fake.add_pipe(crate::kms::fake::connector_info(20, "DP-1"));
+  let cursor = fake.add_cursor_plane(dp);
+  let (card, mut display) = start(fake, OutputPolicy::default());
+  display.set_cursor("DP-1", Some(arrow(3, 4)));
+  assert!(display.commit_cursor("DP-1", Instant::now()));
+  card
+    .borrow_mut()
+    .complete_flip_on(dp, Duration::from_millis(1), 1);
+  display.dispatch_flips();
+  assert_ne!(card.borrow().value(cursor.0, "FB_ID"), 0, "shown");
+  display
+    .apply_configuration(&[("DP-1".into(), shingle::HeadState::Off)])
+    .expect("DP-1 turns off");
+  let (modeset, _) = card.borrow().real_commits().last().cloned().unwrap();
+  assert_eq!(plane_value(&card, &modeset, cursor, "FB_ID"), Some(0));
+  assert_eq!(plane_value(&card, &modeset, cursor, "CRTC_ID"), Some(0));
+}
+
 /// A policy with `vrr` for every output.
 fn vrr_policy(vrr: bool) -> OutputPolicy {
   OutputPolicy {

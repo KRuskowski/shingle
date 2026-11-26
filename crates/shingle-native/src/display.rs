@@ -852,6 +852,15 @@ impl Display {
       if plane && teardown.planes.iter().all(|p| p.id != props.plane.id) {
         teardown.planes.push(props.plane);
       }
+      // A cursor plane left on would keep its CRTC from turning off.
+      if let Some(cursor) = props.cursor
+        && used
+          .iter()
+          .all(|ours| ours.cursor.is_none_or(|c| c.id != cursor.id))
+        && teardown.planes.iter().all(|p| p.id != cursor.id)
+      {
+        teardown.planes.push(cursor);
+      }
     }
     atomic::modeset_all(&states, &teardown)
   }
