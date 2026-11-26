@@ -1059,3 +1059,53 @@ fn the_first_output_turned_off_and_on_is_first_again() {
   );
   let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn without_output_limits_a_window_is_drawn_and_entered_where_it_overlaps() {
+  let (mut compositor, path) = test_compositor_with(Config {
+    remove_output_limits: true,
+    ..Config::default()
+  });
+  compositor
+    .add_output(
+      OutputInfo {
+        name: "HEADLESS-2".into(),
+        ..OutputInfo::default()
+      },
+      (800, 600),
+    )
+    .expect("a second output");
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let (toplevel, window) = mapped(&mut compositor, &mut client, "wide");
+  let reply = crate::ipc::respond(
+    &mut compositor.state,
+    &serde_json::json!({
+      "method": "window-rules/configure-view",
+      "data": {
+        "id": window.0,
+        "geometry": {"x": 1180, "y": 20, "width": 200, "height": 100},
+      },
+    }),
+  );
+  assert_eq!(reply, serde_json::json!({"result": "ok"}));
+  client.roundtrip(&mut compositor);
+  let windows_on = |output: &str| {
+    compositor
+      .visible_surfaces_on(&OutputHandle::new(output))
+      .into_iter()
+      .filter_map(|snapshot| snapshot.window)
+      .collect::<Vec<_>>()
+  };
+  assert_eq!(windows_on("HEADLESS-1"), [window]);
+  assert_eq!(
+    windows_on("HEADLESS-2"),
+    [window],
+    "drawn where it overlaps"
+  );
+  assert_eq!(
+    enters_and_leaves(&client, &toplevel.surface, &outputs),
+    ["enter HEADLESS-1", "enter HEADLESS-2"]
+  );
+  let _ = std::fs::remove_file(path);
+}

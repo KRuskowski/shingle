@@ -172,6 +172,9 @@ pub(crate) struct CompositorState {
   pub(crate) active_output: OutputId,
   /// What happens to the workspace set of an output that goes.
   pub(crate) unplug: shingle_config::UnplugPolicy,
+  /// Whether windows are drawn, and entered, on every output they
+  /// overlap rather than only on their own (`remove_output_limits`).
+  pub(crate) remove_output_limits: bool,
   /// The `oswitch` and `wsets` bindings, device outputs and focus timeout.
   pub(crate) focus_settings: crate::output::FocusSettings,
   /// The active output that went, to focus again if it returns soon.
@@ -352,6 +355,7 @@ impl CompositorState {
       outputs,
       active_output: output_id,
       unplug: config.output_unplug,
+      remove_output_limits: config.remove_output_limits,
       focus_settings,
       lost_focus: None,
       outputs_restored: false,
@@ -879,6 +883,13 @@ impl CompositorState {
         }
       }
     }
+    if self.remove_output_limits {
+      for object in self.foreign_windows_on(id) {
+        if fullscreen.as_ref() != Some(&object) {
+          self.append_surface_and_popups(&object, &mut snapshots);
+        }
+      }
+    }
     // Unmanaged X windows (menus, tooltips) are above Top and below
     // Overlay, where Wayfire's UNMANAGED layer is, and above a fullscreen
     // window, whose menus they may be.
@@ -913,6 +924,68 @@ impl CompositorState {
       snapshots.push(snapshot);
     }
     snapshots
+  }
+
+  /// The surfaces of `window`'s toplevel, its subsurfaces and popups,
+  /// bottom to top; empty without a mapped buffer.
+  pub(crate) fn window_surfaces(
+    &self,
+    window: shingle_core::WindowId,
+  ) -> Vec<SurfaceSnapshot> {
+    let object = self.surfaces.iter().find_map(|(object, surface)| {
+      surface
+        .role
+        .toplevel()
+        .is_some_and(|toplevel| {
+          toplevel.window() == Some(window) && surface.buffer.is_some()
+        })
+        .then(|| object.clone())
+    });
+    let mut snapshots = Vec::new();
+    if let Some(object) = object {
+      self.append_surface_and_popups(&object, &mut snapshots);
+    }
+    snapshots
+  }
+
+  /// The toplevels that other outputs show and that overlap output `id`,
+  /// bottom to top and in the order outputs were added, which
+  /// `remove_output_limits` draws on `id` too.
+  pub(crate) fn foreign_windows_on(&self, id: &OutputId) -> Vec<ObjectId> {
+    let Some(rect) = self.outputs.get(id).map(|output| output.rect) else {
+      return Vec::new();
+    };
+    let mut objects = Vec::new();
+    for other in self.outputs.iter().filter(|other| other.id != *id) {
+      let Ok(workspace) = self.core.current_workspace(&other.id) else {
+        continue;
+      };
+      let Ok(tree) = self.core.tree(&other.id, workspace) else {
+        continue;
+      };
+      for window in tree.stack_order() {
+        let object = self.surfaces.iter().find_map(|(object, surface)| {
+          surface
+            .role
+            .toplevel()
+            .is_some_and(|toplevel| toplevel.window() == Some(*window))
+            .then(|| object.clone())
+        });
+        let Some(object) = object else {
+          continue;
+        };
+        let shown = crate::surface_outputs::toplevel_output(self, &object)
+          .is_some_and(|shown| shown == other.id);
+        let overlaps =
+          shell::surface_geometry(self, &object).is_some_and(|geometry| {
+            crate::surface_outputs::intersection(geometry, rect).is_some()
+          });
+        if shown && overlaps {
+          objects.push(object);
+        }
+      }
+    }
+    objects
   }
 
   /// Appends the mapped layer surfaces of `layers` on output `id`, and
@@ -1000,9 +1073,22 @@ impl CompositorState {
     all_workspaces: bool,
     include_minimized: bool,
   ) -> Vec<SurfaceSnapshot> {
-    let Ok(current_workspace) =
-      self.core.current_workspace(&self.active_output)
-    else {
+    self.scale_surfaces_on(
+      &self.active_output,
+      all_workspaces,
+      include_minimized,
+    )
+  }
+
+  /// [`CompositorState::scale_surfaces`] for the windows of output `id`'s
+  /// workspace set.
+  pub(crate) fn scale_surfaces_on(
+    &self,
+    id: &OutputId,
+    all_workspaces: bool,
+    include_minimized: bool,
+  ) -> Vec<SurfaceSnapshot> {
+    let Ok(current_workspace) = self.core.current_workspace(id) else {
       return Vec::new();
     };
     let mut snapshots = self
@@ -1014,7 +1100,7 @@ impl CompositorState {
         let window = toplevel.window()?;
         let info = self.core.window_info(window).ok()?;
         if info.presence != shingle_core::WindowPresence::Mapped
-          || info.location.output != self.active_output
+          || info.location.output != *id
           || (info.state.minimized && !include_minimized)
           || (!all_workspaces
             && !info.state.sticky

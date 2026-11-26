@@ -7,10 +7,12 @@
 //! A toplevel is on its workspace set's output while that output shows
 //! the set, its workspace is the current one (or it is sticky) and it is
 //! not minimized, since Shingle clips windows to their own output as
-//! Wayfire does; layer and lock surfaces are on their output; an
-//! unmanaged X window is on every output it overlaps; the cursor is on
-//! the output under the pointer; popups and subsurfaces are on their
-//! parent's outputs. [`sync`] runs once per turn and sends what changed.
+//! Wayfire does; with `remove_output_limits` it is also on every other
+//! output it overlaps while it is shown. Layer and lock surfaces are on
+//! their output; an unmanaged X window is on every output it overlaps;
+//! the cursor is on the output under the pointer; popups and subsurfaces
+//! are on their parent's outputs. [`sync`] runs once per turn and sends
+//! what changed.
 
 use std::collections::HashMap;
 
@@ -153,7 +155,7 @@ pub(crate) fn unmanaged_output(
 
 /// The output whose workspace set holds toplevel `object`'s window and
 /// shows it now, if any.
-fn toplevel_output(
+pub(crate) fn toplevel_output(
   state: &CompositorState,
   object: &ObjectId,
 ) -> Option<OutputId> {
@@ -200,7 +202,26 @@ fn outputs_at_depth(
     return Vec::new();
   };
   if surface.role.toplevel().is_some() {
-    return toplevel_output(state, object).into_iter().collect();
+    let own = toplevel_output(state, object);
+    if !state.remove_output_limits {
+      return own.into_iter().collect();
+    }
+    // Drawn, and so entered, on every output it overlaps.
+    let Some(geometry) = own
+      .as_ref()
+      .and_then(|_| shell::surface_geometry(state, object))
+    else {
+      return own.into_iter().collect();
+    };
+    return state
+      .outputs
+      .iter()
+      .filter(|output| {
+        Some(&output.id) == own.as_ref()
+          || (!output.dark && intersection(geometry, output.rect).is_some())
+      })
+      .map(|output| output.id.clone())
+      .collect();
   }
   match &surface.role {
     Role::Layer(layer) => vec![layer.output.clone()],

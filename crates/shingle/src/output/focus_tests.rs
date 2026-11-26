@@ -753,3 +753,41 @@ fn stipc_keys_run_oswitch_without_a_frontend() {
   assert_eq!(compositor.active_output(), handle("HEADLESS-1"));
   let _ = std::fs::remove_file(path);
 }
+
+/// The windows among the surfaces drawn on `output`.
+fn windows_on(compositor: &Compositor, output: &str) -> Vec<WindowId> {
+  compositor
+    .visible_surfaces_on(&handle(output))
+    .into_iter()
+    .filter_map(|snapshot| snapshot.window)
+    .collect()
+}
+
+/// Floats `window` across the boundary of HEADLESS-1 and HEADLESS-2.
+fn straddle(compositor: &mut Compositor, window: WindowId) {
+  let reply = ipc(
+    compositor,
+    "window-rules/configure-view",
+    json!({
+      "id": window.0,
+      "geometry": {"x": 1180, "y": 20, "width": 200, "height": 100},
+    }),
+  );
+  assert_eq!(reply, json!({"result": "ok"}));
+}
+
+#[test]
+fn windows_are_drawn_only_on_their_own_output_by_default() {
+  let (mut compositor, path) = two_outputs(Config::default());
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let (_toplevel, window) = mapped(&mut compositor, &mut client, "wide");
+  straddle(&mut compositor, window);
+  client.roundtrip(&mut compositor);
+  assert_eq!(windows_on(&compositor, "HEADLESS-1"), [window]);
+  assert!(windows_on(&compositor, "HEADLESS-2").is_empty());
+  let surfaces = compositor.window_surfaces(window);
+  assert_eq!(surfaces.len(), 1);
+  assert_eq!(surfaces[0].window, Some(window));
+  assert!(compositor.window_surfaces(WindowId(999)).is_empty());
+  let _ = std::fs::remove_file(path);
+}

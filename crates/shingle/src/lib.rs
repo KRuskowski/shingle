@@ -238,6 +238,10 @@ pub struct Config {
   /// The output each named absolute input device maps to
   /// (`input_devices.NAME.output`).
   pub input_device_outputs: std::collections::BTreeMap<String, String>,
+  /// Draws windows on every output they overlap instead of only on the
+  /// output that shows their workspace set (`behavior.remove_output_limits`,
+  /// Wayfire's `workarounds/remove_output_limits`).
+  pub remove_output_limits: bool,
   /// Background clear colour as RGBA, each component in `0.0..=1.0`.
   pub background_color: [f64; 4],
   /// Columns of the workspace grid; must be nonzero.
@@ -346,6 +350,7 @@ impl Default for Config {
       oswitch: shingle_config::OswitchConfig::default(),
       wsets: shingle_config::WsetsConfig::default(),
       input_device_outputs: std::collections::BTreeMap::new(),
+      remove_output_limits: false,
       output_scale: 1.0,
       output_transform: wayland_server::protocol::wl_output::Transform::Normal,
       output_refresh_mhz: 0,
@@ -408,6 +413,7 @@ impl From<shingle_config::ShingleConfig> for Config {
           Some((name.clone(), device.output.clone()?))
         })
         .collect(),
+      remove_output_limits: config.behavior.remove_output_limits,
       output_placements,
       background_color: config.background_color,
       workspace_width: config.workspaces.width,
@@ -1307,6 +1313,15 @@ impl Compositor {
     self.state.primary().physical_size()
   }
 
+  /// [`Compositor::output_physical_size`] of `output`, if it is there.
+  pub fn physical_size_of(&self, output: &OutputHandle) -> Option<(u32, u32)> {
+    self
+      .state
+      .outputs
+      .get(&output.id())
+      .map(|output| output.physical_size())
+  }
+
   /// Runs one turn of the event loop, waiting up to `timeout` (`None` blocks)
   /// for client requests, connections, signals or the housekeeping tick, then
   /// dispatches clients, serves IPC, advances idle timers and flushes replies.
@@ -1387,9 +1402,9 @@ impl Compositor {
   /// frontends that learn nothing more precise about presentation, such as
   /// nested. For each output it is [`Compositor::frame_presented`] with the
   /// current `CLOCK_MONOTONIC` time, the output's refresh rate from
-  /// [`OutputInfo`], no sequence number and no flags. Until each output
-  /// has a frame clock of its own (MO-5), outputs that the host does not
-  /// draw, such as those created over IPC, get their frames this way.
+  /// [`OutputInfo`], no sequence number and no flags. The frontend reports
+  /// each output it draws with [`Compositor::frame_now`] instead, and
+  /// paces outputs created over IPC with a timer of its own.
   pub fn frame(&mut self) {
     let outputs = self
       .state
@@ -1534,6 +1549,21 @@ impl Compositor {
     include_minimized: bool,
   ) -> Vec<SurfaceSnapshot> {
     self.state.scale_surfaces(all_workspaces, include_minimized)
+  }
+
+  /// [`Compositor::scale_surfaces`] for the windows that `output` shows,
+  /// as Scale, Expo and workspace slides on that output draw them.
+  pub fn scale_surfaces_on(
+    &self,
+    output: &OutputHandle,
+    all_workspaces: bool,
+    include_minimized: bool,
+  ) -> Vec<SurfaceSnapshot> {
+    self.state.scale_surfaces_on(
+      &output.id(),
+      all_workspaces,
+      include_minimized,
+    )
   }
 
   /// A snapshot of any live surface, visible or not; `None` once it is
@@ -1683,6 +1713,7 @@ impl Compositor {
     }
     self.state.placements = placements;
     self.state.unplug = config.output_unplug;
+    self.state.remove_output_limits = config.remove_output_limits;
     self.state.focus_settings = output::FocusSettings::new(&config);
     for (id, placement, _) in &placed {
       if placement.refresh_mhz > 0
@@ -3327,24 +3358,51 @@ impl Compositor {
     OutputHandle::from(&self.state.active().id)
   }
 
-  /// The first output added that is still there. Until the frontend draws
-  /// every output (MO-5), [`Compositor::output`],
+  /// The first output added that is still there. [`Compositor::output`],
   /// [`Compositor::visible_surfaces`] and the other calls without an
-  /// output mean this one.
+  /// output mean this one; the nested and native hosts draw only it until
+  /// they have one window or CRTC per output (MO-6, MO-7).
   pub fn primary_output(&self) -> OutputHandle {
     OutputHandle::from(&self.state.primary().id)
   }
 
-  /// The surfaces to draw on one output, as [`Compositor::visible_surfaces`]
-  /// lists them for the first. Until layer, lock and override-redirect
-  /// surfaces and the cursor have outputs of their own (MO-3), the other
-  /// outputs show only the windows of their workspace sets. A dark output
+  /// The surfaces to draw on one output, bottom to top, as
+  /// [`Compositor::visible_surfaces`] lists them for the first: its layer
+  /// surfaces, the windows of the workspace set it shows, the unmanaged X
+  /// windows that belong to it and the cursor while the pointer is on it.
+  /// With `behavior.remove_output_limits`, windows of other outputs that
+  /// overlap it follow its own windows. A dark output, or one turned off,
   /// shows nothing.
   pub fn visible_surfaces_on(
     &self,
     output: &OutputHandle,
   ) -> Vec<SurfaceSnapshot> {
     self.state.visible_surfaces_on(&output.id())
+  }
+
+  /// The surfaces of `window` bottom to top: its toplevel, then its
+  /// subsurfaces and popups, as [`Compositor::visible_surfaces_on`] lists
+  /// them. Empty for a window without a mapped buffer. The frontend draws
+  /// a window it drags on every output the window crosses with them.
+  pub fn window_surfaces(&self, window: WindowId) -> Vec<SurfaceSnapshot> {
+    self.state.window_surfaces(window)
+  }
+
+  /// Whether any surface visible on `output` has asked for asynchronous
+  /// presentation ([`Compositor::allows_tearing`] for one output).
+  pub fn allows_tearing_on(&self, output: &OutputHandle) -> bool {
+    self
+      .state
+      .visible_surfaces_on(&output.id())
+      .iter()
+      .any(|snapshot| {
+        self
+          .state
+          .surface_ids
+          .get(&snapshot.id)
+          .and_then(|object| self.state.surfaces.get(object))
+          .is_some_and(|surface| surface.tearing)
+      })
   }
 
   /// Settles a restored session once the backend has added its outputs
