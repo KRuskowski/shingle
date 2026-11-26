@@ -855,20 +855,7 @@ impl CompositorState {
     let Ok(tree) = self.core.tree(id, workspace) else {
       return snapshots;
     };
-    let focused = crate::input::focused_window(self).or_else(|| tree.focused());
-    let fullscreen = self.surfaces.iter().find_map(|(object, surface)| {
-      (!self.show_desktop).then_some(object.clone()).filter(|_| {
-        surface.role.toplevel().is_some_and(|toplevel| {
-          toplevel.window() == focused
-            && toplevel.window().is_some_and(|window| {
-              self.core.window_info(window).is_ok_and(|info| {
-                info.state.fullscreen && !info.state.minimized
-              })
-            })
-            && surface.buffer.is_some()
-        })
-      })
-    });
+    let fullscreen = self.promoted_fullscreen(id);
     let mut sticky = self
       .surfaces
       .values()
@@ -977,6 +964,42 @@ impl CompositorState {
       snapshots.push(snapshot);
     }
     snapshots
+  }
+
+  /// The surface of the fullscreen window output `id` draws above its top
+  /// layer, if any: the window focused there, the keyboard's if it is on
+  /// this output and otherwise the focused tile of its current workspace,
+  /// when it is fullscreen, not minimized and has a buffer. Wayfire calls
+  /// this promoting the view (src/output/promotion-manager.hpp).
+  pub(crate) fn promoted_fullscreen(&self, id: &OutputId) -> Option<ObjectId> {
+    if self.show_desktop {
+      return None;
+    }
+    let workspace = self.core.current_workspace(id).ok()?;
+    let tree = self.core.tree(id, workspace).ok()?;
+    let focused = crate::input::focused_window(self)
+      .filter(|window| {
+        self
+          .core
+          .window_info(*window)
+          .is_ok_and(|info| info.location.output == *id)
+      })
+      .or_else(|| tree.focused())?;
+    let fullscreen = self.core.window_info(focused).is_ok_and(|info| {
+      info.state.fullscreen && !info.state.minimized
+    });
+    if !fullscreen {
+      return None;
+    }
+    self.surfaces.iter().find_map(|(object, surface)| {
+      surface
+        .role
+        .toplevel()
+        .is_some_and(|toplevel| {
+          toplevel.window() == Some(focused) && surface.buffer.is_some()
+        })
+        .then(|| object.clone())
+    })
   }
 
   /// The surfaces of `window`'s toplevel, its subsurfaces and popups,

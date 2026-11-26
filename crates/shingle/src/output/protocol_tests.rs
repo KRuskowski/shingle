@@ -338,6 +338,49 @@ fn a_layer_surface_is_on_its_output_and_closed_when_it_goes() {
 }
 
 #[test]
+fn a_fullscreen_window_hides_only_its_own_outputs_panels() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let mut panels = Vec::new();
+  for name in ["HEADLESS-1", "HEADLESS-2"] {
+    let (surface, layer) =
+      panel(&mut compositor, &mut client, Some(&outputs[name]));
+    let &(_, serial, width, _) = client.events.layer_configures.last().unwrap();
+    layer.ack_configure(serial);
+    client.attach_buffer(&mut compositor, &surface, width as i32, 30);
+    panels.push((surface, layer));
+  }
+  let (_toplevel, window) = mapped(&mut compositor, &mut client, "full");
+  move_to(&mut compositor, window, "HEADLESS-2");
+  compositor.focus_window(window);
+  compositor.toggle_fullscreen(window).unwrap();
+  client.roundtrip(&mut compositor);
+  let drawn = |compositor: &Compositor, output: &str| {
+    let surfaces = compositor.visible_surfaces_on(&OutputHandle::new(output));
+    let panel = surfaces
+      .iter()
+      .any(|snapshot| snapshot.role == crate::SurfaceRole::LayerShell);
+    let full = surfaces
+      .iter()
+      .any(|snapshot| snapshot.window == Some(window));
+    (panel, full)
+  };
+  // Before, the focused fullscreen window hid the top layer of every
+  // output and was drawn on each.
+  assert_eq!(drawn(&compositor, "HEADLESS-2"), (false, true));
+  assert_eq!(drawn(&compositor, "HEADLESS-1"), (true, false));
+  // It stays above HEADLESS-2's panel while a window on HEADLESS-1 has
+  // the keyboard.
+  crate::output::focus_output(&mut compositor.state, &id("HEADLESS-1"));
+  let (_other, other) = mapped(&mut compositor, &mut client, "other");
+  assert_eq!(compositor.focused_window(), Some(other));
+  assert_eq!(drawn(&compositor, "HEADLESS-2"), (false, true));
+  assert_eq!(drawn(&compositor, "HEADLESS-1"), (true, false));
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn every_output_gets_a_lock_surface_before_the_session_is_locked() {
   let (mut compositor, path) = two_outputs();
   let mut client = TestClient::connect(&mut compositor, &path);
