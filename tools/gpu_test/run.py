@@ -27,7 +27,7 @@ namespaces:
   tools/gpu_test/run.py [--modeset] [--keep] [--binary target/debug/shingle]
       [--wl-probe target/debug/examples/wl_probe] [--captures DIR]
       --checks offscreen|nested|baseline|buffers|dmabuf|browsers|xwayland|
-               nested-gpu|nodmabuf|weston ...
+               nested-gpu|nodmabuf|weston|syncobj|nosyncobj ...
 
 For example, DB-1's import test:
 
@@ -44,7 +44,10 @@ DB-3's check that buffers replaced behind a FIFO barrier are released is
 `--checks buffers`. DB-4's linux-dmabuf checks (dmabuf_checks.py) are
 `--checks dmabuf browsers xwayland nested-gpu nodmabuf weston`; for these
 groups nvidia-modeset is exposed as with `--modeset`, because NVIDIA's
-Vulkan WSI cannot create a swapchain without it.
+Vulkan WSI cannot create a swapchain without it. DB-5's syncobj checks
+are `--checks syncobj nosyncobj` (after `cargo build -p shingle --example
+syncobj_probe`), and `dmabuf`, `xwayland` and `nested-gpu` check syncobj
+use too.
 
 It exits with the command's status, or 1 when a check failed. With
 `--checks` it prints one PASS or FAIL line per check and INFO lines for
@@ -78,10 +81,12 @@ SAMPLE_INTERVAL = 0.05
 # checks.GROUPS and dmabuf_checks.GROUPS, kept here so that `--help` works
 # without importing them.
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'dmabuf',
-                'browsers', 'xwayland', 'nested-gpu', 'nodmabuf', 'weston')
-# DB-4's groups, whose NVIDIA Vulkan swapchains need nvidia-modeset.
+                'browsers', 'xwayland', 'nested-gpu', 'nodmabuf', 'weston',
+                'syncobj', 'nosyncobj')
+# DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
+# nvidia-modeset; `syncobj` runs no Vulkan client.
 MODESET_GROUPS = ('dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
-                  'weston')
+                  'weston', 'nosyncobj')
 
 def allowed_devices(modeset):
   """The device nodes, relative to /dev, that the namespace exposes."""

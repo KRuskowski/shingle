@@ -1,15 +1,19 @@
-"""DB-4's real-client checks of linux-dmabuf, run inside run.py's namespace.
+"""DB-4's and DB-5's real-client checks of linux-dmabuf and
+linux-drm-syncobj, run inside run.py's namespace.
 
-docs/design/dmabuf.md, section 11, DB-4. Every Shingle here runs with
-`SHINGLE_TRACE_BUFFERS=1`, so its log says which path each buffer took
-(`dmabuf import`, `dmabuf cached`, `shm upload`, `blocked implicit`,
+docs/design/dmabuf.md, section 11, DB-4 and DB-5. Every Shingle here runs
+with `SHINGLE_TRACE_BUFFERS=1`, so its log says which path each buffer
+took (`dmabuf import`, `dmabuf cached`, `shm upload`, `blocked implicit`,
+`blocked syncobj`, `syncobj acquire ready`, `syncobj release`,
 `release`), and the checks judge clients by it as well as by captures:
 
 - `dmabuf`: `wayland-info` sees `zwp_linux_dmabuf_v1` version 5 with main
-  device 226:128 and every pair of the caps; `vkcube` runs to its end,
-  changes between captures and imports each swapchain image once;
-  `vkcube` on lavapipe stays on `wl_shm`; `es2gears_wayland`,
-  `eglgears_wayland` and `kitty` map, draw and import.
+  device 226:128 and every pair of the caps, and
+  `wp_linux_drm_syncobj_manager_v1` version 1; `vkcube` runs to its end,
+  changes between captures, imports each swapchain image once and
+  commits with syncobj acquire and release points; `vkcube` on lavapipe
+  stays on `wl_shm`; `es2gears_wayland`, `eglgears_wayland` and `kitty`
+  map and draw, and their path is recorded.
 - `browsers`: `firefox` and `chromium --ozone-platform=wayland`, one at a
   time, each with a fresh profile in the namespace's private HOME and no
   network, show a local page.
@@ -22,6 +26,18 @@ docs/design/dmabuf.md, section 11, DB-4. Every Shingle here runs with
 - `weston`: `weston-simple-dmabuf-feedback` prints the tranche,
   `weston-simple-dmabuf-egl` draws, and `mpv` plays a test pattern with
   Vulkan and with OpenGL output.
+- `syncobj` (DB-5): `syncobj_probe` stalls one toplevel on an acquire
+  point nobody signals while its other toplevel keeps drawing; the
+  stalled one keeps its last shm content and gets no frame callback,
+  and destroying it releases both its DMA-BUFs and signals both their
+  release points.
+- `nosyncobj` (DB-5): `dmabuf`, `xwayland` and `nested-gpu` again with
+  `SHINGLE_SYNCOBJ=0`: no syncobj global, and the clients pass on
+  implicit sync.
+
+`xwayland` and `nested-gpu` check syncobj use too: Xwayland's glamor
+presents `glxgears`, nested Shingle presents its window and `vkcube`
+inside nested Shingle presents, all with acquire and release points.
 
 Signals go through `run.signal_checked`, via the Shingle and Client
 helpers of checks.py, to children of this process inside the PID
@@ -61,7 +77,42 @@ FIREFOX_PREFERENCES = (
 EGL_NOTE = ('NVIDIA EGL cannot create a Wayland EGLDisplay without '
             '/dev/dri/card0, which the namespace hides')
 GROUPS = ('dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
-          'weston')
+          'weston', 'syncobj', 'nosyncobj')
+# The log line of an offered syncobj global on this host.
+SYNCOBJ_LINE = 'linux-drm-syncobj version 1 on render node 226:128'
+
+class Mode:
+  """How a group runs: with linux-drm-syncobj, as by default, or with
+  `SHINGLE_SYNCOBJ=0`, under /tmp names of its own."""
+
+  def __init__(self, syncobj=True):
+    self.syncobj = syncobj
+    self.suffix = '' if syncobj else '-nosyncobj'
+
+  def environment(self, extra=None):
+    """TRACE, `SHINGLE_SYNCOBJ=0` when off, and `extra`."""
+    environment = dict(TRACE)
+    if not self.syncobj:
+      environment['SHINGLE_SYNCOBJ'] = '0'
+    environment.update(extra or {})
+    return environment
+
+  def name(self, name):
+    """A Shingle's /tmp name in this mode."""
+    return name + self.suffix
+
+DEFAULT = Mode()
+
+class Prefixed:
+  """Results whose check names get a prefix, for a group run again."""
+
+  def __init__(self, results, prefix):
+    self.results = results
+    self.prefix = prefix
+
+  def check(self, name, passed, detail=''):
+    """Records one check under the prefix."""
+    return self.results.check(self.prefix + name, passed, detail)
 
 def dmabuf_global(text):
   """What `wayland-info`'s `text` says of linux-dmabuf: (version, main
@@ -87,6 +138,13 @@ def dmabuf_global(text):
       pairs.append((found.group(1), int(found.group(2), 16)))
   return version, device, pairs
 
+def syncobj_global(text):
+  """The version of `wp_linux_drm_syncobj_manager_v1` in `wayland-info`'s
+  `text`, or None."""
+  found = re.search(r"interface: 'wp_linux_drm_syncobj_manager_v1',\s+"
+                    r"version:\s+(\d+)", text)
+  return int(found.group(1)) if found else None
+
 def expected_pairs():
   """The (fourcc, modifier) pairs DB-1 recorded for this host."""
   return {(fourcc, modifier) for fourcc in FOURCCS
@@ -94,9 +152,10 @@ def expected_pairs():
 
 def trace(text):
   """The buffer trace lines of Shingle's log `text`, as (kind, fields):
-  kind is `import`, `cached`, `shm`, `blocked` or `release`, fields the
-  `key=value` pairs and, for `shm` and `blocked`, the number as
-  `amount`."""
+  kind is `import`, `cached`, `shm`, `blocked` (implicit),
+  `syncobj_wait`, `syncobj_ready`, `syncobj_release` or `release`,
+  fields the `key=value` pairs and, for `shm`, `blocked` and
+  `syncobj_wait`, the number as `amount`."""
   events = []
   for line in text.splitlines():
     if not line.startswith('shingle: buffer: '):
@@ -110,9 +169,16 @@ def trace(text):
     elif message.startswith('shm upload'):
       kind = 'shm'
       fields['amount'] = int(message.split()[2])
+    elif message.startswith('blocked syncobj'):
+      kind = 'syncobj_wait'
+      fields['amount'] = int(message.split()[2])
     elif message.startswith('blocked'):
       kind = 'blocked'
       fields['amount'] = int(message.split()[2])
+    elif message.startswith('syncobj acquire ready'):
+      kind = 'syncobj_ready'
+    elif message.startswith('syncobj release'):
+      kind = 'syncobj_release'
     elif message.startswith('release'):
       kind = 'release'
     else:
@@ -122,9 +188,11 @@ def trace(text):
 
 def summarise(events):
   """Counts of `trace` events: {'imports': {serial: n}, 'cached': set of
-  serials, 'shm': n, 'blocked': n, 'releases': n}."""
+  serials, 'shm': n, 'blocked': n, 'releases': n, 'syncobj_waits': n,
+  'syncobj_ready': n, 'syncobj_releases': n, 'syncobj_wait_us': [µs]}."""
   summary = {'imports': {}, 'cached': set(), 'shm': 0, 'blocked': 0,
-             'releases': 0}
+             'releases': 0, 'syncobj_waits': 0, 'syncobj_ready': 0,
+             'syncobj_releases': 0, 'syncobj_wait_us': []}
   for kind, fields in events:
     if kind == 'import':
       serial = fields.get('dmabuf')
@@ -137,6 +205,13 @@ def summarise(events):
       summary['blocked'] += 1
     elif kind == 'release':
       summary['releases'] += 1
+    elif kind == 'syncobj_wait':
+      summary['syncobj_waits'] += 1
+      summary['syncobj_wait_us'].append(fields['amount'])
+    elif kind == 'syncobj_ready':
+      summary['syncobj_ready'] += 1
+    elif kind == 'syncobj_release':
+      summary['syncobj_releases'] += 1
   return summary
 
 def describe(summary):
@@ -146,7 +221,52 @@ def describe(summary):
           f'({sum(imports.values())} imports), '
           f'{len(summary["cached"])} used from the cache, '
           f'{summary["shm"]} shm uploads, {summary["blocked"]} fence waits, '
-          f'{summary["releases"]} releases')
+          f'{summary["releases"]} releases, syncobj: '
+          f'{summary["syncobj_waits"]} acquire waits '
+          f'({median(summary["syncobj_wait_us"])} µs median), '
+          f'{summary["syncobj_ready"]} acquires ready at commit, '
+          f'{summary["syncobj_releases"]} release points')
+
+def median(values):
+  """The median of `values`, or 0."""
+  ordered = sorted(values)
+  return ordered[len(ordered) // 2] if ordered else 0
+
+def syncobj_acquires(summary):
+  """How many commits came with an acquire point."""
+  return summary['syncobj_waits'] + summary['syncobj_ready']
+
+def syncobj_check(results, mode, label, summary):
+  """With syncobj on, that `label` committed with syncobj acquire points,
+  which Shingle checked and, if unsignalled, waited on, and that their
+  release points were signalled; with it off, that none did. Whether a
+  commit had to wait depends on the client's timing, so the waits are
+  in the detail, not judged."""
+  if mode.syncobj:
+    results.check(f'{label} commits with syncobj acquire and release '
+                  'points',
+                  syncobj_acquires(summary) > 0
+                  and summary['syncobj_releases'] > 0, describe(summary))
+  else:
+    results.check(f'{label} uses implicit sync without syncobj points',
+                  syncobj_acquires(summary) == 0
+                  and summary['syncobj_releases'] == 0, describe(summary))
+
+def syncobj_global_check(results, mode, group, shingle, text):
+  """`wayland-info`'s `text` lists the syncobj global when it is on, and
+  not when it is off; `group`'s Shingle's log says which."""
+  version = syncobj_global(text)
+  log = shingle.log_text()
+  if mode.syncobj:
+    results.check(f'{group}: wayland-info lists '
+                  'wp_linux_drm_syncobj_manager_v1 version 1',
+                  version == 1 and SYNCOBJ_LINE in log,
+                  f'version {version}, {checks.tail(log, 3)}')
+  else:
+    results.check(f'{group}: SHINGLE_SYNCOBJ=0 offers no '
+                  'wp_linux_drm_syncobj_manager_v1 and says so',
+                  version is None and 'SHINGLE_SYNCOBJ=0' in log,
+                  f'version {version}, {checks.tail(log, 3)}')
 
 def drawn(shot, geometry, background=(89, 89, 89), step=8):
   """The share of sampled pixels in `geometry` that are not the
@@ -269,12 +389,15 @@ def wayland_info(shingle):
                         stdin=subprocess.DEVNULL)
   return done.stdout
 
-def dmabuf_checks(results, binary, wl_probe, captures):
+def dmabuf_checks(results, binary, wl_probe, captures, mode=DEFAULT):
   """wayland-info, vkcube on NVIDIA and lavapipe, the gears and kitty."""
   del wl_probe
-  outer = checks.Shingle(binary, 'dmabuf', checks.with_gaps(checks.OUTER_GAPS),
-                         extra_environment=TRACE)
-  version, device, pairs = dmabuf_global(wayland_info(outer))
+  outer = checks.Shingle(binary, mode.name('dmabuf'),
+                         checks.with_gaps(checks.OUTER_GAPS),
+                         extra_environment=mode.environment())
+  info = wayland_info(outer)
+  version, device, pairs = dmabuf_global(info)
+  syncobj_global_check(results, mode, 'dmabuf', outer, info)
   logged = re.search(r'linux-dmabuf version 5 on render node 226:128, '
                      r'(\d+) format', outer.log_text())
   results.check('dmabuf: wayland-info shows zwp_linux_dmabuf_v1 version 5 '
@@ -318,6 +441,7 @@ def dmabuf_checks(results, binary, wl_probe, captures):
         and summary['cached'] and summary['cached'] <= set(imports)
         and summary['shm'] == 0,
         describe(summary))
+    syncobj_check(results, mode, 'dmabuf: vkcube', summary)
   finally:
     run_.client.stop()
   xw.wait_for(lambda: not outer.views(), timeout=15)
@@ -432,17 +556,17 @@ def x_display(shingle):
       (line.split('=', 1)[1] for line in shingle.log_text().splitlines()
        if line.startswith('DISPLAY=')), None), timeout=30)
 
-def xwayland_checks(results, binary, wl_probe, captures):
+def xwayland_checks(results, binary, wl_probe, captures, mode=DEFAULT):
   """glxgears through Xwayland with glamor on the render node."""
   del wl_probe
-  directory = os.path.join('/tmp', 'xwayland-bin')
+  directory = os.path.join('/tmp', mode.name('xwayland-bin'))
   os.makedirs(directory)
   config = dict(checks.BASE_CONFIG)
   config['xwayland'] = {'mode': 'lazy'}
   outer = checks.Shingle(
-      binary, 'xwayland', config,
-      extra_environment=dict(TRACE,
-                             SHINGLE_XWAYLAND=xwayland_wrapper(directory)))
+      binary, mode.name('xwayland'), config,
+      extra_environment=mode.environment(
+          {'SHINGLE_XWAYLAND': xwayland_wrapper(directory)}))
   display = x_display(outer)
   results.check('xwayland: Shingle binds an X display', display is not None,
                 checks.tail(outer.log_text()))
@@ -466,6 +590,7 @@ def xwayland_checks(results, binary, wl_probe, captures):
     results.check('xwayland: Xwayland presents glxgears as DMA-BUFs',
                   summary['imports'] and summary['cached'],
                   describe(summary))
+    syncobj_check(results, mode, 'xwayland: Xwayland', summary)
     devices = xwayland_devices(outer)
   finally:
     run_.client.stop()
@@ -485,15 +610,15 @@ def xwayland_checks(results, binary, wl_probe, captures):
   results.check('xwayland: SIGTERM exits offscreen Shingle with status 0',
                 status == 0, f'status {status}')
 
-def nested_gpu_checks(results, binary, wl_probe, captures):
+def nested_gpu_checks(results, binary, wl_probe, captures, mode=DEFAULT):
   """Nested Shingle on NVIDIA inside offscreen Shingle, with clients."""
-  outer = checks.Shingle(binary, 'outer-gpu',
+  outer = checks.Shingle(binary, mode.name('outer-gpu'),
                          checks.with_gaps(checks.OUTER_GAPS),
-                         extra_environment=TRACE)
+                         extra_environment=mode.environment())
   mark = len(outer.log_text())
-  environment = dict(TRACE, VK_ICD_FILENAMES=checks.NVIDIA_ICD)
+  environment = mode.environment({'VK_ICD_FILENAMES': checks.NVIDIA_ICD})
   inner = checks.Shingle(
-      binary, 'inner-gpu', checks.with_gaps(checks.INNER_GAPS),
+      binary, mode.name('inner-gpu'), checks.with_gaps(checks.INNER_GAPS),
       backend=('--backend', 'nested'),
       extra_environment=dict(environment,
                              WAYLAND_DISPLAY=outer.wayland_display()))
@@ -545,6 +670,8 @@ def nested_gpu_checks(results, binary, wl_probe, captures):
                   drawn(shot, geometry) > 0.2 and inner_summary['imports'],
                   f'{drawn(shot, geometry):.2f} drawn, '
                   f'{describe(inner_summary)}')
+    syncobj_check(results, mode, 'nested-gpu: vkcube in nested Shingle',
+                  inner_summary)
   finally:
     gears.stop()
   outer_summary = summarise(trace(outer.log_text()[mark:]))
@@ -555,6 +682,8 @@ def nested_gpu_checks(results, binary, wl_probe, captures):
                 'Shingle\'s DMA-BUF import',
                 outer_summary['imports'] and outer_summary['cached'],
                 describe(outer_summary))
+  syncobj_check(results, mode, 'nested-gpu: nested Shingle\'s window',
+                outer_summary)
   status = inner.stop()
   results.check('nested-gpu: SIGTERM exits nested Shingle with status 0',
                 status == 0, f'status {status}')
@@ -661,6 +790,107 @@ def weston_checks(results, binary, wl_probe, captures):
   results.check('weston: SIGTERM exits offscreen Shingle with status 0',
                 status == 0, f'status {status}')
 
+def probe_event(output, name):
+  """The first JSON event `name` in a probe's `output`, or None."""
+  for line in output.splitlines():
+    try:
+      event = json.loads(line)
+    except ValueError:
+      continue
+    if isinstance(event, dict) and event.get('event') == name:
+      return event
+  return None
+
+def live_colours(shot, geometry):
+  """The share of the live toplevel's view in red and in blue."""
+  return (colour_share(shot, geometry, 'red'),
+          colour_share(shot, geometry, 'blue'))
+
+def syncobj_checks(results, binary, wl_probe, captures):
+  """A toplevel stalled on a never-signalled acquire point stops only
+  itself, and destroying it releases its buffers."""
+  probe_path = os.path.join(os.path.dirname(wl_probe), 'syncobj_probe')
+  outer = checks.Shingle(binary, 'syncobj',
+                         checks.with_gaps(checks.OUTER_GAPS),
+                         extra_environment=TRACE)
+  mark = len(outer.log_text())
+  probe = checks.Client(outer, [probe_path, '--seconds', '10'],
+                        'syncobj_probe')
+  try:
+    stalled = xw.wait_for(lambda: probe_event(probe.output(), 'stalled'),
+                          timeout=30)
+    results.check('syncobj: the probe maps two toplevels and stalls one',
+                  stalled is not None, checks.tail(probe.output()))
+    stalled_view = outer.view('syncobj-stalled')
+    live_view = outer.view('syncobj-live')
+    wrong = ['no view']
+    if stalled_view is not None and live_view is not None:
+      # Once the map animations have ended.
+      shot = captures.settled(outer, lambda shot: not checks.pattern_mismatches(
+          shot, stalled_view['geometry']))
+      wrong = (checks.pattern_mismatches(shot, stalled_view['geometry'])
+               if shot else ['no capture'])
+    seen = set()
+    for _ in range(20):
+      shot = captures.take(outer)
+      if shot is None or live_view is None:
+        break
+      red, blue = live_colours(shot, live_view['geometry'])
+      if red > 0.8:
+        seen.add('red')
+      if blue > 0.8:
+        seen.add('blue')
+      if seen == {'red', 'blue'}:
+        break
+    results.check('syncobj: the stalled toplevel keeps showing its last '
+                  'shm buffer', not wrong, f'wrong {wrong}')
+    results.check('syncobj: the other toplevel keeps changing',
+                  seen == {'red', 'blue'}, f'seen {sorted(seen)}')
+    live = xw.wait_for(lambda: probe_event(probe.output(), 'live'),
+                       timeout=30)
+    live = live or {}
+    results.check('syncobj: the live toplevel got frame callbacks, the '
+                  'stalled one none',
+                  live.get('frames', 0) >= 20
+                  and live.get('stalled_frames') == 0, json.dumps(live))
+    results.check('syncobj: nothing was released while stalled',
+                  live.get('released') == []
+                  and live.get('signalled') == [False, False],
+                  json.dumps(live))
+    destroyed = xw.wait_for(
+        lambda: probe_event(probe.output(), 'destroyed'), timeout=30)
+    destroyed = destroyed or {}
+    results.check('syncobj: destroying the stalled toplevel releases both '
+                  'DMA-BUFs and signals both release points',
+                  sorted(destroyed.get('released', []))
+                  == ['dmabuf-1', 'dmabuf-2']
+                  and destroyed.get('signalled') == [True, True],
+                  json.dumps(destroyed))
+    status = probe.exited(15)
+    results.check('syncobj: the probe exits with 0', status == 0,
+                  f'status {status}, {checks.tail(probe.output())}')
+  finally:
+    probe.stop()
+  summary = summarise(trace(outer.log_text()[mark:]))
+  print(f'INFO syncobj: {describe(summary)}', flush=True)
+  results.check('syncobj: the stalled commits never applied, and their '
+                'release points were signalled',
+                summary['syncobj_waits'] == 0
+                and summary['syncobj_ready'] == 0
+                and summary['syncobj_releases'] == 2, describe(summary))
+  results.check('syncobj: offscreen Shingle still runs', outer.alive(),
+                checks.tail(outer.log_text()))
+  status = outer.stop()
+  results.check('syncobj: SIGTERM exits offscreen Shingle with status 0',
+                status == 0, f'status {status}')
+
+def nosyncobj_checks(results, binary, wl_probe, captures):
+  """`dmabuf`, `xwayland` and `nested-gpu` with `SHINGLE_SYNCOBJ=0`."""
+  mode = Mode(syncobj=False)
+  prefixed = Prefixed(results, 'nosyncobj: ')
+  for group in (dmabuf_checks, xwayland_checks, nested_gpu_checks):
+    group(prefixed, binary, wl_probe, captures, mode)
+
 CHECKS = {
     'dmabuf': dmabuf_checks,
     'browsers': browser_checks,
@@ -668,4 +898,6 @@ CHECKS = {
     'nested-gpu': nested_gpu_checks,
     'nodmabuf': nodmabuf_checks,
     'weston': weston_checks,
+    'syncobj': syncobj_checks,
+    'nosyncobj': nosyncobj_checks,
 }

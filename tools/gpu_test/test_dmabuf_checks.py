@@ -18,6 +18,7 @@ interface: 'zwp_linux_dmabuf_v1',                        version:  5, name: 50
 \t\tformats (fourcc) and modifiers (names):
 \t\t0x34325241 = 'AR24'; 0x0300000000606015 = NVIDIA_BLOCK_LINEAR_2D,HEIGHT=5
 \t\t0x34325258 = 'XR24'; 0x0000000000000000 = LINEAR
+interface: 'wp_linux_drm_syncobj_manager_v1',            version:  1, name: 51
 interface: 'xdg_wm_base',                                version:  6, name: 45
 """
 
@@ -28,6 +29,11 @@ class WaylandInfoTest(unittest.TestCase):
     version, device, pairs = dmabuf_checks.dmabuf_global(WAYLAND_INFO)
     self.assertEqual((version, device), (5, 0xE280))
     self.assertEqual(pairs, [('AR24', 0x0300000000606015), ('XR24', 0)])
+
+  def test_the_syncobj_global(self):
+    self.assertEqual(dmabuf_checks.syncobj_global(WAYLAND_INFO), 1)
+    self.assertIsNone(dmabuf_checks.syncobj_global("interface: 'wl_shm', "
+                                                   "version: 2, name: 9\n"))
 
   def test_no_global(self):
     self.assertEqual(dmabuf_checks.dmabuf_global("interface: 'wl_shm', "
@@ -52,6 +58,11 @@ class TraceTest(unittest.TestCase):
       'shingle: buffer: shm upload 4096 bytes surface=4',
       'shingle: buffer: blocked implicit 250 µs dmabuf=2',
       'shingle: buffer: release wl_buffer@12',
+      'shingle: buffer: blocked syncobj 900 µs point=4 dmabuf=1',
+      'shingle: buffer: blocked syncobj 100 µs point=5 dmabuf=2',
+      'shingle: buffer: blocked syncobj 300 µs point=6 dmabuf=1',
+      'shingle: buffer: syncobj acquire ready point=7 dmabuf=2',
+      'shingle: buffer: syncobj release point=3',
       'shingle: buffer: something new',
   ])
 
@@ -59,9 +70,12 @@ class TraceTest(unittest.TestCase):
     events = dmabuf_checks.trace(self.LOG)
     self.assertEqual([kind for kind, _ in events],
                      ['import', 'import', 'cached', 'cached', 'shm',
-                      'blocked', 'release'])
+                      'blocked', 'release', 'syncobj_wait', 'syncobj_wait',
+                      'syncobj_wait', 'syncobj_ready', 'syncobj_release'])
     self.assertEqual(events[4][1]['amount'], 4096)
     self.assertEqual(events[5][1], {'dmabuf': '2', 'amount': 250})
+    self.assertEqual(events[7][1], {'point': '4', 'dmabuf': '1',
+                                    'amount': 900})
 
   def test_summary(self):
     summary = dmabuf_checks.summarise(dmabuf_checks.trace(self.LOG))
@@ -70,6 +84,63 @@ class TraceTest(unittest.TestCase):
     self.assertEqual((summary['shm'], summary['blocked'],
                       summary['releases']), (1, 1, 1))
     self.assertIn('2 buffers imported', dmabuf_checks.describe(summary))
+    self.assertEqual((summary['syncobj_waits'], summary['syncobj_ready'],
+                      summary['syncobj_releases']), (3, 1, 1))
+    self.assertEqual(dmabuf_checks.syncobj_acquires(summary), 4)
+    self.assertIn('3 acquire waits (300 µs median)',
+                  dmabuf_checks.describe(summary))
+
+class SyncobjCheckTest(unittest.TestCase):
+  """Judging syncobj use, the modes and probe output."""
+
+  class Recorder:
+    """Records checks."""
+
+    def __init__(self):
+      self.checks = []
+
+    def check(self, name, passed, detail=''):
+      self.checks.append((name, bool(passed)))
+      return passed
+
+  def summary(self, waits, ready, releases):
+    summary = dmabuf_checks.summarise([])
+    summary.update(syncobj_waits=waits, syncobj_ready=ready,
+                   syncobj_releases=releases)
+    return summary
+
+  def test_on_needs_acquires_and_releases_and_off_needs_none(self):
+    on, off = dmabuf_checks.Mode(), dmabuf_checks.Mode(syncobj=False)
+    recorder = self.Recorder()
+    for mode, summary in ((on, self.summary(3, 1, 2)),
+                          (on, self.summary(0, 4, 2)),
+                          (on, self.summary(0, 0, 0)),
+                          (on, self.summary(2, 0, 0)),
+                          (off, self.summary(0, 0, 0)),
+                          (off, self.summary(0, 1, 0))):
+      dmabuf_checks.syncobj_check(recorder, mode, 'x', summary)
+    self.assertEqual([passed for _, passed in recorder.checks],
+                     [True, True, False, False, True, False])
+
+  def test_modes(self):
+    off = dmabuf_checks.Mode(syncobj=False)
+    self.assertEqual(off.name('dmabuf'), 'dmabuf-nosyncobj')
+    self.assertEqual(off.environment({'A': '1'}),
+                     {'SHINGLE_TRACE_BUFFERS': '1', 'SHINGLE_SYNCOBJ': '0',
+                      'A': '1'})
+    self.assertEqual(dmabuf_checks.Mode().name('dmabuf'), 'dmabuf')
+    self.assertNotIn('SHINGLE_SYNCOBJ', dmabuf_checks.Mode().environment())
+
+  def test_prefixed_results(self):
+    recorder = self.Recorder()
+    dmabuf_checks.Prefixed(recorder, 'p: ').check('name', True)
+    self.assertEqual(recorder.checks, [('p: name', True)])
+
+  def test_probe_events(self):
+    output = ('noise\n{"event": "mapped"}\n'
+              '{"event": "live", "frames": 90, "released": []}\n')
+    self.assertEqual(dmabuf_checks.probe_event(output, 'live')['frames'], 90)
+    self.assertIsNone(dmabuf_checks.probe_event(output, 'destroyed'))
 
 class FakeShot:
   """A capture whose pixels come from a function."""

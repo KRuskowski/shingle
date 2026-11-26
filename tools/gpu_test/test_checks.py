@@ -137,7 +137,10 @@ class PatternTest(unittest.TestCase):
     self.assertEqual(set(dmabuf_checks.GROUPS), set(dmabuf_checks.CHECKS))
     self.assertEqual(checks.GROUPS + dmabuf_checks.GROUPS,
                      checks.run.CHECK_GROUPS)
-    self.assertEqual(dmabuf_checks.GROUPS, checks.run.MODESET_GROUPS)
+    # Every DB-4 and DB-5 group runs NVIDIA Vulkan clients but `syncobj`.
+    self.assertEqual(tuple(group for group in dmabuf_checks.GROUPS
+                           if group != 'syncobj'),
+                     checks.run.MODESET_GROUPS)
     self.assertEqual(set(checks.all_checks()), set(checks.run.CHECK_GROUPS))
 
   def test_tail(self):
