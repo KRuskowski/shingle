@@ -482,7 +482,7 @@ impl Probe {
       width * 4,
       wl_shm::Format::Xrgb8888,
       handle,
-      (),
+      Drawn,
     );
     surface.attach(Some(&buffer), 0, 0);
     surface.damage_buffer(0, 0, width, height);
@@ -926,6 +926,27 @@ impl Dispatch<wl_buffer::WlBuffer, &'static str> for Probe {
       if !ANIMATE_BUFFERS.contains(label) {
         report("release", &[("buffer", format!("{label:?}"))]);
       }
+    }
+  }
+}
+
+/// Marks a buffer [`Probe::draw`] made for one configure. It is destroyed
+/// once released, since the next configure draws a new one; kept, every
+/// resize would leave a buffer and its pool's mapping in the compositor
+/// for as long as the probe runs, which the soak test counts as a leak.
+struct Drawn;
+
+impl Dispatch<wl_buffer::WlBuffer, Drawn> for Probe {
+  fn event(
+    _: &mut Self,
+    buffer: &wl_buffer::WlBuffer,
+    event: wl_buffer::Event,
+    _: &Drawn,
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wl_buffer::Event::Release = event {
+      buffer.destroy();
     }
   }
 }
