@@ -102,7 +102,7 @@ The YAML model gains `ShingleConfig.xwayland: XwaylandConfig { mode, startup_scr
 3. Restart only if the server ran for more than 5 s, lazily in `lazy` mode and eagerly otherwise, as wlroots' `handle_client_destroy` does (server.c:198-222). The rule avoids a crash loop.
 4. If it ran 5 s or less, log the failure, keep the sockets and lock, and stay without X until Shingle restarts. In lazy mode the sockets are not watched again either, as in wlroots, so an X client then waits in the listen backlog until it gives up.
 
-A lazy server that exits after its 10 s idle delay is restarted lazily by the same rule. On SIGTERM, shutdown stops the XWM and Xwayland before Wayland clients are destroyed, as Wayfire does (src/core/core.cpp:352-354). It then removes the sockets and the lock.
+A lazy server that exits after its 10 s idle delay is restarted lazily by the same rule. On SIGTERM, shutdown stops the XWM and Xwayland before Wayland clients are destroyed, as Wayfire does (src/core/core.cpp:352-354). It then removes the sockets and the lock. All of this happens after the session snapshot is taken but before it is written, because the write syncs to disk and took more than 10 s on a busy disk (`Compositor::stop_xwayland`, crates/shingle/src/lib.rs; changed after XW-5, when the harness's SIGTERM checks failed intermittently).
 
 ### Rejected alternatives
 
