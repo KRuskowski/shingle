@@ -5,8 +5,7 @@
 use std::{collections::HashMap, time::Instant};
 
 use shingle::{
-  Compositor, OutputHandle, SurfaceId, SurfaceRole, SurfaceSnapshot,
-  frame::FrameSnapshot,
+  Compositor, OutputHandle, SurfaceId, SurfaceSnapshot, frame::FrameSnapshot,
 };
 use shingle_config::Modifiers as ConfigModifiers;
 use shingle_core::{Rect, WindowId as TileWindowId};
@@ -454,6 +453,8 @@ pub(super) struct SwitcherScene<'a, 'b> {
   pub(super) frames: &'b HashMap<SurfaceId, FrameSnapshot>,
   /// The output's scale, which the frames' textures are drawn at.
   pub(super) scale: f64,
+  /// Whether the cursor is drawn, rather than shown on a cursor plane.
+  pub(super) cursor: bool,
 }
 
 impl<'a> SwitcherScene<'a, '_> {
@@ -522,10 +523,10 @@ impl<'a> SwitcherScene<'a, '_> {
     for snapshot in self.compositor.layer_surfaces_on(&shown.output, true) {
       tiles.extend(self.tile(&snapshot));
     }
-    for snapshot in self.compositor.visible_surfaces_on(&shown.output) {
-      if snapshot.role == SurfaceRole::Cursor {
-        tiles.extend(self.tile(&snapshot));
-      }
+    if self.cursor
+      && let Some(snapshot) = self.compositor.cursor_on(&shown.output)
+    {
+      tiles.extend(self.tile(&snapshot));
     }
     tiles
   }

@@ -434,6 +434,10 @@ impl Frontend {
       } else {
         self.compositor.visible_surfaces_on(output)
       };
+      // A cursor plane shows the cursor instead.
+      if self.hardware_cursors.contains(output) {
+        snapshots.retain(|snapshot| snapshot.role != SurfaceRole::Cursor);
+      }
       let extend = |snapshots: &mut Vec<shingle::SurfaceSnapshot>,
                     extra: Vec<shingle::SurfaceSnapshot>| {
         let visible = snapshots
@@ -645,6 +649,7 @@ impl Frontend {
           decoration: &self.decoration_config,
           frames: &frames,
           scale: view.scale,
+          cursor: !self.hardware_cursors.contains(output),
         }
         .tiles(shown, now)
       } else {

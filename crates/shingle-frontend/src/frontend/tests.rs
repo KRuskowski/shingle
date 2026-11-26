@@ -30,6 +30,7 @@ use wayland_client::Proxy;
 use super::{Frontend, drag::DragState, switcher::SwitcherKind};
 
 mod colours;
+mod cursor;
 mod frames;
 mod outputs;
 mod switcher;

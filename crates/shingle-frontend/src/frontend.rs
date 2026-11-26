@@ -9,6 +9,7 @@
 
 mod animation;
 mod bindings;
+mod cursor;
 mod drag;
 mod effects;
 mod expo;
@@ -22,6 +23,8 @@ mod switcher;
 mod tests;
 mod vswipe;
 
+pub use cursor::{CursorImage, CursorPlane};
+
 use std::{
   cell::RefCell,
   collections::{HashMap, HashSet},
@@ -33,7 +36,7 @@ use std::{
 
 use shingle::{
   CaptureId, Compositor, Config, Direction, Event, InputDeviceId,
-  InputDeviceKind, OutputHandle, SurfaceId,
+  InputDeviceKind, OutputHandle, SurfaceId, SurfaceRole,
 };
 use shingle_config::{
   CommandBinding, ConfigWatcher, Keybindings, PointerBindings, ShingleConfig,
@@ -195,6 +198,12 @@ pub struct Frontend {
   /// The outputs the host should be asked for a frame of at the end of the
   /// call.
   redraw_outputs: HashSet<OutputHandle>,
+  /// The outputs whose cursor a cursor plane of the host shows, which
+  /// their frames leave out ([`Frontend::set_hardware_cursor`]).
+  hardware_cursors: HashSet<OutputHandle>,
+  /// Where the cursor was when it was last looked at, to redraw where it
+  /// moved.
+  drawn_cursor: Option<cursor::DrawnCursor>,
   /// Screencopy captures the next frame of their output answers, with
   /// their outputs and regions.
   captures: Vec<(CaptureId, OutputHandle, shingle_core::Rect)>,
@@ -562,6 +571,8 @@ impl Frontend {
       quit: false,
       redraw_all: false,
       redraw_outputs: HashSet::new(),
+      hardware_cursors: HashSet::new(),
+      drawn_cursor: None,
       captures: Vec::new(),
       dmabuf: None,
       uploader: None,
@@ -735,7 +746,14 @@ impl Frontend {
               .or_insert_with(Instant::now);
           }
           self.mark_dirty(snapshot.id);
-          self.damage(snapshot.geometry);
+          // A cursor on a cursor plane changes without a frame.
+          let on_plane = snapshot.role == SurfaceRole::Cursor
+            && self
+              .hardware_cursors
+              .contains(&self.compositor.pointer_output());
+          if !on_plane {
+            self.damage(snapshot.geometry);
+          }
           self.upload_committed(&snapshot);
         }
         Event::SurfaceDestroyed { surface } => {

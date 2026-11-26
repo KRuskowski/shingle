@@ -28,4 +28,4 @@ mod test_gpu;
 pub mod vswipe;
 pub mod workspace_transition;
 
-pub use frontend::Frontend;
+pub use frontend::{CursorImage, CursorPlane, Frontend};

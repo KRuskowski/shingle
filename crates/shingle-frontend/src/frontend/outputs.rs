@@ -256,6 +256,7 @@ impl Frontend {
   /// Passes pending redraw requests on to the host, one per output it may
   /// draw: every output but those created over IPC.
   pub(super) fn flush(&mut self, host: &mut dyn crate::host::Host) {
+    self.track_cursor();
     let all = std::mem::take(&mut self.redraw_all);
     let some = std::mem::take(&mut self.redraw_outputs);
     if !all && some.is_empty() {
