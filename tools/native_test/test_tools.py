@@ -89,6 +89,18 @@ class PresentCheckTest(unittest.TestCase):
     self.assertEqual(present_check.parse_flips(self.LOG),
                      {10: 100_016_000_000, 11: 100_032_666_000})
 
+  def test_flips_of_one_output_are_told_apart(self):
+    log = [
+        'shingle: HDMI-A-1: page flip seq=10 at 100.016000000 s',
+        'shingle: DP-1: page flip seq=10 at 100.020000000 s',
+        'shingle: DP-1: page flip seq=11 at 100.027000000 s',
+    ]
+    self.assertEqual(present_check.parse_flips(log, 'DP-1'),
+                     {10: 100_020_000_000, 11: 100_027_000_000})
+    self.assertEqual(present_check.parse_flips(log, 'HDMI-A-1'),
+                     {10: 100_016_000_000})
+    self.assertEqual(present_check.parse_flips(self.LOG, 'DP-1'), {})
+
   def test_matching_feedback_passes(self):
     flips = present_check.parse_flips(self.LOG)
     problems, statistics = present_check.check(flips, self.events())

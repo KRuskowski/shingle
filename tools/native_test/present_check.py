@@ -2,13 +2,15 @@
 """Checks presentation feedback and frame callbacks against page flips.
 
 Usage:
-  tools/native_test/present_check.py NATIVE_LOG PROBE_OUTPUT
+  tools/native_test/present_check.py [--output NAME] NATIVE_LOG PROBE_OUTPUT
 
 NATIVE_LOG is Shingle's native.log from a run with SHINGLE_TRACE_FLIPS=1,
-which has a line `shingle: page flip seq=S at SEC.NSEC s` for every flip
-it presented. PROBE_OUTPUT is the JSON-line output of the present_probe
-example (crates/shingle-native/examples/present_probe.rs). The check
-passes when:
+which has a line `shingle: OUTPUT: page flip seq=S at SEC.NSEC s` for
+every flip it presented (`shingle: page flip ...` before MO-7). With
+several outputs lit, each CRTC counts its own vblanks, so `--output NAME`
+takes only the flips of the output the probe is on. PROBE_OUTPUT is the
+JSON-line output of the present_probe example
+(crates/shingle-native/examples/present_probe.rs). The check passes when:
 
 - every `presented` feedback names a logged flip by its sequence and its
   time is within 1 ms of that flip's;
@@ -29,20 +31,26 @@ import json
 import re
 import sys
 
-FLIP = re.compile(r'page flip seq=(\d+) at (\d+)\.(\d{9}) s')
+FLIP = re.compile(
+    r'(?:shingle: )?(?:(\S+): )?page flip seq=(\d+) at (\d+)\.(\d{9}) s')
 # wp_presentation_feedback.kind: vsync, hw_clock and hw_completion.
 FLIP_FLAGS = 0x1 | 0x2 | 0x4
 TOLERANCE_NS = 1_000_000
-USAGE = 'usage: present_check.py NATIVE_LOG PROBE_OUTPUT'
+USAGE = ('usage: present_check.py [--output NAME] NATIVE_LOG '
+         'PROBE_OUTPUT')
 
-def parse_flips(lines):
-  """Returns {sequence: time in ns} from native.log lines."""
+def parse_flips(lines, output=None):
+  """Returns {sequence: time in ns} from native.log lines, only of the
+  flips of `output` if it is given."""
   flips = {}
   for line in lines:
     match = FLIP.search(line)
-    if match:
-      seq, sec, nsec = (int(group) for group in match.groups())
-      flips[seq] = sec * 1_000_000_000 + nsec
+    if not match:
+      continue
+    name, seq, sec, nsec = match.groups()
+    if output is not None and name != output:
+      continue
+    flips[int(seq)] = int(sec) * 1_000_000_000 + int(nsec)
   return flips
 
 def parse_probe(lines):
@@ -109,11 +117,14 @@ def check(flips, events):
 
 def main(argv):
   """Runs the check on the files in `argv`; returns the exit status."""
+  output = None
+  if len(argv) == 4 and argv[0] == '--output':
+    output, argv = argv[1], argv[2:]
   if len(argv) != 2:
     print(USAGE, file=sys.stderr)
     return 2
   with open(argv[0], encoding='utf-8', errors='replace') as log:
-    flips = parse_flips(log)
+    flips = parse_flips(log, output)
   with open(argv[1], encoding='utf-8') as probe:
     events = parse_probe(probe)
   problems, statistics = check(flips, events)
