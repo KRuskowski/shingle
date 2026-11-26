@@ -13,7 +13,7 @@
 | `shingle-nested` | Nested backend library, a thin winit host for `Frontend`: the window and renderer, winit-to-`InputEvent` translation, host focus handling and button emulation. Entry point `shingle_nested::run`. |
 | `shingle-xwayland` | XWayland without `wayland-server`: X display sockets and lock, the supervised Xwayland process with its restart rule, and the X window manager (x11rb) behind an `XConnection` trait: property parsers, classification, `Pairing` of windows and surfaces by serial, the `ConfigureRequest` policy, ICCCM focus and the `FocusIn` guard, client messages, restacking and the root cursor, the clipboard and primary selection bridge with its MIME mapping and non-blocking transfers, and the `xw_probe` test client (examples/). |
 | `shingle-config` | Validated YAML model, Wayfire INI and i3 imports, XKB keymap generation. |
-| `shingle-session` | Atomic session persistence and relaunching saved applications. |
+| `shingle-session` | Atomic session persistence, the background session writer and relaunching saved applications. |
 | `shingle-idle` | Idle, DPMS, fullscreen suppression and lock coordination. |
 | `shingle-auth` | PAM authentication for the lock client. |
 | `shingle-lock` | `ext-session-lock-v1` client with swaylock-style options. |
@@ -26,6 +26,7 @@
 | Persistent windows and mapped presence | `crates/shingle-core/src/core.rs` |
 | Tiling order, focus, masks and splits | `crates/shingle-core/src/tree.rs` |
 | Session snapshot format | `crates/shingle-core/src/session.rs` |
+| Background session writes: coalescing, order, final save, error reporting (`SessionWriter`) | `crates/shingle-session/src/writer.rs`; frontend callers in `crates/shingle-frontend/src/frontend/session.rs` and `Frontend::shutdown` |
 | Environment of every child process (`ClientEnvironment`), launching clients | `crates/shingle-session/src/environment.rs`, `crates/shingle-session/src/lib.rs` |
 | Public compositor API and renderer events | `crates/shingle/src/lib.rs` |
 | Protocol timestamps (`CLOCK_MONOTONIC`) | `crates/shingle/src/clock.rs` |
@@ -85,6 +86,7 @@
 | Output description, renaming, mode requests, configured placement | `crates/shingle/src/output.rs`, `output_management.rs`; tests in `output/tests.rs` |
 | Output configuration and Wayfire's mode syntax | `crates/shingle-config/src/output.rs` |
 | Real-client output-management checks (headless and nested) | `tools/output_test/run.py` |
+| Real-client check of responsiveness during slow session writes (nested on a FUSE mount with slow fsync) | `tools/session_test/run.py`, `tools/session_test/slowfs.py` |
 | Host keyboard focus changes | `crates/shingle-nested/src/host_keyboard.rs` |
 | xkb keyboard state, key names, keysyms, modifier masks | `crates/shingle-frontend/src/keyboard.rs` |
 | Key repeat timer | `crates/shingle-frontend/src/keyboard/repeat.rs` |

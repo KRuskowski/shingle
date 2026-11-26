@@ -64,7 +64,7 @@ The work is split into seven workspaces, each with acceptance criteria in the de
 6. XW-6 `shingle-xwayland-dnd`: Xdnd drag and drop (later).
 7. XW-7 `shingle-xwayland-hidpi`: optional zero-scaling HiDPI mode.
 
-XW-6 is next, when drag and drop between X and Wayland is wanted; XW-7 waits for the multi-output item. The harness's intermittent SIGTERM failures were a session write that took more than 10 s on the busy disk; the X display is now freed before it, and the harness waits up to 60 s ([status.md](status.md#sessions)).
+XW-6 is next, when drag and drop between X and Wayland is wanted; XW-7 waits for the multi-output item. The harness's intermittent SIGTERM failures were a session write that took more than 10 s on the busy disk; the X display is now freed before it, and the harness waits up to 60 s. Session writes while Shingle runs have since moved to a background thread, so the disk no longer stalls the compositor ([status.md](status.md#sessions)).
 
 ## 5. Multi-output
 
