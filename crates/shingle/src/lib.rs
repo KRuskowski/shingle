@@ -74,6 +74,7 @@ mod layer_shell;
 mod linux_dmabuf;
 mod linux_drm_syncobj;
 mod output;
+mod output_focus_api;
 mod output_management;
 mod output_power;
 mod output_transform;
@@ -123,8 +124,9 @@ use calloop::{
 pub use input::{Axis, AxisSource, Modifiers};
 pub use input_device::{InputDeviceId, InputDeviceInfo, InputDeviceKind};
 pub use output::{
-  OutputHandle, OutputInfo, OutputKind, OutputModeInfo, OutputPlacement,
-  OutputRequest, OutputRequestId, OutputView, RequestedMode,
+  MoveGeometry, OutputAction, OutputHandle, OutputInfo, OutputKind,
+  OutputModeInfo, OutputPlacement, OutputRequest, OutputRequestId,
+  OutputSwitch, OutputView, RequestedMode,
 };
 pub use shingle_core::{Direction, StackingMode, WindowId};
 use shingle_core::{Gaps, OutputId, Rect, Shingle, WorkspaceId};
@@ -223,6 +225,19 @@ pub struct Config {
   /// What happens to the windows of an output that goes
   /// (`output_layout.unplug`).
   pub output_unplug: shingle_config::UnplugPolicy,
+  /// Milliseconds within which an output that comes back is focused again
+  /// if it was the active output when it went
+  /// (`output_layout.last_output_focus_timeout`).
+  pub last_output_focus_timeout: u64,
+  /// Wayfire's `oswitch` bindings, which focus another output and can take
+  /// the focused window along.
+  pub oswitch: shingle_config::OswitchConfig,
+  /// Wayfire's `wsets` bindings, which show a workspace set on the active
+  /// output or send the focused window to one.
+  pub wsets: shingle_config::WsetsConfig,
+  /// The output each named absolute input device maps to
+  /// (`input_devices.NAME.output`).
+  pub input_device_outputs: std::collections::BTreeMap<String, String>,
   /// Background clear colour as RGBA, each component in `0.0..=1.0`.
   pub background_color: [f64; 4],
   /// Columns of the workspace grid; must be nonzero.
@@ -327,6 +342,10 @@ impl Default for Config {
       workspace_wraparound: WorkspaceWraparound::Disabled,
       output_position: shingle_config::OutputPosition::Auto,
       output_unplug: shingle_config::UnplugPolicy::Return,
+      last_output_focus_timeout: 10_000,
+      oswitch: shingle_config::OswitchConfig::default(),
+      wsets: shingle_config::WsetsConfig::default(),
+      input_device_outputs: std::collections::BTreeMap::new(),
       output_scale: 1.0,
       output_transform: wayland_server::protocol::wl_output::Transform::Normal,
       output_refresh_mhz: 0,
@@ -379,6 +398,16 @@ impl From<shingle_config::ShingleConfig> for Config {
       output_refresh_mhz: output::explicit_refresh(&config.output),
       output_position: config.output.position,
       output_unplug: config.output_layout.unplug,
+      last_output_focus_timeout: config.output_layout.last_output_focus_timeout,
+      oswitch: config.oswitch.clone(),
+      wsets: config.wsets.clone(),
+      input_device_outputs: config
+        .input_devices
+        .iter()
+        .filter_map(|(name, device)| {
+          Some((name.clone(), device.output.clone()?))
+        })
+        .collect(),
       output_placements,
       background_color: config.background_color,
       workspace_width: config.workspaces.width,
@@ -888,14 +917,24 @@ pub enum Event {
   ToggleExpo,
   /// IPC `invert/toggle`.
   InvertToggle,
-  /// A client warped the pointer with wp-pointer-warp-v1. The position is
-  /// in output-layout logical pixels; a host with its own cursor moves it
-  /// there.
+  /// A client warped the pointer with wp-pointer-warp-v1, or `oswitch`
+  /// moved it into the output it focused. The position is in output-layout
+  /// logical pixels; a host with its own cursor moves it there.
   PointerWarp {
     /// New pointer x.
     x: f64,
     /// New pointer y.
     y: f64,
+    /// The output under the new position, whose host window, for a host
+    /// with one per output, shows the cursor.
+    output: Option<OutputHandle>,
+  },
+  /// Another output became the active one (IPC `output-gain-focus`): by a
+  /// click or touch on it, a window on it taking focus, `oswitch`, IPC
+  /// naming it, or the active output going away.
+  OutputFocused {
+    /// The output that is active now.
+    output: OutputHandle,
   },
   /// The current workspace changed (IPC `wset-workspace-changed`).
   WorkspaceChanged {
@@ -1644,6 +1683,7 @@ impl Compositor {
     }
     self.state.placements = placements;
     self.state.unplug = config.output_unplug;
+    self.state.focus_settings = output::FocusSettings::new(&config);
     for (id, placement, _) in &placed {
       if placement.refresh_mhz > 0
         && let Some(output) = self.state.outputs.get_mut(id)

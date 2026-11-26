@@ -461,6 +461,8 @@ const SUPPORTED_METHODS: &[&str] = &[
   "wm-actions/toggle_maximize",
   "wm-actions/toggle_showdesktop",
   "wm-actions/toggle_sticky",
+  "wsets/send-view-to-wset",
+  "wsets/set-output-wset",
 ];
 
 const KNOWN_EVENTS: &[&str] = &[
@@ -486,6 +488,9 @@ const KNOWN_EVENTS: &[&str] = &[
   "output-added",
   "output-removed",
   "output-wset-changed",
+  "output-gain-focus",
+  "view-set-output",
+  "view-wset-changed",
   "xwayland-ready",
 ];
 
@@ -815,6 +820,39 @@ pub(crate) fn output_wset_changed(
   state.ipc_events.push(message);
 }
 
+/// Queues Wayfire's `view-wset-changed` for `window`, which moved from set
+/// `old` to set `new`.
+pub(crate) fn view_wset_changed(
+  state: &mut CompositorState,
+  window: WindowId,
+  old: shingle_core::WsetId,
+  new: shingle_core::WsetId,
+) {
+  let message = json!({
+      "event": "view-wset-changed",
+      "old-wset": wset_json(state, old),
+      "new-wset": wset_json(state, new),
+      "view": event_view(state, window),
+  });
+  state.ipc_events.push(message);
+}
+
+/// Queues Wayfire's `view-set-output` for `window`, which is on `output`
+/// now, or on none while its set is parked.
+pub(crate) fn view_set_output(
+  state: &mut CompositorState,
+  window: WindowId,
+  output: Option<&OutputId>,
+) {
+  let output = output.map_or(Value::Null, |id| output_json(state, id));
+  let message = json!({
+      "event": "view-set-output",
+      "output": output,
+      "view": event_view(state, window),
+  });
+  state.ipc_events.push(message);
+}
+
 /// Wayfire's transform names in output-layout configurations.
 fn layout_transform_name(
   transform: wayland_server::protocol::wl_output::Transform,
@@ -1054,19 +1092,13 @@ fn require_mapped(
   if info.presence != WindowPresence::Mapped {
     return Err(json_error("view is not mapped"));
   }
-  if info.location.output != state.active_output {
-    return Err(json_error("view belongs to a different output"));
-  }
   Ok(())
 }
 
 fn set_workspace(state: &mut CompositorState, data: &Value) -> Value {
-  // Other outputs than the active one come with MO-4.
-  if data.get("output-id").and_then(Value::as_u64)
-    != Some(u64::from(state.active().ipc_id))
-  {
+  let Some(output) = output_by_ipc_id(state, data, "output-id") else {
     return json_error("invalid output id");
-  }
+  };
   let (workspace, index) = match workspace_request(state, data) {
     Ok(target) => target,
     Err(error) => return error,
@@ -1081,13 +1113,20 @@ fn set_workspace(state: &mut CompositorState, data: &Value) -> Value {
     if state
       .core
       .window_info(window)
+      .is_ok_and(|info| info.location.output != output)
+    {
+      return json_error("view belongs to a different output");
+    }
+    if state
+      .core
+      .window_info(window)
       .is_ok_and(|info| info.location.workspace != workspace)
       && let Err(error) = state.move_window_to_workspace(window, index)
     {
       return json_error(&error.to_string());
     }
   }
-  match state.switch_workspace(index) {
+  match state.switch_workspace_on(&output, index) {
     Ok(()) => json_ok(),
     Err(error) => json_error(&error.to_string()),
   }
@@ -1215,15 +1254,11 @@ fn layout_node(
 }
 
 fn get_layout(state: &CompositorState, data: &Value) -> Value {
-  // Sets other than the active output's come with MO-4.
-  if data.get("wset-index").and_then(Value::as_u64)
-    != state
-      .core
-      .wset_of(&state.active_output)
-      .map(|w| u64::from(w.get()))
-  {
+  let Some(target_wset) =
+    wset_index(data).filter(|wset| state.core.wset(*wset).is_ok())
+  else {
     return json_error("wset-index not found");
-  }
+  };
   let Some(workspace) = data.get("workspace") else {
     return json_error("missing workspace field");
   };
@@ -1245,16 +1280,14 @@ fn get_layout(state: &CompositorState, data: &Value) -> Value {
   };
   let workspace = shingle_core::WorkspaceId::new(x, y);
   let snapshot = state.core.snapshot();
-  let Some(output) = snapshot
-    .wsets
-    .iter()
-    .find(|wset| wset.output.as_ref() == Some(&state.active_output))
+  let Some(output) =
+    snapshot.wsets.iter().find(|wset| wset.wset == target_wset)
   else {
-    return json_error("output not found");
+    return json_error("wset-index not found");
   };
   let workarea = state
     .core
-    .tree(&state.active_output, workspace)
+    .wset_tree(target_wset, workspace)
     .map_or(output.workarea, |tree| tree.workarea());
   let root = output
     .workspaces
@@ -1391,15 +1424,11 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
   use shingle_core::{
     ChildSnapshot, NodeSnapshot, SplitDirection, SplitSnapshot,
   };
-  // Sets other than the active output's come with MO-4.
-  if data.get("wset-index").and_then(Value::as_u64)
-    != state
-      .core
-      .wset_of(&state.active_output)
-      .map(|w| u64::from(w.get()))
-  {
+  let Some(target_wset) =
+    wset_index(data).filter(|wset| state.core.wset(*wset).is_ok())
+  else {
     return json_error("wset-index not found");
-  }
+  };
   let Some(workspace) = data.get("workspace") else {
     return json_error("missing workspace field");
   };
@@ -1442,6 +1471,20 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
   for child in &imported.children {
     layout_windows(&child.node, &mut imported_ids);
   }
+  // Views of other sets join this one first, as Wayfire's set-layout moves
+  // them (plugins/tile/tile-ipc.hpp).
+  for window in &imported_ids {
+    let Ok(info) = state.core.window_info(*window) else {
+      continue;
+    };
+    if info.wset == target_wset {
+      continue;
+    }
+    match state.core.move_window_to_wset(*window, target_wset, target) {
+      Ok(moved) => crate::output::moved_events(state, &moved, info.wset),
+      Err(error) => return json_error(&error.to_string()),
+    }
+  }
 
   let old_states = state
     .core
@@ -1462,12 +1505,16 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
     .collect::<Vec<_>>();
   let mut snapshot = state.core.snapshot();
   let before = snapshot.clone();
+  let fallback = state
+    .core
+    .wset(target_wset)
+    .map_or(state.active().rect, |info| info.workarea);
   let Some(output) = snapshot
     .wsets
     .iter_mut()
-    .find(|wset| wset.output.as_ref() == Some(&state.active_output))
+    .find(|wset| wset.wset == target_wset)
   else {
-    return json_error("output not found");
+    return json_error("wset-index not found");
   };
   for workspace in &mut output.workspaces {
     let target_workspace = workspace.workspace == target;
@@ -1486,7 +1533,7 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
           .window_layout(window)
           .ok()
           .map(|layout| layout.geometry)
-          .unwrap_or(state.active().rect);
+          .unwrap_or(fallback);
         leaf.floating = Some(geometry);
         leaf.snapped = None;
         leaf.restore_geometry = None;
@@ -1790,7 +1837,18 @@ fn stipc_key_binding(
     .find(|binding| binding.binding.matches(modifiers, &key))
     .cloned()
   else {
-    return false;
+    // The oswitch and wsets bindings, which a frontend runs too, on press
+    // and while unlocked.
+    let Some(action) =
+      crate::output::binding_matching(&state.focus_settings, modifiers, &key)
+    else {
+      return false;
+    };
+    let unlocked = state.idle.lock_state() == shingle_idle::LockState::Unlocked;
+    if pressed && unlocked {
+      crate::output::run_binding(state, action);
+    }
+    return unlocked;
   };
   let locked = state.idle.lock_state() != shingle_idle::LockState::Unlocked;
   if locked && !binding.exec_always {
@@ -2098,6 +2156,89 @@ fn numbered_workspace_index(
   Ok(Some(workspace - 1))
 }
 
+/// The output an IPC activator names with `output_id` or `output-id`, as
+/// Wayfire's `ipc_activator_t` reads it, made the active output, since
+/// Scale, Expo, show-desktop and the vswitch bindings act on the active
+/// output. Without either field the active output stays.
+fn activator_output(
+  state: &mut CompositorState,
+  data: &Value,
+) -> Result<(), Value> {
+  let Some(value) = data.get("output_id").or_else(|| data.get("output-id"))
+  else {
+    return Ok(());
+  };
+  let Some(output) = value
+    .as_u64()
+    .and_then(|id| state.outputs.by_ipc_id(id))
+    .map(|output| output.id.clone())
+  else {
+    return Err(json_error("output id not found!"));
+  };
+  crate::output::focus_output(state, &output);
+  Ok(())
+}
+
+/// The output with IPC id `field` of `data`.
+fn output_by_ipc_id(
+  state: &CompositorState,
+  data: &Value,
+  field: &str,
+) -> Option<OutputId> {
+  data
+    .get(field)
+    .and_then(Value::as_u64)
+    .and_then(|id| state.outputs.by_ipc_id(id))
+    .map(|output| output.id.clone())
+}
+
+/// `wsets/set-output-wset`: shows set `wset-index` on output `output-id`,
+/// as Wayfire's wsets plugin selects it.
+fn set_output_wset(state: &mut CompositorState, data: &Value) -> Value {
+  let Some(output) = output_by_ipc_id(state, data, "output-id") else {
+    return json_error("output not found");
+  };
+  let Some(index) = wset_index(data) else {
+    return json_error("Missing or invalid \"wset-index\"");
+  };
+  match crate::output::select_wset(state, &output, index) {
+    Ok(()) => json_ok(),
+    Err(error) => json_error(&error.to_string()),
+  }
+}
+
+/// `wsets/send-view-to-wset`: sends view `view-id` to set `wset-index`.
+fn send_view_to_wset(state: &mut CompositorState, data: &Value) -> Value {
+  let window = match data
+    .get("view-id")
+    .and_then(Value::as_u64)
+    .map(WindowId)
+    .ok_or(())
+    .and_then(|window| find_view_id(state, window).map_err(|_| ()))
+  {
+    Ok(window) => window,
+    Err(()) => return json_error("view not found"),
+  };
+  let Some(index) = wset_index(data) else {
+    return json_error("Missing or invalid \"wset-index\"");
+  };
+  let window = crate::output::topmost_parent(state, window);
+  match crate::output::send_to_wset(state, window, index) {
+    Ok(()) => json_ok(),
+    Err(error) => json_error(&error.to_string()),
+  }
+}
+
+/// A positive `wset-index` from `data`.
+fn wset_index(data: &Value) -> Option<shingle_core::WsetId> {
+  data
+    .get("wset-index")
+    .and_then(Value::as_u64)
+    .and_then(|index| u32::try_from(index).ok())
+    .filter(|index| *index > 0)
+    .map(shingle_core::WsetId)
+}
+
 fn vswitch_activator(state: &mut CompositorState, method: &str) -> Value {
   let method = method.strip_prefix("vswitch/").unwrap_or(method);
   let result = (|| -> Result<(), crate::Error> {
@@ -2303,11 +2444,28 @@ fn configure_view(state: &mut CompositorState, data: &Value) -> Value {
     Ok(window) => window,
     Err(error) => return error,
   };
-  // Moving views to other outputs comes with MO-4.
+  // Wayfire's configure-view moves the view first, reconfiguring it for
+  // the new output unless a geometry is given (ipc-rules.cpp).
   if let Some(output) = data.get("output_id").or_else(|| data.get("output-id"))
-    && output.as_u64() != Some(u64::from(state.output_of_window(window).ipc_id))
   {
-    return json_error("output not found");
+    let Some(output) = output
+      .as_u64()
+      .and_then(|id| state.outputs.by_ipc_id(id))
+      .map(|output| output.id.clone())
+    else {
+      return json_error("output not found");
+    };
+    let geometry = if data.get("geometry").is_some() {
+      crate::output::MoveGeometry::Translate
+    } else {
+      crate::output::MoveGeometry::Scale
+    };
+    let top = crate::output::topmost_parent(state, window);
+    if let Err(error) =
+      crate::output::move_window_to_output(state, top, &output, geometry)
+    {
+      return json_error(&error.to_string());
+    }
   }
   let tiled_edges = match data.get("tiled-edges") {
     Some(value) => {
@@ -2886,6 +3044,9 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
     | "wm-actions/set-always-on-top"
     | "wm-actions/set-always-on-bottom" => wm_action(state, method, data),
     "wm-actions/toggle_showdesktop" => {
+      if let Err(error) = activator_output(state, data) {
+        return error;
+      }
       if state.show_desktop {
         shell::disable_show_desktop(state);
       } else {
@@ -2915,18 +3076,19 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
     "stipc/run" => run_command(state, data),
     "stipc/touch" => feed_touch(state, data),
     "stipc/touch_release" => release_touch(state, data),
-    "scale/toggle" => {
-      state.events.push(crate::Event::ToggleScale(false));
+    "scale/toggle" | "scale/toggle_all" | "expo/toggle" => {
+      if let Err(error) = activator_output(state, data) {
+        return error;
+      }
+      state.events.push(match method {
+        "scale/toggle" => crate::Event::ToggleScale(false),
+        "scale/toggle_all" => crate::Event::ToggleScale(true),
+        _ => crate::Event::ToggleExpo,
+      });
       json_ok()
     }
-    "scale/toggle_all" => {
-      state.events.push(crate::Event::ToggleScale(true));
-      json_ok()
-    }
-    "expo/toggle" => {
-      state.events.push(crate::Event::ToggleExpo);
-      json_ok()
-    }
+    "wsets/set-output-wset" => set_output_wset(state, data),
+    "wsets/send-view-to-wset" => send_view_to_wset(state, data),
     "invert/toggle" => {
       state.events.push(crate::Event::InvertToggle);
       json_ok()
@@ -2935,6 +3097,9 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
       || method.starts_with("vswitch/with_win_")
       || method.starts_with("vswitch/send_win_") =>
     {
+      if let Err(error) = activator_output(state, data) {
+        return error;
+      }
       vswitch_activator(state, method)
     }
     "list-methods" => json!({"methods": SUPPORTED_METHODS}),
@@ -2988,18 +3153,20 @@ mod tests {
   }
 
   #[test]
-  fn list_methods_reports_81_sorted_methods_with_input_devices() {
+  fn list_methods_reports_83_sorted_methods_with_input_devices() {
     let mut state = test_state();
     let reply = call(&mut state, "list-methods", Value::Null);
     let methods = reply["methods"].as_array().unwrap();
-    assert_eq!(methods.len(), 81);
-    assert_eq!(SUPPORTED_METHODS.len(), 81);
+    assert_eq!(methods.len(), 83);
+    assert_eq!(SUPPORTED_METHODS.len(), 83);
     assert!(SUPPORTED_METHODS.windows(2).all(|pair| pair[0] < pair[1]));
     for method in [
       "input/list-devices",
       "input/configure-device",
       "wayfire/create-headless-output",
       "wayfire/destroy-headless-output",
+      "wsets/set-output-wset",
+      "wsets/send-view-to-wset",
     ] {
       assert!(methods.contains(&json!(method)), "{method}");
     }

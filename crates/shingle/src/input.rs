@@ -606,6 +606,15 @@ fn focus_object(
       window = Some(target);
     }
   }
+  // Focusing a window focuses its output, as Wayfire's focus_view does
+  // (src/core/window-manager.cpp).
+  if let Some(output) = window
+    .and_then(|window| state.core.window_info(window).ok())
+    .and_then(|info| state.core.wset(info.wset).ok())
+    .and_then(|wset| wset.output)
+  {
+    crate::output::set_active(state, &output);
+  }
   let pointer_target = object.clone();
   let keyboard_target = if state.focus_main_surface_instead_of_popup {
     main_surface(state, object)
@@ -1022,6 +1031,9 @@ fn pointer_motion_inner(
   if relative.is_some() && crate::pointer_protocols::locked(state) {
     return;
   }
+  // The pointer stays on the layout, pulled to the closest point of an
+  // output as wlr_cursor does.
+  let (x, y) = crate::output::clamp(state, x, y);
   let (x, y) = crate::pointer_protocols::constrain(state, x, y);
   state.input.pointer_x = x;
   state.input.pointer_y = y;
@@ -1050,6 +1062,11 @@ pub(crate) fn pointer_button(
   let modifiers = state.input.modifiers;
   let modifiers_active =
     modifiers.depressed != 0 || modifiers.latched != 0 || modifiers.locked != 0;
+  // A press on another output focuses it before anything else, as
+  // Wayfire's pointer.cpp does for the first pressed button.
+  if pressed {
+    crate::output::focus_output_at(state, x, y);
+  }
   let previous_focus = focused_window(state);
   let button_name = match button {
     0x110 => Some("btn_left"),
@@ -1208,6 +1225,10 @@ pub(crate) fn touch_down(state: &mut CompositorState, id: i32, x: f64, y: f64) {
   activity(state);
   if state.input.active_touches.contains_key(&id) {
     return;
+  }
+  // A touch down on another output focuses it, as in Wayfire's touch.cpp.
+  if state.input.active_touches.is_empty() {
+    crate::output::focus_output_at(state, x, y);
   }
   let Some(object) = surface_at(state, x, y) else {
     return;

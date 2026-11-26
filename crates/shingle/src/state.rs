@@ -172,6 +172,10 @@ pub(crate) struct CompositorState {
   pub(crate) active_output: OutputId,
   /// What happens to the workspace set of an output that goes.
   pub(crate) unplug: shingle_config::UnplugPolicy,
+  /// The `oswitch` and `wsets` bindings, device outputs and focus timeout.
+  pub(crate) focus_settings: crate::output::FocusSettings,
+  /// The active output that went, to focus again if it returns soon.
+  pub(crate) lost_focus: Option<crate::output::LostFocus>,
   /// Whether a restored session's sets were settled
   /// ([`crate::Compositor::restore_outputs`]).
   pub(crate) outputs_restored: bool,
@@ -291,6 +295,7 @@ impl CompositorState {
       return Err(crate::Error::InvalidWorkspaceGrid);
     }
     let placements = crate::output::Placements::new(&config);
+    let focus_settings = crate::output::FocusSettings::new(&config);
     let initial = placements.get(OUTPUT_NAME);
     let mut rect = Rect::new(0, 0, initial.width, initial.height);
     if !initial.scale.is_finite() || initial.scale <= 0.0 {
@@ -347,6 +352,8 @@ impl CompositorState {
       outputs,
       active_output: output_id,
       unplug: config.output_unplug,
+      focus_settings,
+      lost_focus: None,
       outputs_restored: false,
       display: None,
       placements,
@@ -615,16 +622,17 @@ impl CompositorState {
       index as u32 % self.workspace_width,
       index as u32 / self.workspace_width,
     );
-    self.core.ensure_workspace(&self.active_output, workspace)?;
-    let previous = self.core.window_location(window)?.workspace;
+    // The window stays in its own set, on whichever output shows it.
+    let location = self.core.window_location(window)?;
+    let output = location.output;
+    self.core.ensure_workspace(&output, workspace)?;
+    let previous = location.workspace;
     if previous == workspace {
       return Ok(());
     }
     let from = previous.y * self.workspace_width + previous.x + 1;
     let detached = self.core.detach_window(window)?;
-    self
-      .core
-      .reattach_window(detached, &self.active_output, workspace)?;
+    self.core.reattach_window(detached, &output, workspace)?;
     self.input.keyboard_focus = None;
     crate::input::sync_focus(self);
     shell::reconfigure_all(self);

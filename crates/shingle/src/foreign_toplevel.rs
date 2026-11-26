@@ -388,7 +388,10 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for CompositorState {
       zwlr_foreign_toplevel_handle_v1::Request::UnsetMaximized => {
         let _ = shell::set_maximized(state, window, false);
       }
-      zwlr_foreign_toplevel_handle_v1::Request::SetFullscreen { .. } => {
+      zwlr_foreign_toplevel_handle_v1::Request::SetFullscreen { output } => {
+        if let Some(output) = output {
+          shell::fullscreen_on(state, window, &output);
+        }
         let _ = shell::set_fullscreen(state, window, true);
       }
       zwlr_foreign_toplevel_handle_v1::Request::UnsetFullscreen => {

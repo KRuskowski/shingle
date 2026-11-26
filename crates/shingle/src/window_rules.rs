@@ -67,6 +67,7 @@ fn apply(
           shingle_core::StackingMode::AlwaysOnBottom,
         );
       }
+      RuleAction::StartOnOutput(name) => start_on_output(state, window, &name),
       RuleAction::AssignWorkspace { x, y } => {
         assign_workspace(state, window, WorkspaceId::new(x, y));
       }
@@ -269,6 +270,56 @@ fn set_geometry(state: &mut CompositorState, window: WindowId, geometry: Rect) {
   if state.core.set_floating(window, Some(geometry)).is_ok() {
     shell::sync_floating_geometry(state, window, geometry);
     shell::reconfigure_all(state);
+  }
+}
+
+/// The output a `start_on_output` rule names: by connector name, else by
+/// `make model` or `make model serial`, as Wayfire's `_start_on_output`
+/// looks it up.
+fn named_output(
+  state: &CompositorState,
+  name: &str,
+) -> Option<shingle_core::OutputId> {
+  let by_name = shingle_core::OutputId::new(name);
+  if state.outputs.get(&by_name).is_some() {
+    return Some(by_name);
+  }
+  state
+    .outputs
+    .iter()
+    .find(|output| {
+      let make_model = format!("{} {}", output.info.make, output.info.model);
+      let full = match output.info.serial.as_deref() {
+        Some(serial) if !serial.is_empty() => format!("{make_model} {serial}"),
+        _ => make_model.clone(),
+      };
+      name == make_model || name == full
+    })
+    .map(|output| output.id.clone())
+}
+
+/// Moves `window` to the output a `start_on_output` rule names, as
+/// `move_view_to_output` with `RECONFIGURE`. Dialogs stay with their
+/// parent, and a name no output has does nothing.
+fn start_on_output(state: &mut CompositorState, window: WindowId, name: &str) {
+  let Some(output) = named_output(state, name) else {
+    eprintln!("shingle: window-rules: no output matches {name:?}");
+    return;
+  };
+  if state
+    .core
+    .window_info(window)
+    .is_ok_and(|info| info.parent.is_some())
+  {
+    return;
+  }
+  if let Err(error) = crate::output::move_window_to_output(
+    state,
+    window,
+    &output,
+    crate::output::MoveGeometry::Scale,
+  ) {
+    eprintln!("shingle: window-rules: start_on_output failed: {error}");
   }
 }
 

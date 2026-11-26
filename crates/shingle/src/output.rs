@@ -17,15 +17,28 @@
 //! [`crate::Compositor::finish_output_request`]. Without a mode list, as in
 //! nested and headless, the compositor applies custom modes itself.
 
+mod bindings;
+mod focus;
 mod hotplug;
+mod moving;
 mod registry;
+mod wsets;
 
 use std::{
   collections::BTreeMap,
   time::{Duration, Instant},
 };
 
+pub use bindings::OutputAction;
+pub(crate) use bindings::{matching as binding_matching, run as run_binding};
+pub use focus::OutputSwitch;
+pub(crate) use focus::{
+  FocusSettings, LostFocus, clamp, focus_output, focus_output_at, oswitch,
+  output_at, set_active,
+};
 pub(crate) use hotplug::{add, park_restored, remove, restore};
+pub use moving::MoveGeometry;
+pub(crate) use moving::{move_window_to_output, moved_events, topmost_parent};
 pub use registry::OutputKind;
 pub(crate) use registry::{DisabledOutput, OutputState, Outputs};
 use shingle_config::OutputPosition;
@@ -34,6 +47,7 @@ use wayland_server::{
   DisplayHandle, Resource,
   protocol::wl_output::{self, WlOutput},
 };
+pub(crate) use wsets::{select_wset, send_to_wset};
 
 use crate::state::CompositorState;
 
@@ -573,13 +587,28 @@ pub(crate) fn claim_parked(
   let Some(rect) = state.outputs.get(id).map(|output| output.rect) else {
     return;
   };
+  // Where the windows that come back are now, for their events.
+  let away = state
+    .core
+    .window_ids()
+    .filter_map(|window| {
+      let info = state.core.window_info(window).ok()?;
+      (info.away_from == Some(parked)).then_some((window, info.wset))
+    })
+    .collect::<Vec<_>>();
   let result = (|| -> Result<(), shingle_core::ShingleError> {
     state.core.attach_wset(parked, Some(id.clone()), identity)?;
     if let Some(shown) = shown.filter(|shown| *shown != parked) {
-      state.core.transfer_wset(shown, parked, false)?;
+      let joined = state.core.transfer_wset(shown, parked, false)?;
+      moved_events(state, &joined, shown);
       state.core.destroy_wset(shown)?;
     }
-    state.core.return_windows(parked)?;
+    let returned = state.core.return_windows(parked)?;
+    for (window, from) in &away {
+      if returned.contains(window) {
+        moved_events(state, &[*window], *from);
+      }
+    }
     state.core.set_wset_workarea(parked, rect)?;
     Ok(())
   })();
@@ -591,6 +620,8 @@ pub(crate) fn claim_parked(
   }
 }
 
+#[cfg(test)]
+mod focus_tests;
 #[cfg(test)]
 mod multi_tests;
 #[cfg(test)]

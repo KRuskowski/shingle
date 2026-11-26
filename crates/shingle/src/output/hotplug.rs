@@ -87,6 +87,7 @@ pub(crate) fn add(
   for dark in dark {
     remove(state, &dark)?;
   }
+  super::focus::output_returned(state, &id);
   crate::shell::reconfigure_all(state);
   Ok(id)
 }
@@ -128,8 +129,9 @@ pub(crate) fn remove(
   };
   let removed = crate::ipc::output_json(state, id);
   if state.active_output == *id {
+    super::focus::output_lost(state, id);
     let next = next_output(state, id);
-    set_active(state, next);
+    super::focus::set_active(state, &next);
   }
   if let Some(wset) = state.core.wset_of(id) {
     let target = state.core.wset_of(&state.active_output);
@@ -171,16 +173,11 @@ fn next_output(state: &CompositorState, id: &OutputId) -> OutputId {
     .map_or_else(|| id.clone(), |output| output.id.clone())
 }
 
-/// Makes `id` the active output, and records it for the session.
-fn set_active(state: &mut CompositorState, id: OutputId) {
-  state.core.set_active_output(Some(id.clone()));
-  state.active_output = id;
-}
-
 /// Detaches `wset` from its output under `policy`: `move` and `return`
-/// move its windows into `target`, `return` keeping a copy of its trees for
-/// their return, and `park` keeps them in the set. A set that nothing can
-/// return to is destroyed.
+/// move its windows into `target`, reconfigured for the target output as
+/// Wayfire's `transfer_views` moves them, `return` keeping a copy of its
+/// trees for their return, and `park` keeps them in the set. A set that
+/// nothing can return to is destroyed.
 fn unplug_wset(
   state: &mut CompositorState,
   wset: WsetId,
@@ -190,9 +187,13 @@ fn unplug_wset(
   if let Some(target) = target.filter(|target| *target != wset)
     && policy != UnplugPolicy::Park
   {
-    state
-      .core
-      .transfer_wset(wset, target, policy == UnplugPolicy::Return)?;
+    let from = shown_rect(state, wset);
+    let to = shown_rect(state, target);
+    let moved =
+      state
+        .core
+        .transfer_wset(wset, target, policy == UnplugPolicy::Return)?;
+    super::moving::transferred(state, &moved, wset, from, to);
   }
   // Parking keeps the set's home and identity.
   state.core.attach_wset(wset, None, None)?;
@@ -202,9 +203,23 @@ fn unplug_wset(
   Ok(())
 }
 
+/// The rectangle of the output showing `wset`, else its workarea.
+fn shown_rect(state: &CompositorState, wset: WsetId) -> Rect {
+  state
+    .core
+    .wset(wset)
+    .map(|info| {
+      info
+        .output
+        .and_then(|id| state.outputs.get(&id).map(|output| output.rect))
+        .unwrap_or(info.workarea)
+    })
+    .unwrap_or(state.active().rect)
+}
+
 /// Whether a parked `wset` still holds windows, a copy of its trees or
 /// windows that are away from it.
-fn referenced(state: &CompositorState, wset: WsetId) -> bool {
+pub(super) fn referenced(state: &CompositorState, wset: WsetId) -> bool {
   state
     .core
     .wset(wset)

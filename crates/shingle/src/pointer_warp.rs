@@ -73,9 +73,16 @@ impl Dispatch<WpPointerWarpV1, ()> for CompositorState {
         f64::from(geometry.x) + x,
         f64::from(geometry.y) + y,
       );
+      let output = crate::output::output_at(
+        state,
+        state.input.pointer_x,
+        state.input.pointer_y,
+      )
+      .map(|id| crate::OutputHandle::from(&id));
       state.events.push(Event::PointerWarp {
         x: state.input.pointer_x,
         y: state.input.pointer_y,
+        output,
       });
     }
   }

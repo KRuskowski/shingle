@@ -58,11 +58,18 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
     current.width = width;
     current.height = height;
   }
+  // The workarea of the window's own set, which a dialog shares with its
+  // parent on whichever output that is.
   let workarea = state
     .core
-    .current_workspace(&state.active_output)
+    .window_info(window)
     .ok()
-    .and_then(|workspace| state.core.tree(&state.active_output, workspace).ok())
+    .and_then(|info| {
+      state
+        .core
+        .wset_tree(info.wset, info.location.workspace)
+        .ok()
+    })
     .map_or(state.active().rect, |tree| tree.workarea());
   if state.placement_mode == "maximize" {
     let _ = shell::set_maximized(state, window, true);

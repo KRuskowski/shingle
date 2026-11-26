@@ -506,6 +506,23 @@ fn finish_map(state: &mut CompositorState, window: WindowId) {
   {
     return;
   }
+  // A dialog maps in its parent's set and workspace, as Wayfire's
+  // adjust_view_output_on_map puts a view on its parent's output; its
+  // parent may have come after it was created.
+  if let Some((wset, workspace)) = state
+    .core
+    .window_info(window)
+    .ok()
+    .and_then(|info| info.parent)
+    .and_then(|parent| state.core.window_info(parent).ok())
+    .map(|info| (info.wset, info.location.workspace))
+    && state
+      .core
+      .window_info(window)
+      .is_ok_and(|info| info.wset != wset)
+  {
+    let _ = state.core.move_window_to_wset(window, wset, workspace);
+  }
   // A held view joins its tiling tree only now, as Wayfire's tile plugin
   // attaches a view on view-mapped (plugins/tile/tile-plugin.cpp,
   // on_view_mapped).
@@ -1205,12 +1222,23 @@ pub(crate) fn materialize_toplevel(
   let (window, created) = match state.core.reconcile_mapped(&identity) {
     Some(window) => (window, false),
     None => {
-      let workspace =
-        state.core.current_workspace(&state.active_output).ok()?;
+      // A dialog maps in its parent's set and workspace, anything else on
+      // the active output's current workspace, as Wayfire's
+      // adjust_view_output_on_map chooses (src/view/view-impl.cpp).
+      let parent_place = parent
+        .and_then(|parent| state.core.window_info(parent).ok())
+        .map(|info| (info.wset, info.location.workspace));
+      let (wset, workspace) = match parent_place {
+        Some(place) => place,
+        None => (
+          state.core.wset_of(&state.active_output)?,
+          state.core.current_workspace(&state.active_output).ok()?,
+        ),
+      };
       let window = state
         .core
-        .attach_window_with_state_and_parent(
-          &state.active_output,
+        .attach_window_to_wset(
+          wset,
           workspace,
           identity.clone(),
           LeafState {
@@ -1431,6 +1459,33 @@ pub(crate) fn set_fullscreen(
     crate::window_rules::apply_event(state, window, RuleEvent::Fullscreened);
   }
   Ok(())
+}
+
+/// Moves `window` to the output of `wl_output` resource `output` before
+/// it is made fullscreen there, as Wayfire's `fullscreen_request` moves a
+/// view to the output a client names (src/core/window-manager.cpp).
+/// Dialogs move with their parent, and an output that is gone is ignored.
+pub(crate) fn fullscreen_on(
+  state: &mut CompositorState,
+  window: WindowId,
+  output: &wayland_server::protocol::wl_output::WlOutput,
+) {
+  let Some(id) = state
+    .outputs
+    .of_resource(output)
+    .map(|output| output.id.clone())
+  else {
+    return;
+  };
+  let top = crate::output::topmost_parent(state, window);
+  if let Err(error) = crate::output::move_window_to_output(
+    state,
+    top,
+    &id,
+    crate::output::MoveGeometry::Scale,
+  ) {
+    eprintln!("shingle: fullscreen on {id:?} failed: {error}");
+  }
 }
 
 pub(crate) fn set_stacking(
@@ -2330,11 +2385,18 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
       }
       xdg_toplevel::Request::SetFullscreen { .. }
       | xdg_toplevel::Request::UnsetFullscreen => {
+        let output = match &request {
+          xdg_toplevel::Request::SetFullscreen { output } => output.clone(),
+          _ => None,
+        };
         let fullscreen =
           matches!(request, xdg_toplevel::Request::SetFullscreen { .. });
         let Some(window) = materialize_toplevel(state, &object) else {
           return;
         };
+        if let Some(output) = output {
+          fullscreen_on(state, window, &output);
+        }
         let _ = set_fullscreen(state, window, fullscreen);
       }
       _ => {}

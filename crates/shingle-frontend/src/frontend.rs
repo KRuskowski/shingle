@@ -572,6 +572,7 @@ impl Frontend {
         | Event::StackingChanged { .. }
         | Event::StackingOrderChanged { .. }
         | Event::ShowDesktopChanged(_)
+        | Event::OutputFocused { .. }
         | Event::LayoutChanged => save = true,
         Event::OutputChanged { .. }
         | Event::OutputAdded { .. }
@@ -584,6 +585,13 @@ impl Frontend {
         }
         Event::ToggleExpo => self.toggle_expo(),
         Event::InvertToggle => self.toggle_inversion(),
+        // Only the first output is drawn until MO-5, so only its
+        // workspace changes are animated.
+        Event::WorkspaceChanged { output, .. }
+          if output != self.compositor.primary_output() =>
+        {
+          save = true;
+        }
         Event::WorkspaceChanged { workspace, .. } => {
           let target = workspace.saturating_sub(1) as usize;
           let overview_active = self.scale.is_some()
@@ -677,7 +685,7 @@ impl Frontend {
           self.surface_windows.remove(&surface);
           self.dirty.remove(&surface);
         }
-        Event::PointerWarp { x, y } => {
+        Event::PointerWarp { x, y, .. } => {
           self.pointer_x = x;
           self.pointer_y = y;
           let output = self.compositor.output();
