@@ -68,7 +68,7 @@ fn shape_snapshot(state: &CompositorState, shape: Shape) -> SurfaceSnapshot {
       source: None,
       scale: 1,
       transform: wayland_server::protocol::wl_output::Transform::Normal,
-      rgba: image.rgba.clone(),
+      content: crate::SnapshotContent::Pixels(image.rgba.clone()),
       damage: Vec::new(),
       offset_x: 0,
       offset_y: 0,

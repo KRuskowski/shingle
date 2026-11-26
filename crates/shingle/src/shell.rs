@@ -430,7 +430,7 @@ pub(crate) fn validate_commit(surface: &Surface) -> Result<(), ()> {
       ..
     } => {
       if !initial_acked
-        && matches!(surface.pending.buffer, PendingBuffer::Attach(_))
+        && matches!(surface.pending.buffer, PendingBuffer::Attach(..))
       {
         resource.post_error(
           xdg_surface::Error::UnconfiguredBuffer,
@@ -459,7 +459,7 @@ pub(crate) fn validate_commit(surface: &Surface) -> Result<(), ()> {
         );
         return Err(());
       };
-      if let PendingBuffer::Attach(attachment) = &surface.pending.buffer
+      if let PendingBuffer::Attach(attachment, _) = &surface.pending.buffer
         && (attachment.width != width || attachment.height != height)
       {
         resource.post_error(
@@ -683,12 +683,9 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
       && surface.buffer.as_ref().is_some_and(|buffer| {
         buffer.width == state.output.width
           && buffer.height == state.output.height
-          && buffer
-            .rgba
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .all(|pixel| pixel[3] == 255)
+          && buffer.rgba().is_some_and(|rgba| {
+            rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255)
+          })
       })
   });
   if ready {

@@ -54,9 +54,12 @@ impl Dispatch<WpSinglePixelBufferManagerV1, ()> for CompositorState {
       } => {
         let buffer = data_init.init(id, BufferData);
         let rgba = [r, g, b, a].map(channel);
-        state
-          .buffers
-          .insert(buffer.id(), Attachment::single_pixel(buffer, rgba));
+        let attachment = Attachment::single_pixel(
+          buffer.clone(),
+          rgba,
+          &state.buffer_releases,
+        );
+        state.buffers.insert(buffer.id(), attachment);
       }
       _ => {}
     }

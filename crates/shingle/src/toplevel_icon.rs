@@ -199,7 +199,7 @@ impl Dispatch<XdgToplevelIconV1, ()> for CompositorState {
           );
           return;
         };
-        if attachment.pool.is_none()
+        if !attachment.is_shm()
           || attachment.width != attachment.height
           || scale <= 0
         {
@@ -209,7 +209,8 @@ impl Dispatch<XdgToplevelIconV1, ()> for CompositorState {
           );
           return;
         }
-        let snapshot = match attachment.retained_snapshot() {
+        // Icons keep their buffers, which are never released.
+        let snapshot = match attachment.snapshot(Vec::new(), 0, 0) {
           Ok(snapshot) => snapshot,
           Err(message) => {
             resource
@@ -217,10 +218,13 @@ impl Dispatch<XdgToplevelIconV1, ()> for CompositorState {
             return;
           }
         };
+        let Some(rgba) = snapshot.rgba() else {
+          return;
+        };
         let data = ToplevelIconBuffer {
           width: snapshot.width,
           scale,
-          rgba: snapshot.rgba,
+          rgba,
         };
         if let Some(existing) = icon.buffers.iter_mut().find(|item| {
           item.data.width == snapshot.width && item.data.scale == scale

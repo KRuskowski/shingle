@@ -14,7 +14,8 @@ use wayland_client::{
   backend::ObjectId,
   protocol::{
     wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer,
-    wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface, wl_touch,
+    wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface,
+    wl_surface, wl_touch,
   },
 };
 use wayland_protocols::{
@@ -24,6 +25,7 @@ use wayland_protocols::{
     },
     fifo::v1::client::{wp_fifo_manager_v1, wp_fifo_v1},
     presentation_time::client::{wp_presentation, wp_presentation_feedback},
+    single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1,
     viewporter::client::{wp_viewport, wp_viewporter},
   },
   xdg::{
@@ -115,6 +117,8 @@ pub(crate) struct Events {
   pub(crate) control_cancelled: Vec<ObjectId>,
   /// Every wlr-screencopy frame event, in order.
   pub(crate) screencopy: Vec<zwlr_screencopy_frame_v1::Event>,
+  /// The `wl_buffer`s that received `release`, in order.
+  pub(crate) buffer_releases: Vec<ObjectId>,
   synced: bool,
 }
 
@@ -337,14 +341,13 @@ impl TestClient {
     }
   }
 
-  /// Attaches and commits a `width` by `height` shm buffer on `surface`.
-  pub(crate) fn attach_buffer(
-    &mut self,
-    compositor: &mut Compositor,
-    surface: &wl_surface::WlSurface,
+  /// Creates a `width` by `height` ARGB8888 shm buffer in a pool of its
+  /// own, without attaching it.
+  pub(crate) fn shm_buffer(
+    &self,
     width: i32,
     height: i32,
-  ) {
+  ) -> wl_buffer::WlBuffer {
     let shm = self.bind::<wl_shm::WlShm>(1);
     let size = width * height * 4;
     let fd = rustix::fs::memfd_create(
@@ -364,6 +367,19 @@ impl TestClient {
       &self.handle,
       (),
     );
+    pool.destroy();
+    buffer
+  }
+
+  /// Attaches and commits a `width` by `height` shm buffer on `surface`.
+  pub(crate) fn attach_buffer(
+    &mut self,
+    compositor: &mut Compositor,
+    surface: &wl_surface::WlSurface,
+    width: i32,
+    height: i32,
+  ) {
+    let buffer = self.shm_buffer(width, height);
     surface.attach(Some(&buffer), 0, 0);
     surface.commit();
     self.roundtrip(compositor);
@@ -389,6 +405,21 @@ fn read_keymap(fd: &OwnedFd, size: u32) -> String {
     bytes.pop();
   }
   String::from_utf8(bytes).expect("the keymap is UTF-8")
+}
+
+impl Dispatch<wl_buffer::WlBuffer, ()> for Events {
+  fn event(
+    events: &mut Self,
+    buffer: &wl_buffer::WlBuffer,
+    event: wl_buffer::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wl_buffer::Event::Release = event {
+      events.buffer_releases.push(buffer.id());
+    }
+  }
 }
 
 impl Dispatch<wl_keyboard::WlKeyboard, ()> for Events {
@@ -828,8 +859,9 @@ ignore_events!(
   wl_surface::WlSurface,
   wl_shm::WlShm,
   wl_shm_pool::WlShmPool,
-  wl_buffer::WlBuffer,
   wl_seat::WlSeat,
+  wl_subcompositor::WlSubcompositor,
+  wl_subsurface::WlSubsurface,
   zxdg_output_manager_v1::ZxdgOutputManagerV1,
   wp_presentation::WpPresentation,
   wp_viewporter::WpViewporter,
@@ -840,6 +872,7 @@ ignore_events!(
   zwp_input_method_v2::ZwpInputMethodV2,
   wp_fifo_manager_v1::WpFifoManagerV1,
   wp_fifo_v1::WpFifoV1,
+  wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1,
   wp_commit_timing_manager_v1::WpCommitTimingManagerV1,
   wp_commit_timer_v1::WpCommitTimerV1,
   xwayland_shell_v1::XwaylandShellV1,

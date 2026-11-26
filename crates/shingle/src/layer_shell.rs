@@ -77,7 +77,7 @@ pub(crate) fn validate_commit(surface: &Surface) -> Result<(), ()> {
   let Role::Layer(layer) = &surface.role else {
     return Ok(());
   };
-  if matches!(surface.pending.buffer, PendingBuffer::Attach(_))
+  if matches!(surface.pending.buffer, PendingBuffer::Attach(..))
     && (!layer.initial_configured || layer.acked.is_none())
   {
     layer.resource.post_error(

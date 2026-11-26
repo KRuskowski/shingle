@@ -367,19 +367,19 @@ impl Frontend {
         let Some(buffer) = &snapshot.buffer else {
           continue;
         };
+        // DB-4 draws content without CPU pixels from imported textures.
+        let Some(rgba) = buffer.rgba() else {
+          continue;
+        };
         let recreate = self.textures.get(&snapshot.id).is_none_or(|texture| {
           texture.width() != buffer.width || texture.height() != buffer.height
         });
         if recreate {
-          let texture = renderer.create_texture(
-            buffer.width,
-            buffer.height,
-            &buffer.rgba,
-          )?;
+          let texture =
+            renderer.create_texture(buffer.width, buffer.height, &rgba)?;
           self.textures.insert(snapshot.id, texture);
         } else if self.dirty.contains(&snapshot.id) {
-          renderer
-            .update_texture(&self.textures[&snapshot.id], &buffer.rgba)?;
+          renderer.update_texture(&self.textures[&snapshot.id], &rgba)?;
         }
       }
       for snapshot in &snapshots {
@@ -397,6 +397,9 @@ impl Frontend {
         else {
           continue;
         };
+        let Some(old_rgba) = old_buffer.rgba() else {
+          continue;
+        };
         if *old_geometry == geometry
           || self.animations.contains_key(&snapshot.id)
           || self.animation_duration.is_zero()
@@ -406,7 +409,7 @@ impl Frontend {
         let old_texture = renderer.create_texture(
           old_buffer.width,
           old_buffer.height,
-          &old_buffer.rgba,
+          &old_rgba,
         )?;
         self.animations.insert(
           snapshot.id,

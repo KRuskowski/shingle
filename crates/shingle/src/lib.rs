@@ -42,6 +42,7 @@
 mod activation;
 mod alpha_modifier;
 mod buffer;
+mod buffer_lock;
 mod clock;
 mod commit_timing;
 mod cursor_shape;
@@ -472,11 +473,22 @@ pub enum SurfaceRole {
   Unmanaged,
 }
 
-/// A copy of a surface's committed shared-memory buffer.
-///
-/// Pixels are copied out of the client's pool at commit time, so the
-/// buffer is released to the client at once and the snapshot stays valid.
+/// What a [`BufferSnapshot`] holds of its buffer (docs/design/dmabuf.md,
+/// section 4). DB-6 adds a view of an shm buffer to upload, and DB-4 a
+/// DMA-BUF.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum SnapshotContent {
+  /// Tightly packed 8-bit RGBA rows, top to bottom, copied when the commit
+  /// applied, so the buffer is released to its client at once. ARGB/XRGB
+  /// formats are swizzled, X formats get opaque alpha, and colour stays
+  /// premultiplied as `wl_shm` defines it. Shared-memory and single-pixel
+  /// buffers are copied like this.
+  Pixels(Arc<[u8]>),
+}
+
+/// A surface's committed buffer, as a frontend draws it.
+#[derive(Clone)]
 pub struct BufferSnapshot {
   /// Buffer width in buffer pixels.
   pub width: u32,
@@ -490,10 +502,8 @@ pub struct BufferSnapshot {
   pub scale: i32,
   /// `wl_surface.set_buffer_transform`.
   pub transform: wayland_server::protocol::wl_output::Transform,
-  /// Tightly packed 8-bit RGBA rows, top to bottom. ARGB/XRGB formats are
-  /// swizzled, X formats get opaque alpha, and colour stays premultiplied
-  /// as `wl_shm` defines it.
-  pub rgba: Arc<[u8]>,
+  /// The buffer's pixels, or where to find them.
+  pub content: SnapshotContent,
   /// Rectangles in buffer pixels that changed in this commit, clipped to
   /// the buffer. `wl_surface.damage` is converted from surface coordinates
   /// through the viewport, buffer scale and buffer transform. A new buffer
@@ -506,10 +516,42 @@ pub struct BufferSnapshot {
   pub offset_y: i32,
 }
 
+impl std::fmt::Debug for BufferSnapshot {
+  /// Pixel content prints as `rgba`, the field `content` replaced, so that
+  /// recorded transcripts such as crates/shingle/testdata/wayland_pins.txt
+  /// still compare.
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let mut debug = formatter.debug_struct("BufferSnapshot");
+    debug
+      .field("width", &self.width)
+      .field("height", &self.height)
+      .field("source", &self.source)
+      .field("scale", &self.scale)
+      .field("transform", &self.transform);
+    match &self.content {
+      SnapshotContent::Pixels(rgba) => debug.field("rgba", rgba),
+    };
+    debug
+      .field("damage", &self.damage)
+      .field("offset_x", &self.offset_x)
+      .field("offset_y", &self.offset_y)
+      .finish()
+  }
+}
+
 impl BufferSnapshot {
-  /// Bytes per row of `rgba`.
+  /// Bytes per row of [`BufferSnapshot::rgba`].
   pub fn stride(&self) -> u32 {
     self.width * 4
+  }
+
+  /// The buffer as tightly packed RGBA rows, as described for
+  /// [`SnapshotContent::Pixels`], or `None` for content the CPU cannot
+  /// read. Every buffer has CPU pixels today.
+  pub fn rgba(&self) -> Option<Arc<[u8]>> {
+    match &self.content {
+      SnapshotContent::Pixels(rgba) => Some(Arc::clone(rgba)),
+    }
   }
 }
 
@@ -520,7 +562,7 @@ pub struct ToplevelIconBuffer {
   pub width: u32,
   /// The scale the image is meant for.
   pub scale: i32,
-  /// Tightly packed RGBA rows, converted as in [`BufferSnapshot::rgba`].
+  /// Tightly packed RGBA rows, converted as in [`SnapshotContent::Pixels`].
   pub rgba: Arc<[u8]>,
 }
 
@@ -1183,6 +1225,7 @@ impl Compositor {
     if let Some(xwayland) = &mut self.xwayland {
       xwayland.flush(&mut self.state, &self.event_loop.handle());
     }
+    self.state.buffer_releases.flush();
     self.display.flush_clients()?;
     Ok(dispatched)
   }
@@ -1224,6 +1267,7 @@ impl Compositor {
     }
     commit_timing::frame(&mut self.state);
     fifo::frame(&mut self.state);
+    self.state.buffer_releases.flush();
     let time = clock::millis(info.time);
     let visible = self
       .state
@@ -3099,6 +3143,28 @@ pub(crate) mod tests {
   /// for clients to connect to.
   pub(crate) fn test_compositor() -> (Compositor, PathBuf) {
     test_compositor_with(Config::default())
+  }
+
+  #[test]
+  fn a_snapshot_gives_its_pixels_and_prints_them_as_rgba() {
+    let snapshot = BufferSnapshot {
+      width: 1,
+      height: 1,
+      source: None,
+      scale: 1,
+      transform: wayland_server::protocol::wl_output::Transform::Normal,
+      content: SnapshotContent::Pixels(vec![1, 2, 3, 4].into()),
+      damage: Vec::new(),
+      offset_x: 0,
+      offset_y: 0,
+    };
+    assert_eq!(snapshot.rgba().as_deref(), Some(&[1, 2, 3, 4][..]));
+    assert_eq!(
+      format!("{snapshot:?}"),
+      "BufferSnapshot { width: 1, height: 1, source: None, scale: 1, \
+       transform: Normal, rgba: [1, 2, 3, 4], damage: [], offset_x: 0, \
+       offset_y: 0 }"
+    );
   }
 
   /// [`test_compositor`] with `config`.

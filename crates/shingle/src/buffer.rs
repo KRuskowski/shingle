@@ -22,7 +22,10 @@ use wayland_server::{
   },
 };
 
-use crate::BufferSnapshot;
+use crate::{
+  BufferSnapshot, SnapshotContent,
+  buffer_lock::{BufferLock, BufferLocks, ReleaseQueue},
+};
 
 pub(crate) struct ShmPool {
   fd: OwnedFd,
@@ -85,19 +88,39 @@ impl ShmPool {
   }
 }
 
+/// Where an attached buffer's pixels live (docs/design/dmabuf.md,
+/// section 4). DB-4 adds DMA-BUFs.
+#[derive(Clone)]
+pub(crate) enum BufferContent {
+  /// A `wl_shm` buffer in its client's pool.
+  Shm(ShmView),
+  /// A `wp_single_pixel_buffer_v1` colour, already RGBA.
+  SinglePixel([u8; 4]),
+}
+
+/// Where a `wl_shm` buffer sits in its pool, and how.
+#[derive(Clone)]
+pub(crate) struct ShmView {
+  pool: Arc<ShmPool>,
+  offset: usize,
+  stride: usize,
+  format: Format,
+}
+
+/// A client buffer as the compositor knows it: one per `wl_buffer`,
+/// cloned wherever it is attached.
 #[derive(Clone)]
 pub(crate) struct Attachment {
   pub(crate) resource: WlBuffer,
-  pub(crate) pool: Option<Arc<ShmPool>>,
-  pub(crate) single_pixel: Option<[u8; 4]>,
-  pub(crate) offset: usize,
+  pub(crate) content: BufferContent,
   pub(crate) width: u32,
   pub(crate) height: u32,
-  pub(crate) stride: usize,
-  pub(crate) format: Format,
+  /// The buffer's lock count, shared by every clone.
+  locks: Arc<BufferLocks>,
 }
 
 impl Attachment {
+  #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
     resource: WlBuffer,
     pool: Arc<ShmPool>,
@@ -106,6 +129,7 @@ impl Attachment {
     height: i32,
     stride: i32,
     format: Format,
+    releases: &ReleaseQueue,
   ) -> Result<Self, String> {
     if offset < 0 || width <= 0 || height <= 0 || stride < 0 {
       return Err("buffer dimensions, stride, and offset are invalid".into());
@@ -145,82 +169,122 @@ impl Attachment {
       );
     }
     Ok(Self {
+      locks: BufferLocks::new(resource.clone(), releases.clone()),
       resource,
-      pool: Some(pool),
-      single_pixel: None,
-      offset,
+      content: BufferContent::Shm(ShmView {
+        pool,
+        offset,
+        stride,
+        format,
+      }),
       width,
       height,
-      stride,
-      format,
     })
   }
 
-  pub(crate) fn single_pixel(resource: WlBuffer, rgba: [u8; 4]) -> Self {
+  pub(crate) fn single_pixel(
+    resource: WlBuffer,
+    rgba: [u8; 4],
+    releases: &ReleaseQueue,
+  ) -> Self {
     Self {
+      locks: BufferLocks::new(resource.clone(), releases.clone()),
       resource,
-      pool: None,
-      single_pixel: Some(rgba),
-      offset: 0,
+      content: BufferContent::SinglePixel(rgba),
       width: 1,
       height: 1,
-      stride: 4,
-      format: Format::Argb8888,
     }
   }
 
+  /// Locks the buffer: it is not released while the lock lives.
+  pub(crate) fn lock(&self) -> BufferLock {
+    self.locks.lock()
+  }
+
+  /// How many locks the buffer has.
+  #[cfg(test)]
+  pub(crate) fn lock_count(&self) -> usize {
+    self.locks.count()
+  }
+
+  /// Whether the buffer is a `wl_shm` buffer.
+  pub(crate) fn is_shm(&self) -> bool {
+    matches!(self.content, BufferContent::Shm(_))
+  }
+
+  /// Copies the buffer's pixels into a snapshot. This sends no release:
+  /// whoever holds the buffer's lock drops it once the copy is complete.
   pub(crate) fn snapshot(
     &self,
     damage: Vec<Rect>,
     offset_x: i32,
     offset_y: i32,
   ) -> Result<BufferSnapshot, String> {
-    self.snapshot_inner(damage, offset_x, offset_y, true)
+    let rgba = match &self.content {
+      BufferContent::SinglePixel(rgba) => rgba.to_vec(),
+      BufferContent::Shm(view) => view.rgba(self.width, self.height)?,
+    };
+    Ok(BufferSnapshot {
+      width: self.width,
+      height: self.height,
+      source: None,
+      scale: 1,
+      transform: wl_output::Transform::Normal,
+      content: SnapshotContent::Pixels(rgba.into()),
+      damage,
+      offset_x,
+      offset_y,
+    })
   }
 
-  /// Copies a retained protocol buffer without sending a release event.
-  pub(crate) fn retained_snapshot(&self) -> Result<BufferSnapshot, String> {
-    self.snapshot_inner(Vec::new(), 0, 0, false)
+  /// Writes tightly packed RGBA rows into a `wl_shm` buffer, as
+  /// screencopy does, and releases it.
+  pub(crate) fn write_rgba(&self, rgba: &[u8]) -> Result<(), String> {
+    let BufferContent::Shm(view) = &self.content else {
+      return Err("buffer has no shared memory pool".into());
+    };
+    view.write_rgba(self.width, self.height, rgba)?;
+    self.resource.release();
+    Ok(())
   }
 
-  fn snapshot_inner(
-    &self,
-    damage: Vec<Rect>,
-    offset_x: i32,
-    offset_y: i32,
-    release: bool,
-  ) -> Result<BufferSnapshot, String> {
-    if let Some(rgba) = self.single_pixel {
-      if release {
-        self.resource.release();
+  pub(crate) fn validate_format(
+    pool: &WlShmPool,
+    format: Format,
+  ) -> Result<(), wayland_server::WEnum<Format>> {
+    match format {
+      Format::Argb8888
+      | Format::Xrgb8888
+      | Format::Abgr8888
+      | Format::Xbgr8888 => Ok(()),
+      _ => {
+        pool.post_error(
+          wl_shm_pool::Error::InvalidFormat,
+          "Shingle supports ARGB8888, XRGB8888, ABGR8888, and XBGR8888",
+        );
+        Err(wayland_server::WEnum::Value(format))
       }
-      return Ok(BufferSnapshot {
-        width: 1,
-        height: 1,
-        source: None,
-        scale: 1,
-        transform: wl_output::Transform::Normal,
-        rgba: rgba.to_vec().into(),
-        damage,
-        offset_x,
-        offset_y,
-      });
     }
+  }
+}
+
+impl ShmView {
+  /// Converts the `width` by `height` buffer into tightly packed RGBA
+  /// rows: ARGB/XRGB are swizzled and X formats get opaque alpha.
+  fn rgba(&self, width: u32, height: u32) -> Result<Vec<u8>, String> {
     let required = self
       .stride
-      .checked_mul(self.height as usize - 1)
-      .and_then(|prefix| prefix.checked_add(self.width as usize * 4))
+      .checked_mul(height as usize - 1)
+      .and_then(|prefix| prefix.checked_add(width as usize * 4))
       .and_then(|extent| self.offset.checked_add(extent))
       .ok_or_else(|| "buffer extent overflows address space".to_string())?;
-    let pool = self
-      .pool
-      .as_ref()
-      .ok_or_else(|| "buffer has no shared memory pool".to_string())?;
-    let pool_size = pool.size();
+    let pool_size = self.pool.size();
     if required > pool_size {
       return Err("buffer no longer fits its shared memory pool".into());
     }
-    let actual = fstat(&pool.fd).map_err(|error| error.to_string())?.st_size;
+    let actual = fstat(&self.pool.fd)
+      .map_err(|error| error.to_string())?
+      .st_size;
     if actual < 0 || (actual as u64) < pool_size as u64 {
       return Err("shared memory pool was truncated".into());
     }
@@ -233,7 +297,7 @@ impl Attachment {
         pool_size,
         ProtFlags::READ,
         MapFlags::SHARED,
-        &pool.fd,
+        &self.pool.fd,
         0,
       )
     }
@@ -247,16 +311,16 @@ impl Attachment {
     let bytes = unsafe {
       std::slice::from_raw_parts(mapping.pointer.cast::<u8>(), pool_size)
     };
-    let rgba_len = (self.width as usize)
-      .checked_mul(self.height as usize)
+    let rgba_len = (width as usize)
+      .checked_mul(height as usize)
       .and_then(|pixels| pixels.checked_mul(4))
       .ok_or_else(|| {
         "RGBA allocation size overflows address space".to_string()
       })?;
     let mut rgba = Vec::with_capacity(rgba_len);
-    for row in 0..self.height as usize {
+    for row in 0..height as usize {
       let start = self.offset + row * self.stride;
-      let end = start + self.width as usize * 4;
+      let end = start + width as usize * 4;
       let source = bytes
         .get(start..end)
         .ok_or_else(|| "buffer row extends outside its mapping".to_string())?;
@@ -294,35 +358,25 @@ impl Attachment {
         }
       }
     }
-    if release {
-      self.resource.release();
-    }
-    Ok(BufferSnapshot {
-      width: self.width,
-      height: self.height,
-      source: None,
-      scale: 1,
-      transform: wl_output::Transform::Normal,
-      rgba: rgba.into(),
-      damage,
-      offset_x,
-      offset_y,
-    })
+    Ok(rgba)
   }
 
-  pub(crate) fn write_rgba(&self, rgba: &[u8]) -> Result<(), String> {
-    let expected = (self.width as usize)
-      .checked_mul(self.height as usize)
+  /// Writes tightly packed RGBA rows into the `width` by `height` buffer,
+  /// swizzled to BGRA.
+  fn write_rgba(
+    &self,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+  ) -> Result<(), String> {
+    let expected = (width as usize)
+      .checked_mul(height as usize)
       .and_then(|pixels| pixels.checked_mul(4))
       .ok_or_else(|| "RGBA input size overflows address space".to_string())?;
     if rgba.len() != expected {
       return Err("RGBA input has the wrong dimensions".into());
     }
-    let pool = self
-      .pool
-      .as_ref()
-      .ok_or_else(|| "buffer has no shared memory pool".to_string())?;
-    let pool_size = pool.size();
+    let pool_size = self.pool.size();
     // SAFETY: the mapping is shared and writable, and every row is bounded
     // by the validated attachment extent before being written.
     let pointer = unsafe {
@@ -331,7 +385,7 @@ impl Attachment {
         pool_size,
         ProtFlags::READ | ProtFlags::WRITE,
         MapFlags::SHARED,
-        &pool.fd,
+        &self.pool.fd,
         0,
       )
     }
@@ -344,14 +398,13 @@ impl Attachment {
     let bytes = unsafe {
       std::slice::from_raw_parts_mut(mapping.pointer.cast::<u8>(), pool_size)
     };
-    for row in 0..self.height as usize {
+    let row_bytes = width as usize * 4;
+    for row in 0..height as usize {
       let start = self.offset + row * self.stride;
-      let end = start + self.width as usize * 4;
       let destination = bytes
-        .get_mut(start..end)
+        .get_mut(start..start + row_bytes)
         .ok_or_else(|| "buffer row extends outside its mapping".to_string())?;
-      let source =
-        &rgba[row * self.width as usize * 4..][..self.width as usize * 4];
+      let source = &rgba[row * row_bytes..][..row_bytes];
       for (destination, source) in destination
         .as_chunks_mut::<4>()
         .0
@@ -361,27 +414,7 @@ impl Attachment {
         *destination = [source[2], source[1], source[0], source[3]];
       }
     }
-    self.resource.release();
     Ok(())
-  }
-
-  pub(crate) fn validate_format(
-    pool: &WlShmPool,
-    format: Format,
-  ) -> Result<(), wayland_server::WEnum<Format>> {
-    match format {
-      Format::Argb8888
-      | Format::Xrgb8888
-      | Format::Abgr8888
-      | Format::Xbgr8888 => Ok(()),
-      _ => {
-        pool.post_error(
-          wl_shm_pool::Error::InvalidFormat,
-          "Shingle supports ARGB8888, XRGB8888, ABGR8888, and XBGR8888",
-        );
-        Err(wayland_server::WEnum::Value(format))
-      }
-    }
   }
 }
 

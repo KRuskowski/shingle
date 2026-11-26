@@ -37,6 +37,7 @@ use wayland_server::{
 use crate::{
   BufferSnapshot, Config, Event, OUTPUT_NAME, SurfaceSnapshot,
   buffer::{Attachment, ShmPool},
+  buffer_lock::{BufferLock, ReleaseQueue},
   input::InputState,
   shell::{self, Role},
 };
@@ -74,9 +75,12 @@ pub(crate) struct PendingMap {
   pub(crate) notified: bool,
 }
 
+/// The buffer part of a pending commit.
 pub(crate) enum PendingBuffer {
   Unchanged,
-  Attach(Attachment),
+  /// A buffer to show, locked from `wl_surface.attach` until the commit
+  /// applies, so that replacing or dropping the state releases it.
+  Attach(Attachment, BufferLock),
   Detach,
 }
 
@@ -170,6 +174,8 @@ pub(crate) struct CompositorState {
   pub(crate) surface_ids: HashMap<SurfaceId, ObjectId>,
   pub(crate) pools: HashMap<ObjectId, Arc<ShmPool>>,
   pub(crate) buffers: HashMap<ObjectId, Attachment>,
+  /// Buffers whose last lock dropped, released at the end of each turn.
+  pub(crate) buffer_releases: ReleaseQueue,
   pub(crate) outputs: HashMap<ObjectId, WlOutput>,
   pub(crate) xdg_outputs: HashMap<ObjectId, ZxdgOutputV1>,
   pub(crate) events: Vec<Event>,
@@ -334,6 +340,7 @@ impl CompositorState {
       surface_ids: HashMap::new(),
       pools: HashMap::new(),
       buffers: HashMap::new(),
+      buffer_releases: ReleaseQueue::default(),
       outputs: HashMap::new(),
       xdg_outputs: HashMap::new(),
       events: Vec::new(),
@@ -1239,19 +1246,62 @@ impl CompositorState {
     );
   }
 
+  /// `wl_surface.commit`.
   fn commit(&mut self, object: &ObjectId) {
     self.commit_inner(object, false);
   }
 
+  /// Applies a synchronized subsurface's cached commit, when its parent
+  /// commits or it becomes desynchronized.
   pub(crate) fn commit_cached(&mut self, object: &ObjectId) {
-    self.commit_inner(object, true);
+    let Some(cached) = self
+      .surfaces
+      .get_mut(object)
+      .and_then(|surface| surface.cached_commit.take())
+    else {
+      return;
+    };
+    self.commit_state(object, cached, true);
   }
 
-  pub(crate) fn commit_fifo(&mut self, object: &ObjectId) {
-    self.commit_inner(object, false);
+  /// Takes the surface's pending state for a later commit. Buffer scale
+  /// and transform stay pending too, since they persist until changed.
+  pub(crate) fn take_pending(
+    &mut self,
+    object: &ObjectId,
+  ) -> Option<PendingSurface> {
+    let surface = self.surfaces.get_mut(object)?;
+    let pending = std::mem::take(&mut surface.pending);
+    surface.pending.scale = pending.scale;
+    surface.pending.transform = pending.transform;
+    Some(pending)
   }
 
-  fn commit_inner(&mut self, object: &ObjectId, apply_cached: bool) {
+  /// Commits `pending`, state taken earlier with
+  /// [`CompositorState::take_pending`], as if the client committed it now.
+  /// What the client has set since stays pending for its next commit.
+  /// `cached` skips the synchronized-subsurface cache, for cached state.
+  pub(crate) fn commit_state(
+    &mut self,
+    object: &ObjectId,
+    pending: PendingSurface,
+    cached: bool,
+  ) {
+    let Some(surface) = self.surfaces.get_mut(object) else {
+      return;
+    };
+    let current = std::mem::replace(&mut surface.pending, pending);
+    self.commit_inner(object, cached);
+    if let Some(surface) = self.surfaces.get_mut(object) {
+      // What the commit left unused, such as a buffer it refused, drops
+      // here with its lock.
+      surface.pending = current;
+    }
+  }
+
+  /// Applies the surface's pending state, unless a synchronized parent
+  /// (without `apply_cached`), FIFO or commit timing defers it.
+  pub(crate) fn commit_inner(&mut self, object: &ObjectId, apply_cached: bool) {
     let synchronized = self.surfaces.get(object).is_some_and(|surface| {
       matches!(
         &surface.role,
@@ -1262,12 +1312,12 @@ impl CompositorState {
       )
     });
     if synchronized && !apply_cached {
+      let Some(mut pending) = self.take_pending(object) else {
+        return;
+      };
       let Some(surface) = self.surfaces.get_mut(object) else {
         return;
       };
-      let mut pending = std::mem::take(&mut surface.pending);
-      surface.pending.scale = pending.scale;
-      surface.pending.transform = pending.transform;
       if let Some(cached) = &mut surface.cached_commit {
         merge_pending(cached, &mut pending);
       } else {
@@ -1275,33 +1325,18 @@ impl CompositorState {
       }
       return;
     }
-    if apply_cached {
-      let Some(surface) = self.surfaces.get_mut(object) else {
-        return;
-      };
-      let Some(pending) = surface.cached_commit.take() else {
-        return;
-      };
-      surface.pending = pending;
-    }
     if crate::fifo::commit(self, object) {
-      let Some(surface) = self.surfaces.get_mut(object) else {
+      let Some(pending) = self.take_pending(object) else {
         return;
       };
-      let pending = std::mem::take(&mut surface.pending);
-      surface.pending.scale = pending.scale;
-      surface.pending.transform = pending.transform;
       crate::fifo::defer(self, object, pending);
       crate::commit_timing::latch(self, object);
       return;
     }
     if crate::commit_timing::commit(self, object) {
-      let Some(surface) = self.surfaces.get_mut(object) else {
+      let Some(pending) = self.take_pending(object) else {
         return;
       };
-      let pending = std::mem::take(&mut surface.pending);
-      surface.pending.scale = pending.scale;
-      surface.pending.transform = pending.transform;
       crate::commit_timing::defer(self, object, pending);
       return;
     }
@@ -1322,14 +1357,15 @@ impl CompositorState {
     let scale = surface.pending.scale;
     let pending_buffer =
       std::mem::replace(&mut surface.pending.buffer, PendingBuffer::Unchanged);
+    // The lock travels with the attachment until its pixels are copied.
     let attachment = match pending_buffer {
       PendingBuffer::Unchanged => None,
-      PendingBuffer::Attach(attachment) => Some(Some(attachment)),
+      PendingBuffer::Attach(attachment, lock) => Some(Some((attachment, lock))),
       PendingBuffer::Detach => Some(None),
     };
     let surface_damage = std::mem::take(&mut surface.pending.damage);
     let mut buffer_damage = std::mem::take(&mut surface.pending.buffer_damage);
-    if let Some(Some(attachment)) = &attachment {
+    if let Some(Some((attachment, _))) = &attachment {
       if attachment.width % scale as u32 != 0
         || attachment.height % scale as u32 != 0
       {
@@ -1404,6 +1440,8 @@ impl CompositorState {
         buffer.transform = surface.pending.transform;
       }
     }
+    // The pixels are copied, so the buffer goes back to its client.
+    drop(attachment);
 
     if let Some(viewport) = crate::viewport::commit(self, object, scale)
       && let Some(surface) = self.surfaces.get_mut(object)
@@ -1685,7 +1723,8 @@ impl Dispatch<WlSurface, SurfaceData> for CompositorState {
               .cloned()
               .map(|mut attachment| {
                 attachment.resource = buffer;
-                PendingBuffer::Attach(attachment)
+                let lock = attachment.lock();
+                PendingBuffer::Attach(attachment, lock)
               })
           }
           None => Some(PendingBuffer::Detach),
@@ -1887,6 +1926,7 @@ impl Dispatch<WlShmPool, PoolData> for CompositorState {
           height,
           stride,
           format,
+          &state.buffer_releases,
         ) {
           Ok(attachment) => {
             state.buffers.insert(buffer.id(), attachment);

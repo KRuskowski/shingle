@@ -194,6 +194,10 @@ fn composite(state: &CompositorState, region: Rect) -> Vec<u8> {
     let Some(buffer) = surface.buffer else {
       continue;
     };
+    // Content without CPU pixels is left to the frontend's frame capture.
+    let Some(pixels) = buffer.rgba() else {
+      continue;
+    };
     let opacity = (surface.opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
     if opacity == 0 {
       continue;
@@ -212,7 +216,7 @@ fn composite(state: &CompositorState, region: Rect) -> Vec<u8> {
         ) else {
           continue;
         };
-        let source = &buffer.rgba[source_index..source_index + 4];
+        let source = &pixels[source_index..source_index + 4];
         let destination_x = intersection.x - region.x + x as i32;
         let destination_y = intersection.y - region.y + y as i32;
         let destination_index = (destination_y as usize

@@ -98,10 +98,7 @@ pub(crate) fn frame(state: &mut CompositorState) {
     })
     .collect::<Vec<_>>();
   for (object, pending) in ready {
-    if let Some(surface) = state.surfaces.get_mut(&object) {
-      surface.pending = pending;
-      state.commit_fifo(&object);
-    }
+    state.commit_state(&object, pending, false);
   }
 }
 
