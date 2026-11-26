@@ -46,6 +46,29 @@ class SessionTest(unittest.TestCase):
     workspace = session['outputs'][0]['workspaces'][0]
     self.assertEqual(workspace['stack'], [window['id']])
 
+class WaitTest(unittest.TestCase):
+  """Where a slow exit waits, from /proc."""
+
+  def test_names_the_kernel_function_and_system_call(self):
+    self.assertEqual(
+        run.describe_wait('folio_wait_bit_common', '74 0x5 0x0 0x0\n'),
+        'folio_wait_bit_common, system call 74')
+    self.assertEqual(run.describe_wait('0', 'running\n'),
+                     'nothing (running)')
+    self.assertEqual(run.describe_wait('', ''), '?, system call ?')
+
+  def test_reads_a_live_and_a_missing_process(self):
+    with subprocess.Popen(['sleep', '30']) as child:
+      try:
+        deadline = run.time.monotonic() + 5
+        while (run.blocked_in(child.pid) or '').startswith('nothing'):
+          self.assertLess(run.time.monotonic(), deadline)
+          run.time.sleep(0.01)
+        self.assertIn('system call', run.blocked_in(child.pid))
+      finally:
+        child.kill()
+    self.assertIsNone(run.blocked_in(child.pid))
+
 class KillTest(unittest.TestCase):
   """kill_xwayland refuses anything but an Xwayland process."""
 

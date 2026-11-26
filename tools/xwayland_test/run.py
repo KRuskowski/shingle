@@ -57,6 +57,12 @@ import time
 
 INNER_FLAG = '--inner'
 IPC_TIMEOUT = 10.0
+# How long Shingle gets to exit after a signal before it is killed. Exit
+# syncs the session file to disk, which took more than 10 s while other
+# builds loaded the shared disk (fsync, system call 74).
+STOP_TIMEOUT = 60.0
+# An exit slower than this records where Shingle was waiting.
+SLOW_STOP = 5.0
 # The probe client refuses to run without it, so it never opens a window
 # on the host's X displays.
 NAMESPACE_VARIABLE = 'SHINGLE_XWAYLAND_TEST_NAMESPACE'
@@ -150,6 +156,25 @@ def children_of(pid):
     except FileNotFoundError:
       pass
   return children
+
+def describe_wait(wchan, syscall):
+  """Names what a process waits in from its /proc `wchan` and `syscall`
+  files: the kernel function and the system call number."""
+  number = syscall.split()[0] if syscall.split() else '?'
+  if number == 'running':
+    return 'nothing (running)'
+  return f'{wchan or "?"}, system call {number}'
+
+def blocked_in(pid):
+  """What `pid` waits in now, from /proc, or None when it is gone."""
+  try:
+    with open(f'/proc/{pid}/wchan') as file:
+      wchan = file.read().strip()
+    with open(f'/proc/{pid}/syscall') as file:
+      syscall = file.read()
+  except OSError:
+    return None
+  return describe_wait(wchan, syscall)
 
 def command_name(pid):
   """The `comm` of `pid`, or None when it is gone."""
@@ -398,6 +423,8 @@ class Shingle:
       arguments += ['--spawn'] + spawn
     self.log_path = os.path.join(self.directory, 'shingle.log')
     self.log = open(self.log_path, 'w')
+    self.stop_seconds = None
+    self.stop_blocked = None
     self.process = subprocess.Popen(
         arguments, env=environment, stdout=self.log, stderr=self.log,
         stdin=subprocess.DEVNULL)
@@ -551,18 +578,34 @@ class Shingle:
     except subprocess.TimeoutExpired:
       return 'timeout', ''
 
-  def stop(self, sig=signal.SIGTERM, timeout=10):
-    """Sends `sig` and waits; returns the exit status."""
+  def stop(self, sig=signal.SIGTERM, timeout=STOP_TIMEOUT):
+    """Sends `sig` and waits; returns the exit status, or 'timeout' once it
+    had to be killed. Sets `stop_seconds` to how long the exit took and,
+    when it took more than SLOW_STOP seconds, `stop_blocked` to where
+    Shingle was waiting by then."""
     self.ipc.close()
     self.process.send_signal(sig)
+    started = time.monotonic()
     try:
-      return self.process.wait(timeout)
+      try:
+        return self.process.wait(min(SLOW_STOP, timeout))
+      except subprocess.TimeoutExpired:
+        self.stop_blocked = blocked_in(self.process.pid)
+      return self.process.wait(max(0.0, timeout - SLOW_STOP))
     except subprocess.TimeoutExpired:
       self.process.kill()
       self.process.wait()
       return 'timeout'
     finally:
+      self.stop_seconds = time.monotonic() - started
       self.log.close()
+
+  def stop_detail(self, status):
+    """`status` with how long the exit took, for a check's detail."""
+    detail = f'{status} after {self.stop_seconds:.1f} s'
+    if self.stop_blocked:
+      detail += f', at {SLOW_STOP} s blocked in {self.stop_blocked}'
+    return detail
 
   def log_text(self):
     """Shingle's stdout and stderr so far."""
@@ -778,7 +821,8 @@ def lazy_checks(results, binary, work):
                 f'pid {third}, xdpyinfo {status}')
 
   status = shingle.stop(signal.SIGTERM)
-  results.check('lazy: SIGTERM exits with status 0', status == 0, f'{status}')
+  results.check('lazy: SIGTERM exits with status 0', status == 0,
+                shingle.stop_detail(status))
   results.check('lazy: SIGTERM leaves no lock or socket',
                 not os.path.exists('/tmp/.X0-lock')
                 and not os.path.exists('/tmp/.X11-unix/X0'),
@@ -805,8 +849,9 @@ def idle_checks(results, binary, work):
   again = shingle.xwayland_pid()
   results.check('idle: the next connection starts it again',
                 status == 0 and again > 0 and again != pid, f'pid {again}')
-  results.check('idle: SIGTERM exits with status 0',
-                shingle.stop() == 0)
+  status = shingle.stop()
+  results.check('idle: SIGTERM exits with status 0', status == 0,
+                shingle.stop_detail(status))
   return shingle.log_text()
 
 def eager_checks(results, binary, work):
@@ -853,10 +898,13 @@ def eager_checks(results, binary, work):
   time.sleep(1)
   results.check('eager: killed after 2 s, not restarted',
                 gone == -1 and shingle.xwayland_pid() == -1)
-  results.check('eager: SIGTERM exits with status 0', shingle.stop() == 0)
+  status = shingle.stop()
+  results.check('eager: SIGTERM exits with status 0', status == 0,
+                shingle.stop_detail(status))
   results.check('eager: SIGTERM leaves no lock or socket',
                 not os.path.exists('/tmp/.X0-lock')
                 and not os.path.exists('/tmp/.X11-unix/X0'))
+  return shingle.log_text()
 
 def running_sigterm_checks(results, binary, work):
   """SIGTERM while Xwayland runs stops it and frees the display."""
@@ -866,7 +914,7 @@ def running_sigterm_checks(results, binary, work):
   results.check('running: xdpyinfo succeeds', status == 0)
   exit_status = shingle.stop()
   results.check('running: SIGTERM exits with status 0', exit_status == 0,
-                f'{exit_status}')
+                shingle.stop_detail(exit_status))
   results.check('running: Xwayland is gone after SIGTERM',
                 command_name(pid) is None, f'pid {pid}')
   results.check('running: no lock or socket after SIGTERM',
@@ -1788,7 +1836,7 @@ def session_checks(results, binary, work, probe):
     for client in clients:
       client.stop()
   results.check('session: the first run exits with status 0', status == 0,
-                f'{status}')
+                first.stop_detail(status))
   path = os.path.join(first.directory, 'state', 'session.json')
   try:
     with open(path) as file:
@@ -1844,7 +1892,7 @@ def session_checks(results, binary, work, probe):
   finally:
     status = second.stop()
   results.check('session: the restored run exits with status 0', status == 0,
-                f'{status}')
+                second.stop_detail(status))
   return second.log_text()
 
 LAVAPIPE = '/usr/share/vulkan/icd.d/lvp_icd.json'
