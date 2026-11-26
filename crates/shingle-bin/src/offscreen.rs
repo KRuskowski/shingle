@@ -88,12 +88,18 @@ pub fn run(
       }
       if output.take_presented() {
         sequence += 1;
-        frontend.compositor_mut().frame_presented(PresentInfo {
-          time: shingle::monotonic_time(),
-          refresh_ns: refresh_ns(interval),
-          seq: sequence,
-          flags: PresentationFlags::empty(),
-        });
+        let compositor = frontend.compositor_mut();
+        // The offscreen target is the first output's until MO-5.
+        let primary = compositor.primary_output();
+        compositor.frame_presented(
+          &primary,
+          PresentInfo {
+            time: shingle::monotonic_time(),
+            refresh_ns: refresh_ns(interval),
+            seq: sequence,
+            flags: PresentationFlags::empty(),
+          },
+        );
       }
     }
     let timeout =

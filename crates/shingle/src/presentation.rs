@@ -64,19 +64,38 @@ impl Presented {
   }
 }
 
-/// Sends feedback for a presented frame: `presented` for surfaces in it,
-/// `discarded` for the rest.
-pub(crate) fn frame(state: &mut CompositorState, info: &PresentInfo) {
+/// Sends feedback for a frame presented on output `id`: `presented`, with
+/// that output as `sync_output`, for surfaces in it, nothing yet for
+/// surfaces shown on another output, and `discarded` for the rest.
+pub(crate) fn frame(
+  state: &mut CompositorState,
+  id: &shingle_core::OutputId,
+  info: &PresentInfo,
+) {
   let visible = state
-    .visible_surfaces()
+    .visible_surfaces_on(id)
     .into_iter()
+    .map(|surface| surface.id)
+    .collect::<HashSet<_>>();
+  let elsewhere = state
+    .outputs
+    .iter()
+    .filter(|output| output.id != *id)
+    .map(|output| output.id.clone())
+    .collect::<Vec<_>>()
+    .iter()
+    .flat_map(|other| state.visible_surfaces_on(other))
     .map(|surface| surface.id)
     .collect::<HashSet<_>>();
   let pending = std::mem::take(&mut state.presentation.pending);
   let presented = Presented::new(info);
   for feedback in pending {
     if !visible.contains(&feedback.surface) {
-      feedback.resource.discarded();
+      if elsewhere.contains(&feedback.surface) {
+        state.presentation.pending.push(feedback);
+      } else {
+        feedback.resource.discarded();
+      }
       continue;
     }
     let client = state.surface_ids.get(&feedback.surface).and_then(|object| {
@@ -85,7 +104,12 @@ pub(crate) fn frame(state: &mut CompositorState, info: &PresentInfo) {
         .get(object)
         .map(|surface| surface.client.clone())
     });
-    for output in state.outputs.values().filter(|output| {
+    let bound = state
+      .outputs
+      .get(id)
+      .into_iter()
+      .flat_map(|output| output.bound.values());
+    for output in bound.filter(|output| {
       client.as_ref().is_some_and(|client| {
         output
           .client()

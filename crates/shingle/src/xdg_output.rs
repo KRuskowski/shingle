@@ -27,19 +27,26 @@ pub(crate) fn update(state: &mut CompositorState) {
   }
 }
 
+/// Sends the logical geometry of the output `resource` was created for,
+/// or of the first output when that `wl_output` stands for an output that
+/// is gone.
 fn send_metadata(
   state: &CompositorState,
   resource: &ZxdgOutputV1,
   created: bool,
 ) {
-  let output = state.output;
-  resource.logical_position(output.x, output.y);
-  resource.logical_size(output.width as i32, output.height as i32);
+  let output = resource
+    .data::<WlOutput>()
+    .and_then(|bound| state.outputs.of_resource(bound))
+    .unwrap_or_else(|| state.primary());
+  let rect = output.rect;
+  resource.logical_position(rect.x, rect.y);
+  resource.logical_size(rect.width as i32, rect.height as i32);
   if created && resource.version() >= 2 {
-    resource.name(state.output_info.name.clone());
+    resource.name(output.info.name.clone());
   }
   if (created && resource.version() >= 2) || resource.version() >= 3 {
-    resource.description(state.output_info.description());
+    resource.description(output.info.description());
   }
   if resource.version() >= 3 {
     if let Some(output) = resource.data::<WlOutput>()

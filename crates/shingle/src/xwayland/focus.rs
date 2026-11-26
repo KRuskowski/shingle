@@ -67,11 +67,12 @@ pub(crate) fn stacking(state: &CompositorState) -> Vec<Window> {
   if x_windows.is_empty() {
     return Vec::new();
   }
-  let current = state.core.current_workspace(&state.output_id).ok();
+  let current = state.core.current_workspace(&state.active_output).ok();
   let mut trees = Vec::new();
   for output in state.core.outputs() {
     for workspace in state.core.workspaces(output).unwrap_or_default() {
-      let is_current = *output == state.output_id && Some(workspace) == current;
+      let is_current =
+        *output == state.active_output && Some(workspace) == current;
       if let Ok(tree) = state.core.tree(output, workspace) {
         trees.push((is_current, tree));
       }

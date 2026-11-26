@@ -127,7 +127,7 @@ pub(crate) fn geometry(
   let area = if layer.current.exclusive_zone == 0 {
     usable_output(state)
   } else {
-    state.output
+    state.primary().rect
   };
   let width = surface
     .buffer
@@ -169,13 +169,23 @@ pub(crate) fn geometry(
   Some(Rect::new(x, y, width, height))
 }
 
+/// Lays out every workspace set in its output's workarea: the first
+/// output's minus the exclusive zones of layer surfaces, which are all on
+/// it until they have outputs of their own (MO-3), and every other
+/// output's whole rectangle.
 pub(crate) fn update_workarea(state: &mut CompositorState) {
   let workarea = usable_output(state);
-  if state
-    .core
-    .set_output_workarea(&state.output_id, workarea)
-    .is_ok()
-  {
+  let primary = state.primary().id.clone();
+  let others = state
+    .outputs
+    .iter()
+    .filter(|output| output.id != primary)
+    .map(|output| (output.id.clone(), output.rect))
+    .collect::<Vec<_>>();
+  for (id, rect) in others {
+    let _ = state.core.set_output_workarea(&id, rect);
+  }
+  if state.core.set_output_workarea(&primary, workarea).is_ok() {
     shell::reconfigure_all(state);
     reconfigure(state);
   }
@@ -228,13 +238,14 @@ pub(crate) fn assign_popup(
 
 fn configure_surface(state: &mut CompositorState, object: &ObjectId) {
   let serial = state.serial();
+  let output = state.primary().rect;
   let Some(surface) = state.surfaces.get_mut(object) else {
     return;
   };
   let Role::Layer(layer) = &mut surface.role else {
     return;
   };
-  let (width, height) = configured_size(state.output, &layer.pending);
+  let (width, height) = configured_size(output, &layer.pending);
   layer.resource.configure(serial, width, height);
   layer.serials.insert(serial);
   layer.configured = (width, height);
@@ -268,7 +279,7 @@ fn configured_size(output: Rect, layer: &LayerState) -> (u32, u32) {
 }
 
 fn usable_output(state: &CompositorState) -> Rect {
-  let mut output = state.output;
+  let mut output = state.primary().rect;
   let mut surfaces = state
     .surfaces
     .values()

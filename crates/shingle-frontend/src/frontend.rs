@@ -246,8 +246,10 @@ impl Frontend {
     Ok(frontend)
   }
 
-  /// Starts the clients [`Frontend::new`] left for later: the restored
-  /// session's, autostart and the `spawn` program, all in
+  /// Settles the restored session's workspace sets on the outputs the
+  /// backend added ([`Compositor::restore_outputs`]) and starts the clients
+  /// [`Frontend::new`] left for later: the restored session's, autostart
+  /// and the `spawn` program, all in
   /// [`Compositor::client_environment`], and prints `WAYLAND_DISPLAY` and
   /// `DISPLAY`. Only the first call does anything.
   ///
@@ -259,6 +261,9 @@ impl Frontend {
     let Some(startup) = self.startup.take() else {
       return Ok(());
     };
+    // The backend has added its outputs by now, so saved workspace sets
+    // that none of them took are settled before clients connect.
+    self.compositor.restore_outputs();
     let environment = self.compositor.client_environment();
     if let Some(snapshot) = &startup.restored {
       let report =
@@ -567,7 +572,9 @@ impl Frontend {
         | Event::StackingOrderChanged { .. }
         | Event::ShowDesktopChanged(_)
         | Event::LayoutChanged => save = true,
-        Event::OutputChanged { .. } => {
+        Event::OutputChanged { .. }
+        | Event::OutputAdded { .. }
+        | Event::OutputRemoved { .. } => {
           self.workspace_transition = None;
           save = true;
         }
@@ -576,7 +583,7 @@ impl Frontend {
         }
         Event::ToggleExpo => self.toggle_expo(),
         Event::InvertToggle => self.toggle_inversion(),
-        Event::WorkspaceChanged { workspace } => {
+        Event::WorkspaceChanged { workspace, .. } => {
           let target = workspace.saturating_sub(1) as usize;
           let overview_active = self.scale.is_some()
             || self.scale_exit.is_some()

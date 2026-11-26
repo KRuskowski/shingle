@@ -75,7 +75,8 @@ pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {
     let manager = &state.ext_workspaces.managers[&manager_id];
     // Workspace ids carry the output name, so a renamed output gets new
     // workspaces, as a replaced output does in Wayfire.
-    if manager.grid != grid || manager.output_name != state.output_info.name {
+    if manager.grid != grid || manager.output_name != state.primary().info.name
+    {
       rebuild_manager(state, handle, &manager_id);
       rebuilt.insert(manager_id);
       continue;
@@ -140,8 +141,11 @@ fn sync_outputs(
   let Some(client) = manager.resource.client() else {
     return dirty;
   };
+  // Until each output has its own group (MO-3), the group is the first
+  // output's.
   let outputs = state
-    .outputs
+    .primary()
+    .bound
     .iter()
     .filter(|(_, output)| {
       output
@@ -220,9 +224,10 @@ fn create_manager_contents(
     return;
   };
   let grid = (state.workspace_width, state.workspace_height);
+  let name = state.primary().info.name.clone();
   if let Some(manager) = state.ext_workspaces.managers.get_mut(manager_id) {
     manager.grid = grid;
-    manager.output_name.clone_from(&state.output_info.name);
+    manager.output_name = name;
   }
   let Ok(group) = client
     .create_resource::<ExtWorkspaceGroupHandleV1, (), CompositorState>(
@@ -235,8 +240,11 @@ fn create_manager_contents(
   };
   manager_resource.workspace_group(&group);
   group.capabilities(ext_workspace_group_handle_v1::GroupCapabilities::empty());
+  // Until each output has its own group (MO-3), the group is the first
+  // output's.
   let outputs = state
-    .outputs
+    .primary()
+    .bound
     .iter()
     .filter(|(_, output)| {
       output
@@ -288,7 +296,7 @@ fn create_workspace(
   };
   let x = index as u32 % grid.0;
   let y = index as u32 / grid.0;
-  let id = format!("{}:workspace-{x}-{y}", state.output_info.name);
+  let id = format!("{}:workspace-{x}-{y}", state.primary().info.name);
   manager.resource.workspace(&workspace);
   workspace.id(id.clone());
   workspace.name(format!("Workspace {}", index + 1));
@@ -320,7 +328,7 @@ fn create_workspace(
 fn current_workspace(state: &CompositorState) -> usize {
   state
     .core
-    .current_workspace(&state.output_id)
+    .current_workspace(&state.active_output)
     .map(|workspace| {
       workspace.y as usize * state.workspace_width as usize
         + workspace.x as usize

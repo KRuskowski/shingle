@@ -514,7 +514,7 @@ fn placement(
   if fixed {
     let current = toplevel_object(state, window)
       .and_then(|object| shell::surface_geometry(state, &object))
-      .unwrap_or(state.output);
+      .unwrap_or(state.active().rect);
     return Placement::Fixed(geometry(current));
   }
   let workarea = info
@@ -524,7 +524,7 @@ fn placement(
         .tree(&info.location.output, info.location.workspace)
         .ok()
     })
-    .map_or(state.output, |tree| tree.workarea());
+    .map_or(state.active().rect, |tree| tree.workarea());
   Placement::Floating {
     workarea: geometry(workarea),
   }
@@ -720,7 +720,7 @@ mod tests {
     let mut fixture = Fixture::new();
     map(&mut fixture, XTERM, "XTerm", 5);
     map(&mut fixture, XEYES, "XEyes", 6);
-    let output = fixture.state().output;
+    let output = fixture.state().active().rect;
     let requests = fixture.requests();
     let last_geometry = |window| {
       requests.iter().rev().find_map(|request| match request {
@@ -785,7 +785,7 @@ mod tests {
   #[test]
   fn an_x_window_claims_a_placeholder_by_class() {
     let mut fixture = Fixture::new();
-    let output = fixture.state().output_id.clone();
+    let output = fixture.state().active_output.clone();
     let placeholder = fixture
       .state()
       .core
@@ -870,7 +870,7 @@ mod tests {
     let mut fixture = Fixture::new();
     map(&mut fixture, XTERM, "XTerm", 5);
     let window = fixture.windows("XTerm")[0];
-    let output = fixture.state().output;
+    let output = fixture.state().active().rect;
     fixture.requests();
     shell::set_fullscreen(fixture.state(), window, true).unwrap();
     let requests = fixture.requests();
@@ -916,7 +916,7 @@ mod tests {
     });
     let window = fixture.windows("XTerm")[0];
     // Tiled: the tile comes back.
-    let output = fixture.state().output;
+    let output = fixture.state().active().rect;
     fixture.requests();
     fixture.apply(XwmEvent::ConfigureRequest {
       window: XTERM,

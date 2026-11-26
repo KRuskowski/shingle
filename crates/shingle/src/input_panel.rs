@@ -124,7 +124,7 @@ pub(crate) fn geometry(
   };
   let (width, height) = crate::viewport::dimensions(state, object)
     .unwrap_or_else(|| shell::logical_buffer_dimensions(surface));
-  let output = state.output;
+  let output = state.primary().rect;
   if matches!(panel.kind, PanelKind::Bottom) {
     return Some(Rect::new(
       centered(output.x, output.width, width),

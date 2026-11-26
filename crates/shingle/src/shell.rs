@@ -327,7 +327,9 @@ pub(crate) fn surface_geometry(
         .window_info(window)
         .is_ok_and(|info| info.state.fullscreen)
     }) {
-      Some(state.output)
+      toplevel
+        .window()
+        .map(|window| state.output_of_window(window).rect)
     } else if !toplevel.tiled
       && toplevel.window().is_some_and(|window| {
         state
@@ -342,7 +344,7 @@ pub(crate) fn surface_geometry(
         .and_then(|location| {
           state.core.tree(&location.output, location.workspace).ok()
         })
-        .map_or(state.output, |tree| tree.workarea())
+        .map_or(state.active().rect, |tree| tree.workarea())
         .into()
     } else if !toplevel.tiled {
       Some(toplevel.floating_geometry)
@@ -351,7 +353,7 @@ pub(crate) fn surface_geometry(
         toplevel
           .window()
           .and_then(|window| state.core.window_layout(window).ok())
-          .map_or(state.output, |layout| layout.geometry),
+          .map_or(state.active().rect, |layout| layout.geometry),
       )
     };
   }
@@ -394,7 +396,7 @@ pub(crate) fn surface_geometry(
         height,
       ))
     }
-    Role::SessionLock { .. } => Some(state.output),
+    Role::SessionLock { .. } => Some(state.primary().rect),
     _ => {
       let (width, height) = crate::viewport::dimensions(state, object)
         .unwrap_or_else(|| logical_buffer_dimensions(surface));
@@ -507,10 +509,10 @@ fn finish_map(state: &mut CompositorState, window: WindowId) {
   reconfigure_all(state);
   if state
     .core
-    .current_workspace(&state.output_id)
+    .current_workspace(&state.active_output)
     .is_ok_and(|workspace| {
       state.core.window_info(window).is_ok_and(|info| {
-        info.location.output == state.output_id
+        info.location.output == state.active_output
           && info.location.workspace == workspace
       })
     })
@@ -649,11 +651,11 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
     reconfigure_all(state);
     if state
       .core
-      .current_workspace(&state.output_id)
+      .current_workspace(&state.active_output)
       .is_ok_and(|workspace| {
         state.core.window_info(window).is_ok_and(|info| {
           info.presence == WindowPresence::Mapped
-            && info.location.output == state.output_id
+            && info.location.output == state.active_output
             && info.location.workspace == workspace
         })
       })
@@ -681,8 +683,8 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
     surface.client == active_client
       && matches!(surface.role, Role::SessionLock { .. })
       && surface.buffer.as_ref().is_some_and(|buffer| {
-        buffer.width == state.output.width
-          && buffer.height == state.output.height
+        buffer.width == state.primary().rect.width
+          && buffer.height == state.primary().rect.height
           && covers_opaquely(buffer)
       })
   });
@@ -873,8 +875,12 @@ fn activated_window(state: &CompositorState) -> Option<WindowId> {
   // A Wayfire toplevel stays activated while one of its X menus has the
   // keyboard.
   if crate::xwayland::unmanaged::has_keyboard_focus(state) {
-    let workspace = state.core.current_workspace(&state.output_id).ok()?;
-    return state.core.tree(&state.output_id, workspace).ok()?.focused();
+    let workspace = state.core.current_workspace(&state.active_output).ok()?;
+    return state
+      .core
+      .tree(&state.active_output, workspace)
+      .ok()?
+      .focused();
   }
   if !state.keep_last_toplevel_activated {
     return None;
@@ -886,8 +892,12 @@ fn activated_window(state: &CompositorState) -> Option<WindowId> {
   ) {
     return None;
   }
-  let workspace = state.core.current_workspace(&state.output_id).ok()?;
-  state.core.tree(&state.output_id, workspace).ok()?.focused()
+  let workspace = state.core.current_workspace(&state.active_output).ok()?;
+  state
+    .core
+    .tree(&state.active_output, workspace)
+    .ok()?
+    .focused()
 }
 
 pub(crate) fn reconfigure_all(state: &mut CompositorState) {
@@ -922,18 +932,20 @@ pub(crate) fn reconfigure_all(state: &mut CompositorState) {
       .get(&object)
       .and_then(|surface| surface.role.toplevel())
       .map(|toplevel| (toplevel.tiled, toplevel.floating_geometry))
-      .unwrap_or((true, state.output));
+      .unwrap_or((true, state.active().rect));
     let geometry = if fullscreen {
-      state.output
+      window.map_or(state.active().rect, |window| {
+        state.output_of_window(window).rect
+      })
     } else if tiled {
-      layout.map_or(state.output, |layout| layout.geometry)
+      layout.map_or(state.active().rect, |layout| layout.geometry)
     } else if maximized {
       window
         .and_then(|window| state.core.window_location(window).ok())
         .and_then(|location| {
           state.core.tree(&location.output, location.workspace).ok()
         })
-        .map_or(state.output, |tree| tree.workarea())
+        .map_or(state.active().rect, |tree| tree.workarea())
     } else {
       floating_geometry
     };
@@ -950,13 +962,14 @@ pub(crate) fn reconfigure_all(state: &mut CompositorState) {
 
 fn sync_fullscreen_idle(state: &mut CompositorState) {
   let is_visible_fullscreen = |window: WindowId| {
-    let Ok(workspace) = state.core.current_workspace(&state.output_id) else {
+    let Ok(workspace) = state.core.current_workspace(&state.active_output)
+    else {
       return false;
     };
     state.core.window_info(window).is_ok_and(|info| {
       info.state.fullscreen
         && !info.state.minimized
-        && info.location.output == state.output_id
+        && info.location.output == state.active_output
         && (info.state.sticky || info.location.workspace == workspace)
     })
   };
@@ -1037,7 +1050,7 @@ pub(crate) fn reconfigure_lock_surfaces(state: &mut CompositorState) {
 
 fn configure_lock_surface(state: &mut CompositorState, object: &ObjectId) {
   let serial = state.serial();
-  let output = state.output;
+  let output = state.primary().rect;
   let Some(surface) = state.surfaces.get_mut(object) else {
     return;
   };
@@ -1127,11 +1140,12 @@ pub(crate) fn materialize_toplevel(
   let (window, created) = match state.core.reconcile_mapped(&identity) {
     Some(window) => (window, false),
     None => {
-      let workspace = state.core.current_workspace(&state.output_id).ok()?;
+      let workspace =
+        state.core.current_workspace(&state.active_output).ok()?;
       let window = state
         .core
         .attach_window_with_state_and_parent(
-          &state.output_id,
+          &state.active_output,
           workspace,
           identity.clone(),
           LeafState {
@@ -1244,9 +1258,9 @@ pub(crate) fn enable_show_desktop(state: &mut CompositorState) {
   state.show_desktop_focus = crate::input::focused_window(state);
   let windows = state
     .core
-    .current_workspace(&state.output_id)
+    .current_workspace(&state.active_output)
     .ok()
-    .and_then(|workspace| state.core.tree(&state.output_id, workspace).ok())
+    .and_then(|workspace| state.core.tree(&state.active_output, workspace).ok())
     .map(|tree| tree.stack_order().to_vec())
     .unwrap_or_default();
   for window in windows {
@@ -1445,10 +1459,10 @@ pub(crate) fn snap_window(
 ) -> Result<bool, crate::Error> {
   let workarea = state
     .core
-    .current_workspace(&state.output_id)
+    .current_workspace(&state.active_output)
     .ok()
-    .and_then(|workspace| state.core.tree(&state.output_id, workspace).ok())
-    .map_or(state.output, |tree| tree.workarea());
+    .and_then(|workspace| state.core.tree(&state.active_output, workspace).ok())
+    .map_or(state.active().rect, |tree| tree.workarea());
   let Some(geometry) = snap_geometry(workarea, slot) else {
     return Ok(false);
   };
@@ -1745,7 +1759,7 @@ fn configured_geometry(state: &CompositorState, object: &ObjectId) -> Rect {
     .get(object)
     .and_then(|surface| surface.role.toplevel())
     .and_then(|toplevel| toplevel.configured_geometry)
-    .unwrap_or(state.output)
+    .unwrap_or(state.active().rect)
 }
 
 pub(crate) fn assign_pending_popup(
@@ -2403,7 +2417,7 @@ fn popup_geometry(
   let mut x = i64::from(rect.x) + anchor_x + gravity_x;
   let mut y = i64::from(rect.y) + anchor_y + gravity_y;
   if let Some(parent_geometry) = surface_geometry(state, parent) {
-    let output = state.output;
+    let output = state.active().rect;
     let global_x = i64::from(parent_geometry.x) + x;
     let global_y = i64::from(parent_geometry.y) + y;
     let max_x = i64::from(output.x) + i64::from(output.width)
@@ -2530,7 +2544,7 @@ impl Dispatch<ExtSessionLockV1, SessionLockData> for CompositorState {
           );
           return;
         }
-        if !state.outputs.contains_key(&output.id()) {
+        if !state.outputs.is_bound(&output.id()) {
           resource.post_error(
             ext_session_lock_v1::Error::DuplicateOutput,
             "unknown or removed output",
@@ -2605,6 +2619,7 @@ impl Dispatch<ExtSessionLockSurfaceV1, SessionLockSurfaceData>
         }
       }
       ext_session_lock_surface_v1::Request::AckConfigure { serial } => {
+        let output = state.primary().rect;
         if let Some(surface) = state.surfaces.get_mut(&object)
           && let Role::SessionLock { serials, acked, .. } = &mut surface.role
         {
@@ -2615,7 +2630,7 @@ impl Dispatch<ExtSessionLockSurfaceV1, SessionLockSurfaceData>
             );
           } else {
             serials.retain(|candidate| *candidate > serial);
-            *acked = Some((serial, state.output.width, state.output.height));
+            *acked = Some((serial, output.width, output.height));
           }
         }
       }
@@ -2900,7 +2915,7 @@ mod tests {
 
     let (mut compositor, path) = crate::tests::test_compositor();
     let mut client = TestClient::connect(&mut compositor, &path);
-    let width = u64::from(compositor.state.output.width);
+    let width = u64::from(compositor.state.active().rect.width);
     let stays = client.toplevel(&mut compositor, "stays");
     client.attach_buffer(&mut compositor, &stays.surface, 64, 64);
     let hides = client.toplevel(&mut compositor, "hides");
@@ -2963,7 +2978,7 @@ mod tests {
   fn blocked_new_view_joins_the_layout_when_released() {
     let (mut compositor, path) = crate::tests::test_compositor();
     let mut client = TestClient::connect(&mut compositor, &path);
-    let width = u64::from(compositor.state.output.width);
+    let width = u64::from(compositor.state.active().rect.width);
     let first = client.toplevel(&mut compositor, "first");
     client.attach_buffer(&mut compositor, &first.surface, 64, 64);
     let first_id = windows_with(&compositor.state, "first")[0];
@@ -2989,7 +3004,7 @@ mod tests {
     );
     assert_eq!(
       client.events.last_configure(&first.toplevel),
-      Some((width as i32, compositor.state.output.height as i32)),
+      Some((width as i32, compositor.state.active().rect.height as i32)),
       "the neighbour of a blocked view keeps its size"
     );
     // The blocked view still answers state queries.
@@ -3042,7 +3057,7 @@ mod tests {
   fn view_blocked_after_creation_gives_its_tile_back() {
     let (mut compositor, path) = crate::tests::test_compositor();
     let mut client = TestClient::connect(&mut compositor, &path);
-    let width = u64::from(compositor.state.output.width);
+    let width = u64::from(compositor.state.active().rect.width);
     let first = client.toplevel(&mut compositor, "first");
     client.attach_buffer(&mut compositor, &first.surface, 64, 64);
     let first_id = windows_with(&compositor.state, "first")[0];
@@ -3096,8 +3111,8 @@ mod tests {
   #[test]
   fn blocked_restored_placeholder_keeps_its_slot() {
     let (mut compositor, path) = crate::tests::test_compositor();
-    let output = compositor.state.output_id.clone();
-    let width = u64::from(compositor.state.output.width);
+    let output = compositor.state.active_output.clone();
+    let width = u64::from(compositor.state.active().rect.width);
     let placeholder = compositor
       .state
       .core
@@ -3140,7 +3155,7 @@ mod tests {
   #[test]
   fn title_before_app_id_claims_the_restored_placeholder() {
     let mut state = crate::input_device::tests::test_state();
-    let output = state.output_id.clone();
+    let output = state.active_output.clone();
     let identity = LaunchIdentity {
       app_id: "restore.test".into(),
       launch_id: Some("shingle-restore-1".into()),

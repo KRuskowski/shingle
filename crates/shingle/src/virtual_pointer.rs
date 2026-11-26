@@ -271,7 +271,7 @@ fn apply_frame(state: &mut CompositorState, resource: &ZwlrVirtualPointerV1) {
       } => {
         input::pointer_event_time(state, time);
         if x_extent > 0 && y_extent > 0 {
-          let output = state.output;
+          let output = state.primary().rect;
           let x = f64::from(output.x)
             + f64::from(output.width) * f64::from(x.min(x_extent))
               / f64::from(x_extent);

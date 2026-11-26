@@ -1,9 +1,10 @@
 //! wlr-output-management: heads, modes and configurations.
 //!
-//! Every manager gets one head for the output, with the backend's mode list
+//! Every manager gets one head per output, with the backend's mode list
 //! ([`crate::OutputInfo::modes`]) or, without one, a single mode that is the
-//! output rectangle in physical pixels. An applied or tested configuration
-//! changes position, scale and transform itself. A mode change goes to the
+//! output rectangle in physical pixels. Heads come and go with outputs. An
+//! applied or tested configuration changes position, scale and transform
+//! itself. A mode change goes to the
 //! backend as a [`crate::OutputRequest`] when the backend lists modes, and
 //! the configuration is answered when the backend finishes it
 //! ([`finish_request`]); without a list, as in nested and headless, a
@@ -25,6 +26,9 @@ use wayland_server::{
   protocol::wl_output,
 };
 
+use shingle_config::OutputPosition;
+use shingle_core::OutputId;
+
 use crate::{
   OutputPlacement, OutputRequest, OutputRequestId, RequestedMode,
   state::CompositorState,
@@ -45,6 +49,8 @@ pub(crate) struct OutputManagement {
 struct Head {
   resource: ZwlrOutputHeadV1,
   manager: ObjectId,
+  /// The output the head stands for.
+  output: OutputId,
 }
 
 struct Mode {
@@ -83,8 +89,17 @@ struct ConfigurationHead {
 /// A configuration whose mode change the backend carries out.
 struct Pending {
   resource: ZwlrOutputConfigurationV1,
-  placement: OutputPlacement,
+  /// The placement of each configured output, applied once the backend
+  /// made the mode change.
+  placements: Vec<(OutputId, OutputPlacement)>,
   test: bool,
+}
+
+/// What a configuration asks of one output.
+struct Change {
+  output: OutputId,
+  placement: OutputPlacement,
+  mode: Option<ModeChoice>,
 }
 
 pub(crate) fn create_global(handle: &DisplayHandle) {
@@ -100,131 +115,144 @@ fn next_serial(state: &mut CompositorState) -> u32 {
   state.output_management.serial
 }
 
-/// The physical size of the mode that stands for the output rectangle.
-fn rectangle_mode_size(state: &CompositorState) -> (i32, i32) {
-  let (width, height) = crate::output_transform::physical_size(
-    state.output.width,
-    state.output.height,
-    state.output_scale,
-    state.output_transform,
-  );
-  (
-    width.min(i32::MAX as u32) as i32,
-    height.min(i32::MAX as u32) as i32,
-  )
-}
-
-/// Sends the current mode, position, transform and scale to every head,
-/// and `done` to every manager.
+/// Sends the current mode, position, transform and scale of its output to
+/// every head, and `done` to every manager.
 pub(crate) fn sync(state: &mut CompositorState) {
   if state.output_management.managers.is_empty() {
     return;
   }
   let serial = next_serial(state);
-  let (width, height) = rectangle_mode_size(state);
-  let current = state.output_info.current_mode;
-  let output = state.output;
   for mode in state.output_management.modes.values() {
     let Some(head) = state.output_management.heads.get(&mode.head) else {
       continue;
     };
+    let Some(output) = state.outputs.get(&head.output) else {
+      continue;
+    };
     match mode.index {
       None => {
+        let (width, height) = output.mode_size();
         mode.resource.size(width, height);
         mode
           .resource
-          .refresh(state.output_info.refresh_mhz.min(i32::MAX as u32) as i32);
+          .refresh(output.info.refresh_mhz.min(i32::MAX as u32) as i32);
         head.resource.current_mode(&mode.resource);
       }
-      Some(index) if Some(index) == current => {
+      Some(index) if Some(index) == output.info.current_mode => {
         head.resource.current_mode(&mode.resource);
       }
       Some(_) => {}
     }
   }
   for head in state.output_management.heads.values() {
-    head.resource.position(output.x, output.y);
-    head.resource.transform(state.output_transform);
-    head.resource.scale(state.output_scale);
+    let Some(output) = state.outputs.get(&head.output) else {
+      continue;
+    };
+    head.resource.position(output.rect.x, output.rect.y);
+    head.resource.transform(output.transform);
+    head.resource.scale(output.scale);
   }
   for manager in state.output_management.managers.values() {
     manager.done(serial);
   }
 }
 
-/// Replaces the mode objects of every head after the backend's mode list
-/// changed, then sends the current state.
-pub(crate) fn modes_changed(
-  state: &mut CompositorState,
-  handle: &DisplayHandle,
-) {
+/// Replaces the mode objects of output `id`'s heads after the backend's
+/// mode list changed, then sends the current state.
+pub(crate) fn modes_changed(state: &mut CompositorState, id: &OutputId) {
+  let Some(handle) = state.display.clone() else {
+    return;
+  };
   let heads: Vec<(ObjectId, ZwlrOutputHeadV1)> = state
     .output_management
     .heads
     .iter()
-    .map(|(id, head)| (id.clone(), head.resource.clone()))
+    .filter(|(_, head)| head.output == *id)
+    .map(|(head_id, head)| (head_id.clone(), head.resource.clone()))
     .collect();
-  for (id, head) in heads {
+  for (head_id, head) in heads {
     state.output_management.modes.retain(|_, mode| {
-      if mode.head != id {
+      if mode.head != head_id {
         return true;
       }
       mode.resource.finished();
       false
     });
     if let Some(client) = head.client() {
-      send_modes(state, handle, &client, &head);
+      send_modes(state, &handle, &client, &head, id);
     }
   }
   sync(state);
 }
 
-/// Finishes every head, which stood for an output that was replaced, and
-/// announces a head for the new output to every manager.
-pub(crate) fn output_replaced(
-  state: &mut CompositorState,
-  handle: &DisplayHandle,
-) {
-  for (_, mode) in state.output_management.modes.drain() {
-    mode.resource.finished();
+/// Finishes the heads of output `id`, which is gone or renamed, and their
+/// modes, then sends the current state.
+pub(crate) fn output_removed(state: &mut CompositorState, id: &OutputId) {
+  let heads = state
+    .output_management
+    .heads
+    .iter()
+    .filter(|(_, head)| head.output == *id)
+    .map(|(head_id, _)| head_id.clone())
+    .collect::<Vec<_>>();
+  for head_id in heads {
+    state.output_management.modes.retain(|_, mode| {
+      if mode.head != head_id {
+        return true;
+      }
+      mode.resource.finished();
+      false
+    });
+    if let Some(head) = state.output_management.heads.remove(&head_id) {
+      head.resource.finished();
+    }
   }
-  for (_, head) in state.output_management.heads.drain() {
-    head.resource.finished();
-  }
+  sync(state);
+}
+
+/// Announces a head for the new output `id` to every manager.
+pub(crate) fn output_added(state: &mut CompositorState, id: &OutputId) {
+  let Some(handle) = state.display.clone() else {
+    return;
+  };
   let managers: Vec<ZwlrOutputManagerV1> =
     state.output_management.managers.values().cloned().collect();
   for manager in managers {
     if let Some(client) = manager.client() {
-      announce_head(state, handle, &client, &manager);
+      announce_head(state, &handle, &client, &manager, id);
     }
   }
   sync(state);
 }
 
-/// Creates the mode objects of `head`: the backend's modes, or the mode
-/// that stands for the output rectangle.
+/// Creates the mode objects of `head`: the backend's modes of output `id`,
+/// or the mode that stands for its rectangle.
 fn send_modes(
   state: &mut CompositorState,
   handle: &DisplayHandle,
   client: &Client,
   head: &ZwlrOutputHeadV1,
+  id: &OutputId,
 ) {
+  let Some(output) = state.outputs.get(id) else {
+    return;
+  };
   let version = head.version().min(3);
   let listed: Vec<(Option<usize>, crate::OutputModeInfo)> =
-    if state.output_info.modes.is_empty() {
-      let (width, height) = rectangle_mode_size(state);
+    if output.info.modes.is_empty() {
+      let (width, height) = output.mode_size();
       vec![(
         None,
         crate::OutputModeInfo {
           width: width as u32,
           height: height as u32,
-          refresh_mhz: state.output_info.refresh_mhz,
+          refresh_mhz: output.info.refresh_mhz,
           preferred: true,
         },
       )]
     } else {
-      state
-        .output_info
+      output
+        .info
         .modes
         .iter()
         .enumerate()
@@ -263,14 +291,19 @@ fn send_modes(
   }
 }
 
-/// Announces the output's head with its description and modes to
+/// Announces output `id`'s head with its description and modes to
 /// `manager`. The caller sends the current state and `done`.
 fn announce_head(
   state: &mut CompositorState,
   handle: &DisplayHandle,
   client: &Client,
   manager: &ZwlrOutputManagerV1,
+  id: &OutputId,
 ) {
+  let Some(info) = state.outputs.get(id).map(|output| output.info.clone())
+  else {
+    return;
+  };
   let version = manager.version();
   let Ok(head) = client
     .create_resource::<ZwlrOutputHeadV1, (), CompositorState>(
@@ -282,7 +315,6 @@ fn announce_head(
     return;
   };
   manager.head(&head);
-  let info = &state.output_info;
   head.name(info.name.clone());
   head.description(info.description());
   let (width_mm, height_mm) = info.physical_size_mm;
@@ -308,9 +340,10 @@ fn announce_head(
     Head {
       resource: head.clone(),
       manager: manager.id(),
+      output: id.clone(),
     },
   );
-  send_modes(state, handle, client, &head);
+  send_modes(state, handle, client, &head, id);
 }
 
 impl GlobalDispatch<ZwlrOutputManagerV1, ()> for CompositorState {
@@ -329,7 +362,14 @@ impl GlobalDispatch<ZwlrOutputManagerV1, ()> for CompositorState {
       .output_management
       .managers
       .insert(manager.id(), manager.clone());
-    announce_head(state, handle, client, &manager);
+    let ids = state
+      .outputs
+      .iter()
+      .map(|output| output.id.clone())
+      .collect::<Vec<_>>();
+    for id in &ids {
+      announce_head(state, handle, client, &manager, id);
+    }
     sync(state);
   }
 }
@@ -574,79 +614,99 @@ fn finish(
     );
     return;
   }
-  // Shingle drives one output; turning it off is DPMS's job.
+  // Turning outputs off and on comes with MO-3; until then it is DPMS's
+  // job.
   if !disabled.is_empty() {
     resource.failed();
     return;
   }
-  let mut placement = OutputPlacement {
-    x: state.output.x,
-    y: state.output.y,
-    width: 0,
-    height: 0,
-    scale: state.output_scale,
-    transform: state.output_transform,
-    refresh_mhz: 0,
-  };
-  let mut mode = None;
+  let mut changes = Vec::new();
   for head in &configured {
-    let Some(configuration_head) =
+    let Some(output) = state
+      .output_management
+      .heads
+      .get(head)
+      .and_then(|head| state.outputs.get(&head.output))
+    else {
+      continue;
+    };
+    let mut change = Change {
+      output: output.id.clone(),
+      placement: OutputPlacement {
+        position: output.position,
+        width: 0,
+        height: 0,
+        scale: output.scale,
+        transform: output.transform,
+        refresh_mhz: 0,
+      },
+      mode: None,
+    };
+    if let Some(configuration_head) =
       state.output_management.configuration_heads.values().find(
         |configuration_head| {
           configuration_head.configuration == resource.id()
             && &configuration_head.head == head
         },
       )
-    else {
-      continue;
-    };
-    if configuration_head.mode.is_some() {
-      mode = configuration_head.mode;
+    {
+      change.mode = configuration_head.mode;
+      if let Some((x, y)) = configuration_head.position {
+        change.placement.position = OutputPosition::Fixed { x, y };
+      }
+      if let Some(requested) = configuration_head.scale {
+        change.placement.scale = requested;
+      }
+      if let Some(requested) = configuration_head.transform {
+        change.placement.transform = requested;
+      }
+      if configuration_head.adaptive_sync == Some(true) {
+        resource.failed();
+        return;
+      }
     }
-    if let Some((x, y)) = configuration_head.position {
-      placement.x = x;
-      placement.y = y;
-    }
-    if let Some(requested) = configuration_head.scale {
-      placement.scale = requested;
-    }
-    if let Some(requested) = configuration_head.transform {
-      placement.transform = requested;
-    }
-    if configuration_head.adaptive_sync == Some(true) {
-      resource.failed();
-      return;
-    }
+    changes.push(change);
   }
-  match requested_mode(state, mode) {
-    Some(mode) => {
+  let requests = changes
+    .iter()
+    .filter_map(|change| requested_mode(state, &change.output, change.mode))
+    .collect::<Vec<_>>();
+  match requests.as_slice() {
+    [] => apply_locally(state, resource, changes, test),
+    [mode] => {
       let id = OutputRequestId(state.next_output_request);
       state.next_output_request += 1;
       state.output_requests.push(OutputRequest {
         id,
-        mode,
+        mode: *mode,
         test_only: test,
       });
       state.output_management.pending.insert(
         id,
         Pending {
           resource: resource.clone(),
-          placement,
+          placements: changes
+            .into_iter()
+            .map(|change| (change.output, change.placement))
+            .collect(),
           test,
         },
       );
     }
-    None => apply_locally(state, resource, placement, mode, test),
+    // A backend changes the mode of one output per configuration until
+    // requests name their output (MO-7).
+    _ => resource.failed(),
   }
 }
 
-/// The mode change the backend has to make, if the backend lists modes and
-/// `mode` is not the current one.
+/// The mode change the backend has to make on output `id`, if the backend
+/// lists its modes and `mode` is not the current one.
 fn requested_mode(
   state: &CompositorState,
+  id: &OutputId,
   mode: Option<ModeChoice>,
 ) -> Option<RequestedMode> {
-  let info = &state.output_info;
+  let info = &state.outputs.get(id)?.info;
   if info.modes.is_empty() {
     return None;
   }
@@ -669,33 +729,39 @@ fn requested_mode(
   }
 }
 
-/// Tests or applies a configuration without the backend: the placement,
-/// and a custom mode as the new physical size and refresh rate. As in
-/// Wayfire, the physical size stays across scale and transform changes,
-/// and the logical size follows from it.
+/// Tests or applies a configuration without the backend: each output's
+/// placement, and a custom mode as its new physical size and refresh rate.
+/// As in Wayfire, the physical size stays across scale and transform
+/// changes, and the logical size follows from it.
 fn apply_locally(
   state: &mut CompositorState,
   resource: &ZwlrOutputConfigurationV1,
-  placement: OutputPlacement,
-  mode: Option<ModeChoice>,
+  changes: Vec<Change>,
   test: bool,
 ) {
-  let mut physical = crate::output::physical_size(state);
-  let mut refresh = None;
-  if let Some(ModeChoice::Custom(width, height, refresh_mhz)) = mode {
-    physical = (width, height);
-    refresh = (refresh_mhz > 0).then_some(refresh_mhz);
-  }
   if test {
     resource.succeeded();
     return;
   }
-  if let Some(refresh_mhz) = refresh {
-    state.output_info.refresh_mhz = refresh_mhz;
+  let mut ok = true;
+  for change in changes {
+    let mut physical = crate::output::physical_size(state, &change.output);
+    if let Some(ModeChoice::Custom(width, height, refresh_mhz)) = change.mode {
+      physical = (width, height);
+      if refresh_mhz > 0
+        && let Some(output) = state.outputs.get_mut(&change.output)
+      {
+        output.info.refresh_mhz = refresh_mhz;
+      }
+    }
+    ok &=
+      crate::output::place(state, &change.output, change.placement, physical)
+        .is_ok();
   }
-  match crate::output::place(state, placement, physical) {
-    Ok(()) => resource.succeeded(),
-    Err(_) => resource.failed(),
+  if ok {
+    resource.succeeded();
+  } else {
+    resource.failed();
   }
 }
 
@@ -722,10 +788,15 @@ pub(crate) fn finish_request(
     pending.resource.succeeded();
     return;
   }
-  let physical = crate::output::physical_size(state);
-  match crate::output::place(state, pending.placement, physical) {
-    Ok(()) => pending.resource.succeeded(),
-    Err(_) => pending.resource.failed(),
+  let mut ok = true;
+  for (output, placement) in pending.placements {
+    let physical = crate::output::physical_size(state, &output);
+    ok &= crate::output::place(state, &output, placement, physical).is_ok();
+  }
+  if ok {
+    pending.resource.succeeded();
+  } else {
+    pending.resource.failed();
   }
 }
 

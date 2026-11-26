@@ -171,7 +171,7 @@ fn create_handle(
   manager.resource.toplevel(&resource);
   resource.title(info.title.clone());
   resource.app_id(info.app_id.clone());
-  if let Some(output) = state.outputs.values().find(|output| {
+  if let Some(output) = state.outputs.bound().find(|output| {
     output.client().as_ref().map(Client::id) == Some(client.id())
   }) {
     resource.output_enter(output);

@@ -77,7 +77,7 @@ fn create_control(
   output: WlOutput,
   control: ZwlrOutputPowerV1,
 ) {
-  if !state.outputs.contains_key(&output.id()) {
+  if !state.outputs.is_bound(&output.id()) {
     control.failed();
     return;
   }

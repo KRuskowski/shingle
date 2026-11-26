@@ -17,15 +17,21 @@
 //! [`crate::Compositor::finish_output_request`]. Without a mode list, as in
 //! nested and headless, the compositor applies custom modes itself.
 
+mod hotplug;
+mod registry;
+
 use std::{
   collections::BTreeMap,
   time::{Duration, Instant},
 };
 
+pub(crate) use hotplug::{add, park_restored, remove, restore};
+pub use registry::OutputKind;
+pub(crate) use registry::{OutputState, Outputs};
+use shingle_config::OutputPosition;
 use shingle_core::{OutputId, Rect};
 use wayland_server::{
   DisplayHandle, Resource,
-  backend::GlobalId,
   protocol::wl_output::{self, WlOutput},
 };
 
@@ -123,10 +129,9 @@ impl OutputInfo {
 /// size, scale and transform.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OutputPlacement {
-  /// Horizontal position of the top-left corner in the layout.
-  pub x: i32,
-  /// Vertical position of the top-left corner in the layout.
-  pub y: i32,
+  /// The position of the top-left corner in the layout: fixed, or `auto`,
+  /// placed by [`shingle_config::layout`] after the fixed outputs.
+  pub position: OutputPosition,
   /// Logical width before the transform, used when the backend gives no
   /// mode, as in nested and headless.
   pub width: u32,
@@ -146,8 +151,7 @@ impl OutputPlacement {
   pub fn from_config(config: &shingle_config::OutputConfig) -> Self {
     let (width, height) = configured_size(config);
     Self {
-      x: config.x,
-      y: config.y,
+      position: config.position,
       width,
       height,
       scale: config.scale,
@@ -231,8 +235,7 @@ impl Placements {
   pub(crate) fn new(config: &crate::Config) -> Self {
     Self {
       default: OutputPlacement {
-        x: config.output.x,
-        y: config.output.y,
+        position: config.output_position,
         width: config.output.width,
         height: config.output.height,
         scale: config.output_scale,
@@ -249,29 +252,91 @@ impl Placements {
   }
 }
 
-/// The `wl_output` global and the globals it replaced.
-#[derive(Default)]
-pub(crate) struct OutputGlobals {
-  current: Option<GlobalId>,
-  /// Bumped with each new global; outputs bound from an older one are
-  /// inert.
-  pub(crate) generation: u32,
-  retired: Vec<(GlobalId, Instant)>,
+/// Names one output for the per-output calls of [`crate::Compositor`]:
+/// the output's name, which is unique among the outputs that are there.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct OutputHandle(String);
+
+impl OutputHandle {
+  /// The handle of the output called `name`.
+  pub fn new(name: impl Into<String>) -> Self {
+    Self(name.into())
+  }
+
+  /// The output's name.
+  pub fn name(&self) -> &str {
+    &self.0
+  }
+
+  pub(crate) fn id(&self) -> OutputId {
+    OutputId::new(self.0.clone())
+  }
 }
 
-/// The data of a `wl_output` global: which generation it is.
+impl From<&OutputId> for OutputHandle {
+  fn from(id: &OutputId) -> Self {
+    Self(id.as_str().to_owned())
+  }
+}
+
+/// One output as [`crate::Compositor::outputs`] reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputView {
+  /// The output, for the per-output calls.
+  pub handle: OutputHandle,
+  /// Its IPC id: counted from 1 and never reused, so a replugged monitor
+  /// gets a new one, as in Wayfire.
+  pub ipc_id: u32,
+  /// Its rectangle in the layout, in logical pixels after the transform.
+  pub rect: Rect,
+  /// Its scale.
+  pub scale: f64,
+  /// Its transform.
+  pub transform: wl_output::Transform,
+  /// What clients are told about it.
+  pub info: OutputInfo,
+  /// Where it comes from.
+  pub kind: OutputKind,
+  /// The workspace set it shows.
+  pub wset: Option<shingle_core::WsetId>,
+  /// Whether the backend reported it gone while it was the last output,
+  /// so that it stays described but draws nothing and gets no frames.
+  pub dark: bool,
+}
+
+impl OutputView {
+  pub(crate) fn new(state: &CompositorState, output: &OutputState) -> Self {
+    Self {
+      handle: OutputHandle::from(&output.id),
+      ipc_id: output.ipc_id,
+      rect: output.rect,
+      scale: output.scale,
+      transform: output.transform,
+      info: output.info.clone(),
+      kind: output.kind,
+      wset: state.core.wset_of(&output.id),
+      dark: output.dark,
+    }
+  }
+}
+
+/// The data of a `wl_output` global and of the outputs bound from it: the
+/// generation of the global, which names its output while it is current.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct OutputGlobal {
   pub(crate) generation: u32,
 }
 
-/// Creates the first `wl_output` global.
-pub(crate) fn create_global(
-  state: &mut CompositorState,
-  handle: &DisplayHandle,
-) {
-  let generation = state.output_globals.generation;
-  state.output_globals.current = Some(
+/// Creates the `wl_output` global of output `id`, once the display exists.
+pub(crate) fn create_global(state: &mut CompositorState, id: &OutputId) {
+  let Some(handle) = state.display.clone() else {
+    return;
+  };
+  let Some(output) = state.outputs.get_mut(id) else {
+    return;
+  };
+  let generation = output.generation;
+  output.global = Some(
     handle.create_global::<CompositorState, WlOutput, OutputGlobal>(
       4,
       OutputGlobal { generation },
@@ -285,7 +350,7 @@ pub(crate) fn remove_retired(
   handle: &DisplayHandle,
   now: Instant,
 ) {
-  state.output_globals.retired.retain(|(global, since)| {
+  state.outputs.retired.retain(|(global, since)| {
     if now.duration_since(*since) < RETIRED_GLOBAL_DELAY {
       return true;
     }
@@ -294,33 +359,64 @@ pub(crate) fn remove_retired(
   });
 }
 
-/// Gives the output the name `name`: renames the core output, replaces the
-/// `wl_output` global, and finishes everything tied to the outputs clients
-/// bound so far. The caller sets the new [`OutputInfo`] first.
+/// Disables the global of output `id`, which stays bindable as an inert
+/// output for [`RETIRED_GLOBAL_DELAY`], and tells every client that bound
+/// it that its surfaces, toplevels and workspace groups left it.
+fn retire_global(state: &mut CompositorState, id: &OutputId) {
+  let generation = state.outputs.next_generation();
+  let Some(output) = state.outputs.get_mut(id) else {
+    return;
+  };
+  output.generation = generation;
+  let old = output.global.take();
+  let bound: Vec<WlOutput> =
+    output.bound.drain().map(|(_, resource)| resource).collect();
+  if let (Some(old), Some(handle)) = (old, state.display.clone()) {
+    handle.disable_global::<CompositorState>(old.clone());
+    state.outputs.retired.push((old, Instant::now()));
+  }
+  for resource in &bound {
+    retire(state, resource);
+  }
+}
+
+/// Gives output `id` the name `name`: renames the core output, replaces
+/// the `wl_output` global, and finishes everything tied to the outputs
+/// clients bound so far. The caller sets the new [`OutputInfo`] first.
+///
+/// When the new name has a parked workspace set, as when a session saved
+/// on that connector was restored, the output shows that set, and the
+/// windows of the set it showed join it.
 pub(crate) fn rename(
   state: &mut CompositorState,
-  handle: &DisplayHandle,
+  id: &OutputId,
   name: &str,
-) -> Result<(), crate::Error> {
+) -> Result<OutputId, crate::Error> {
   let new_id = OutputId::new(name);
-  state.core.rename_output(&state.output_id, new_id.clone())?;
-  state.output_id = new_id;
-  if let Some(old) = state.output_globals.current.take() {
-    handle.disable_global::<CompositorState>(old.clone());
-    state.output_globals.retired.push((old, Instant::now()));
+  if *id != new_id && state.outputs.get(&new_id).is_some() {
+    return Err(crate::Error::OutputExists(name.into()));
   }
-  state.output_globals.generation =
-    state.output_globals.generation.wrapping_add(1);
-  create_global(state, handle);
-  let retired: Vec<WlOutput> =
-    state.outputs.drain().map(|(_, output)| output).collect();
-  for output in &retired {
-    retire(state, output);
+  state.core.rename_output(id, new_id.clone())?;
+  retire_global(state, id);
+  if let Some(output) = state.outputs.get_mut(id) {
+    output.id = new_id.clone();
   }
+  if state.active_output == *id {
+    state.active_output = new_id.clone();
+  }
+  create_global(state, &new_id);
+  let identity = state.outputs.get(&new_id).and_then(OutputState::identity);
+  if let Some(wset) = state.core.wset_of(&new_id) {
+    state
+      .core
+      .attach_wset(wset, Some(new_id.clone()), identity.clone())?;
+  }
+  claim_parked(state, &new_id, identity);
   crate::output_power::output_removed(state);
   crate::gamma_control::output_removed(state);
-  crate::output_management::output_replaced(state, handle);
-  Ok(())
+  crate::output_management::output_removed(state, id);
+  crate::output_management::output_added(state, &new_id);
+  Ok(new_id)
 }
 
 /// Tells the client of `output` that its surfaces, toplevels and workspace
@@ -343,38 +439,137 @@ fn retire(state: &mut CompositorState, output: &WlOutput) {
   });
 }
 
-/// Applies `placement` to the output, keeping its physical size: the
+/// Applies `placement` to output `id`, keeping its physical size: the
 /// transform, the scale and the position, with the logical size computed
 /// again from the physical one.
 pub(crate) fn place(
   state: &mut CompositorState,
+  id: &OutputId,
   placement: OutputPlacement,
   physical: (u32, u32),
 ) -> Result<(), crate::Error> {
-  state.set_output_transform(placement.transform);
-  state.set_output_scale(placement.scale)?;
+  state.set_transform_of(id, placement.transform);
+  state.set_scale_of(id, placement.scale)?;
   let (width, height) = crate::output_transform::logical_size(
     physical.0,
     physical.1,
     placement.scale,
     placement.transform,
   );
-  state.set_output(Rect::new(placement.x, placement.y, width, height))
-}
-
-/// The output's size in physical pixels: the current mode's, or the
-/// logical rectangle scaled and transformed back.
-pub(crate) fn physical_size(state: &CompositorState) -> (u32, u32) {
-  if let Some(mode) = state.output_info.current() {
-    return (mode.width, mode.height);
+  if let Some(output) = state.outputs.get_mut(id) {
+    output.position = placement.position;
   }
-  crate::output_transform::physical_size(
-    state.output.width,
-    state.output.height,
-    state.output_scale,
-    state.output_transform,
-  )
+  let (x, y) = match placement.position {
+    OutputPosition::Fixed { x, y } => (x, y),
+    OutputPosition::Auto => state
+      .outputs
+      .get(id)
+      .map_or((0, 0), |output| (output.rect.x, output.rect.y)),
+  };
+  state.set_rect_of(id, Rect::new(x, y, width, height), false)
 }
 
+/// The size in physical pixels of output `id`: the current mode's, or the
+/// logical rectangle scaled and transformed back.
+pub(crate) fn physical_size(
+  state: &CompositorState,
+  id: &OutputId,
+) -> (u32, u32) {
+  state
+    .outputs
+    .get(id)
+    .map_or((0, 0), OutputState::physical_size)
+}
+
+/// Places every output with [`shingle_config::layout`] and returns those
+/// whose position changed, after giving them their new rectangles.
+pub(crate) fn relayout(state: &mut CompositorState) -> Vec<OutputId> {
+  let layout = state
+    .outputs
+    .iter()
+    .map(|output| shingle_config::LayoutOutput {
+      position: output.position,
+      width: output.rect.width,
+      height: output.rect.height,
+    })
+    .collect::<Vec<_>>();
+  let rects = shingle_config::layout(&layout);
+  for warning in shingle_config::layout_warnings(&layout) {
+    eprintln!("shingle: output layout: {warning}");
+  }
+  let mut moved = Vec::new();
+  for (output, rect) in state.outputs.iter_mut().zip(rects) {
+    if output.rect != rect {
+      output.rect = rect;
+      moved.push(output.id.clone());
+    }
+  }
+  moved
+}
+
+/// What clients and the core learn after output `id` moved or was
+/// resized: `wl_output` and xdg-output geometry, output-management heads,
+/// the workarea of its workspace set and the layer surfaces, and
+/// [`crate::Event::OutputChanged`].
+pub(crate) fn moved(state: &mut CompositorState, id: &OutputId) {
+  let Some(output) = state.outputs.get(id) else {
+    return;
+  };
+  output.send_all();
+  let rect = output.rect;
+  crate::layer_shell::update_workarea(state);
+  crate::shell::reconfigure_lock_surfaces(state);
+  crate::xdg_output::update(state);
+  crate::output_management::sync(state);
+  state.events.push(crate::Event::OutputChanged {
+    output: OutputHandle::from(id),
+    rect,
+  });
+}
+
+/// Places every output again and tells clients about those that moved.
+pub(crate) fn relayout_and_notify(state: &mut CompositorState) {
+  for id in relayout(state) {
+    moved(state, &id);
+  }
+}
+
+/// Shows on output `id` the parked workspace set that belongs to it, found
+/// by `identity` or name ([`shingle_core::Shingle::find_parked_wset`]),
+/// and brings back the windows away from that set. The set the output
+/// showed until then joins it and is gone. Does nothing without such a
+/// set.
+pub(crate) fn claim_parked(
+  state: &mut CompositorState,
+  id: &OutputId,
+  identity: Option<shingle_core::OutputIdentity>,
+) {
+  let Some(parked) = state.core.find_parked_wset(id, identity.as_ref()) else {
+    return;
+  };
+  let shown = state.core.wset_of(id);
+  let Some(rect) = state.outputs.get(id).map(|output| output.rect) else {
+    return;
+  };
+  let result = (|| -> Result<(), shingle_core::ShingleError> {
+    state.core.attach_wset(parked, Some(id.clone()), identity)?;
+    if let Some(shown) = shown.filter(|shown| *shown != parked) {
+      state.core.transfer_wset(shown, parked, false)?;
+      state.core.destroy_wset(shown)?;
+    }
+    state.core.return_windows(parked)?;
+    state.core.set_wset_workarea(parked, rect)?;
+    Ok(())
+  })();
+  if let Err(error) = result {
+    eprintln!("shingle: restoring the windows of {id:?} failed: {error}");
+  }
+  if let Some(wset) = state.core.wset_of(id) {
+    crate::ipc::output_wset_changed(state, id, wset);
+  }
+}
+
+#[cfg(test)]
+mod multi_tests;
 #[cfg(test)]
 mod tests;

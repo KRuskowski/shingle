@@ -109,7 +109,7 @@ fn create_control(
   output: WlOutput,
   control: ZwlrGammaControlV1,
 ) {
-  if !state.outputs.contains_key(&output.id())
+  if !state.outputs.is_bound(&output.id())
     || state.gamma_control.active.is_some()
   {
     control.failed();

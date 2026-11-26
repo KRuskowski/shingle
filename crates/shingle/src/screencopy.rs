@@ -353,7 +353,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for CompositorState {
   ) {
     match request {
       zwlr_screencopy_manager_v1::Request::CaptureOutput { frame, .. } => {
-        create_frame(state, frame, data_init, state.output);
+        create_frame(state, frame, data_init, state.primary().rect);
       }
       zwlr_screencopy_manager_v1::Request::CaptureOutputRegion {
         frame,
@@ -364,8 +364,8 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for CompositorState {
         ..
       } => {
         let region = Rect::new(x, y, width.max(0) as u32, height.max(0) as u32);
-        let region =
-          intersection(state.output, region).unwrap_or(Rect::new(x, y, 0, 0));
+        let region = intersection(state.primary().rect, region)
+          .unwrap_or(Rect::new(x, y, 0, 0));
         create_frame(state, frame, data_init, region);
       }
       zwlr_screencopy_manager_v1::Request::Destroy => {}

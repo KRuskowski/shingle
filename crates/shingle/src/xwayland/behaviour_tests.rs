@@ -287,7 +287,7 @@ fn client_state_requests_reach_shingle() {
     ..StateChange::default()
   }));
   assert!(leaf(&mut fixture, XTERM).fullscreen);
-  let output = fixture.state().output;
+  let output = fixture.state().active().rect;
   assert!(fixture.requests().contains(&XRequest::Configure {
     window: XTERM,
     geometry: super::windows::geometry(output),
@@ -383,7 +383,7 @@ fn transient_dialogs_float_centred_on_their_parent() {
   let state = fixture.state();
   let info = state.core.window_info(window).unwrap();
   assert_eq!(info.parent, Some(xterm));
-  let output = state.output;
+  let output = state.active().rect;
   let x = output.x + (output.width as i32 - 200) / 2;
   let y = output.y + (output.height as i32 - 100) / 2;
   assert_eq!(

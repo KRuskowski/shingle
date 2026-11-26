@@ -554,7 +554,10 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       if self.trace_flips {
         diagnostics::log(&flip_line(&info));
       }
-      self.frontend.compositor_mut().frame_presented(info);
+      let compositor = self.frontend.compositor_mut();
+      // Native lights one output, the compositor's first, until MO-7.
+      let output = compositor.primary_output();
+      compositor.frame_presented(&output, info);
     }
     if let Err(fatal) = self.display.check_timeout(now) {
       self.fail(fatal);

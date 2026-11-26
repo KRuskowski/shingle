@@ -6,7 +6,9 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use shingle_core::{Direction, Rect, StackingMode, WindowId, WindowPresence};
+use shingle_core::{
+  Direction, OutputId, Rect, StackingMode, WindowId, WindowPresence,
+};
 use wayland_server::Resource;
 
 use crate::{
@@ -419,6 +421,8 @@ const SUPPORTED_METHODS: &[&str] = &[
   "vswitch/with_win_left",
   "vswitch/with_win_right",
   "vswitch/with_win_up",
+  "wayfire/create-headless-output",
+  "wayfire/destroy-headless-output",
   "wayfire/get-config-option",
   "wayfire/get-keyboard-state",
   "wayfire/list-config-options",
@@ -479,6 +483,9 @@ const KNOWN_EVENTS: &[&str] = &[
   "view-always-on-bottom",
   "wset-workspace-changed",
   "output-layout-changed",
+  "output-added",
+  "output-removed",
+  "output-wset-changed",
   "xwayland-ready",
 ];
 
@@ -596,6 +603,7 @@ pub(crate) fn record_events(
   events: &[crate::Event],
 ) {
   use crate::Event;
+  let mut layout_sent = false;
   for event in events {
     let message = match event {
       Event::WindowCreated { window, .. } => {
@@ -677,14 +685,45 @@ pub(crate) fn record_events(
         };
         view_event(state, event, *window)
       }
-      Event::WorkspaceChanged { .. } => json!({
-          "event": "wset-workspace-changed",
-          "wset": output_json(state),
-      }),
-      Event::OutputChanged { .. } => json!({
-          "event": "output-layout-changed",
-          "configuration": [output_json(state)],
-      }),
+      Event::WorkspaceChanged {
+        workspace,
+        previous,
+        output,
+      } => {
+        let point = |index: &u32| {
+          let index = index.saturating_sub(1);
+          json!({
+              "x": index % state.workspace_width,
+              "y": index / state.workspace_width,
+          })
+        };
+        let id = output.id();
+        let wset = state.core.wset_of(&id);
+        let output = state
+          .outputs
+          .get(&id)
+          .map_or(-1, |output| i64::from(output.ipc_id));
+        let wset_data = wset.map_or(Value::Null, |wset| wset_json(state, wset));
+        json!({
+            "event": "wset-workspace-changed",
+            "previous-workspace": point(previous),
+            "new-workspace": point(workspace),
+            "output": output,
+            "wset": wset.map_or(-1, |wset| i64::from(wset.get())),
+            "output-data": output_json(state, &id),
+            "wset-data": wset_data,
+        })
+      }
+      // One event for every change of the layout in a batch, as Wayfire
+      // sends one per configuration.
+      Event::OutputChanged { .. } if layout_sent => continue,
+      Event::OutputChanged { .. } => {
+        layout_sent = true;
+        json!({
+            "event": "output-layout-changed",
+            "configuration": layout_configuration(state),
+        })
+      }
       _ => continue,
     };
     state.ipc_events.push(message);
@@ -703,31 +742,40 @@ fn geometry(rect: Rect) -> Value {
   json!({"x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height})
 }
 
-fn wset_json(state: &CompositorState) -> Value {
+/// Wayfire's `wset_to_json`: a workspace set by its index, with the output
+/// that shows it, or -1 and "" while it is parked.
+fn wset_json(state: &CompositorState, wset: shingle_core::WsetId) -> Value {
+  let Ok(info) = state.core.wset(wset) else {
+    return Value::Null;
+  };
+  let output = info.output.as_ref().and_then(|id| state.outputs.get(id));
   json!({
-      "index": 1,
-      "name": state.output_info.name,
-      "output-id": 1,
-      "output-name": state.output_info.name,
-      "workspace": output_json(state)["workspace"].clone(),
+      "index": wset.get(),
+      "name": format!("workspace set {}", wset.get()),
+      "output-id": output.map_or(-1, |output| i64::from(output.ipc_id)),
+      "output-name": output.map_or("", |output| output.info.name.as_str()),
+      "workspace": {
+          "x": info.current_workspace.x,
+          "y": info.current_workspace.y,
+          "grid_width": state.workspace_width,
+          "grid_height": state.workspace_height,
+      },
   })
 }
 
-fn output_json(state: &CompositorState) -> Value {
-  let workspace = state
-    .core
-    .current_workspace(&state.output_id)
-    .unwrap_or_default();
-  let workarea = state
-    .core
-    .output_workarea(&state.output_id)
-    .unwrap_or(state.output);
+/// Wayfire's `output_to_json` for output `id`, or null if it is not there.
+pub(crate) fn output_json(state: &CompositorState, id: &OutputId) -> Value {
+  let Some(output) = state.outputs.get(id) else {
+    return Value::Null;
+  };
+  let workspace = state.core.current_workspace(id).unwrap_or_default();
+  let workarea = state.core.output_workarea(id).unwrap_or(output.rect);
   json!({
-      "id": 1,
-      "name": state.output_info.name,
-      "geometry": geometry(state.output),
+      "id": output.ipc_id,
+      "name": output.info.name,
+      "geometry": geometry(output.rect),
       "workarea": geometry(workarea),
-      "wset-index": 1,
+      "wset-index": state.core.wset_of(id).map_or(0, |wset| wset.get()),
       "workspace": {
           "x": workspace.x,
           "y": workspace.y,
@@ -737,7 +785,138 @@ fn output_json(state: &CompositorState) -> Value {
   })
 }
 
-fn view_json(state: &CompositorState, window: WindowId) -> Value {
+/// Queues an IPC event named `event` with output `id`'s description, as
+/// Wayfire's `output-added`.
+pub(crate) fn output_event(
+  state: &mut CompositorState,
+  event: &str,
+  id: &OutputId,
+) {
+  let message = json!({"event": event, "output": output_json(state, id)});
+  state.ipc_events.push(message);
+}
+
+/// Queues Wayfire's `output-wset-changed` for output `id`, which now shows
+/// `wset`.
+pub(crate) fn output_wset_changed(
+  state: &mut CompositorState,
+  id: &OutputId,
+  wset: shingle_core::WsetId,
+) {
+  let message = json!({
+      "event": "output-wset-changed",
+      "new-wset": wset.get(),
+      "output": state.outputs.get(id).map_or(-1, |o| i64::from(o.ipc_id)),
+      "new-wset-data": wset_json(state, wset),
+      "output-data": output_json(state, id),
+  });
+  state.ipc_events.push(message);
+}
+
+/// Wayfire's transform names in output-layout configurations.
+fn layout_transform_name(
+  transform: wayland_server::protocol::wl_output::Transform,
+) -> &'static str {
+  use wayland_server::protocol::wl_output::Transform;
+  match transform {
+    Transform::_90 => "90",
+    Transform::_180 => "180",
+    Transform::_270 => "270",
+    Transform::Flipped => "flipped",
+    Transform::Flipped90 => "90_flipped",
+    Transform::Flipped180 => "180_flipped",
+    Transform::Flipped270 => "270_flipped",
+    _ => "normal",
+  }
+}
+
+/// The `configuration` of Wayfire's `output-layout-changed`: every output
+/// with its source, depth, scale, transform, position and mode.
+fn layout_configuration(state: &CompositorState) -> Value {
+  let outputs = state
+    .outputs
+    .iter()
+    .map(|output| {
+      let (width, height) = output.physical_size();
+      json!({
+          "name": output.info.name,
+          "output-id": output.ipc_id,
+          "source": if output.dark { "none" } else { "self" },
+          "depth": 8,
+          "scale": output.scale,
+          "vrr": false,
+          "transform": layout_transform_name(output.transform),
+          "mirror-from": "",
+          "position": {"x": output.rect.x, "y": output.rect.y},
+          "mode": {
+              "width": width,
+              "height": height,
+              "refresh": output.info.refresh_mhz,
+          },
+      })
+    })
+    .collect::<Vec<_>>();
+  Value::Array(outputs)
+}
+
+/// `wayfire/create-headless-output`: a virtual output of `width` by
+/// `height` pixels, named after the next unused `HEADLESS-N`.
+fn create_headless_output(state: &mut CompositorState, data: &Value) -> Value {
+  let mut size = [0u32; 2];
+  for (slot, field) in size.iter_mut().zip(["width", "height"]) {
+    let Some(value) = data.get(field) else {
+      return json_error(&format!("Missing \"{field}\""));
+    };
+    let Some(value) = value.as_u64().and_then(|v| u32::try_from(v).ok()) else {
+      return json_error(&format!(
+        "Field \"{field}\" does not have the correct type, expected \
+         number_unsigned"
+      ));
+    };
+    *slot = value;
+  }
+  let name = state.outputs.next_headless_name();
+  let info = crate::OutputInfo {
+    name,
+    ..crate::OutputInfo::default()
+  };
+  match crate::output::add(
+    state,
+    info,
+    (size[0], size[1]),
+    crate::OutputKind::Virtual,
+  ) {
+    Ok(id) => json!({"result": "ok", "output": output_json(state, &id)}),
+    Err(error) => json_error(&error.to_string()),
+  }
+}
+
+/// `wayfire/destroy-headless-output`: removes an output that
+/// `create-headless-output` made, by `output` name or `output-id`.
+fn destroy_headless_output(state: &mut CompositorState, data: &Value) -> Value {
+  let by_name = data.get("output").and_then(Value::as_str);
+  let by_id = data.get("output-id").and_then(Value::as_u64);
+  let output = match (by_name, by_id) {
+    (None, None) => return json_error("Missing `output` or `output-id`!"),
+    (Some(name), _) => state.outputs.get(&OutputId::new(name)),
+    (None, Some(id)) => state.outputs.by_ipc_id(id),
+  };
+  let Some(output) = output else {
+    return json_error("Output not found!");
+  };
+  if output.kind != crate::OutputKind::Virtual {
+    return json_error(
+      "Output is not a headless output created from an IPC command!",
+    );
+  }
+  let id = output.id.clone();
+  match crate::output::remove(state, &id) {
+    Ok(()) => json_ok(),
+    Err(error) => json_error(&error.to_string()),
+  }
+}
+
+pub(crate) fn view_json(state: &CompositorState, window: WindowId) -> Value {
   let Ok(info) = state.core.window_info(window) else {
     return Value::Null;
   };
@@ -778,6 +957,12 @@ fn view_json(state: &CompositorState, window: WindowId) -> Value {
       },
     );
   let last_focus = state.focus_recency.get(&window).copied().unwrap_or(0);
+  let output = state
+    .core
+    .wset(info.wset)
+    .ok()
+    .and_then(|wset| wset.output)
+    .and_then(|id| state.outputs.get(&id));
   let mapped = info.presence == WindowPresence::Mapped;
   json!({
       "id": window.0,
@@ -788,8 +973,8 @@ fn view_json(state: &CompositorState, window: WindowId) -> Value {
       "parent": info.parent.map_or(-1, |parent| parent.0 as i64),
       "geometry": geometry_value,
       "bbox": geometry_value,
-      "output-id": 1,
-      "output-name": info.location.output.as_str(),
+      "output-id": output.map_or(-1, |output| i64::from(output.ipc_id)),
+      "output-name": output.map_or("null", |output| output.info.name.as_str()),
       "last-focus-timestamp": last_focus,
       "role": "toplevel",
       "mapped": mapped,
@@ -799,7 +984,7 @@ fn view_json(state: &CompositorState, window: WindowId) -> Value {
       "minimized": info.state.minimized,
       "activated": input::focused_window(state) == Some(window),
       "sticky": info.state.sticky,
-      "wset-index": 1,
+      "wset-index": info.wset.get(),
       "min-size": {"width": min_size.0, "height": min_size.1},
       "max-size": {"width": max_size.0, "height": max_size.1},
       "focusable": mapped && !info.state.minimized,
@@ -867,14 +1052,17 @@ fn require_mapped(
   if info.presence != WindowPresence::Mapped {
     return Err(json_error("view is not mapped"));
   }
-  if info.location.output != state.output_id {
+  if info.location.output != state.active_output {
     return Err(json_error("view belongs to a different output"));
   }
   Ok(())
 }
 
 fn set_workspace(state: &mut CompositorState, data: &Value) -> Value {
-  if data.get("output-id").and_then(Value::as_u64) != Some(1) {
+  // Other outputs than the active one come with MO-4.
+  if data.get("output-id").and_then(Value::as_u64)
+    != Some(u64::from(state.active().ipc_id))
+  {
     return json_error("invalid output id");
   }
   let (workspace, index) = match workspace_request(state, data) {
@@ -1025,7 +1213,13 @@ fn layout_node(
 }
 
 fn get_layout(state: &CompositorState, data: &Value) -> Value {
-  if data.get("wset-index").and_then(Value::as_u64) != Some(1) {
+  // Sets other than the active output's come with MO-4.
+  if data.get("wset-index").and_then(Value::as_u64)
+    != state
+      .core
+      .wset_of(&state.active_output)
+      .map(|w| u64::from(w.get()))
+  {
     return json_error("wset-index not found");
   }
   let Some(workspace) = data.get("workspace") else {
@@ -1052,13 +1246,13 @@ fn get_layout(state: &CompositorState, data: &Value) -> Value {
   let Some(output) = snapshot
     .wsets
     .iter()
-    .find(|wset| wset.output.as_ref() == Some(&state.output_id))
+    .find(|wset| wset.output.as_ref() == Some(&state.active_output))
   else {
     return json_error("output not found");
   };
   let workarea = state
     .core
-    .tree(&state.output_id, workspace)
+    .tree(&state.active_output, workspace)
     .map_or(output.workarea, |tree| tree.workarea());
   let root = output
     .workspaces
@@ -1195,7 +1389,13 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
   use shingle_core::{
     ChildSnapshot, NodeSnapshot, SplitDirection, SplitSnapshot,
   };
-  if data.get("wset-index").and_then(Value::as_u64) != Some(1) {
+  // Sets other than the active output's come with MO-4.
+  if data.get("wset-index").and_then(Value::as_u64)
+    != state
+      .core
+      .wset_of(&state.active_output)
+      .map(|w| u64::from(w.get()))
+  {
     return json_error("wset-index not found");
   }
   let Some(workspace) = data.get("workspace") else {
@@ -1263,7 +1463,7 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
   let Some(output) = snapshot
     .wsets
     .iter_mut()
-    .find(|wset| wset.output.as_ref() == Some(&state.output_id))
+    .find(|wset| wset.output.as_ref() == Some(&state.active_output))
   else {
     return json_error("output not found");
   };
@@ -1284,7 +1484,7 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
           .window_layout(window)
           .ok()
           .map(|layout| layout.geometry)
-          .unwrap_or(state.output);
+          .unwrap_or(state.active().rect);
         leaf.floating = Some(geometry);
         leaf.snapped = None;
         leaf.restore_geometry = None;
@@ -1766,7 +1966,7 @@ fn layout_views(state: &mut CompositorState, data: &Value) -> Value {
       return json_error("unknown or invalid view id");
     };
     if let Some(output) = view.get("output")
-      && output.as_str() != Some(state.output_info.name.as_str())
+      && output.as_str() != Some(state.active().info.name.as_str())
     {
       return json_error("unknown output");
     }
@@ -1825,8 +2025,8 @@ pub(crate) fn plugin_activation_event(
       "event": "plugin-activation-state-changed",
       "plugin": plugin,
       "state": activated,
-      "output": 1,
-      "output-data": output_json(state),
+      "output": state.active().ipc_id,
+      "output-data": output_json(state, &state.active_output),
   })
 }
 
@@ -2101,8 +2301,9 @@ fn configure_view(state: &mut CompositorState, data: &Value) -> Value {
     Ok(window) => window,
     Err(error) => return error,
   };
+  // Moving views to other outputs comes with MO-4.
   if let Some(output) = data.get("output_id").or_else(|| data.get("output-id"))
-    && output.as_u64() != Some(1)
+    && output.as_u64() != Some(u64::from(state.output_of_window(window).ipc_id))
   {
     return json_error("output not found");
   }
@@ -2156,7 +2357,7 @@ fn configure_view(state: &mut CompositorState, data: &Value) -> Value {
         .and_then(|location| {
           state.core.tree(&location.output, location.workspace)
         })
-        .map_or(state.output, |tree| tree.workarea());
+        .map_or(state.active().rect, |tree| tree.workarea());
       shell::snap_window_to_geometry(
         state,
         window,
@@ -2240,16 +2441,20 @@ fn config_option(
     ),
     "core/preferred_decoration_mode" => (decoration.into(), "client".into()),
     "output/mode" => (
-      format!("{}x{}", state.output.width, state.output.height),
+      format!(
+        "{}x{}",
+        state.active().rect.width,
+        state.active().rect.height
+      ),
       "1280x720".into(),
     ),
     "output/position" => (
-      format!("{},{}", state.output.x, state.output.y),
+      format!("{},{}", state.active().rect.x, state.active().rect.y),
       "0,0".into(),
     ),
-    "output/scale" => (state.output_scale.to_string(), "1".into()),
+    "output/scale" => (state.active().scale.to_string(), "1".into()),
     "output/transform" => (
-      output_transform_name(state.output_transform).into(),
+      output_transform_name(state.active().transform).into(),
       "normal".into(),
     ),
     "input/cursor_theme" => (state.cursor_theme.clone(), "default".into()),
@@ -2441,7 +2646,7 @@ fn apply_config_updates(
           .set_output(Rect {
             width,
             height,
-            ..state.output
+            ..state.active().rect
           })
           .map_err(|error| error.to_string())?;
       }
@@ -2450,7 +2655,7 @@ fn apply_config_updates(
           .set_output(Rect {
             x,
             y,
-            ..state.output
+            ..state.active().rect
           })
           .map_err(|error| error.to_string())?;
       }
@@ -2538,7 +2743,7 @@ fn set_config_options(state: &mut CompositorState, data: &Value) -> Value {
     };
     updates.push(update);
   }
-  let mut output = state.output;
+  let mut output = state.active().rect;
   for update in &updates {
     match update {
       ConfigUpdate::Mode(width, height) => {
@@ -2574,7 +2779,13 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
         .map(|window| view_json(state, window))
         .collect(),
     ),
-    "window-rules/list-outputs" => json!([output_json(state)]),
+    "window-rules/list-outputs" => Value::Array(
+      state
+        .outputs
+        .iter()
+        .map(|output| output_json(state, &output.id))
+        .collect(),
+    ),
     "window-rules/view-info" => match find_view(state, data) {
       Ok(window) => {
         json!({"result": "ok", "info": view_json(state, window)})
@@ -2589,19 +2800,36 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
           "info": info,
       })
     }
-    "window-rules/list-wsets" => json!([wset_json(state)]),
+    "window-rules/list-wsets" => Value::Array(
+      state
+        .core
+        .wsets()
+        .map(|wset| wset_json(state, wset.id))
+        .collect(),
+    ),
     "window-rules/get-focused-output" => {
-      json!({"result": "ok", "info": output_json(state)})
+      json!({"result": "ok", "info": output_json(state, &state.active_output)})
     }
-    "window-rules/output-info" | "window-rules/wset-info" => {
-      if data.get("id").and_then(Value::as_u64) == Some(1) {
-        if method.ends_with("output-info") {
-          output_json(state)
-        } else {
-          wset_json(state)
-        }
-      } else {
-        json_error("output or workspace set not found")
+    "window-rules/output-info" => {
+      match data
+        .get("id")
+        .and_then(Value::as_u64)
+        .and_then(|id| state.outputs.by_ipc_id(id))
+      {
+        Some(output) => output_json(state, &output.id),
+        None => json_error("output not found"),
+      }
+    }
+    "window-rules/wset-info" => {
+      match data
+        .get("id")
+        .and_then(Value::as_u64)
+        .and_then(|id| u32::try_from(id).ok())
+        .map(shingle_core::WsetId::new)
+        .filter(|wset| state.core.wset(*wset).is_ok())
+      {
+        Some(wset) => wset_json(state, wset),
+        None => json_error("workspace set not found"),
       }
     }
     "window-rules/get_cursor_position" | "window-rules/get-cursor-position" => {
@@ -2632,6 +2860,8 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
     "vswitch/send-view" => send_view(state, data),
     "wf/alpha/get-view-alpha" => get_view_alpha(state, data),
     "wf/alpha/set-view-alpha" => set_view_alpha(state, data),
+    "wayfire/create-headless-output" => create_headless_output(state, data),
+    "wayfire/destroy-headless-output" => destroy_headless_output(state, data),
     "wayfire/get-config-option" => get_config_option(state, data),
     "wayfire/list-config-options" => list_config_options(state),
     "wayfire/get-keyboard-state" => keyboard_state(state),
@@ -2756,14 +2986,19 @@ mod tests {
   }
 
   #[test]
-  fn list_methods_reports_79_sorted_methods_with_input_devices() {
+  fn list_methods_reports_81_sorted_methods_with_input_devices() {
     let mut state = test_state();
     let reply = call(&mut state, "list-methods", Value::Null);
     let methods = reply["methods"].as_array().unwrap();
-    assert_eq!(methods.len(), 79);
-    assert_eq!(SUPPORTED_METHODS.len(), 79);
+    assert_eq!(methods.len(), 81);
+    assert_eq!(SUPPORTED_METHODS.len(), 81);
     assert!(SUPPORTED_METHODS.windows(2).all(|pair| pair[0] < pair[1]));
-    for method in ["input/list-devices", "input/configure-device"] {
+    for method in [
+      "input/list-devices",
+      "input/configure-device",
+      "wayfire/create-headless-output",
+      "wayfire/destroy-headless-output",
+    ] {
       assert!(methods.contains(&json!(method)), "{method}");
     }
   }
@@ -3072,7 +3307,7 @@ mod tests {
       .state
       .core
       .tree(
-        &compositor.state.output_id,
+        &compositor.state.active_output,
         shingle_core::WorkspaceId::ORIGIN,
       )
       .unwrap();

@@ -184,7 +184,7 @@ fn percent_geometry(
   width: i32,
   height: i32,
 ) -> Option<Rect> {
-  let output = state.output;
+  let output = state.active().rect;
   let scale = |value: i32, extent: u32| {
     (u64::from(extent) * i64::from(value.clamp(0, 100)) as u64 / 100) as u32
   };
@@ -214,10 +214,10 @@ fn x11_geometry(
   let height = height.unwrap_or(current.height);
   let workarea = state
     .core
-    .current_workspace(&state.output_id)
+    .current_workspace(&state.active_output)
     .ok()
-    .and_then(|workspace| state.core.tree(&state.output_id, workspace).ok())
-    .map_or(state.output, |tree| tree.workarea());
+    .and_then(|workspace| state.core.tree(&state.active_output, workspace).ok())
+    .map_or(state.active().rect, |tree| tree.workarea());
   let x = match x {
     Some(x) if x_from_right => {
       (i64::from(workarea.width) - i64::from(width) - i64::from(x)).max(0)
@@ -279,7 +279,7 @@ fn assign_workspace(
 ) {
   if state
     .core
-    .ensure_workspace(&state.output_id, workspace)
+    .ensure_workspace(&state.active_output, workspace)
     .is_err()
   {
     return;
@@ -294,7 +294,7 @@ fn assign_workspace(
   };
   if state
     .core
-    .reattach_window(detached, &state.output_id, workspace)
+    .reattach_window(detached, &state.active_output, workspace)
     .is_ok()
   {
     let index = workspace.y * state.workspace_width + workspace.x;

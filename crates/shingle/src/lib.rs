@@ -7,7 +7,11 @@
 //! a [`Compositor`] and drives it:
 //!
 //! 1. Build it with [`Compositor::new`], or [`Compositor::with_core`] to
-//!    restore a saved session. Optionally start IPC with
+//!    restore a saved session. It starts with one output, `HEADLESS-1`;
+//!    describe it with [`Compositor::set_output_info`], add more with
+//!    [`Compositor::add_output`], and once every output is there settle a
+//!    restored session with [`Compositor::restore_outputs`]. Optionally
+//!    start IPC with
 //!    [`Compositor::enable_ipc`]. Start every client in
 //!    [`Compositor::client_environment`], which exports
 //!    [`Compositor::socket_name`] as `WAYLAND_DISPLAY`.
@@ -118,11 +122,11 @@ use calloop::{
 pub use input::{Axis, AxisSource, Modifiers};
 pub use input_device::{InputDeviceId, InputDeviceInfo, InputDeviceKind};
 pub use output::{
-  OutputInfo, OutputModeInfo, OutputPlacement, OutputRequest, OutputRequestId,
-  RequestedMode,
+  OutputHandle, OutputInfo, OutputKind, OutputModeInfo, OutputPlacement,
+  OutputRequest, OutputRequestId, OutputView, RequestedMode,
 };
 pub use shingle_core::{Direction, StackingMode, WindowId};
-use shingle_core::{Gaps, Rect, Shingle, WorkspaceId};
+use shingle_core::{Gaps, OutputId, Rect, Shingle, WorkspaceId};
 use shingle_idle::{Config as IdleConfig, IdleCoordinator};
 pub use shingle_idle::{DpmsState, LockState};
 pub use shingle_session::ClientEnvironment;
@@ -207,10 +211,17 @@ pub enum WorkspaceWraparound {
 /// startup script.
 #[derive(Clone, Debug)]
 pub struct Config {
-  /// Output position and logical size before the output transform, so a
-  /// quarter-turn transform swaps width and height. Physical pixels are
-  /// this size times `output_scale`.
+  /// Logical size before the output transform, so a quarter-turn
+  /// transform swaps width and height. Physical pixels are this size times
+  /// `output_scale`. Its position is ignored: `output_position` places the
+  /// output.
   pub output: Rect,
+  /// Where outputs without a named entry go in the layout: `auto`, after
+  /// the fixed outputs from left to right, or a fixed point.
+  pub output_position: shingle_config::OutputPosition,
+  /// What happens to the windows of an output that goes
+  /// (`output_layout.unplug`).
+  pub output_unplug: shingle_config::UnplugPolicy,
   /// Background clear colour as RGBA, each component in `0.0..=1.0`.
   pub background_color: [f64; 4],
   /// Columns of the workspace grid; must be nonzero.
@@ -313,6 +324,8 @@ impl Default for Config {
       workspace_width: 10,
       workspace_height: 1,
       workspace_wraparound: WorkspaceWraparound::Disabled,
+      output_position: shingle_config::OutputPosition::Auto,
+      output_unplug: shingle_config::UnplugPolicy::Return,
       output_scale: 1.0,
       output_transform: wayland_server::protocol::wl_output::Transform::Normal,
       output_refresh_mhz: 0,
@@ -363,6 +376,8 @@ impl From<shingle_config::ShingleConfig> for Config {
     Self {
       output: Rect::new(config.output.x, config.output.y, width, height),
       output_refresh_mhz: output::explicit_refresh(&config.output),
+      output_position: config.output.position,
+      output_unplug: config.output_layout.unplug,
       output_placements,
       background_color: config.background_color,
       workspace_width: config.workspaces.width,
@@ -845,11 +860,25 @@ pub enum Event {
     /// The destroyed surface.
     surface: SurfaceId,
   },
-  /// The output's rectangle, scale or transform changed (IPC
+  /// An output's rectangle, scale or transform changed (IPC
   /// `output-layout-changed`).
   OutputChanged {
-    /// The output rectangle in logical pixels after the transform.
-    output: Rect,
+    /// The output.
+    output: OutputHandle,
+    /// Its rectangle in logical pixels after the transform.
+    rect: Rect,
+  },
+  /// An output was added ([`Compositor::add_output`], or IPC
+  /// `wayfire/create-headless-output`).
+  OutputAdded {
+    /// The new output.
+    output: OutputHandle,
+  },
+  /// An output was removed; its windows went where
+  /// `output_layout.unplug` says.
+  OutputRemoved {
+    /// The output, which no longer exists.
+    output: OutputHandle,
   },
   /// IPC `scale/toggle` (`false`, current workspace) or `scale/toggle_all`
   /// (`true`, all workspaces). The frontend runs Scale.
@@ -867,11 +896,14 @@ pub enum Event {
     /// New pointer y.
     y: f64,
   },
-  /// The current workspace changed (IPC `wset-workspace-changed`). Also
-  /// emitted when switching to the workspace that is already current.
+  /// The current workspace changed (IPC `wset-workspace-changed`).
   WorkspaceChanged {
     /// The 1-based row-major index of the new workspace.
     workspace: u32,
+    /// The 1-based row-major index of the workspace before.
+    previous: u32,
+    /// The output whose workspace set changed workspace.
+    output: OutputHandle,
   },
   /// The output should be powered on or off: an idle timeout, activity,
   /// [`Compositor::set_dpms`] or wlr-output-power-management. A single
@@ -950,6 +982,9 @@ pub enum Error {
   /// An output scale that is zero, negative, NaN or infinite.
   #[error("output scale must be finite and positive")]
   InvalidOutputScale,
+  /// An output with this name is already there.
+  #[error("an output called {0} exists already")]
+  OutputExists(String),
   /// The XKB keymap did not compile, contained a NUL byte or could not be
   /// shared with clients.
   #[error("keymap error: {0}")]
@@ -966,8 +1001,8 @@ pub enum Error {
   Syncobj(String),
 }
 
-/// A Wayland compositor with one output, run by a host frontend; see the
-/// crate documentation for the lifecycle.
+/// A Wayland compositor with one or more outputs, run by a host frontend;
+/// see the crate documentation for the lifecycle.
 ///
 /// SIGINT and SIGTERM are blocked on the thread that creates it and read
 /// through a signalfd (see [`Compositor::shutdown_requested`]).
@@ -1002,7 +1037,8 @@ impl Compositor {
   /// typically a session restored by `shingle-session`. Its saved windows are
   /// unmapped placeholders; a new toplevel with the same app ID claims one
   /// ([`Shingle::reconcile_mapped`]) and keeps its tile, workspace and
-  /// flags.
+  /// flags. Its workspace sets are parked, and each output takes its own as
+  /// it is added; [`Compositor::restore_outputs`] settles the rest.
   pub fn with_core(config: Config, core: Shingle) -> Result<Self, Error> {
     let socket = ListeningSocket::bind_auto("wayland", 0..32)?;
     let socket_name = socket
@@ -1216,14 +1252,14 @@ impl Compositor {
   /// The output rectangle in layout logical pixels, after the output transform
   /// (a quarter turn swaps width and height).
   pub fn output(&self) -> Rect {
-    self.state.output
+    self.state.primary().rect
   }
 
   /// The output's size in physical pixels: the current mode's, or the
   /// logical rectangle scaled and transformed back. A backend without a
   /// display of its own, such as offscreen, draws frames of this size.
   pub fn output_physical_size(&self) -> (u32, u32) {
-    output::physical_size(&self.state)
+    self.state.primary().physical_size()
   }
 
   /// Runs one turn of the event loop, waiting up to `timeout` (`None` blocks)
@@ -1239,6 +1275,7 @@ impl Compositor {
   /// socket fails. A single misbehaving client is disconnected with a protocol
   /// error rather than failing the call.
   pub fn poll(&mut self, timeout: Option<Duration>) -> Result<usize, Error> {
+    output::restore(&mut self.state);
     self.state.reap_ipc_children();
     self
       .event_loop
@@ -1300,42 +1337,77 @@ impl Compositor {
     self.poll(Some(Duration::ZERO))
   }
 
-  /// Reports a frame drawn now, for frontends that learn nothing more
-  /// precise about presentation, such as nested. It is
-  /// [`Compositor::frame_presented`] with the current `CLOCK_MONOTONIC`
-  /// time, the output's refresh rate from [`OutputInfo`], no sequence
-  /// number and no flags.
+  /// Reports a frame drawn now on every output that is not dark, for
+  /// frontends that learn nothing more precise about presentation, such as
+  /// nested. For each output it is [`Compositor::frame_presented`] with the
+  /// current `CLOCK_MONOTONIC` time, the output's refresh rate from
+  /// [`OutputInfo`], no sequence number and no flags. Until each output
+  /// has a frame clock of its own (MO-5), outputs that the host does not
+  /// draw, such as those created over IPC, get their frames this way.
   pub fn frame(&mut self) {
-    let refresh_ns =
-      presentation::refresh_ns(self.state.output_info.refresh_mhz);
-    self.frame_presented(PresentInfo {
-      time: clock::monotonic_now(),
-      refresh_ns,
-      seq: 0,
-      flags: PresentationFlags::empty(),
-    });
+    let outputs = self
+      .state
+      .outputs
+      .iter()
+      .filter(|output| !output.dark)
+      .map(|output| OutputHandle::from(&output.id))
+      .collect::<Vec<_>>();
+    for output in outputs {
+      self.frame_now(&output);
+    }
   }
 
-  /// Reports that a frame reached the screen, for example on a DRM page
-  /// flip. Surfaces that were visible in it get their frame callbacks,
-  /// with `info.time` in milliseconds, and their `wp_presentation`
-  /// feedback, with every field of `info`. Hidden surfaces keep their
-  /// callbacks for a later frame, and their feedback is discarded. FIFO
-  /// and commit-timing barriers waiting for a frame are released.
+  /// [`Compositor::frame`] for one output, as a host that paces each
+  /// output by its own timer reports it.
+  pub fn frame_now(&mut self, output: &OutputHandle) {
+    let Some(refresh_mhz) = self
+      .state
+      .outputs
+      .get(&output.id())
+      .map(|output| output.info.refresh_mhz)
+    else {
+      return;
+    };
+    self.frame_presented(
+      output,
+      PresentInfo {
+        time: clock::monotonic_now(),
+        refresh_ns: presentation::refresh_ns(refresh_mhz),
+        seq: 0,
+        flags: PresentationFlags::empty(),
+      },
+    );
+  }
+
+  /// Reports that a frame of `output` reached the screen, for example on a
+  /// DRM page flip. Surfaces that were visible on it get their frame
+  /// callbacks, with `info.time` in milliseconds, and their
+  /// `wp_presentation` feedback, with every field of `info` and the output
+  /// as `sync_output`. Surfaces hidden everywhere keep their callbacks for
+  /// a later frame, and their feedback is discarded; those shown on another
+  /// output wait for its frame. FIFO and commit-timing barriers waiting for
+  /// a frame are released by the first output's frames, until surfaces
+  /// follow their own output's (MO-3). A dark output presents nothing.
   ///
   /// Does nothing while the session is inactive
   /// ([`Compositor::set_session_active`]).
-  pub fn frame_presented(&mut self, info: PresentInfo) {
+  pub fn frame_presented(&mut self, output: &OutputHandle, info: PresentInfo) {
     if !input_device::session_active(&self.state) {
       return;
     }
-    commit_timing::frame(&mut self.state);
-    fifo::frame(&mut self.state);
+    let id = output.id();
+    if self.state.outputs.get(&id).is_none_or(|output| output.dark) {
+      return;
+    }
+    if self.state.primary().id == id {
+      commit_timing::frame(&mut self.state);
+      fifo::frame(&mut self.state);
+    }
     self.state.buffer_releases.flush();
     let time = clock::millis(info.time);
     let visible = self
       .state
-      .visible_surfaces()
+      .visible_surfaces_on(&id)
       .into_iter()
       .map(|surface| surface.id)
       .collect::<Vec<_>>();
@@ -1349,7 +1421,7 @@ impl Compositor {
       }
     }
     self.state.frame_callbacks = hidden;
-    presentation::frame(&mut self.state, &info);
+    presentation::frame(&mut self.state, &id, &info);
   }
 
   /// Whether a constrained surface update needs a future frame.
@@ -1452,12 +1524,12 @@ impl Compositor {
     let current = self
       .state
       .core
-      .current_workspace(&self.state.output_id)
+      .current_workspace(&self.state.active_output)
       .ok()?;
     let window = self
       .state
       .core
-      .tree(&self.state.output_id, current)
+      .tree(&self.state.active_output, current)
       .ok()?
       .focused()?;
     self.close_window(window).map(|_| window)
@@ -1525,29 +1597,52 @@ impl Compositor {
       return Err(Error::InvalidOutputScale);
     }
     let placements = output::Placements::new(&config);
-    let placement = placements.get(&self.state.output_info.name);
-    if !placement.scale.is_finite() || placement.scale <= 0.0 {
-      return Err(Error::InvalidOutputScale);
-    }
-    // A backend with a mode list sets the size; the configuration places
-    // it.
-    let (width, height) = match self.state.output_info.current() {
-      Some(mode) => output_transform::logical_size(
-        mode.width,
-        mode.height,
-        placement.scale,
-        placement.transform,
-      ),
-      None if output_transform::is_quarter_turn(placement.transform) => {
-        (placement.height, placement.width)
+    // Every output is placed again; a backend with a mode list sets the
+    // size, the configuration the rest.
+    let mut placed = Vec::new();
+    for output in self.state.outputs.iter() {
+      let placement = placements.get(&output.info.name);
+      if !placement.scale.is_finite() || placement.scale <= 0.0 {
+        return Err(Error::InvalidOutputScale);
       }
-      None => (placement.width, placement.height),
-    };
-    let output = Rect::new(placement.x, placement.y, width, height);
-    output.validate()?;
+      let (width, height) = match (output.kind, output.info.current()) {
+        (_, Some(mode)) => output_transform::logical_size(
+          mode.width,
+          mode.height,
+          placement.scale,
+          placement.transform,
+        ),
+        // An IPC output keeps the size it was created with.
+        (OutputKind::Virtual, None) => output_transform::logical_size(
+          output.physical_size().0,
+          output.physical_size().1,
+          placement.scale,
+          placement.transform,
+        ),
+        (OutputKind::Backend, None)
+          if output_transform::is_quarter_turn(placement.transform) =>
+        {
+          (placement.height, placement.width)
+        }
+        (OutputKind::Backend, None) => (placement.width, placement.height),
+      };
+      let (x, y) = match placement.position {
+        shingle_config::OutputPosition::Fixed { x, y } => (x, y),
+        shingle_config::OutputPosition::Auto => (output.rect.x, output.rect.y),
+      };
+      let rect = Rect::new(x, y, width, height);
+      rect.validate()?;
+      placed.push((output.id.clone(), placement, rect));
+    }
     self.state.placements = placements;
-    if self.state.output_info.modes.is_empty() && placement.refresh_mhz > 0 {
-      self.state.output_info.refresh_mhz = placement.refresh_mhz;
+    self.state.unplug = config.output_unplug;
+    for (id, placement, _) in &placed {
+      if placement.refresh_mhz > 0
+        && let Some(output) = self.state.outputs.get_mut(id)
+        && output.info.modes.is_empty()
+      {
+        output.info.refresh_mhz = placement.refresh_mhz;
+      }
     }
     self.state.background_color = config.background_color;
     self.state.workspace_wraparound = config.workspace_wraparound;
@@ -1602,9 +1697,14 @@ impl Compositor {
     }
     let commands = self.state.idle.set_config(config.idle);
     self.state.process_idle_commands(commands);
-    self.state.set_output_transform(placement.transform);
-    self.state.set_output_scale(placement.scale)?;
-    self.state.set_output(output)?;
+    for (id, placement, rect) in placed {
+      self.state.set_transform_of(&id, placement.transform);
+      self.state.set_scale_of(&id, placement.scale)?;
+      if let Some(output) = self.state.outputs.get_mut(&id) {
+        output.position = placement.position;
+      }
+      self.state.set_rect_of(&id, rect, false)?;
+    }
     shell::reconfigure_all(&mut self.state);
     Ok(())
   }
@@ -2183,14 +2283,14 @@ impl Compositor {
       return Vec::new();
     }
     let Ok(workspace) =
-      self.state.core.current_workspace(&self.state.output_id)
+      self.state.core.current_workspace(&self.state.active_output)
     else {
       return Vec::new();
     };
     let mut windows = self
       .state
       .core
-      .tree(&self.state.output_id, workspace)
+      .tree(&self.state.active_output, workspace)
       .map(|tree| tree.windows())
       .unwrap_or_default();
     let mut sticky = self
@@ -2201,7 +2301,7 @@ impl Compositor {
         Some(toplevel) => toplevel.window().filter(|window| {
           self.state.core.window_info(*window).is_ok_and(|info| {
             info.state.sticky
-              && info.location.output == self.state.output_id
+              && info.location.output == self.state.active_output
               && info.location.workspace != workspace
           })
         }),
@@ -2408,7 +2508,10 @@ impl Compositor {
 
   /// The current workspace as a 0-based row-major index.
   pub fn current_workspace_index(&self) -> Result<usize, Error> {
-    let workspace = self.state.core.current_workspace(&self.state.output_id)?;
+    let workspace = self
+      .state
+      .core
+      .current_workspace(&self.state.active_output)?;
     Ok(
       workspace.y as usize * self.state.workspace_width as usize
         + workspace.x as usize,
@@ -2591,12 +2694,16 @@ impl Compositor {
     self
       .state
       .core
-      .current_workspace(&self.state.output_id)
+      .current_workspace(&self.state.active_output)
       .ok()
       .and_then(|workspace| {
-        self.state.core.tree(&self.state.output_id, workspace).ok()
+        self
+          .state
+          .core
+          .tree(&self.state.active_output, workspace)
+          .ok()
       })
-      .map_or(self.state.output, |tree| tree.workarea())
+      .map_or(self.state.primary().rect, |tree| tree.workarea())
   }
 
   /// The grid slot a window dragged to `(x, y)` would snap to, as Wayfire's
@@ -2810,7 +2917,7 @@ impl Compositor {
 
   /// The exact output scale, possibly fractional.
   pub fn output_scale(&self) -> f64 {
-    self.state.output_scale
+    self.state.primary().scale
   }
 
   /// The gamma table to apply to the output: 256 red, then 256 green, then
@@ -2834,7 +2941,7 @@ impl Compositor {
   pub fn output_transform(
     &self,
   ) -> wayland_server::protocol::wl_output::Transform {
-    self.state.output_transform
+    self.state.primary().transform
   }
 
   /// Changes the output transform. Switching between upright and quarter-turn
@@ -2859,8 +2966,8 @@ impl Compositor {
     output_transform::logical_size(
       physical_width,
       physical_height,
-      self.state.output_scale,
-      self.state.output_transform,
+      self.state.primary().scale,
+      self.state.primary().transform,
     )
   }
 
@@ -2880,13 +2987,13 @@ impl Compositor {
       y,
       display_width,
       display_height,
-      self.state.output.width,
-      self.state.output.height,
-      self.state.output_transform,
+      self.state.primary().rect.width,
+      self.state.primary().rect.height,
+      self.state.primary().transform,
     );
     (
-      x + f64::from(self.state.output.x),
-      y + f64::from(self.state.output.y),
+      x + f64::from(self.state.primary().rect.x),
+      y + f64::from(self.state.primary().rect.y),
     )
   }
 
@@ -2901,13 +3008,13 @@ impl Compositor {
     display_height: u32,
   ) -> (f64, f64) {
     output_transform::unmap_point(
-      x - f64::from(self.state.output.x),
-      y - f64::from(self.state.output.y),
+      x - f64::from(self.state.primary().rect.x),
+      y - f64::from(self.state.primary().rect.y),
       display_width,
       display_height,
-      self.state.output.width,
-      self.state.output.height,
-      self.state.output_transform,
+      self.state.primary().rect.width,
+      self.state.primary().rect.height,
+      self.state.primary().transform,
     )
   }
 
@@ -2925,9 +3032,9 @@ impl Compositor {
       y,
       display_width,
       display_height,
-      self.state.output.width,
-      self.state.output.height,
-      self.state.output_transform,
+      self.state.primary().rect.width,
+      self.state.primary().rect.height,
+      self.state.primary().transform,
     )
   }
 
@@ -2967,7 +3074,7 @@ impl Compositor {
 
   /// Returns the description of the output clients currently see.
   pub fn output_info(&self) -> &OutputInfo {
-    &self.state.output_info
+    &self.state.primary().info
   }
 
   /// Describes the physical output to clients: `wl_output` geometry, mode,
@@ -2992,26 +3099,202 @@ impl Compositor {
   /// it, and wlr-output-management mode changes become
   /// [`Compositor::take_output_requests`].
   pub fn set_output_info(&mut self, info: OutputInfo) {
-    let renamed = info.name != self.state.output_info.name;
-    let modes_changed = info.modes != self.state.output_info.modes;
-    let handle = self.display.handle();
+    let output = OutputHandle::from(&self.state.primary().id);
+    self.describe_output(&output, info);
+  }
+
+  /// [`Compositor::set_output_info`] for any output. A new name renames
+  /// the output: clients see its global replaced, and if a workspace set
+  /// waits, parked, for an output of that name or EDID identity, the
+  /// output shows it with its windows. Does nothing for an unknown output.
+  pub fn describe_output(&mut self, output: &OutputHandle, info: OutputInfo) {
+    let id = output.id();
+    let Some(current) = self.state.outputs.get(&id) else {
+      return;
+    };
+    let renamed = info.name != current.info.name;
+    let modes_changed = info.modes != current.info.modes;
     if !renamed {
-      self.state.set_output_info(info);
+      self.state.set_info_of(&id, info);
       if modes_changed {
-        output_management::modes_changed(&mut self.state, &handle);
+        output_management::modes_changed(&mut self.state, &id);
       }
       return;
     }
     let name = info.name.clone();
-    self.state.output_info = info;
-    if let Err(error) = output::rename(&mut self.state, &handle, &name) {
-      eprintln!("shingle: renaming the output to {name} failed: {error}");
+    if self
+      .state
+      .outputs
+      .get(&OutputId::new(name.clone()))
+      .is_some()
+    {
+      eprintln!("shingle: renaming {} to {name} failed: taken", id.as_str());
+      return;
     }
+    if let Some(output) = self.state.outputs.get_mut(&id) {
+      output.info = info;
+    }
+    let id = match output::rename(&mut self.state, &id, &name) {
+      Ok(id) => id,
+      Err(error) => {
+        eprintln!("shingle: renaming the output to {name} failed: {error}");
+        return;
+      }
+    };
     let placement = self.state.placements.get(&name);
-    let physical = output::physical_size(&self.state);
-    if let Err(error) = output::place(&mut self.state, placement, physical) {
+    let physical = output::physical_size(&self.state, &id);
+    if let Err(error) = output::place(&mut self.state, &id, placement, physical)
+    {
       eprintln!("shingle: placing output {name} failed: {error}");
     }
+  }
+
+  /// Adds an output described by `info` with a size of `physical` pixels,
+  /// before the transform. Its configuration entry, by name, places and
+  /// scales it, with `auto` positions placed left to right after the fixed
+  /// ones, as wlroots does. It shows the parked workspace set of the same
+  /// EDID identity or name, whose windows away elsewhere come back, or a
+  /// new set with the lowest free index. Clients see a new `wl_output`
+  /// global and output-management head, and IPC watchers `output-added`.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::OutputExists`] for a name that another output has,
+  /// [`Error::InvalidOutputScale`] for a bad configured scale, and
+  /// [`Error::Core`] for an empty name or size.
+  pub fn add_output(
+    &mut self,
+    info: OutputInfo,
+    physical: (u32, u32),
+  ) -> Result<OutputHandle, Error> {
+    output::add(&mut self.state, info, physical, OutputKind::Backend)
+      .map(|id| OutputHandle::from(&id))
+  }
+
+  /// The size in physical pixels, before the transform, that the
+  /// configuration gives an output called `name` when the backend has no
+  /// mode of its own, as in headless: its explicit mode, else its logical
+  /// size times its scale.
+  pub fn configured_physical_size(&self, name: &str) -> (u32, u32) {
+    let placement = self.state.placements.get(name);
+    let scale = |extent: u32| (f64::from(extent) * placement.scale).round();
+    (
+      scale(placement.width).clamp(1.0, f64::from(u32::MAX)) as u32,
+      scale(placement.height).clamp(1.0, f64::from(u32::MAX)) as u32,
+    )
+  }
+
+  /// Removes an output whose monitor, window or connector is gone. Its
+  /// windows are handled by `output_layout.unplug` (Wayfire's `move`,
+  /// preserve-output's `park`, or `return`, the default, which moves them
+  /// to the active output and back when the output returns). The last
+  /// output is never removed: it stays described, marked dark, draws
+  /// nothing and gets no frames until another output is added, which then
+  /// takes its windows.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::Core`] for an unknown output.
+  pub fn remove_output(&mut self, output: &OutputHandle) -> Result<(), Error> {
+    output::remove(&mut self.state, &output.id())
+  }
+
+  /// Gives an output a new size in physical pixels, before the transform,
+  /// keeping its scale and transform. Outputs placed after it move.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::Core`] for an empty size.
+  pub fn set_output_size(
+    &mut self,
+    output: &OutputHandle,
+    physical: (u32, u32),
+  ) -> Result<(), Error> {
+    let id = output.id();
+    let Some(current) = self.state.outputs.get(&id) else {
+      return Ok(());
+    };
+    let (width, height) = output_transform::logical_size(
+      physical.0,
+      physical.1,
+      current.scale,
+      current.transform,
+    );
+    let rect = Rect::new(current.rect.x, current.rect.y, width, height);
+    self.state.set_rect_of(&id, rect, false)
+  }
+
+  /// Every output, in the order they were added.
+  pub fn outputs(&self) -> Vec<OutputView> {
+    self
+      .state
+      .outputs
+      .iter()
+      .map(|output| OutputView::new(&self.state, output))
+      .collect()
+  }
+
+  /// One output, if it is there.
+  pub fn output_view(&self, output: &OutputHandle) -> Option<OutputView> {
+    self
+      .state
+      .outputs
+      .get(&output.id())
+      .map(|state| OutputView::new(&self.state, state))
+  }
+
+  /// The output under a point of the layout, the first added where
+  /// outputs overlap.
+  pub fn output_at(&self, x: f64, y: f64) -> Option<OutputHandle> {
+    self
+      .state
+      .outputs
+      .iter()
+      .find(|output| {
+        let rect = output.rect;
+        x >= f64::from(rect.x)
+          && y >= f64::from(rect.y)
+          && x < f64::from(rect.x) + f64::from(rect.width)
+          && y < f64::from(rect.y) + f64::from(rect.height)
+      })
+      .map(|output| OutputHandle::from(&output.id))
+  }
+
+  /// The focused output, which workspace bindings, new windows and IPC
+  /// without an output act on.
+  pub fn active_output(&self) -> OutputHandle {
+    OutputHandle::from(&self.state.active().id)
+  }
+
+  /// The first output added that is still there. Until the frontend draws
+  /// every output (MO-5), [`Compositor::output`],
+  /// [`Compositor::visible_surfaces`] and the other calls without an
+  /// output mean this one.
+  pub fn primary_output(&self) -> OutputHandle {
+    OutputHandle::from(&self.state.primary().id)
+  }
+
+  /// The surfaces to draw on one output, as [`Compositor::visible_surfaces`]
+  /// lists them for the first. Until layer, lock and override-redirect
+  /// surfaces and the cursor have outputs of their own (MO-3), the other
+  /// outputs show only the windows of their workspace sets. A dark output
+  /// shows nothing.
+  pub fn visible_surfaces_on(
+    &self,
+    output: &OutputHandle,
+  ) -> Vec<SurfaceSnapshot> {
+    self.state.visible_surfaces_on(&output.id())
+  }
+
+  /// Settles a restored session once the backend has added its outputs
+  /// ([`Compositor::with_core`] parks every saved workspace set, and each
+  /// added output takes its own): saved sets that no output took are
+  /// handled by `output_layout.unplug` as if their outputs had just gone,
+  /// and the saved active output is focused again if it is there. Only
+  /// the first call does anything; the first [`Compositor::poll`] calls it
+  /// if the host did not.
+  pub fn restore_outputs(&mut self) {
+    output::restore(&mut self.state);
   }
 
   /// Takes the mode changes wlr-output-management clients asked for since
@@ -3497,10 +3780,15 @@ pub(crate) mod tests {
     let (mut compositor, _) = test_compositor();
     let grid = compositor.workspace_grid_dimensions();
     let background = compositor.state.background_color;
-    for (scale, output) in [
-      (f64::NAN, Rect::new(0, 0, 800, 600)),
-      (1.0, Rect::new(0, 0, 0, 600)),
-      (1.0, Rect::new(i32::MAX, 0, 800, 600)),
+    use shingle_config::OutputPosition;
+    for (scale, output, output_position) in [
+      (f64::NAN, Rect::new(0, 0, 800, 600), OutputPosition::Auto),
+      (1.0, Rect::new(0, 0, 0, 600), OutputPosition::Auto),
+      (
+        1.0,
+        Rect::new(0, 0, 800, 600),
+        OutputPosition::Fixed { x: i32::MAX, y: 0 },
+      ),
     ] {
       let config = Config {
         workspace_width: 4,
@@ -3509,13 +3797,14 @@ pub(crate) mod tests {
         output_transform: wl_output::Transform::_90,
         output_scale: scale,
         output,
+        output_position,
         ..Config::default()
       };
       assert!(compositor.apply_config(config).is_err());
       assert_eq!(compositor.workspace_grid_dimensions(), grid);
       assert_eq!(compositor.state.background_color, background);
       assert_eq!(
-        compositor.state.output_transform,
+        compositor.state.primary().transform,
         wl_output::Transform::Normal
       );
       assert_eq!(compositor.output_scale(), 1.0);
@@ -3532,12 +3821,12 @@ pub(crate) mod tests {
       let workspace = compositor
         .state
         .core
-        .current_workspace(&compositor.state.output_id)
+        .current_workspace(&compositor.state.active_output)
         .unwrap();
       compositor
         .state
         .core
-        .tree(&compositor.state.output_id, workspace)
+        .tree(&compositor.state.active_output, workspace)
         .unwrap()
         .windows()
     };
@@ -3964,12 +4253,16 @@ pub(crate) mod tests {
     let (mut compositor, path) = test_compositor();
     let mut client = client_waiting_for_a_frame(&mut compositor, &path);
     assert!(client.events.frame_done.is_empty());
-    compositor.frame_presented(PresentInfo {
-      time: Duration::new(5, 250_000_123),
-      refresh_ns: 16_666_667,
-      seq: (1 << 32) + 2,
-      flags: PresentationFlags::Vsync | PresentationFlags::HwClock,
-    });
+    let output = compositor.primary_output();
+    compositor.frame_presented(
+      &output,
+      PresentInfo {
+        time: Duration::new(5, 250_000_123),
+        refresh_ns: 16_666_667,
+        seq: (1 << 32) + 2,
+        flags: PresentationFlags::Vsync | PresentationFlags::HwClock,
+      },
+    );
     client.roundtrip(&mut compositor);
     assert_eq!(client.events.frame_done, [5_250]);
     let presented = client

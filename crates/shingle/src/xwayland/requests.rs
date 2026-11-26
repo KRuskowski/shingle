@@ -199,7 +199,7 @@ fn transient_geometry(
     .and_then(|location| {
       state.core.tree(&location.output, location.workspace).ok()
     })
-    .map_or(state.output, |tree| tree.workarea());
+    .map_or(state.active().rect, |tree| tree.workarea());
   Some(centred(parent_geometry, size, workarea))
 }
 

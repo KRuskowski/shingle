@@ -530,10 +530,10 @@ pub(crate) fn sync_focus(state: &mut CompositorState) {
         } else {
           state
             .core
-            .current_workspace(&state.output_id)
+            .current_workspace(&state.active_output)
             .ok()
             .and_then(|workspace| {
-              state.core.tree(&state.output_id, workspace).ok()
+              state.core.tree(&state.active_output, workspace).ok()
             })
             .and_then(|tree| tree.focused())
             .and_then(|window| object_for_window(state, window))
@@ -719,8 +719,8 @@ pub(crate) fn focus_directional(
   let Some(current) = focused_window(state) else {
     return Ok(None);
   };
-  let workspace = state.core.current_workspace(&state.output_id)?;
-  let tree = state.core.tree(&state.output_id, workspace)?;
+  let workspace = state.core.current_workspace(&state.active_output)?;
+  let tree = state.core.tree(&state.active_output, workspace)?;
   let source = tree.window_layout(current)?;
   let next = tree
     .layout()
@@ -1685,8 +1685,12 @@ pub(crate) fn focused_window(state: &CompositorState) -> Option<WindowId> {
   if let Some(object) = &state.input.keyboard_focus {
     return window_for_object(state, object);
   }
-  let workspace = state.core.current_workspace(&state.output_id).ok()?;
-  state.core.tree(&state.output_id, workspace).ok()?.focused()
+  let workspace = state.core.current_workspace(&state.active_output).ok()?;
+  state
+    .core
+    .tree(&state.active_output, workspace)
+    .ok()?
+    .focused()
 }
 
 fn pointer_frame(state: &CompositorState, pointer: &WlPointer) {
@@ -1742,7 +1746,7 @@ mod tests {
   #[test]
   fn aspect_resize_from_the_left_and_top_keeps_the_far_edges() {
     let mut state = test_state();
-    let output = state.output_id.clone();
+    let output = state.active_output.clone();
     let window = state
       .core
       .attach_window(&output, Default::default())

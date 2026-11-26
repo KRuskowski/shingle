@@ -83,7 +83,7 @@ pub(crate) fn blocker(
 ) -> Option<Box<dyn Blocker>> {
   let timestamp = state.surfaces.get(object)?.pending.timestamp?;
   let refresh = Duration::from_nanos(u64::from(
-    crate::presentation::refresh_ns(state.output_info.refresh_mhz),
+    crate::presentation::refresh_ns(state.primary().info.refresh_mhz),
   ));
   let at = deadline(timestamp, refresh);
   if at <= now() + MINIMUM_WAIT {

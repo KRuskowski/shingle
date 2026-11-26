@@ -158,21 +158,27 @@ pub(crate) struct CompositorState {
   pub(crate) cascade_position: (i32, i32),
   pub(crate) window_rules: Vec<shingle_config::WindowRule>,
   pub(crate) applying_window_rules: bool,
-  pub(crate) output: Rect,
   pub(crate) background_color: [f64; 4],
   pub(crate) workspace_width: u32,
   pub(crate) workspace_height: u32,
   pub(crate) workspace_wraparound: crate::WorkspaceWraparound,
-  pub(crate) output_scale: f64,
-  pub(crate) output_transform: wl_output::Transform,
   pub(crate) cursor_theme: String,
   pub(crate) cursor_size: u32,
   pub(crate) default_cursor: bool,
-  pub(crate) output_id: OutputId,
-  pub(crate) output_info: crate::OutputInfo,
-  /// Where the configuration puts the output, by name.
+  /// The outputs in the order they were added; never empty.
+  pub(crate) outputs: crate::output::Outputs,
+  /// The focused output: workspace bindings, IPC without an output and new
+  /// windows use it.
+  pub(crate) active_output: OutputId,
+  /// What happens to the workspace set of an output that goes.
+  pub(crate) unplug: shingle_config::UnplugPolicy,
+  /// Whether a restored session's sets were settled
+  /// ([`crate::Compositor::restore_outputs`]).
+  pub(crate) outputs_restored: bool,
+  /// The display, once the globals exist, for globals created later.
+  pub(crate) display: Option<DisplayHandle>,
+  /// Where the configuration puts outputs, by name.
   pub(crate) placements: crate::output::Placements,
-  pub(crate) output_globals: crate::output::OutputGlobals,
   /// Mode changes waiting for the backend.
   pub(crate) output_requests: Vec<crate::OutputRequest>,
   pub(crate) next_output_request: u64,
@@ -194,7 +200,6 @@ pub(crate) struct CompositorState {
   pub(crate) dmabuf: Option<crate::linux_dmabuf::DmabufState>,
   /// `wp_linux_drm_syncobj_manager_v1`, once a frontend enabled it.
   pub(crate) syncobj: Option<crate::linux_drm_syncobj::SyncobjState>,
-  pub(crate) outputs: HashMap<ObjectId, WlOutput>,
   pub(crate) xdg_outputs: HashMap<ObjectId, ZxdgOutputV1>,
   pub(crate) events: Vec<Event>,
   pub(crate) ipc_events: Vec<serde_json::Value>,
@@ -275,7 +280,7 @@ pub(crate) struct CompositorState {
 
 impl CompositorState {
   pub(crate) fn new(
-    mut config: Config,
+    config: Config,
     mut core: Shingle,
     disconnected: Arc<Mutex<Vec<ClientId>>>,
     socket_name: &std::ffi::OsStr,
@@ -285,35 +290,37 @@ impl CompositorState {
     }
     let placements = crate::output::Placements::new(&config);
     let initial = placements.get(OUTPUT_NAME);
-    config.output =
-      Rect::new(initial.x, initial.y, initial.width, initial.height);
-    config.output_scale = initial.scale;
-    config.output_transform = initial.transform;
-    if !config.output_scale.is_finite() || config.output_scale <= 0.0 {
+    let mut rect = Rect::new(0, 0, initial.width, initial.height);
+    if !initial.scale.is_finite() || initial.scale <= 0.0 {
       return Err(crate::Error::InvalidOutputScale);
     }
-    if crate::output_transform::is_quarter_turn(config.output_transform) {
-      std::mem::swap(&mut config.output.width, &mut config.output.height);
+    if crate::output_transform::is_quarter_turn(initial.transform) {
+      std::mem::swap(&mut rect.width, &mut rect.height);
     }
+    rect.validate()?;
     let output_id = OutputId::new(OUTPUT_NAME);
-    if !core.outputs().any(|output| output == &output_id) {
-      core.add_output(output_id.clone(), config.output)?;
-    }
-    // Shingle drives one output, so the windows of a session saved under
-    // another output name, such as a native connector, join this one. A
-    // native backend renames it after its connector before clients connect.
-    let others: Vec<OutputId> = core
-      .outputs()
-      .filter(|output| **output != output_id)
-      .cloned()
-      .collect();
-    for other in others {
-      core.rename_output(&other, output_id.clone())?;
-    }
-    core.set_output_workarea(&output_id, config.output)?;
+    // A restored session's sets wait, parked, for their outputs, which
+    // take them as they are added; `restore_outputs` settles the rest.
+    crate::output::park_restored(&mut core);
+    core.add_output(output_id.clone(), rect)?;
+    let mut outputs = crate::output::Outputs::new();
+    outputs.push(
+      crate::OutputInfo {
+        refresh_mhz: match initial.refresh_mhz {
+          0 => crate::OutputInfo::default().refresh_mhz,
+          refresh => refresh,
+        },
+        ..Default::default()
+      },
+      rect,
+      initial.scale,
+      initial.transform,
+      initial.position,
+      crate::OutputKind::Backend,
+    );
     let started = Instant::now();
     let idle = IdleCoordinator::new(config.idle, Duration::ZERO);
-    Ok(Self {
+    let mut state = Self {
       core,
       idle,
       idle_notifications: Default::default(),
@@ -328,26 +335,19 @@ impl CompositorState {
       cascade_position: (0, 0),
       window_rules: config.window_rules,
       applying_window_rules: false,
-      output: config.output,
       background_color: config.background_color,
       workspace_width: config.workspace_width,
       workspace_height: config.workspace_height,
       workspace_wraparound: config.workspace_wraparound,
-      output_scale: config.output_scale,
-      output_transform: config.output_transform,
       cursor_theme: config.cursor_theme,
       cursor_size: config.cursor_size,
       default_cursor: false,
-      output_id,
-      output_info: crate::OutputInfo {
-        refresh_mhz: match initial.refresh_mhz {
-          0 => crate::OutputInfo::default().refresh_mhz,
-          refresh => refresh,
-        },
-        ..Default::default()
-      },
+      outputs,
+      active_output: output_id,
+      unplug: config.output_unplug,
+      outputs_restored: false,
+      display: None,
       placements,
-      output_globals: Default::default(),
       output_requests: Vec::new(),
       next_output_request: 0,
       output_power: Default::default(),
@@ -365,7 +365,6 @@ impl CompositorState {
       dmabuf: None,
       syncobj: None,
       commit_queue: Default::default(),
-      outputs: HashMap::new(),
       xdg_outputs: HashMap::new(),
       events: Vec::new(),
       ipc_events: Vec::new(),
@@ -441,7 +440,14 @@ impl CompositorState {
       last_workspace: None,
       last_lock_state: LockState::Unlocked,
       last_dpms_state: DpmsState::On,
-    })
+    };
+    crate::output::relayout(&mut state);
+    let first = state.primary();
+    let (id, rect, identity) = (first.id.clone(), first.rect, first.identity());
+    state.core.set_output_workarea(&id, rect)?;
+    crate::output::claim_parked(&mut state, &id, identity);
+    state.ipc_events.clear();
+    Ok(state)
   }
 
   pub(crate) fn switch_workspace(
@@ -455,8 +461,8 @@ impl CompositorState {
       index as u32 % self.workspace_width,
       index as u32 / self.workspace_width,
     );
-    self.core.ensure_workspace(&self.output_id, workspace)?;
-    let previous = self.core.current_workspace(&self.output_id)?;
+    self.core.ensure_workspace(&self.active_output, workspace)?;
+    let previous = self.core.current_workspace(&self.active_output)?;
     if previous == workspace {
       // A request for the current workspace does nothing, as vswitch's
       // on_set_workspace_request (plugins/vswitch/vswitch.cpp) carries it
@@ -467,12 +473,14 @@ impl CompositorState {
     self.last_workspace = Some(previous);
     self
       .core
-      .set_current_workspace(&self.output_id, workspace)?;
+      .set_current_workspace(&self.active_output, workspace)?;
     self.input.keyboard_focus = None;
     crate::input::sync_focus(self);
     shell::reconfigure_all(self);
     self.events.push(crate::Event::WorkspaceChanged {
       workspace: index as u32 + 1,
+      previous: previous.y * self.workspace_width + previous.x + 1,
+      output: crate::OutputHandle::from(&self.active_output),
     });
     Ok(())
   }
@@ -490,7 +498,7 @@ impl CompositorState {
     if width == self.workspace_width && height == self.workspace_height {
       return Ok(());
     }
-    let current = self.core.current_workspace(&self.output_id)?;
+    let current = self.core.current_workspace(&self.active_output)?;
     let target =
       WorkspaceId::new(current.x.min(width - 1), current.y.min(height - 1));
     self.workspace_width = width;
@@ -501,7 +509,7 @@ impl CompositorState {
     let windows = self.core.window_ids().collect::<Vec<_>>();
     for window in windows {
       let location = self.core.window_location(window)?.clone();
-      if location.output != self.output_id {
+      if location.output != self.active_output {
         continue;
       }
       if location.workspace.x >= width || location.workspace.y >= height {
@@ -527,7 +535,7 @@ impl CompositorState {
     &self,
     direction: shingle_core::Direction,
   ) -> Result<usize, crate::Error> {
-    let current = self.core.current_workspace(&self.output_id)?;
+    let current = self.core.current_workspace(&self.active_output)?;
     let (dx, dy) = match direction {
       shingle_core::Direction::Left => (-1, 0),
       shingle_core::Direction::Right => (1, 0),
@@ -570,8 +578,8 @@ impl CompositorState {
     &mut self,
     index: usize,
   ) -> Result<Option<WindowId>, crate::Error> {
-    let current = self.core.current_workspace(&self.output_id)?;
-    let window = self.core.tree(&self.output_id, current)?.focused();
+    let current = self.core.current_workspace(&self.active_output)?;
+    let window = self.core.tree(&self.active_output, current)?.focused();
     if let Some(window) = window {
       self.move_window_to_workspace(window, index)?;
     }
@@ -591,7 +599,7 @@ impl CompositorState {
       index as u32 % self.workspace_width,
       index as u32 / self.workspace_width,
     );
-    self.core.ensure_workspace(&self.output_id, workspace)?;
+    self.core.ensure_workspace(&self.active_output, workspace)?;
     let previous = self.core.window_location(window)?.workspace;
     if previous == workspace {
       return Ok(());
@@ -600,7 +608,7 @@ impl CompositorState {
     let detached = self.core.detach_window(window)?;
     self
       .core
-      .reattach_window(detached, &self.output_id, workspace)?;
+      .reattach_window(detached, &self.active_output, workspace)?;
     self.input.keyboard_focus = None;
     crate::input::sync_focus(self);
     shell::reconfigure_all(self);
@@ -613,6 +621,7 @@ impl CompositorState {
   }
 
   pub(crate) fn create_globals(&mut self, handle: &DisplayHandle) {
+    self.display = Some(handle.clone());
     crate::activation::create_global(handle);
     crate::foreign::create_globals(handle);
     crate::foreign_toplevel::create_global(handle);
@@ -621,7 +630,14 @@ impl CompositorState {
     crate::xdg_output::create_global(handle);
     handle.create_global::<CompositorState, WlCompositor, ()>(6, ());
     handle.create_global::<CompositorState, WlShm, ()>(2, ());
-    crate::output::create_global(self, handle);
+    let ids = self
+      .outputs
+      .iter()
+      .map(|output| output.id.clone())
+      .collect::<Vec<_>>();
+    for id in &ids {
+      crate::output::create_global(self, id);
+    }
     crate::output_power::create_global(handle);
     crate::output_management::create_global(handle);
     crate::security_context::create_global(handle);
@@ -695,10 +711,28 @@ impl CompositorState {
   }
 
   pub(crate) fn visible_surfaces(&self) -> Vec<SurfaceSnapshot> {
-    if self.idle.dpms_state() == DpmsState::Off {
+    self.visible_surfaces_on(&self.primary().id)
+  }
+
+  /// The surfaces to draw on output `id`, bottom to top. Until layer, lock
+  /// and X11 override-redirect surfaces and the cursor have outputs of
+  /// their own (MO-3), they are on the first output; other outputs show
+  /// the windows of their workspace sets. A dark output shows nothing.
+  pub(crate) fn visible_surfaces_on(
+    &self,
+    id: &OutputId,
+  ) -> Vec<SurfaceSnapshot> {
+    let Some(output) = self.outputs.get(id) else {
+      return Vec::new();
+    };
+    let primary = self.primary().id == *id;
+    if self.idle.dpms_state() == DpmsState::Off || output.dark {
       return Vec::new();
     }
     if self.idle.lock_state() != LockState::Unlocked {
+      if !primary {
+        return Vec::new();
+      }
       let mut surfaces = self
         .surfaces
         .values()
@@ -714,11 +748,13 @@ impl CompositorState {
         .collect();
     }
     let mut snapshots = Vec::new();
-    self.append_layers(&mut snapshots, &[Layer::Background, Layer::Bottom]);
-    let Ok(workspace) = self.core.current_workspace(&self.output_id) else {
+    if primary {
+      self.append_layers(&mut snapshots, &[Layer::Background, Layer::Bottom]);
+    }
+    let Ok(workspace) = self.core.current_workspace(id) else {
       return snapshots;
     };
-    let Ok(tree) = self.core.tree(&self.output_id, workspace) else {
+    let Ok(tree) = self.core.tree(id, workspace) else {
       return snapshots;
     };
     let focused = crate::input::focused_window(self).or_else(|| tree.focused());
@@ -749,8 +785,8 @@ impl CompositorState {
               self.core.window_info(window).is_ok_and(|info| {
                 info.state.sticky
                   && !info.state.minimized
-                  && (info.location.output != self.output_id
-                    || info.location.workspace != workspace)
+                  && info.location.output == *id
+                  && info.location.workspace != workspace
               })
             })
       })
@@ -807,8 +843,11 @@ impl CompositorState {
     // window, whose menus they may be.
     if let Some(object) = fullscreen {
       self.append_surface_and_popups(&object, &mut snapshots);
-    } else {
+    } else if primary {
       self.append_layers(&mut snapshots, &[Layer::Top]);
+    }
+    if !primary {
+      return snapshots;
     }
     for object in crate::xwayland::unmanaged::drawn(self) {
       if let Some(snapshot) = self.snapshot(&object) {
@@ -911,7 +950,8 @@ impl CompositorState {
     all_workspaces: bool,
     include_minimized: bool,
   ) -> Vec<SurfaceSnapshot> {
-    let Ok(current_workspace) = self.core.current_workspace(&self.output_id)
+    let Ok(current_workspace) =
+      self.core.current_workspace(&self.active_output)
     else {
       return Vec::new();
     };
@@ -924,7 +964,7 @@ impl CompositorState {
         let window = toplevel.window()?;
         let info = self.core.window_info(window).ok()?;
         if info.presence != shingle_core::WindowPresence::Mapped
-          || info.location.output != self.output_id
+          || info.location.output != self.active_output
           || (info.state.minimized && !include_minimized)
           || (!all_workspaces
             && !info.state.sticky
@@ -968,159 +1008,177 @@ impl CompositorState {
     })
   }
 
-  pub(crate) fn set_output_transform(
+  /// The first output added that is still there, which hosts draw until
+  /// the frontend draws every output (MO-5).
+  pub(crate) fn primary(&self) -> &crate::output::OutputState {
+    self.outputs.first()
+  }
+
+  /// The active output.
+  pub(crate) fn active(&self) -> &crate::output::OutputState {
+    self
+      .outputs
+      .get(&self.active_output)
+      .unwrap_or_else(|| self.outputs.first())
+  }
+
+  /// The output that shows `window`'s workspace set, else the active one.
+  pub(crate) fn output_of_window(
+    &self,
+    window: WindowId,
+  ) -> &crate::output::OutputState {
+    self
+      .core
+      .window_info(window)
+      .ok()
+      .and_then(|info| self.outputs.get(&info.location.output))
+      .unwrap_or_else(|| self.active())
+  }
+
+  /// Changes the transform of output `id`. Switching between upright and
+  /// quarter-turn transforms swaps its logical width and height.
+  pub(crate) fn set_transform_of(
     &mut self,
+    id: &OutputId,
     transform: wl_output::Transform,
   ) {
-    let old = self.output_transform;
+    let Some(output) = self.outputs.get_mut(id) else {
+      return;
+    };
+    let old = output.transform;
     if old == transform {
       return;
     }
-    self.output_transform = transform;
+    output.transform = transform;
     if crate::output_transform::is_quarter_turn(old)
       != crate::output_transform::is_quarter_turn(transform)
     {
-      std::mem::swap(&mut self.output.width, &mut self.output.height);
+      std::mem::swap(&mut output.rect.width, &mut output.rect.height);
     }
-    let output = self.output;
-    for resource in self.outputs.values() {
-      self.send_output_geometry(resource);
-      let (width, height) = crate::output_transform::physical_size(
-        output.width,
-        output.height,
-        self.output_scale,
-        transform,
-      );
-      resource.mode(
-        wl_output::Mode::Current | wl_output::Mode::Preferred,
-        width.min(i32::MAX as u32) as i32,
-        height.min(i32::MAX as u32) as i32,
-        self.output_info.refresh_mhz as i32,
-      );
-      if resource.version() >= 2 {
-        resource.done();
-      }
-    }
+    let moved = crate::output::relayout(self);
+    let output = self.outputs.get(id).expect("the output exists");
+    output.send_all();
+    let rect = output.rect;
     crate::layer_shell::update_workarea(self);
     shell::reconfigure_lock_surfaces(self);
     shell::reconfigure_all(self);
     crate::xdg_output::update(self);
     crate::output_management::sync(self);
-    self.events.push(Event::OutputChanged { output });
-  }
-
-  /// Sends the output's position, physical size, subpixel layout, make,
-  /// model and transform.
-  fn send_output_geometry(&self, resource: &WlOutput) {
-    let info = &self.output_info;
-    let (width_mm, height_mm) = info.physical_size_mm;
-    resource.geometry(
-      self.output.x,
-      self.output.y,
-      width_mm.min(i32::MAX as u32) as i32,
-      height_mm.min(i32::MAX as u32) as i32,
-      info.subpixel,
-      info.make.clone(),
-      info.model.clone(),
-      self.output_transform,
-    );
-  }
-
-  pub(crate) fn set_output_info(&mut self, info: crate::OutputInfo) {
-    self.output_info = info;
-    let output = self.output;
-    for resource in self.outputs.values() {
-      self.send_output_geometry(resource);
-      let (width, height) = crate::output_transform::physical_size(
-        output.width,
-        output.height,
-        self.output_scale,
-        self.output_transform,
-      );
-      resource.mode(
-        wl_output::Mode::Current | wl_output::Mode::Preferred,
-        width.min(i32::MAX as u32) as i32,
-        height.min(i32::MAX as u32) as i32,
-        self.output_info.refresh_mhz as i32,
-      );
-      if resource.version() >= 4 {
-        resource.description(self.output_info.description());
-      }
-      if resource.version() >= 2 {
-        resource.done();
-      }
+    self.events.push(Event::OutputChanged {
+      output: crate::OutputHandle::from(id),
+      rect,
+    });
+    for other in moved.iter().filter(|other| *other != id) {
+      crate::output::moved(self, other);
     }
+  }
+
+  /// Describes output `id` to clients again.
+  pub(crate) fn set_info_of(&mut self, id: &OutputId, info: crate::OutputInfo) {
+    let Some(output) = self.outputs.get_mut(id) else {
+      return;
+    };
+    output.info = info;
+    output.send_all();
     crate::xdg_output::update(self);
     crate::output_management::sync(self);
   }
 
-  pub(crate) fn set_output_scale(
+  /// Changes the scale of output `id`, keeping its logical size.
+  pub(crate) fn set_scale_of(
     &mut self,
+    id: &OutputId,
     scale: f64,
   ) -> Result<(), crate::Error> {
     if !scale.is_finite() || scale <= 0.0 {
       return Err(crate::Error::InvalidOutputScale);
     }
-    self.output_scale = scale;
-    let output = self.output;
-    for resource in self.outputs.values() {
-      if resource.version() >= 2 {
-        resource.scale(scale.ceil().clamp(1.0, i32::MAX as f64) as i32);
-      }
-      let (width, height) = crate::output_transform::physical_size(
-        output.width,
-        output.height,
-        scale,
-        self.output_transform,
-      );
-      resource.mode(
-        wl_output::Mode::Current | wl_output::Mode::Preferred,
-        width.min(i32::MAX as u32) as i32,
-        height.min(i32::MAX as u32) as i32,
-        self.output_info.refresh_mhz as i32,
-      );
-      if resource.version() >= 2 {
-        resource.done();
-      }
-    }
+    let Some(output) = self.outputs.get_mut(id) else {
+      return Ok(());
+    };
+    output.scale = scale;
+    output.send_all();
+    let rect = output.rect;
     crate::fractional_scale::sync(self);
     crate::output_management::sync(self);
-    self.events.push(Event::OutputChanged { output });
+    self.events.push(Event::OutputChanged {
+      output: crate::OutputHandle::from(id),
+      rect,
+    });
     Ok(())
   }
 
-  pub(crate) fn set_output(
+  /// Gives output `id` the logical size of `rect`. With `fix`, a position
+  /// other than the current one fixes the output there; otherwise the
+  /// layout keeps placing it as configured.
+  pub(crate) fn set_rect_of(
     &mut self,
-    output: Rect,
+    id: &OutputId,
+    rect: Rect,
+    fix: bool,
   ) -> Result<(), crate::Error> {
-    output.validate()?;
-    self.output = output;
-    for resource in self.outputs.values() {
-      self.send_output_geometry(resource);
-      let scale = self.output_scale;
-      let (width, height) = crate::output_transform::physical_size(
-        output.width,
-        output.height,
-        scale,
-        self.output_transform,
-      );
-      resource.mode(
-        wl_output::Mode::Current | wl_output::Mode::Preferred,
-        width.min(i32::MAX as u32) as i32,
-        height.min(i32::MAX as u32) as i32,
-        self.output_info.refresh_mhz as i32,
-      );
-      if resource.version() >= 2 {
-        resource.scale(scale.ceil().clamp(1.0, i32::MAX as f64) as i32);
-        resource.done();
-      }
+    rect.validate()?;
+    let Some(output) = self.outputs.get_mut(id) else {
+      return Ok(());
+    };
+    if fix && (rect.x, rect.y) != (output.rect.x, output.rect.y) {
+      output.position = shingle_config::OutputPosition::Fixed {
+        x: rect.x,
+        y: rect.y,
+      };
     }
+    output.rect = rect;
+    let moved = crate::output::relayout(self);
+    let output = self.outputs.get(id).expect("the output exists");
+    output.send_all();
+    let rect = output.rect;
     crate::layer_shell::update_workarea(self);
     shell::reconfigure_lock_surfaces(self);
     crate::xdg_output::update(self);
     crate::output_management::sync(self);
-    self.events.push(Event::OutputChanged { output });
+    self.events.push(Event::OutputChanged {
+      output: crate::OutputHandle::from(id),
+      rect,
+    });
+    for other in moved.iter().filter(|other| *other != id) {
+      crate::output::moved(self, other);
+    }
     Ok(())
+  }
+
+  /// [`CompositorState::set_transform_of`] for the first output.
+  pub(crate) fn set_output_transform(
+    &mut self,
+    transform: wl_output::Transform,
+  ) {
+    let id = self.primary().id.clone();
+    self.set_transform_of(&id, transform);
+  }
+
+  /// [`CompositorState::set_info_of`] for the first output.
+  #[cfg(test)]
+  pub(crate) fn set_output_info(&mut self, info: crate::OutputInfo) {
+    let id = self.primary().id.clone();
+    self.set_info_of(&id, info);
+  }
+
+  /// [`CompositorState::set_scale_of`] for the first output.
+  pub(crate) fn set_output_scale(
+    &mut self,
+    scale: f64,
+  ) -> Result<(), crate::Error> {
+    let id = self.primary().id.clone();
+    self.set_scale_of(&id, scale)
+  }
+
+  /// [`CompositorState::set_rect_of`] for the first output, fixing it at a
+  /// new position.
+  pub(crate) fn set_output(
+    &mut self,
+    output: Rect,
+  ) -> Result<(), crate::Error> {
+    let id = self.primary().id.clone();
+    self.set_rect_of(&id, output, true)
   }
 
   pub(crate) fn poll_idle(&mut self) {
@@ -1490,11 +1548,18 @@ impl CompositorState {
     };
     self.frame_callbacks.extend(callbacks);
     if let Some(surface) = self.surfaces.get(object) {
-      for output in self.outputs.values() {
-        if output.client().map(|client| client.id())
+      // Until surfaces enter outputs by overlap (MO-3), a toplevel is on its
+      // window's output and everything else on the first output.
+      let output = surface
+        .role
+        .toplevel()
+        .and_then(|toplevel| toplevel.window())
+        .map_or_else(|| self.primary(), |window| self.output_of_window(window));
+      for resource in output.bound.values() {
+        if resource.client().map(|client| client.id())
           == Some(surface.client.clone())
         {
-          surface.resource.enter(output);
+          surface.resource.enter(resource);
         }
       }
     }
@@ -1672,7 +1737,6 @@ fn clip_rects(
 struct SurfaceData;
 struct PoolData;
 pub(crate) struct BufferData;
-struct OutputData;
 
 impl GlobalDispatch<WlCompositor, ()> for CompositorState {
   crate::security_context::protocol_can_view!("wl_compositor");
@@ -2029,45 +2093,31 @@ impl GlobalDispatch<WlOutput, crate::output::OutputGlobal> for CompositorState {
     global_data: &crate::output::OutputGlobal,
     data_init: &mut DataInit<'_, Self>,
   ) {
-    let resource = data_init.init(resource, OutputData);
-    state.send_output_geometry(&resource);
-    let scale = state.output_scale;
-    let (width, height) = crate::output_transform::physical_size(
-      state.output.width,
-      state.output.height,
-      scale,
-      state.output_transform,
-    );
-    resource.mode(
-      wl_output::Mode::Current | wl_output::Mode::Preferred,
-      width.min(i32::MAX as u32) as i32,
-      height.min(i32::MAX as u32) as i32,
-      state.output_info.refresh_mhz as i32,
-    );
-    if resource.version() >= 2 {
-      resource.scale(scale.ceil().clamp(1.0, i32::MAX as f64) as i32);
-    }
-    if resource.version() >= 4 {
-      resource.name(state.output_info.name.clone());
-      resource.description(state.output_info.description());
-    }
-    if resource.version() >= 2 {
-      resource.done();
-    }
-    if global_data.generation == state.output_globals.generation {
+    let resource = data_init.init(resource, *global_data);
+    let generation = global_data.generation;
+    let Some(output) = state.outputs.by_generation(generation) else {
+      // An output that is gone: described as the first output once, and
+      // never kept.
+      state.primary().send(&resource, true);
+      return;
+    };
+    output.send(&resource, true);
+    if output.id == state.primary().id {
       crate::foreign_toplevel::output_bound(state, &resource);
-      state.outputs.insert(resource.id(), resource);
+    }
+    if let Some(output) = state.outputs.by_generation_mut(generation) {
+      output.bound.insert(resource.id(), resource);
     }
   }
 }
 
-impl Dispatch<WlOutput, OutputData> for CompositorState {
+impl Dispatch<WlOutput, crate::output::OutputGlobal> for CompositorState {
   fn request(
     _state: &mut Self,
     _client: &Client,
     _resource: &WlOutput,
     request: wl_output::Request,
-    _data: &OutputData,
+    _data: &crate::output::OutputGlobal,
     _dhandle: &DisplayHandle,
     _data_init: &mut DataInit<'_, Self>,
   ) {
@@ -2078,9 +2128,11 @@ impl Dispatch<WlOutput, OutputData> for CompositorState {
     state: &mut Self,
     _client: ClientId,
     resource: &WlOutput,
-    _data: &OutputData,
+    data: &crate::output::OutputGlobal,
   ) {
-    state.outputs.remove(&resource.id());
+    if let Some(output) = state.outputs.by_generation_mut(data.generation) {
+      output.bound.remove(&resource.id());
+    }
   }
 }
 

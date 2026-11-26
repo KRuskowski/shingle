@@ -114,7 +114,7 @@ fn a_new_name_replaces_the_output_and_keeps_the_tree() {
     wl_output::Event::Name { name } if name == "DP-1"
   )));
   assert_eq!(
-    compositor.state.outputs.len(),
+    compositor.state.outputs.bound().count(),
     1,
     "the old output is retired"
   );
@@ -122,14 +122,14 @@ fn a_new_name_replaces_the_output_and_keeps_the_tree() {
   // The old global stays bindable for a while, as an inert output.
   let _late = client.bind_name::<WlOutput>(old_global, 4);
   client.roundtrip(&mut compositor);
-  assert_eq!(compositor.state.outputs.len(), 1);
-  assert_eq!(compositor.state.output_globals.retired.len(), 1);
+  assert_eq!(compositor.state.outputs.bound().count(), 1);
+  assert_eq!(compositor.state.outputs.retired.len(), 1);
   let handle = compositor.display.handle();
   remove_retired(&mut compositor.state, &handle, Instant::now());
-  assert_eq!(compositor.state.output_globals.retired.len(), 1);
+  assert_eq!(compositor.state.outputs.retired.len(), 1);
   let later = Instant::now() + RETIRED_GLOBAL_DELAY + Duration::from_secs(1);
   remove_retired(&mut compositor.state, &handle, later);
-  assert!(compositor.state.output_globals.retired.is_empty());
+  assert!(compositor.state.outputs.retired.is_empty());
 }
 
 #[test]
@@ -138,8 +138,7 @@ fn the_new_name_brings_its_configured_placement() {
   config.output_placements.insert(
     "DP-1".into(),
     OutputPlacement {
-      x: 100,
-      y: 0,
+      position: shingle_config::OutputPosition::Fixed { x: 100, y: 0 },
       width: 1,
       height: 1,
       scale: 2.0,
@@ -159,8 +158,7 @@ fn the_new_name_brings_its_configured_placement() {
   reloaded.output_placements.insert(
     "DP-1".into(),
     OutputPlacement {
-      x: 0,
-      y: 50,
+      position: shingle_config::OutputPosition::Fixed { x: 0, y: 50 },
       width: 1,
       height: 1,
       scale: 1.0,
@@ -178,8 +176,7 @@ fn a_headless_config_entry_sizes_the_headless_output() {
   config.output_placements.insert(
     OUTPUT_NAME.into(),
     OutputPlacement {
-      x: 0,
-      y: 0,
+      position: shingle_config::OutputPosition::Fixed { x: 0, y: 0 },
       width: 800,
       height: 600,
       scale: 1.0,
@@ -455,7 +452,7 @@ fn a_session_saved_under_a_connector_name_joins_the_one_output() {
     .join(format!("shingle-test-restore-{}", std::process::id()));
   let socket = wayland_server::ListeningSocket::bind_absolute(path.clone())
     .expect("the temporary directory accepts a test socket");
-  let compositor = Compositor::with_socket(
+  let mut compositor = Compositor::with_socket(
     Config::default(),
     saved,
     socket,
@@ -464,12 +461,29 @@ fn a_session_saved_under_a_connector_name_joins_the_one_output() {
   .unwrap();
   let headless = OutputId::new(OUTPUT_NAME);
   assert_eq!(compositor.core().outputs().collect::<Vec<_>>(), [&headless]);
+  // The saved set waits, parked, until the backend has added its outputs.
+  let info = compositor.core().window_info(window).unwrap();
+  assert_eq!(compositor.core().wset(info.wset).unwrap().output, None);
+  compositor.restore_outputs();
+  // Under the default `return`, the window joins the one output and
+  // remembers its set.
+  let info = compositor.core().window_info(window).unwrap();
+  assert_eq!(info.location.output, headless);
+  let parked = info.away_from.expect("the window is away from its set");
   assert_eq!(
-    compositor.core().window_location(window).unwrap().output,
-    headless
+    compositor.core().wset(parked).unwrap().home,
+    Some(dp1.clone())
   );
   assert_eq!(
     compositor.core().output_workarea(&headless).unwrap(),
     Rect::new(0, 0, 1280, 720)
   );
+  // When the output is DP-1 after all, the window goes back to its set.
+  compositor.set_output_info(monitor());
+  let info = compositor.core().window_info(window).unwrap();
+  assert_eq!(info.location.output, dp1);
+  assert_eq!(info.wset, parked);
+  assert_eq!(info.away_from, None);
+  assert_eq!(compositor.core().wsets().count(), 1);
+  let _ = std::fs::remove_file(path);
 }

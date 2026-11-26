@@ -60,10 +60,10 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
   }
   let workarea = state
     .core
-    .current_workspace(&state.output_id)
+    .current_workspace(&state.active_output)
     .ok()
-    .and_then(|workspace| state.core.tree(&state.output_id, workspace).ok())
-    .map_or(state.output, |tree| tree.workarea());
+    .and_then(|workspace| state.core.tree(&state.active_output, workspace).ok())
+    .map_or(state.active().rect, |tree| tree.workarea());
   if state.placement_mode == "maximize" {
     let _ = shell::set_maximized(state, window, true);
     return;
