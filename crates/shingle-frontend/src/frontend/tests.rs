@@ -31,6 +31,7 @@ use super::{Frontend, drag::DragState, switcher::SwitcherKind};
 
 mod frames;
 mod outputs;
+mod switcher;
 mod vswipe;
 use crate::{
   host::{Axis, Host, InputEvent, Touch, TouchPhase},
@@ -1001,6 +1002,8 @@ struct RecordingTarget {
   captures: Vec<(u32, u32)>,
   /// The colour every frame was cleared to.
   clears: Vec<[f64; 4]>,
+  /// The colour and projection of every tile of every frame.
+  looks: Vec<Vec<([f32; 4], Option<shingle_render::Projection>)>>,
 }
 
 impl RecordingTarget {
@@ -1072,6 +1075,12 @@ impl RenderTarget for RecordingTarget {
     self
       .alphas
       .push(tiles.iter().map(|tile| tile.color[3]).collect());
+    self.looks.push(
+      tiles
+        .iter()
+        .map(|tile| (tile.color, tile.projection))
+        .collect(),
+    );
     thread::sleep(self.delay);
     self.target.render(&self.gpu, &self.state, tiles, clear);
     self.target.read_rgba(&self.gpu).map(|_| true)
@@ -1103,6 +1112,7 @@ fn recording_target() -> Option<RecordingTarget> {
     delay: Duration::ZERO,
     captures: Vec::new(),
     clears: Vec::new(),
+    looks: Vec::new(),
   })
 }
 

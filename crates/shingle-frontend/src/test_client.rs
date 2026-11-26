@@ -25,9 +25,15 @@ use wayland_protocols::{
   },
   xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
 };
-use wayland_protocols_wlr::screencopy::v1::client::{
-  zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
-  zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+use wayland_protocols_wlr::{
+  layer_shell::v1::client::{
+    zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
+    zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
+  },
+  screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+  },
 };
 
 /// The client's side of wayfire-shell-unstable-v2, which no protocol
@@ -74,6 +80,8 @@ pub(crate) struct Events {
   /// Swipe gesture events, as `begin FINGERS`, `update DX DY` and `end
   /// CANCELLED`, in order.
   swipes: Vec<String>,
+  /// The width of the last layer surface configure.
+  layer_width: Option<u32>,
   synced: bool,
 }
 
@@ -244,6 +252,36 @@ impl TestClient {
     let shell_output = shell.get_wf_output(&output, &self.handle, ());
     self.roundtrip(compositor);
     shell_output
+  }
+
+  /// A layer surface of `layer`, `height` pixels high across the top of
+  /// the active output, mapped with a buffer of its configured size.
+  pub(crate) fn layer_surface(
+    &mut self,
+    compositor: &mut Compositor,
+    layer: Layer,
+    height: u32,
+  ) -> (wl_surface::WlSurface, ZwlrLayerSurfaceV1) {
+    let wl_compositor = self.bind::<wl_compositor::WlCompositor>(4);
+    let shell = self.bind::<ZwlrLayerShellV1>(4);
+    let surface = wl_compositor.create_surface(&self.handle, ());
+    let layer_surface = shell.get_layer_surface(
+      &surface,
+      None,
+      layer,
+      "test".into(),
+      &self.handle,
+      (),
+    );
+    layer_surface.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+    layer_surface.set_size(0, height);
+    surface.commit();
+    self.roundtrip(compositor);
+    let width = self.events.layer_width.take().expect("a configure");
+    let height = i32::try_from(height).expect("a small height");
+    let width = i32::try_from(width).expect("a small width");
+    self.attach_buffer(compositor, &surface, width, height);
+    (surface, layer_surface)
   }
 
   /// Asks wlr-screencopy for the `width` by `height` region at (`x`, `y`)
@@ -624,7 +662,25 @@ impl Dispatch<ZwpPointerGestureSwipeV1, ()> for Events {
   }
 }
 
+impl Dispatch<ZwlrLayerSurfaceV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    layer_surface: &ZwlrLayerSurfaceV1,
+    event: zwlr_layer_surface_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let zwlr_layer_surface_v1::Event::Configure { serial, width, .. } = event
+    {
+      layer_surface.ack_configure(serial);
+      events.layer_width = Some(width);
+    }
+  }
+}
+
 ignore_events!(
+  ZwlrLayerShellV1,
   ZwfShellManagerV2,
   wl_seat::WlSeat,
   wl_pointer::WlPointer,

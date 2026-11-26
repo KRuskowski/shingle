@@ -389,6 +389,11 @@ impl Frontend {
       overview_here && (self.expo.is_some() || self.expo_exit.is_some());
     let scale_here =
       overview_here && (self.scale.is_some() || self.scale_exit.is_some());
+    // The regular switcher draws over the whole of its output.
+    let switcher_here = self
+      .switcher_view
+      .as_ref()
+      .is_some_and(|shown| shown.output == *output);
     let (mut tiles, mut locks) = {
       let renderer = &mut *target;
       renderer.set_scale_factor(view.scale);
@@ -459,6 +464,18 @@ impl Frontend {
           &mut snapshots,
           self.compositor.scale_surfaces_on(output, true, false),
         );
+      }
+      if switcher_here && let Some(shown) = &self.switcher_view {
+        let mut windows = shown
+          .view
+          .thumbnails(now, &[])
+          .into_iter()
+          .map(|(window, _)| window)
+          .collect::<Vec<_>>();
+        windows.dedup();
+        for window in windows {
+          extend(&mut snapshots, self.compositor.window_surfaces(window));
+        }
       }
       // A window being dragged is drawn on every output it crosses.
       if let Some(DragState::Move { source, .. }) = &self.drag {
@@ -619,245 +636,261 @@ impl Frontend {
           || self.minimize_animations.contains_key(id)
       });
       scene.animations.retain(|id, _| drawn.contains(id));
-      let tiles = snapshots
-        .iter()
-        .filter_map(|snapshot| {
-          let texture = self.textures.get(&snapshot.id)?;
-          let geometry = snapshot.geometry;
-          let content_rect = RenderRect {
-            x: geometry.x,
-            y: geometry.y,
-            width: geometry.width,
-            height: geometry.height,
-          };
-          // The window's geometry, which includes its frame if it has one.
-          let window_rect =
-            frames
-              .get(&snapshot.id)
-              .map_or(content_rect, |frame| RenderRect {
-                x: frame.rect.x,
-                y: frame.rect.y,
-                width: frame.rect.width,
-                height: frame.rect.height,
-              });
-          let mut tile = RenderTile::textured(
-            RenderRect {
+      let switcher = self.switcher_view.as_ref().filter(|_| switcher_here);
+      let tiles = if let Some(shown) = switcher {
+        super::switcher::SwitcherScene {
+          compositor: &self.compositor,
+          textures: &self.textures,
+          frame_textures: &self.frame_textures,
+          decoration: &self.decoration_config,
+          frames: &frames,
+          scale: view.scale,
+        }
+        .tiles(shown, now)
+      } else {
+        snapshots
+          .iter()
+          .filter_map(|snapshot| {
+            let texture = self.textures.get(&snapshot.id)?;
+            let geometry = snapshot.geometry;
+            let content_rect = RenderRect {
               x: geometry.x,
               y: geometry.y,
               width: geometry.width,
               height: geometry.height,
-            },
-            texture,
-          );
-          tile.color = [snapshot.opacity; 4];
-          if let Some(buffer) = &snapshot.buffer {
-            apply_buffer(&mut tile, buffer);
-          }
-          let mut tiles = Vec::with_capacity(2);
-          if let Some(animation) = scene.animations.get(&snapshot.id)
-            && let Some((_, old_buffer)) =
-              scene.previous_surfaces.get(&snapshot.id)
-          {
-            let progress = animation_progress(
-              animation.started,
-              now,
-              self.animation_duration,
+            };
+            // The window's geometry, which includes its frame if it has one.
+            let window_rect =
+              frames.get(&snapshot.id).map_or(content_rect, |frame| {
+                RenderRect {
+                  x: frame.rect.x,
+                  y: frame.rect.y,
+                  width: frame.rect.width,
+                  height: frame.rect.height,
+                }
+              });
+            let mut tile = RenderTile::textured(
+              RenderRect {
+                x: geometry.x,
+                y: geometry.y,
+                width: geometry.width,
+                height: geometry.height,
+              },
+              texture,
             );
-            if progress < 1.0 {
-              let mut old_tile = RenderTile::textured(
-                animation.old_geometry,
-                &animation.old_texture,
+            tile.color = [snapshot.opacity; 4];
+            if let Some(buffer) = &snapshot.buffer {
+              apply_buffer(&mut tile, buffer);
+            }
+            let mut tiles = Vec::with_capacity(2);
+            if let Some(animation) = scene.animations.get(&snapshot.id)
+              && let Some((_, old_buffer)) =
+                scene.previous_surfaces.get(&snapshot.id)
+            {
+              let progress = animation_progress(
+                animation.started,
+                now,
+                self.animation_duration,
               );
-              old_tile.color = [snapshot.opacity; 4];
-              apply_buffer(&mut old_tile, old_buffer);
-              tiles.push(old_tile);
+              if progress < 1.0 {
+                let mut old_tile = RenderTile::textured(
+                  animation.old_geometry,
+                  &animation.old_texture,
+                );
+                old_tile.color = [snapshot.opacity; 4];
+                apply_buffer(&mut old_tile, old_buffer);
+                tiles.push(old_tile);
+              }
+              tile.color = [snapshot.opacity * progress; 4];
             }
-            tile.color = [snapshot.opacity * progress; 4];
-          }
-          if let Some(started) = self.open_animations.get(&snapshot.id) {
-            let progress = animation_progress(
-              *started,
-              now,
-              Duration::from_millis(self.animate.duration_ms),
-            );
-            apply_opening_animation(
-              &mut tile,
-              &self.animate.open_animation,
-              progress,
-            );
-          }
-          tiles.push(tile);
-          if scale_here
-            && snapshot.role == SurfaceRole::Toplevel
-            && !self.minimize_animations.contains_key(&snapshot.id)
-            && let Some(window) = snapshot.window
-            && let Some(state) =
-              self.scale.as_ref().or(self.scale_exit.as_ref())
-            && let Some(geometry) = state.geometry.get(&window)
-          {
-            let selected = state.windows.get(state.selected) == Some(&window);
-            let minimized = self
-              .compositor
-              .core()
-              .window_info(window)
-              .is_ok_and(|info| info.state.minimized);
-            let inactive_alpha = if minimized {
-              self.scale_config.minimized_alpha
-            } else {
-              self.scale_config.inactive_alpha
-            };
-            let progress = animation_progress(
-              state.animation_started,
-              now,
-              Duration::from_millis(self.scale_config.duration_ms),
-            );
-            let opacity = if self.scale.is_none() {
-              let origin =
-                state.opacity_origin.get(&window).copied().unwrap_or(1.0);
-              let target = if minimized { 0.0 } else { 1.0 };
-              origin + (target - origin) * progress
-            } else if selected {
-              1.0
-            } else {
-              1.0 - (1.0 - inactive_alpha) * progress
-            };
-            // Scale lays out the window's geometry, its frame included,
-            // and the surface goes where the frame puts it.
-            let origin = state
-              .animation_origin
-              .get(&window)
-              .copied()
-              .unwrap_or(window_rect);
-            let target = map_rect(
-              content_rect,
-              window_rect,
-              interpolate_scale_rect(origin, *geometry, progress),
-            );
-            for tile in &mut tiles {
-              tile.geometry = target;
-              tile.color[3] *= opacity;
+            if let Some(started) = self.open_animations.get(&snapshot.id) {
+              let progress = animation_progress(
+                *started,
+                now,
+                Duration::from_millis(self.animate.duration_ms),
+              );
+              apply_opening_animation(
+                &mut tile,
+                &self.animate.open_animation,
+                progress,
+              );
             }
-          }
-          if expo_here
-            && let Some(window) = snapshot.window
-            && let Some(state) = self.expo.as_ref().or(self.expo_exit.as_ref())
-            && let Some(geometry) = state.geometry.get(&window)
-            && let Ok(info) = self.compositor.core().window_info(window)
-          {
-            let (width, _) = self.compositor.workspace_grid_dimensions();
-            let workspace = info.location.workspace.y as usize * width as usize
-              + info.location.workspace.x as usize;
-            let duration = Duration::from_millis(self.expo_config.duration_ms);
-            let progress =
-              animation_progress(state.animation_started, now, duration);
-            let origin = state
-              .geometry_origin
-              .get(&window)
-              .copied()
-              .unwrap_or(*geometry);
-            let brightness = state.brightness(
-              workspace,
-              now,
-              Duration::from_millis(self.expo_config.transition_length_ms),
-              self.expo_config.inactive_brightness,
-            );
-            let dragged = state
-              .dragged_window()
-              .filter(|(dragged, _, _)| *dragged == window);
-            // Expo lays out the window's geometry, its frame included,
-            // and the surface goes where the frame puts it.
-            let mut target =
-              crate::expo::interpolate_rect(origin, *geometry, progress);
-            if let Some((_, x, y)) = dragged {
-              target.x = (x - f64::from(target.width) / 2.0).round() as i32;
-              target.y = (y - f64::from(target.height) / 2.0).round() as i32;
-            }
-            let target = map_rect(content_rect, window_rect, target);
-            for tile in &mut tiles {
-              tile.geometry = target;
-              for component in &mut tile.color[..3] {
-                *component *= brightness;
+            tiles.push(tile);
+            if scale_here
+              && snapshot.role == SurfaceRole::Toplevel
+              && !self.minimize_animations.contains_key(&snapshot.id)
+              && let Some(window) = snapshot.window
+              && let Some(state) =
+                self.scale.as_ref().or(self.scale_exit.as_ref())
+              && let Some(geometry) = state.geometry.get(&window)
+            {
+              let selected = state.windows.get(state.selected) == Some(&window);
+              let minimized = self
+                .compositor
+                .core()
+                .window_info(window)
+                .is_ok_and(|info| info.state.minimized);
+              let inactive_alpha = if minimized {
+                self.scale_config.minimized_alpha
+              } else {
+                self.scale_config.inactive_alpha
+              };
+              let progress = animation_progress(
+                state.animation_started,
+                now,
+                Duration::from_millis(self.scale_config.duration_ms),
+              );
+              let opacity = if self.scale.is_none() {
+                let origin =
+                  state.opacity_origin.get(&window).copied().unwrap_or(1.0);
+                let target = if minimized { 0.0 } else { 1.0 };
+                origin + (target - origin) * progress
+              } else if selected {
+                1.0
+              } else {
+                1.0 - (1.0 - inactive_alpha) * progress
+              };
+              // Scale lays out the window's geometry, its frame included,
+              // and the surface goes where the frame puts it.
+              let origin = state
+                .animation_origin
+                .get(&window)
+                .copied()
+                .unwrap_or(window_rect);
+              let target = map_rect(
+                content_rect,
+                window_rect,
+                interpolate_scale_rect(origin, *geometry, progress),
+              );
+              for tile in &mut tiles {
+                tile.geometry = target;
+                tile.color[3] *= opacity;
               }
             }
-          }
-          if let Some(window) = snapshot.window
-            && let Some(transition) = &scene.workspace_transition
-            && let Ok(info) = self.compositor.core().window_info(window)
-            && info.location.output.as_str() == output.name()
-          {
-            let (grid_width, _) = self.compositor.workspace_grid_dimensions();
-            let workspace = info.location.workspace.y as usize
-              * grid_width as usize
-              + info.location.workspace.x as usize;
-            let layout = workspace_transition::TransitionLayout {
-              output: rect,
-              grid_width,
-              gap: f64::from(self.vswitch.gap),
-            };
-            let geometry = transition.geometry(
-              snapshot.geometry,
-              workspace,
-              layout,
-              now,
-              Duration::from_millis(self.vswitch.duration_ms),
-            );
-            for tile in &mut tiles {
-              tile.geometry = geometry;
+            if expo_here
+              && let Some(window) = snapshot.window
+              && let Some(state) =
+                self.expo.as_ref().or(self.expo_exit.as_ref())
+              && let Some(geometry) = state.geometry.get(&window)
+              && let Ok(info) = self.compositor.core().window_info(window)
+            {
+              let (width, _) = self.compositor.workspace_grid_dimensions();
+              let workspace = info.location.workspace.y as usize
+                * width as usize
+                + info.location.workspace.x as usize;
+              let duration =
+                Duration::from_millis(self.expo_config.duration_ms);
+              let progress =
+                animation_progress(state.animation_started, now, duration);
+              let origin = state
+                .geometry_origin
+                .get(&window)
+                .copied()
+                .unwrap_or(*geometry);
+              let brightness = state.brightness(
+                workspace,
+                now,
+                Duration::from_millis(self.expo_config.transition_length_ms),
+                self.expo_config.inactive_brightness,
+              );
+              let dragged = state
+                .dragged_window()
+                .filter(|(dragged, _, _)| *dragged == window);
+              // Expo lays out the window's geometry, its frame included,
+              // and the surface goes where the frame puts it.
+              let mut target =
+                crate::expo::interpolate_rect(origin, *geometry, progress);
+              if let Some((_, x, y)) = dragged {
+                target.x = (x - f64::from(target.width) / 2.0).round() as i32;
+                target.y = (y - f64::from(target.height) / 2.0).round() as i32;
+              }
+              let target = map_rect(content_rect, window_rect, target);
+              for tile in &mut tiles {
+                tile.geometry = target;
+                for component in &mut tile.color[..3] {
+                  *component *= brightness;
+                }
+              }
             }
-          }
-          if let Some(window) = snapshot.window
-            && let Some(viewport) = wall
-            && let Ok(info) = self.compositor.core().window_info(window)
-            && info.location.output.as_str() == output.name()
-          {
-            let (grid_width, _) = self.compositor.workspace_grid_dimensions();
-            let workspace = info.location.workspace.y as usize
-              * grid_width as usize
-              + info.location.workspace.x as usize;
-            let layout = workspace_transition::TransitionLayout {
-              output: rect,
-              grid_width,
-              gap: self.vswipe_config.gap,
-            };
-            let geometry = workspace_transition::wall_geometry(
-              snapshot.geometry,
-              workspace,
-              layout,
-              viewport,
-            );
-            for tile in &mut tiles {
-              tile.geometry = geometry;
+            if let Some(window) = snapshot.window
+              && let Some(transition) = &scene.workspace_transition
+              && let Ok(info) = self.compositor.core().window_info(window)
+              && info.location.output.as_str() == output.name()
+            {
+              let (grid_width, _) = self.compositor.workspace_grid_dimensions();
+              let workspace = info.location.workspace.y as usize
+                * grid_width as usize
+                + info.location.workspace.x as usize;
+              let layout = workspace_transition::TransitionLayout {
+                output: rect,
+                grid_width,
+                gap: f64::from(self.vswitch.gap),
+              };
+              let geometry = transition.geometry(
+                snapshot.geometry,
+                workspace,
+                layout,
+                now,
+                Duration::from_millis(self.vswitch.duration_ms),
+              );
+              for tile in &mut tiles {
+                tile.geometry = geometry;
+              }
             }
-          }
-          if let Some(angle) = snapshot
-            .window
-            .and_then(|window| self.rotations.get(&window))
-          {
-            for tile in &mut tiles {
-              tile.rotation = *angle;
+            if let Some(window) = snapshot.window
+              && let Some(viewport) = wall
+              && let Ok(info) = self.compositor.core().window_info(window)
+              && info.location.output.as_str() == output.name()
+            {
+              let (grid_width, _) = self.compositor.workspace_grid_dimensions();
+              let workspace = info.location.workspace.y as usize
+                * grid_width as usize
+                + info.location.workspace.x as usize;
+              let layout = workspace_transition::TransitionLayout {
+                output: rect,
+                grid_width,
+                gap: self.vswipe_config.gap,
+              };
+              let geometry = workspace_transition::wall_geometry(
+                snapshot.geometry,
+                workspace,
+                layout,
+                viewport,
+              );
+              for tile in &mut tiles {
+                tile.geometry = geometry;
+              }
             }
-          }
-          // A frame follows its surface wherever the scene put it; a
-          // rotated window is drawn without one, since its pieces would
-          // turn about their own centres.
-          if let Some(frame) = frames.get(&snapshot.id)
-            && let Some(content) = tiles.last()
-            && content.rotation == 0.0
-          {
-            let mut framed = self.frame_textures.tiles(
-              frame,
-              content_rect,
-              content,
-              &self.decoration_config,
-              view.scale,
-            );
-            framed.append(&mut tiles);
-            tiles = framed;
-          }
-          Some(tiles)
-        })
-        .flatten()
-        .collect::<Vec<_>>();
+            if let Some(angle) = snapshot
+              .window
+              .and_then(|window| self.rotations.get(&window))
+            {
+              for tile in &mut tiles {
+                tile.rotation = *angle;
+              }
+            }
+            // A frame follows its surface wherever the scene put it; a
+            // rotated window is drawn without one, since its pieces would
+            // turn about their own centres.
+            if let Some(frame) = frames.get(&snapshot.id)
+              && let Some(content) = tiles.last()
+              && content.rotation == 0.0
+            {
+              let mut framed = self.frame_textures.tiles(
+                frame,
+                content_rect,
+                content,
+                &self.decoration_config,
+                view.scale,
+              );
+              framed.append(&mut tiles);
+              tiles = framed;
+            }
+            Some(tiles)
+          })
+          .flatten()
+          .collect::<Vec<_>>()
+      };
       scene.previous_surfaces = snapshots
         .iter()
         .filter_map(|snapshot| {
@@ -911,7 +944,9 @@ impl Frontend {
       cells.append(&mut tiles);
       tiles = cells;
     }
-    self.append_drop_preview(&mut tiles);
+    if !switcher_here {
+      self.append_drop_preview(&mut tiles);
+    }
     if overview_here && let Some(state) = &self.scale {
       let snapshots = self.compositor.scale_surfaces_on(output, true, true);
       let titles = snapshots
@@ -954,38 +989,47 @@ impl Frontend {
         &mut tiles,
       )?;
     }
-    Self::append_closing_surfaces(
-      &self.closing_animations,
-      &self.textures,
-      output,
-      now,
-      &self.animate,
-      &self.animate.close_animation,
-      &mut tiles,
-    );
-    Self::append_closing_surfaces(
-      &self.minimize_animations,
-      &self.textures,
-      output,
-      now,
-      &self.animate,
-      &self.animate.minimize_animation,
-      &mut tiles,
-    );
-    Self::append_label(
-      &*target,
-      &mut scene.label,
-      rect,
-      now,
-      self.wsets_label_duration,
-      &mut tiles,
-    )?;
+    // Wayfire's switcher draws over closing views and the label.
+    if !switcher_here {
+      Self::append_closing_surfaces(
+        &self.closing_animations,
+        &self.textures,
+        output,
+        now,
+        &self.animate,
+        &self.animate.close_animation,
+        &mut tiles,
+      );
+      Self::append_closing_surfaces(
+        &self.minimize_animations,
+        &self.textures,
+        output,
+        now,
+        &self.animate,
+        &self.animate.minimize_animation,
+        &mut tiles,
+      );
+      Self::append_label(
+        &*target,
+        &mut scene.label,
+        rect,
+        now,
+        self.wsets_label_duration,
+        &mut tiles,
+      )?;
+    }
     // Tiles are in layout coordinates; the target is the output.
     for tile in &mut tiles {
       tile.geometry = translate(tile.geometry, -rect.x, -rect.y);
+      if let Some(projection) = &mut tile.projection {
+        projection.origin[0] -= rect.x as f32;
+        projection.origin[1] -= rect.y as f32;
+      }
     }
     let renderer = target;
-    let background = if expo_here {
+    let background = if switcher_here {
+      [0.0, 0.0, 0.0, 1.0]
+    } else if expo_here {
       self.expo_config.background
     } else if vswipe_here {
       self.vswipe_config.background
@@ -1075,6 +1119,7 @@ impl Frontend {
     // vswipe draws every frame while its wall is up, as Wayfire's
     // `post_frame` does; the last one ends it.
     self.finish_vswipe(now);
+    self.end_switcher_frame(output, now);
     if !scene.animations.is_empty()
       || scene.workspace_transition.is_some()
       || self.vswipe_on(output)

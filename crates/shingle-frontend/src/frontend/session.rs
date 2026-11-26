@@ -81,7 +81,7 @@ impl Frontend {
         let scale_filter_enabled = config.plugin_enabled("scale-title-filter");
         let vswipe_enabled = config.plugin_enabled("vswipe");
         self.reloaded_config = Some(config.clone());
-        self.finish_switcher();
+        self.cancel_switcher();
         self.cancel_scale();
         self.clear_expo();
         for scene in self.scenes.values_mut() {
@@ -97,6 +97,7 @@ impl Frontend {
         self.scale_filter.clear();
         self.scale_filter_texture = None;
         self.switcher_inactive_alpha = config.fast_switcher.inactive_alpha;
+        self.switcher_config = config.switcher.clone();
         self.scale_config = config.scale.clone();
         self.scale_title_filter = config.scale_title_filter.clone();
         self.scale_filter_enabled = scale_filter_enabled;

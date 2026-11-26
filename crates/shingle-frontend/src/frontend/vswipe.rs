@@ -138,6 +138,7 @@ impl Frontend {
       && self.expo.is_none()
       && self.expo_exit.is_none()
       && self.switcher.is_none()
+      && self.switcher_view.is_none()
       && self.drag.is_none()
       && self.rotation_drag.is_none()
       && !self.compositor.is_locked()

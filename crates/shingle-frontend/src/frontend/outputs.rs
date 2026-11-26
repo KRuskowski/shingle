@@ -281,6 +281,13 @@ impl Frontend {
       .map(|view| view.handle)
       .collect::<HashSet<_>>();
     self.scenes.retain(|output, _| present.contains(output));
+    if self
+      .switcher_view
+      .as_ref()
+      .is_some_and(|shown| !present.contains(&shown.output))
+    {
+      self.cancel_switcher();
+    }
     self
       .closing_animations
       .retain(|_, animation| present.contains(&animation.output));

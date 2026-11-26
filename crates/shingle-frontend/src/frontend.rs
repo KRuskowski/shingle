@@ -112,6 +112,10 @@ pub struct Frontend {
   repeat_device: Option<InputDeviceId>,
   switcher: Option<SwitcherState>,
   switcher_inactive_alpha: f32,
+  /// The regular switcher's thumbnails, until they are back in place.
+  switcher_view: Option<switcher::ShownSwitcher>,
+  /// `[switcher]`'s view options.
+  switcher_config: shingle_config::SwitcherConfig,
   scale: Option<ScaleState>,
   scale_exit: Option<ScaleState>,
   scale_config: shingle_config::ScaleConfig,
@@ -481,6 +485,8 @@ impl Frontend {
       repeat_device: None,
       switcher: None,
       switcher_inactive_alpha: config.fast_switcher.inactive_alpha,
+      switcher_view: None,
+      switcher_config: config.switcher.clone(),
       scale: None,
       scale_exit: None,
       scale_config: config.scale.clone(),

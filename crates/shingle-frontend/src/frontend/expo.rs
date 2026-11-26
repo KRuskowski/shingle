@@ -29,8 +29,8 @@ impl Frontend {
     self.cancel_scale();
     self.scale_exit = None;
     self.overview_output = Some(active);
-    if self.switcher.is_some() {
-      self.finish_switcher();
+    if self.switcher.is_some() || self.switcher_view.is_some() {
+      self.cancel_switcher();
     }
     self.drag = None;
     self.drop_preview = None;

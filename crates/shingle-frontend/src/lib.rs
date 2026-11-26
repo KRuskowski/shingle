@@ -20,6 +20,7 @@ pub mod render_target;
 pub mod scale;
 pub mod scale_title;
 mod shm;
+mod switcher_view;
 #[cfg(test)]
 mod test_client;
 #[cfg(test)]

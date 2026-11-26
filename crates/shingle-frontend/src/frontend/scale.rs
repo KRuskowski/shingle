@@ -67,8 +67,8 @@ impl Frontend {
       .scale
       .as_ref()
       .and_then(|state| state.windows.get(state.selected).copied());
-    if self.switcher.is_some() {
-      self.finish_switcher();
+    if self.switcher.is_some() || self.switcher_view.is_some() {
+      self.cancel_switcher();
     }
     self.compositor.set_show_desktop(false);
     self.drag = None;
