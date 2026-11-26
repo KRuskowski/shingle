@@ -1451,3 +1451,28 @@ fn layout_changes_are_saved_in_the_background() {
   fixture.window("bravo");
   assert_eq!(saved(&fixture), ["alpha", "bravo"]);
 }
+
+#[test]
+fn a_layout_that_changes_only_weights_is_saved() {
+  let (mut fixture, [left, right, _]) = three_windows();
+  let session = fixture.base.with_extension("session.json");
+  let saved_widths = |fixture: &Fixture| {
+    fixture.frontend.flush_session();
+    let (core, _) = SessionStore::new(&session).load().unwrap().unwrap();
+    [left, right].map(|window| core.window_layout(window).unwrap().node.width)
+  };
+  assert_eq!(saved_widths(&fixture)[0], saved_widths(&fixture)[1]);
+  // The same three tiles side by side, only wider on the left.
+  let request = format!(
+    concat!(
+      r#"{{"method":"simple-tile/set-layout","data":{{"wset-index":1,"#,
+      r#""workspace":{{"x":0,"y":0}},"layout":{{"vertical-split":["#,
+      r#"{{"view-id":{},"weight":2}},{{"view-id":{},"weight":1}},"#,
+      r#"{{"view-id":3,"weight":1}}]}}}}}}"#
+    ),
+    left.0, right.0
+  );
+  assert_eq!(fixture.ipc(&request), r#"{"result":"ok"}"#);
+  let [left_width, right_width] = saved_widths(&fixture);
+  assert_eq!(left_width, 2 * right_width);
+}

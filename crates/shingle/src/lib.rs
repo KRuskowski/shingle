@@ -814,6 +814,10 @@ pub enum Event {
     /// The newly focused window.
     window: Option<WindowId>,
   },
+  /// The tiling trees changed in a way no other event reports, such as
+  /// the split weights or nesting `simple-tile/set-layout` applied. The
+  /// session should be saved.
+  LayoutChanged,
   /// Show-desktop was turned on (`true`) or off. Turning it on minimizes
   /// the current workspace's windows; mapping or unminimizing a window,
   /// or switching workspace, turns it off, as in Wayfire's

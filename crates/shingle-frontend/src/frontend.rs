@@ -565,7 +565,8 @@ impl Frontend {
         | Event::StickyChanged { .. }
         | Event::StackingChanged { .. }
         | Event::StackingOrderChanged { .. }
-        | Event::ShowDesktopChanged(_) => save = true,
+        | Event::ShowDesktopChanged(_)
+        | Event::LayoutChanged => save = true,
         Event::OutputChanged { .. } => {
           self.workspace_transition = None;
           save = true;

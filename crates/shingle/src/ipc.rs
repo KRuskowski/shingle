@@ -1259,6 +1259,7 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
     })
     .collect::<Vec<_>>();
   let mut snapshot = state.core.snapshot();
+  let before = snapshot.clone();
   let Some(output) = snapshot
     .wsets
     .iter_mut()
@@ -1341,6 +1342,11 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
     }
   }
   state.core = restored;
+  // Split weights and the tree's shape have no event of their own, so a
+  // layout that changes only them would otherwise not be saved.
+  if state.core.snapshot() != before {
+    state.events.push(crate::Event::LayoutChanged);
+  }
   for surface in state.surfaces.values_mut() {
     let Some(toplevel) = surface.role.toplevel_mut() else {
       continue;
@@ -3037,6 +3043,13 @@ mod tests {
     )
   }
 
+  fn layout_changed(compositor: &mut crate::Compositor) -> bool {
+    compositor
+      .drain_events()
+      .iter()
+      .any(|event| matches!(event, crate::Event::LayoutChanged))
+  }
+
   #[test]
   fn a_cross_direction_layout_can_be_applied_twice() {
     let (mut compositor, _client, _toplevels) = tiled_toplevels(3);
@@ -3065,5 +3078,33 @@ mod tests {
       .unwrap();
     assert_eq!(tree.windows().len(), 3);
     compositor.state.core.snapshot().validate().unwrap();
+  }
+
+  #[test]
+  fn a_layout_that_changes_only_weights_reports_a_layout_change() {
+    let (mut compositor, _client, _toplevels) = tiled_toplevels(2);
+    let width = |compositor: &crate::Compositor, id| {
+      compositor
+        .state
+        .core
+        .window_layout(shingle_core::WindowId(id))
+        .unwrap()
+        .node
+        .width
+    };
+    assert_eq!(width(&compositor, 1), width(&compositor, 2));
+    let layout = json!({"vertical-split": [
+      {"view-id": 1, "weight": 3},
+      {"view-id": 2, "weight": 1},
+    ]});
+    assert_eq!(
+      set_layout(&mut compositor, layout.clone()),
+      json!({"result": "ok"})
+    );
+    assert_eq!(width(&compositor, 1), 3 * width(&compositor, 2));
+    assert!(layout_changed(&mut compositor), "weights alone need a save");
+    // The same layout again changes nothing and reports nothing.
+    assert_eq!(set_layout(&mut compositor, layout), json!({"result": "ok"}));
+    assert!(!layout_changed(&mut compositor));
   }
 }
