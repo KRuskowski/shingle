@@ -51,7 +51,15 @@ impl Frontend {
   pub(super) fn reload_config(&mut self) {
     self.config_watcher.mark_loaded();
     let result = (|| {
-      let config = ShingleConfig::load(self.config_path.as_deref())?;
+      let (config, warnings) =
+        ShingleConfig::load_with_warnings(self.config_path.as_deref())?;
+      let path = self
+        .config_path
+        .clone()
+        .unwrap_or_else(shingle_config::default_path);
+      for warning in warnings {
+        eprintln!("shingle: {}: {warning}", path.display());
+      }
       let keymap = config.input.load_keymap()?;
       self.compositor.apply_config(config.clone().into())?;
       self.compositor.set_keymap(&keymap)?;

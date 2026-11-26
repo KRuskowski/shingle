@@ -1,11 +1,11 @@
 mod app;
 mod ui;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use gloomy_core::{HeadlessConfig, HeadlessRenderer};
-use shingle_config::{ShingleConfig, default_path};
+use shingle_config::{ConfigWarning, ShingleConfig, default_path};
 use ui::{Page, UiModel};
 
 fn main() -> Result<()> {
@@ -14,7 +14,8 @@ fn main() -> Result<()> {
     return Ok(());
   };
   let source = options.source.unwrap_or_else(default_path);
-  let config = ShingleConfig::load(Some(&source))?;
+  let (config, warnings) = ShingleConfig::load_with_warnings(Some(&source))?;
+  let report = warning_report(&source, &warnings);
   let destination = options.destination.unwrap_or_else(|| {
     if source
       .extension()
@@ -27,12 +28,21 @@ fn main() -> Result<()> {
   });
 
   match options.mode {
-    Mode::Window => app::run(config, source, destination),
+    Mode::Window => {
+      eprint!("{report}");
+      app::run(config, source, destination)
+    }
     Mode::Check => {
-      println!("Valid configuration: {}", source.display());
+      print!("{report}");
+      println!(
+        "Valid configuration: {}{}",
+        source.display(),
+        warning_count(warnings.len())
+      );
       Ok(())
     }
     Mode::Export => {
+      eprint!("{report}");
       config.save_yaml(&destination)?;
       println!("Saved YAML: {}", destination.display());
       Ok(())
@@ -109,6 +119,23 @@ impl Options {
   }
 }
 
+/// One line per warning, `PATH: line N: MESSAGE`.
+fn warning_report(path: &Path, warnings: &[ConfigWarning]) -> String {
+  warnings
+    .iter()
+    .map(|warning| format!("{}: {warning}\n", path.display()))
+    .collect()
+}
+
+/// `""`, or how many warnings there were, in parentheses.
+fn warning_count(count: usize) -> String {
+  match count {
+    0 => String::new(),
+    1 => " (1 warning)".into(),
+    count => format!(" ({count} warnings)"),
+  }
+}
+
 fn next_path(
   arguments: &mut impl Iterator<Item = std::ffi::OsString>,
   flag: &str,
@@ -127,7 +154,8 @@ fn print_help() {
          --config PATH       Load YAML, Wayfire INI, or i3 config\n\
          --output PATH       YAML destination (defaults to source YAML or \
          Shingle default)\n\
-         --check             Validate the source without opening a window\n\
+         --check             Validate the source and print its warnings \
+         without opening a window\n\
          --export-yaml       Convert and save YAML without opening a window\n\
          --page NAME         Screenshot page: general, tiling, keys, \
          commands, rules, input, idle\n\
@@ -135,4 +163,33 @@ fn print_help() {
          (default: keys)\n\
          --help              Show this help"
   );
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn warnings_are_reported_with_path_and_line() {
+    let warnings = [
+      ConfigWarning {
+        line: Some(4),
+        message: "[core] vwidth: invalid number \"x\"".into(),
+      },
+      ConfigWarning {
+        line: None,
+        message: "whole file".into(),
+      },
+    ];
+    assert_eq!(
+      warning_report(Path::new("/c/wayfire.ini"), &warnings),
+      concat!(
+        "/c/wayfire.ini: line 4: [core] vwidth: invalid number \"x\"\n",
+        "/c/wayfire.ini: whole file\n"
+      )
+    );
+    assert_eq!(warning_count(0), "");
+    assert_eq!(warning_count(1), " (1 warning)");
+    assert_eq!(warning_count(3), " (3 warnings)");
+  }
 }

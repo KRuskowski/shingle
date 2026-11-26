@@ -114,7 +114,15 @@ fn start(
   block_shutdown_signals()?;
   // Clients find IPC as WAYFIRE_SOCKET through the compositor's client
   // environment, not through Shingle's own environment.
-  let config = ShingleConfig::load(options.config.as_deref())?;
+  let (config, warnings) =
+    ShingleConfig::load_with_warnings(options.config.as_deref())?;
+  let path = options
+    .config
+    .clone()
+    .unwrap_or_else(shingle_config::default_path);
+  for warning in warnings {
+    eprintln!("shingle: {}: {warning}", path.display());
+  }
   match selection.backend {
     Backend::Nested => {
       let outputs = headless::output_count(

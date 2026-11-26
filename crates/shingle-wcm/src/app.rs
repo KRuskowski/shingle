@@ -359,13 +359,19 @@ impl Editor {
   }
 
   fn reload(&mut self) {
-    match ShingleConfig::load(Some(&self.source)) {
-      Ok(config) => {
+    match ShingleConfig::load_with_warnings(Some(&self.source)) {
+      Ok((config, warnings)) => {
         self.config = config;
         self.capture.cancel();
         self.capture_action = None;
         self.dirty = false;
         self.status = format!("Loaded {}", self.source.display());
+        if !warnings.is_empty() {
+          self.status += &format!(
+            " with {} warnings; run shingle-wcm --check to list them",
+            warnings.len()
+          );
+        }
       }
       Err(error) => self.status = error.to_string(),
     }
