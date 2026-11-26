@@ -1161,6 +1161,14 @@ fn transform_layout(
           })
         })
         .collect::<Vec<_>>();
+      // A nested split must keep two children: one that lost all of them
+      // goes, and one left with a single child is replaced by it. Without
+      // the first rule, applying a layout whose direction differs from
+      // the root's a second time left the first application's split empty
+      // and the restore refused it.
+      if !root && children.is_empty() {
+        return None;
+      }
       if !root && children.len() == 1 {
         return Some(children.into_iter().next().unwrap().node);
       }
@@ -2986,5 +2994,76 @@ mod tests {
       json!({"finger": 0, "x": 10, "y": 10}),
     );
     assert!(crate::input_device::holds_nothing(&state));
+  }
+
+  /// A compositor with `count` mapped toplevels tiled left to right, with
+  /// view ids 1 to `count`, and the client that keeps them alive.
+  fn tiled_toplevels(
+    count: usize,
+  ) -> (
+    crate::Compositor,
+    crate::test_client::TestClient,
+    Vec<crate::test_client::Toplevel>,
+  ) {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client =
+      crate::test_client::TestClient::connect(&mut compositor, &path);
+    let toplevels = (0..count)
+      .map(|index| {
+        let toplevel =
+          client.toplevel(&mut compositor, &format!("layout-{index}"));
+        client.attach_buffer(&mut compositor, &toplevel.surface, 100, 80);
+        toplevel
+      })
+      .collect();
+    compositor.drain_events();
+    (compositor, client, toplevels)
+  }
+
+  fn set_layout(compositor: &mut crate::Compositor, layout: Value) -> Value {
+    call(
+      &mut compositor.state,
+      "simple-tile/set-layout",
+      json!({"wset-index": 1, "workspace": {"x": 0, "y": 0},
+        "layout": layout}),
+    )
+  }
+
+  fn get_layout(compositor: &mut crate::Compositor) -> Value {
+    call(
+      &mut compositor.state,
+      "simple-tile/get-layout",
+      json!({"wset-index": 1, "workspace": {"x": 0, "y": 0}}),
+    )
+  }
+
+  #[test]
+  fn a_cross_direction_layout_can_be_applied_twice() {
+    let (mut compositor, _client, _toplevels) = tiled_toplevels(3);
+    // The root splits vertically; this layout splits 1 and 2 the other
+    // way, so it is nested under the root next to 3.
+    let layout = json!({"horizontal-split": [
+      {"view-id": 1, "weight": 1},
+      {"view-id": 2, "weight": 1},
+    ]});
+    assert_eq!(
+      set_layout(&mut compositor, layout.clone()),
+      json!({"result": "ok"})
+    );
+    let first = get_layout(&mut compositor);
+    // The second time, 1 and 2 leave the nested split of the first, which
+    // must go rather than stay empty.
+    assert_eq!(set_layout(&mut compositor, layout), json!({"result": "ok"}));
+    assert_eq!(get_layout(&mut compositor), first);
+    let tree = compositor
+      .state
+      .core
+      .tree(
+        &compositor.state.output_id,
+        shingle_core::WorkspaceId::ORIGIN,
+      )
+      .unwrap();
+    assert_eq!(tree.windows().len(), 3);
+    compositor.state.core.snapshot().validate().unwrap();
   }
 }
