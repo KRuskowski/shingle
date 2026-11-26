@@ -342,6 +342,7 @@ fn vrr_is_on_where_configured_and_the_monitor_is_capable() {
     card.borrow().value(card.borrow().crtc_id.0, "VRR_ENABLED"),
     1
   );
+  assert!(display.output_info().unwrap().adaptive_sync, "heads say so");
   flip_frame(&mut display);
   let presented = complete(&card, &mut display, 1);
   assert_eq!(presented[0].refresh_ns, 0, "no constant refresh rate");
@@ -358,6 +359,7 @@ fn vrr_stays_off_unless_configured_and_capable() {
       Some(0),
       "{capable} {configured}"
     );
+    assert!(!display.output_info().unwrap().adaptive_sync);
     flip_frame(&mut display);
     assert_eq!(complete(&card, &mut display, 1)[0].refresh_ns, 16_666_666);
   }

@@ -111,6 +111,9 @@ pub struct OutputInfo {
   pub modes: Vec<OutputModeInfo>,
   /// The index of the current mode in `modes`, if one is set.
   pub current_mode: Option<usize>,
+  /// Whether the output runs with a variable refresh rate (adaptive sync),
+  /// as wlr-output-management heads report it.
+  pub adaptive_sync: bool,
 }
 
 impl Default for OutputInfo {
@@ -125,6 +128,7 @@ impl Default for OutputInfo {
       refresh_mhz: 60_000,
       modes: Vec::new(),
       current_mode: None,
+      adaptive_sync: false,
     }
   }
 }

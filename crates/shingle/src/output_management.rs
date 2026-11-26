@@ -193,9 +193,24 @@ pub(crate) fn sync(state: &mut CompositorState) {
     head.resource.position(output.rect.x, output.rect.y);
     head.resource.transform(output.transform);
     head.resource.scale(output.scale);
+    if head.resource.version() >= 4 {
+      head
+        .resource
+        .adaptive_sync(adaptive_sync_state(output.info.adaptive_sync));
+    }
   }
   for manager in state.output_management.managers.values() {
     manager.done(serial);
+  }
+}
+
+/// A head's `adaptive_sync` for an output that does or does not run
+/// with a variable refresh rate.
+fn adaptive_sync_state(on: bool) -> zwlr_output_head_v1::AdaptiveSyncState {
+  if on {
+    zwlr_output_head_v1::AdaptiveSyncState::Enabled
+  } else {
+    zwlr_output_head_v1::AdaptiveSyncState::Disabled
   }
 }
 
@@ -398,7 +413,7 @@ fn announce_head(
   }
   head.enabled(i32::from(enabled));
   if version >= 4 {
-    head.adaptive_sync(zwlr_output_head_v1::AdaptiveSyncState::Disabled);
+    head.adaptive_sync(adaptive_sync_state(info.adaptive_sync));
   }
   state.output_management.heads.insert(
     head.id(),

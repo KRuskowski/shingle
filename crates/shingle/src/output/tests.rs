@@ -71,6 +71,55 @@ fn mapped_window(
     .expect("the toplevel is focused")
 }
 
+/// The last `adaptive_sync` the client's heads were sent.
+fn last_adaptive_sync(
+  client: &TestClient,
+) -> Option<zwlr_output_head_v1::AdaptiveSyncState> {
+  client
+    .events
+    .heads
+    .iter()
+    .rev()
+    .find_map(|event| match event {
+      zwlr_output_head_v1::Event::AdaptiveSync {
+        state: wayland_client::WEnum::Value(state),
+      } => Some(*state),
+      _ => None,
+    })
+}
+
+#[test]
+fn heads_report_whether_the_output_has_adaptive_sync() {
+  let (mut compositor, path) = test_compositor();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let _manager = client.bind::<ZwlrOutputManagerV1>(4);
+  client.roundtrip(&mut compositor);
+  assert_eq!(
+    last_adaptive_sync(&client),
+    Some(zwlr_output_head_v1::AdaptiveSyncState::Disabled)
+  );
+  light(
+    &mut compositor,
+    OutputInfo {
+      adaptive_sync: true,
+      ..monitor()
+    },
+  );
+  client.roundtrip(&mut compositor);
+  assert_eq!(
+    last_adaptive_sync(&client),
+    Some(zwlr_output_head_v1::AdaptiveSyncState::Enabled),
+    "the new head"
+  );
+  compositor.set_output_info(monitor());
+  client.roundtrip(&mut compositor);
+  assert_eq!(
+    last_adaptive_sync(&client),
+    Some(zwlr_output_head_v1::AdaptiveSyncState::Disabled),
+    "the head follows the description"
+  );
+}
+
 #[test]
 fn a_new_name_replaces_the_output_and_keeps_the_tree() {
   let (mut compositor, path) = test_compositor();

@@ -419,8 +419,13 @@ fn wl_subpixel(subpixel: Subpixel) -> wl_output::Subpixel {
 
 /// What clients are told about `connector`: its name, the EDID's make,
 /// model and serial ([`Edid::unknown`] without one), physical size,
-/// subpixel layout and modes, with `mode` as the current one.
-fn describe(connector: &ConnectorInfo, mode: Option<&Mode>) -> OutputInfo {
+/// subpixel layout and modes, with `mode` as the current one, and whether
+/// it runs with variable refresh.
+fn describe(
+  connector: &ConnectorInfo,
+  mode: Option<&Mode>,
+  vrr: bool,
+) -> OutputInfo {
   let edid = connector.edid.clone().unwrap_or_else(Edid::unknown);
   let refresh = mode
     .or(connector.modes.first())
@@ -437,6 +442,7 @@ fn describe(connector: &ConnectorInfo, mode: Option<&Mode>) -> OutputInfo {
     current_mode: mode.and_then(|mode| {
       connector.modes.iter().position(|listed| listed == mode)
     }),
+    adaptive_sync: vrr,
   }
 }
 
@@ -1014,7 +1020,7 @@ impl Display {
   /// ([`Display::output_info_of`]).
   pub fn output_info(&self) -> Option<OutputInfo> {
     let lit = self.lit.first()?;
-    Some(describe(&lit.output.connector, Some(&lit.mode)))
+    Some(describe(&lit.output.connector, Some(&lit.mode), lit.vrr))
   }
 
   /// What clients are told about lit output `name`: the connector's name,
@@ -1023,7 +1029,7 @@ impl Display {
   /// one.
   pub fn output_info_of(&self, name: &str) -> Option<OutputInfo> {
     let lit = self.find(name)?;
-    Some(describe(&lit.output.connector, Some(&lit.mode)))
+    Some(describe(&lit.output.connector, Some(&lit.mode), lit.vrr))
   }
 
   /// The connected connectors that are not lit, because they are
@@ -1042,7 +1048,7 @@ impl Display {
       .filter_map(|info| {
         let choice = self.choice(&info.name).unwrap_or_default();
         let mode = outputs::first_mode(info, choice)?;
-        Some((describe(info, None), mode.size()))
+        Some((describe(info, None, false), mode.size()))
       })
       .collect()
   }
