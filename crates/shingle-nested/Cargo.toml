@@ -12,6 +12,9 @@ shingle = { path = "../shingle" }
 shingle-config = { path = "../shingle-config" }
 shingle-frontend = { path = "../shingle-frontend" }
 shingle-render = { path = "../shingle-render" }
+wayland-client = "0.31"
+wayland-protocols.workspace = true
+wayland-protocols-wlr.workspace = true
 winit.workspace = true
 
 [lints]

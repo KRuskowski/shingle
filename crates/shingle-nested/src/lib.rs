@@ -12,6 +12,7 @@
 //! section 7). The `shingle` binary (crates/shingle-bin) parses the
 //! command line, selects this backend and calls [`run`].
 
+mod clipboard;
 mod host_keyboard;
 mod windows;
 
@@ -25,7 +26,7 @@ use std::{
 
 use shingle::{
   Compositor, InputDeviceId, InputDeviceInfo, InputDeviceKind, OutputHandle,
-  OutputInfo,
+  OutputInfo, SelectionSourceId,
 };
 use shingle_config::{Modifiers as ConfigModifiers, ShingleConfig};
 use shingle_frontend::{
@@ -350,6 +351,9 @@ struct App {
   config: ShingleConfig,
   /// How many windows to open at start.
   outputs: u32,
+  /// The clipboard and primary selection shared with the host, while the
+  /// bridge runs.
+  clipboard: Option<clipboard::host::HostClipboard<SelectionSourceId>>,
 }
 
 impl App {
@@ -359,11 +363,17 @@ impl App {
     config_path: Option<PathBuf>,
     ipc_path: Option<&Path>,
     outputs: u32,
+    host_socket: Option<&Path>,
   ) -> Result<Self, Box<dyn Error>> {
     let mut frontend =
       Frontend::new(config.clone(), spawn, config_path, ipc_path)?;
     let devices = SeatDevices::register(frontend.compositor_mut());
     frontend.compositor_mut().set_host_outputs(true);
+    let clipboard = clipboard::share_with_host(
+      frontend.compositor(),
+      config.behavior.host_clipboard,
+      host_socket,
+    );
     Ok(Self {
       frontend,
       devices,
@@ -378,7 +388,33 @@ impl App {
       host_keyboard: host_keyboard::HostKeyboard::default(),
       config,
       outputs: outputs.max(1),
+      clipboard,
     })
+  }
+
+  /// Runs the host clipboard bridge's half of a turn: what the host sent
+  /// before the compositor's turn, and nested's changes and reads after
+  /// it (`after`). A failed connection stops the bridge, and the host's
+  /// selections leave nested.
+  fn share_clipboard(&mut self, after: bool) {
+    let Some(clipboard) = &mut self.clipboard else {
+      return;
+    };
+    let compositor = self.frontend.compositor_mut();
+    let result = if after {
+      clipboard.sync(compositor)
+    } else {
+      clipboard.dispatch(compositor)
+    };
+    if let Err(error) = result {
+      eprintln!(
+        "shingle: the connection to the host's clipboard failed: {error}"
+      );
+      clipboard.abandon(compositor);
+      self.clipboard = None;
+    } else if clipboard.idle() {
+      self.clipboard = None;
+    }
   }
 
   /// Opens the window that shows `output` and gives the output the
@@ -855,7 +891,12 @@ impl ApplicationHandler for App {
   }
 
   fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    // Host selections first, so that the compositor's turn flushes them
+    // to nested's clients; nested's own changes after it, so that the
+    // host hears of them in the same turn.
+    self.share_clipboard(false);
     self.frontend.process(&mut self.host);
+    self.share_clipboard(true);
     // A reload sizes the outputs from the config; the windows decide.
     if let Some(config) = self.frontend.take_reloaded_config() {
       self.config = config;
@@ -933,7 +974,16 @@ pub fn run(
   // Connect to the host first, so that no client is started when there is
   // no session to show it in.
   let event_loop = EventLoop::new()?;
-  let mut app = App::new(config, spawn, config_path, ipc_path, outputs)?;
+  let host_socket =
+    clipboard::host::host_socket(|name| std::env::var(name).ok());
+  let mut app = App::new(
+    config,
+    spawn,
+    config_path,
+    ipc_path,
+    outputs,
+    host_socket.as_deref(),
+  )?;
   event_loop.run_app(&mut app)?;
   Ok(())
 }
