@@ -16,7 +16,7 @@
 //! Shingle.
 
 use std::{
-  collections::VecDeque,
+  collections::{HashMap, VecDeque},
   ffi::OsStr,
   fmt, fs, io,
   path::{Path, PathBuf},
@@ -27,6 +27,7 @@ use std::{
   time::{Duration, Instant},
 };
 
+use shingle::OutputHandle;
 use shingle_frontend::{Frontend, host::Host, render_target::RenderTarget};
 use shingle_render::{
   GpuContext, GpuOptions, GpuTexture, OffscreenTarget, RenderError,
@@ -217,17 +218,22 @@ impl GpuHealth {
   }
 }
 
-/// Draws the frontend's frames for scanout.
+/// Draws the frontend's frames for scanout, one output at a time.
 pub trait FrameRenderer {
-  /// Draws the frontend's scene and returns it as a [`Frame`].
+  /// Draws `output`'s scene at `size` pixels and returns it as a
+  /// [`Frame`].
   fn draw(
     &mut self,
     frontend: &mut Frontend,
     host: &mut dyn Host,
+    output: &OutputHandle,
+    size: (u32, u32),
   ) -> Result<Frame, RenderFailure>;
 
-  /// Changes the frame size, for a new mode.
-  fn resize(&mut self, size: (u32, u32)) -> Result<(), RenderFailure>;
+  /// Drops what the renderer keeps for `output`, which is no longer lit.
+  fn forget(&mut self, output: &OutputHandle) {
+    let _ = output;
+  }
 
   /// The GPU context, for shm uploads and linux-dmabuf
   /// ([`Frontend::attach_gpu`]); `None` for renderers without one.
@@ -236,26 +242,33 @@ pub trait FrameRenderer {
   }
 }
 
-/// Creates a renderer for frames of a size; called again to recreate it
-/// after the GPU was lost.
+/// Creates a renderer, given the first output's size; called again to
+/// recreate it after the GPU was lost.
 pub type RendererFactory =
   Box<dyn FnMut((u32, u32)) -> Result<Box<dyn FrameRenderer>, String>>;
 
-/// The real renderer: the frontend's scene drawn into an RGBA offscreen
-/// target and read back within [`GPU_WAIT`], for copy scanout.
+/// What the real renderer keeps per output: an RGBA offscreen target of
+/// the output's size and the output's render state (scale, transform,
+/// zoom).
+struct OutputTarget {
+  target: OffscreenTarget,
+  state: RenderState,
+}
+
+/// The real renderer: each output's scene drawn into an RGBA offscreen
+/// target of its own on one GPU and read back within [`GPU_WAIT`], for
+/// copy scanout.
 pub struct GpuRenderer {
   gpu: GpuContext,
-  state: RenderState,
-  target: OffscreenTarget,
+  targets: HashMap<OutputHandle, OutputTarget>,
   /// Set by wgpu's device-lost callback.
   lost: Arc<AtomicBool>,
-  /// What the last call of `render` produced.
-  last: Option<Result<Frame, RenderFailure>>,
 }
 
 impl GpuRenderer {
   /// Opens the Vulkan adapter on PCI slot `pci` (any adapter when there
-  /// is none or no slot is known) and an offscreen target of `size`.
+  /// is none or no slot is known). Targets are made as outputs are drawn;
+  /// `size` is the first output's, for which one is checked at once.
   pub fn new(size: (u32, u32), pci: Option<&str>) -> Result<Self, String> {
     let gpu = open_gpu(pci).map_err(|error| error.to_string())?;
     let lost = Arc::new(AtomicBool::new(false));
@@ -263,14 +276,13 @@ impl GpuRenderer {
     gpu.device().set_device_lost_callback(move |_, _| {
       flag.store(true, Ordering::SeqCst);
     });
-    let target = OffscreenTarget::new(&gpu, size.0, size.1)
+    // A target this GPU cannot make fails the start, not the first frame.
+    OffscreenTarget::new(&gpu, size.0, size.1)
       .map_err(|error| error.to_string())?;
     Ok(Self {
       gpu,
-      state: RenderState::default(),
-      target,
+      targets: HashMap::new(),
       lost,
-      last: None,
     })
   }
 
@@ -317,21 +329,31 @@ fn open_gpu(pci: Option<&str>) -> Result<GpuContext, RenderError> {
   ))
 }
 
-impl RenderTarget for GpuRenderer {
+/// The frontend's render target for one output's frame: its target on
+/// the shared GPU, and where the frame read back goes.
+struct NativeTarget<'a> {
+  gpu: &'a mut GpuContext,
+  output: &'a mut OutputTarget,
+  lost: &'a AtomicBool,
+  /// What the last call of `render` produced.
+  last: Option<Result<Frame, RenderFailure>>,
+}
+
+impl RenderTarget for NativeTarget<'_> {
   fn set_scale_factor(&mut self, scale: f64) {
-    self.state.set_scale_factor(scale);
+    self.output.state.set_scale_factor(scale);
   }
 
   fn set_output_transform(&mut self, transform: TextureTransform) {
-    self.state.set_output_transform(transform);
+    self.output.state.set_output_transform(transform);
   }
 
   fn set_nearest_filter(&mut self, nearest: bool) -> bool {
-    self.state.set_nearest_filter(nearest)
+    self.output.state.set_nearest_filter(nearest)
   }
 
   fn set_zoom(&mut self, factor: f32, origin_x: f32, origin_y: f32) {
-    self.state.set_zoom(factor, origin_x, origin_y);
+    self.output.state.set_zoom(factor, origin_x, origin_y);
   }
 
   fn set_gamma_ramp(&mut self, ramp: &[u16]) -> Result<(), RenderError> {
@@ -351,9 +373,12 @@ impl RenderTarget for GpuRenderer {
     height: u32,
     rgba: &[u8],
   ) -> Result<GpuTexture, RenderError> {
-    self
-      .gpu
-      .create_texture(width, height, rgba, self.state.texture_filter())
+    self.gpu.create_texture(
+      width,
+      height,
+      rgba,
+      self.output.state.texture_filter(),
+    )
   }
 
   fn update_texture(
@@ -372,24 +397,24 @@ impl RenderTarget for GpuRenderer {
     tiles: &[RenderTile<'_>],
     clear: [f64; 4],
   ) -> Result<bool, RenderError> {
-    if self.lost() {
+    let lost = || self.lost.load(Ordering::SeqCst);
+    if lost() {
       self.last = Some(Err(RenderFailure::Lost("device lost".into())));
       return Ok(false);
     }
-    self.target.render(&self.gpu, &self.state, tiles, clear);
-    let (width, height) = self.target.size();
-    self.last = Some(
-      match self.target.read_rgba_within(&self.gpu, Some(GPU_WAIT)) {
-        Ok(rgba) => Ok(Frame {
-          width,
-          height,
-          rgba,
-        }),
-        Err(RenderError::Timeout(_)) => Err(RenderFailure::Timeout),
-        Err(_) if self.lost() => Err(RenderFailure::Lost("device lost".into())),
-        Err(error) => Err(RenderFailure::Failed(error.to_string())),
-      },
-    );
+    let target = &self.output.target;
+    target.render(self.gpu, &self.output.state, tiles, clear);
+    let (width, height) = target.size();
+    self.last = Some(match target.read_rgba_within(self.gpu, Some(GPU_WAIT)) {
+      Ok(rgba) => Ok(Frame {
+        width,
+        height,
+        rgba,
+      }),
+      Err(RenderError::Timeout(_)) => Err(RenderFailure::Timeout),
+      Err(_) if lost() => Err(RenderFailure::Lost("device lost".into())),
+      Err(error) => Err(RenderFailure::Failed(error.to_string())),
+    });
     Ok(false)
   }
 
@@ -399,7 +424,13 @@ impl RenderTarget for GpuRenderer {
     clear: [f64; 4],
     size: (u32, u32),
   ) -> Result<Vec<u8>, RenderError> {
-    shingle_render::capture_frame(&self.gpu, &self.state, size, tiles, clear)
+    shingle_render::capture_frame(
+      self.gpu,
+      &self.output.state,
+      size,
+      tiles,
+      clear,
+    )
   }
 }
 
@@ -412,14 +443,37 @@ impl FrameRenderer for GpuRenderer {
     &mut self,
     frontend: &mut Frontend,
     host: &mut dyn Host,
+    output: &OutputHandle,
+    (width, height): (u32, u32),
   ) -> Result<Frame, RenderFailure> {
-    self.last = None;
-    // Native lights the compositor's first output until MO-7.
-    let output = frontend.compositor().primary_output();
-    let result = frontend.render(host, &output, self);
-    match (self.last.take(), result) {
+    let resized = self
+      .targets
+      .get(output)
+      .is_none_or(|target| target.target.size() != (width, height));
+    if resized {
+      let target = OffscreenTarget::new(&self.gpu, width, height)
+        .map_err(|error| RenderFailure::Failed(error.to_string()))?;
+      let state = self
+        .targets
+        .remove(output)
+        .map(|old| old.state)
+        .unwrap_or_default();
+      self
+        .targets
+        .insert(output.clone(), OutputTarget { target, state });
+    }
+    let lost = self.lost();
+    let target = self.targets.get_mut(output).expect("the target was made");
+    let mut native = NativeTarget {
+      gpu: &mut self.gpu,
+      output: target,
+      lost: &self.lost,
+      last: None,
+    };
+    let result = frontend.render(host, output, &mut native);
+    match (native.last.take(), result) {
       (Some(frame), _) => frame,
-      (None, _) if self.lost() => {
+      (None, _) if lost || self.lost() => {
         Err(RenderFailure::Lost("device lost".into()))
       }
       (None, Err(error)) => Err(RenderFailure::Failed(error.to_string())),
@@ -427,13 +481,8 @@ impl FrameRenderer for GpuRenderer {
     }
   }
 
-  fn resize(
-    &mut self,
-    (width, height): (u32, u32),
-  ) -> Result<(), RenderFailure> {
-    self.target = OffscreenTarget::new(&self.gpu, width, height)
-      .map_err(|error| RenderFailure::Failed(error.to_string()))?;
-    Ok(())
+  fn forget(&mut self, output: &OutputHandle) {
+    self.targets.remove(output);
   }
 }
 
@@ -449,6 +498,8 @@ pub(crate) mod tests {
     pub(crate) size: (u32, u32),
     pub(crate) failures: Rc<RefCell<VecDeque<RenderFailure>>>,
     pub(crate) frames: Rc<RefCell<u32>>,
+    /// The output of each frame drawn, in order.
+    pub(crate) drawn: Rc<RefCell<Vec<String>>>,
   }
 
   impl FrameRenderer for FakeRenderer {
@@ -456,22 +507,21 @@ pub(crate) mod tests {
       &mut self,
       _frontend: &mut Frontend,
       _host: &mut dyn Host,
+      output: &OutputHandle,
+      size: (u32, u32),
     ) -> Result<Frame, RenderFailure> {
       if let Some(failure) = self.failures.borrow_mut().pop_front() {
         return Err(failure);
       }
       *self.frames.borrow_mut() += 1;
-      let (width, height) = self.size;
+      self.drawn.borrow_mut().push(output.name().to_owned());
+      self.size = size;
+      let (width, height) = size;
       Ok(Frame {
         width,
         height,
         rgba: [10, 20, 30, 255].repeat((width * height) as usize),
       })
-    }
-
-    fn resize(&mut self, size: (u32, u32)) -> Result<(), RenderFailure> {
-      self.size = size;
-      Ok(())
     }
   }
 

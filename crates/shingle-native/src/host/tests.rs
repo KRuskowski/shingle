@@ -71,6 +71,8 @@ struct Fixture {
   frames: Rc<RefCell<u32>>,
   /// How many renderers the factory made after the first.
   recreated: Rc<RefCell<u32>>,
+  /// The output of every frame drawn, in order.
+  drawn: Rc<RefCell<Vec<String>>>,
   client: TestClient,
   toplevel: Toplevel,
   base: PathBuf,
@@ -89,13 +91,30 @@ pub(crate) fn fake_rendering(
   frames: &Rc<RefCell<u32>>,
   recreated: &Rc<RefCell<u32>>,
 ) -> Rendering {
+  let drawn = Rc::new(RefCell::new(Vec::new()));
+  drawing_rendering(size, failures, frames, recreated, &drawn)
+}
+
+/// [`fake_rendering`] that records the output of every frame in `drawn`.
+fn drawing_rendering(
+  size: (u32, u32),
+  failures: &Rc<RefCell<VecDeque<RenderFailure>>>,
+  frames: &Rc<RefCell<u32>>,
+  recreated: &Rc<RefCell<u32>>,
+  drawn: &Rc<RefCell<Vec<String>>>,
+) -> Rendering {
   let renderer = FakeRenderer {
     size,
     failures: Rc::clone(failures),
     frames: Rc::clone(frames),
+    drawn: Rc::clone(drawn),
   };
-  let (failures, frames, recreated) =
-    (Rc::clone(failures), Rc::clone(frames), Rc::clone(recreated));
+  let (failures, frames, recreated, drawn) = (
+    Rc::clone(failures),
+    Rc::clone(frames),
+    Rc::clone(recreated),
+    Rc::clone(drawn),
+  );
   Rendering {
     renderer: Box::new(renderer),
     factory: Box::new(move |size| {
@@ -104,6 +123,7 @@ pub(crate) fn fake_rendering(
         size,
         failures: Rc::clone(&failures),
         frames: Rc::clone(&frames),
+        drawn: Rc::clone(&drawn),
       }))
     }),
   }
@@ -145,8 +165,10 @@ impl Fixture {
     let failures = Rc::new(RefCell::new(VecDeque::new()));
     let frames = Rc::new(RefCell::new(0));
     let recreated = Rc::new(RefCell::new(0));
+    let drawn = Rc::new(RefCell::new(Vec::new()));
     let size = display.size().unwrap_or(crate::OUTPUT_SIZE);
-    let rendering = fake_rendering(size, &failures, &frames, &recreated);
+    let rendering =
+      drawing_rendering(size, &failures, &frames, &recreated, &drawn);
     let mut backend = Backend::new(
       frontend,
       Rc::clone(&session),
@@ -169,6 +191,7 @@ impl Fixture {
       failures,
       frames,
       recreated,
+      drawn,
       client,
       toplevel,
       base,
@@ -1154,4 +1177,281 @@ fn a_hotplug_during_a_pending_flip_waits_for_the_flip() {
   let compositor = fixture.backend.frontend().compositor();
   assert_eq!(compositor.output_info().name, "DP-2");
   assert!(fixture.flip_pending(), "DP-2 shows a frame");
+}
+
+/// A card with HDMI-A-1 (1280x720) and DP-1 (1920x1080) on CRTCs of their
+/// own, both connected unless `dp_connected` is false, with DP-1's CRTC.
+fn two_monitors(dp_connected: bool) -> (FakeKms, crate::kms::CrtcId) {
+  let mut card = FakeKms::single_output();
+  let mut dp = crate::kms::fake::connector_info(20, "DP-1");
+  dp.modes = vec![crate::kms::fake::mode(1920, 1080, 60, true)];
+  if !dp_connected {
+    dp.connection = Connection::Disconnected;
+  }
+  let crtc = card.add_pipe(dp);
+  (card, crtc)
+}
+
+impl Fixture {
+  /// The compositor's outputs, by name, in add order.
+  fn output_names(&self) -> Vec<String> {
+    self
+      .backend
+      .frontend()
+      .compositor()
+      .outputs()
+      .into_iter()
+      .map(|view| view.handle.name().to_owned())
+      .collect()
+  }
+
+  /// Completes the flip pending on `crtc` and runs a turn.
+  fn flip_on(&mut self, crtc: crate::kms::CrtcId, time: Duration, seq: u32) {
+    self.card.borrow_mut().complete_flip_on(crtc, time, seq);
+    self.step();
+  }
+
+  /// Completes every pending flip and runs a turn.
+  fn flip_all(&mut self, time: Duration) {
+    let pending: Vec<_> = self.card.borrow().pending.iter().copied().collect();
+    for crtc in pending {
+      self.card.borrow_mut().complete_flip_on(crtc, time, 1);
+    }
+    self.step();
+  }
+
+  /// Delivers a DRM hotplug event and completes flips until the hotplug,
+  /// which waits for them, was followed.
+  fn hotplug_settled(&mut self, time: Duration) {
+    self.hotplug();
+    for _ in 0..3 {
+      self.flip_all(time);
+    }
+  }
+
+  /// `ACTIVE` of `crtc` as the card has it now.
+  fn active_of(&self, crtc: crate::kms::CrtcId) -> u64 {
+    self.card.borrow().value(crtc.0, "ACTIVE")
+  }
+}
+
+#[test]
+fn two_monitors_are_two_outputs_each_paced_by_its_own_flips() {
+  let (card, dp) = two_monitors(true);
+  let mut fixture = Fixture::with_card(test_config(), card);
+  assert_eq!(fixture.output_names(), ["HDMI-A-1", "DP-1"]);
+  let compositor = fixture.backend.frontend().compositor();
+  let view = compositor.output_view(&shingle::OutputHandle::new("DP-1"));
+  assert_eq!(
+    view.map(|view| view.rect),
+    Some(shingle_core::Rect::new(1280, 0, 1920, 1080)),
+    "placed automatically to the right"
+  );
+  let mut drawn = fixture.drawn.borrow().clone();
+  drawn.sort();
+  assert_eq!(drawn, ["DP-1", "HDMI-A-1"], "a first frame on each");
+  let hdmi = fixture.card.borrow().crtc_id;
+  assert_eq!(
+    fixture.card.borrow().pending.len(),
+    2,
+    "two flips in flight"
+  );
+  // The window is on HDMI-A-1: DP-1's flip sends it nothing.
+  fixture.client_frame();
+  fixture.flip_on(dp, Duration::from_secs(2), 11);
+  assert!(fixture.client.events.frames.is_empty());
+  fixture.flip_on(hdmi, Duration::from_secs(3), 20);
+  assert_eq!(fixture.client.events.frames, [3_000]);
+  assert_eq!(fixture.client.events.presented[0].seq, 20);
+  assert_eq!(
+    fixture.drawn.borrow().last().map(String::as_str),
+    Some("HDMI-A-1"),
+    "the committed frame is drawn on HDMI-A-1"
+  );
+}
+
+#[test]
+fn monitors_plugged_in_and_out_add_and_remove_outputs() {
+  let (card, _) = two_monitors(false);
+  let mut fixture = Fixture::with_card(test_config(), card);
+  assert_eq!(fixture.output_names(), ["HDMI-A-1"]);
+  let (window, _, _) = fixture.window_place();
+  fixture
+    .card
+    .borrow_mut()
+    .set_connection("DP-1", Connection::Connected);
+  fixture.hotplug_settled(Duration::from_secs(1));
+  assert_eq!(fixture.output_names(), ["HDMI-A-1", "DP-1"]);
+  assert!(fixture.drawn.borrow().iter().any(|name| name == "DP-1"));
+  // Unplugging HDMI-A-1 moves its window to DP-1 ...
+  fixture.card.borrow_mut().disconnect();
+  fixture.hotplug_settled(Duration::from_secs(2));
+  assert_eq!(fixture.output_names(), ["DP-1"]);
+  let compositor = fixture.backend.frontend().compositor();
+  let place = compositor.core().window_location(window).unwrap();
+  assert_eq!(place.output.0, "DP-1");
+  // ... and replugging it brings the window back, under `return`.
+  fixture.card.borrow_mut().connection = Connection::Connected;
+  fixture.hotplug_settled(Duration::from_secs(3));
+  assert_eq!(fixture.output_names(), ["DP-1", "HDMI-A-1"]);
+  let compositor = fixture.backend.frontend().compositor();
+  let place = compositor.core().window_location(window).unwrap();
+  assert_eq!(place.output.0, "HDMI-A-1");
+}
+
+#[test]
+fn a_hotplug_waits_for_every_flip_and_starts_no_frame_meanwhile() {
+  let (card, dp) = two_monitors(true);
+  let mut fixture = Fixture::with_card(test_config(), card);
+  let hdmi = fixture.card.borrow().crtc_id;
+  fixture.flip_on(hdmi, Duration::from_secs(1), 1);
+  fixture.card.borrow_mut().disconnect();
+  fixture.hotplug();
+  let drawn = fixture.drawn.borrow().len();
+  fixture.client_frame();
+  assert_eq!(fixture.output_names(), ["HDMI-A-1", "DP-1"], "not yet");
+  assert_eq!(fixture.drawn.borrow().len(), drawn, "no frame meanwhile");
+  fixture.flip_on(dp, Duration::from_secs(2), 2);
+  assert_eq!(fixture.output_names(), ["DP-1"]);
+}
+
+#[test]
+fn a_monitor_without_a_free_crtc_is_a_disabled_head() {
+  let mut card = FakeKms::single_output();
+  card.add_connector(crate::kms::fake::connector_info(9, "DP-2"));
+  let mut fixture = Fixture::with_card(test_config(), card);
+  let compositor = fixture.backend.frontend().compositor();
+  assert_eq!(fixture.output_names(), ["HDMI-A-1"]);
+  assert_eq!(
+    compositor.disabled_outputs(),
+    [shingle::OutputHandle::new("DP-2")]
+  );
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  let _manager = fixture.client.output_manager(compositor);
+  assert_eq!(
+    fixture.client.heads(),
+    std::collections::BTreeMap::from([
+      ("DP-2".to_owned(), false),
+      ("HDMI-A-1".to_owned(), true)
+    ])
+  );
+  // Unplugging HDMI-A-1 frees the CRTC for DP-2.
+  fixture.flip(Duration::from_secs(1), 1);
+  fixture.card.borrow_mut().disconnect();
+  fixture.hotplug();
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture.client.roundtrip(compositor);
+  assert_eq!(fixture.output_names(), ["DP-2"]);
+  assert!(
+    fixture
+      .backend
+      .frontend()
+      .compositor()
+      .disabled_outputs()
+      .is_empty()
+  );
+  assert_eq!(
+    fixture.client.heads(),
+    std::collections::BTreeMap::from([("DP-2".to_owned(), true)])
+  );
+}
+
+#[test]
+fn output_management_turns_one_monitor_off_and_on_again() {
+  let (card, dp) = two_monitors(true);
+  let mut fixture = Fixture::with_card(test_config(), card);
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  let manager = fixture.client.output_manager(compositor);
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture
+    .client
+    .configure_heads(compositor, &manager, &["DP-1"]);
+  fixture.step();
+  assert!(
+    fixture.client.events.configurations.is_empty(),
+    "waiting for the flips"
+  );
+  fixture.flip_all(Duration::from_secs(1));
+  assert_eq!(fixture.client.events.configurations, ["succeeded"]);
+  assert_eq!(fixture.output_names(), ["HDMI-A-1"]);
+  assert_eq!(fixture.active_of(dp), 0, "DP-1's CRTC is off");
+  assert_eq!(
+    fixture.client.heads(),
+    std::collections::BTreeMap::from([
+      ("DP-1".to_owned(), false),
+      ("HDMI-A-1".to_owned(), true)
+    ])
+  );
+  // A hotplug leaves it off, as output management turned it off.
+  fixture.hotplug_settled(Duration::from_secs(2));
+  assert_eq!(fixture.output_names(), ["HDMI-A-1"]);
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture.client.configure_heads(compositor, &manager, &[]);
+  fixture.flip_all(Duration::from_secs(3));
+  fixture.step();
+  assert_eq!(
+    fixture.client.events.configurations,
+    ["succeeded", "succeeded"]
+  );
+  assert_eq!(fixture.output_names(), ["HDMI-A-1", "DP-1"]);
+  assert_eq!(fixture.active_of(dp), 1);
+}
+
+#[test]
+fn power_management_turns_one_monitor_off() {
+  let (card, dp) = two_monitors(true);
+  let mut fixture = Fixture::with_card(test_config(), card);
+  let hdmi = fixture.card.borrow().crtc_id;
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  let output = fixture.client.output_named(compositor, "DP-1");
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture.client.set_power(compositor, &output, false);
+  fixture.step();
+  assert_eq!(fixture.active_of(dp), 1, "not while its flip is pending");
+  fixture.flip_on(dp, Duration::from_secs(1), 1);
+  assert_eq!(fixture.active_of(dp), 0);
+  assert_eq!(fixture.active_of(hdmi), 1, "HDMI-A-1 stays on");
+  // HDMI-A-1 keeps drawing.
+  fixture.flip_on(hdmi, Duration::from_secs(1), 1);
+  fixture.client_frame();
+  assert!(fixture.card.borrow().pending.contains(&hdmi));
+  let compositor = fixture.backend.frontend_mut().compositor_mut();
+  fixture.client.set_power(compositor, &output, true);
+  fixture.step();
+  assert_eq!(fixture.active_of(dp), 1);
+}
+
+#[test]
+fn absolute_devices_map_to_their_output_or_the_whole_layout() {
+  let (card, _) = two_monitors(true);
+  let mut config = test_config();
+  config.input_devices.insert(
+    "event7 device".into(),
+    shingle_config::InputDeviceConfig {
+      output: Some("DP-1".into()),
+    },
+  );
+  let mut fixture = Fixture::with_card(config, card);
+  fixture.add(device("event7", POINTER, 0));
+  fixture.add(device("event8", POINTER, 0));
+  // libinput transforms to the first output's 1280x720 pixels: the middle
+  // of the device is the middle of DP-1.
+  let middle = DeviceInput::MotionAbsolute { x: 640.0, y: 360.0 };
+  fixture.input("event7", 1_000, middle);
+  assert_eq!(fixture.backend.translator.pointer, (1280.0 + 960.0, 540.0));
+  // An unmapped device spans the layout, 3200x1080.
+  fixture.input("event8", 2_000, middle);
+  assert_eq!(fixture.backend.translator.pointer, (1600.0, 540.0));
+  // Relative motion crosses from one output to the other.
+  fixture.input(
+    "event8",
+    3_000,
+    DeviceInput::Motion {
+      dx: -400.0,
+      dy: 0.0,
+      dx_unaccel: -400.0,
+      dy_unaccel: 0.0,
+    },
+  );
+  assert_eq!(fixture.backend.translator.pointer, (1200.0, 540.0));
 }

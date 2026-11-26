@@ -5,34 +5,41 @@
 //! Each [`Backend::step`] dispatches the seat, feeds libinput's events to
 //! the frontend with their timestamps, reports completed page flips to the
 //! compositor, runs the frontend's turn, carries out what the frontend
-//! asked of its [`NativeHost`], follows DPMS and draws a frame if one is
-//! wanted and the display is ready for it. [`Backend::run`] repeats that,
-//! sleeping in `poll(2)` on the seat, libinput, DRM and compositor
-//! descriptors in between, until the frontend asks to exit, and then saves
-//! the session and closes every device.
+//! asked of its [`NativeHost`], follows DPMS and draws a frame of every
+//! output that wants one and whose display is ready for it.
+//! [`Backend::run`] repeats that, sleeping in `poll(2)` on the seat,
+//! libinput, DRM and compositor descriptors in between, until the frontend
+//! asks to exit, and then saves the session and closes every device.
 //!
-//! Frames are paced by page flips: a frame is drawn only when no flip is
-//! pending, and frame callbacks and `wp_presentation` feedback are sent
-//! with the flip's timestamp when it completes
-//! ([`shingle::Compositor::frame_presented`]).
+//! Frames are paced by page flips, per CRTC: a frame of an output is drawn
+//! only when no flip of it is pending, and frame callbacks and
+//! `wp_presentation` feedback of that output are sent with the flip's
+//! timestamp when it completes
+//! ([`shingle::Compositor::frame_presented`]). The outputs are drawn one
+//! after another on the one GPU.
 //!
 //! A seat pause ([`SeatEvent::Disable`], for example a VT switch) follows
 //! docs/design/native-backend.md, "Pause": stop committing and drop the
-//! pending flip, suspend libinput, pause the frontend (which releases held
+//! pending flips, suspend libinput, pause the frontend (which releases held
 //! input) and acknowledge. A resume reopens the devices, which keep their
 //! seat device ids, probes the card again and makes a fresh modeset,
 //! resumes the frontend, resends the keyboard LEDs and draws again.
 //!
-//! Outputs follow DRM hotplug ([`DeviceMonitor`]): the display probes the
-//! card again, and when another output is lit, or none, the compositor is
-//! told ([`shingle::Compositor::set_output_info`], which renames the core
-//! output and replaces the `wl_output` global) and the frontend, renderer
-//! and input mapping get the new size. With nothing connected the
-//! compositor keeps the last output and its windows, and nothing is drawn
-//! until a display is plugged in again. wlr-output-management mode
-//! changes ([`shingle::Compositor::take_output_requests`]) pass a
-//! `TEST_ONLY` modeset first, and a config reload applies the output
-//! modes it configures.
+//! The compositor's outputs follow the lit connectors
+//! ([`Backend::sync_outputs`], docs/design/multi-output.md, MO-7): the
+//! first monitor lit renames the compositor's default output, other lit
+//! monitors are added with [`shingle::Compositor::add_output`], unplugged
+//! ones removed under `output_layout.unplug`, and connected monitors that
+//! are not lit (no free CRTC, configured or turned off) listed as disabled
+//! heads. DRM hotplug ([`DeviceMonitor`]) and reloaded output modes are
+//! followed once no flip is pending, and no new frame starts while they
+//! wait. With nothing connected the compositor keeps the last output, dark,
+//! with its windows, and nothing is drawn until a display is plugged in
+//! again. wlr-output-management configurations
+//! ([`shingle::Compositor::take_output_requests`]) pass one `TEST_ONLY`
+//! modeset of every head first. DPMS and wlr-output-power-management are
+//! per output. Absolute input devices are mapped to the output configured
+//! for them, else to the whole layout.
 //!
 //! Rendering failures follow [`GpuHealth`]: a lost or hung GPU is replaced
 //! with a new renderer from the [`RendererFactory`], and a third loss
@@ -41,6 +48,7 @@
 
 use std::{
   cell::RefCell,
+  collections::{BTreeSet, HashMap},
   error::Error,
   io,
   os::fd::{AsFd, BorrowedFd},
@@ -49,8 +57,8 @@ use std::{
 };
 
 use shingle::{
-  DpmsState, HeadRequest, HeadState, InputDeviceId, InputDeviceKind,
-  OutputHandle, OutputRequest,
+  Compositor, HeadState, InputDeviceId, InputDeviceKind, OutputHandle,
+  OutputKind, OutputRequest,
 };
 use shingle_config::InputConfig;
 use shingle_frontend::{
@@ -81,8 +89,8 @@ const TICK: Duration = Duration::from_millis(16);
 /// by the [`Backend`] afterwards.
 pub struct NativeHost<S> {
   session: Rc<RefCell<S>>,
-  /// A frame was requested.
-  redraw: bool,
+  /// The outputs a frame was requested of.
+  redraw: BTreeSet<OutputHandle>,
   /// The frontend warped the pointer here, relative to this output.
   warp: Option<(OutputHandle, f64, f64)>,
   /// The frontend asked the loop to end.
@@ -96,7 +104,7 @@ impl<S> NativeHost<S> {
   pub fn new(session: Rc<RefCell<S>>) -> Self {
     Self {
       session,
-      redraw: false,
+      redraw: BTreeSet::new(),
       warp: None,
       exit: false,
       device_changes: Vec::new(),
@@ -105,10 +113,9 @@ impl<S> NativeHost<S> {
 }
 
 impl<S: Session> Host for NativeHost<S> {
-  /// Native lights one output, the compositor's first, until MO-7; the
-  /// frontend asks only for outputs a backend added, which is that one.
-  fn request_redraw(&mut self, _output: &OutputHandle) {
-    self.redraw = true;
+  /// Asks for a frame of `output`; outputs that are not lit draw none.
+  fn request_redraw(&mut self, output: &OutputHandle) {
+    self.redraw.insert(output.clone());
   }
 
   fn warp_pointer(&mut self, output: &OutputHandle, x: f64, y: f64) {
@@ -139,9 +146,9 @@ impl<S: Session> Host for NativeHost<S> {
 /// What the backend draws with: a renderer, and how to make a new one
 /// after the GPU was lost.
 pub struct Rendering {
-  /// The renderer for the output's current size.
+  /// The renderer, which draws every output.
   pub renderer: Box<dyn FrameRenderer>,
-  /// Makes a new renderer of a size.
+  /// Makes a new renderer.
   pub factory: RendererFactory,
 }
 
@@ -154,7 +161,9 @@ pub struct Backend<S: Session, I: InputSource> {
   translator: Translator,
   /// The `[input]` options for device configuration.
   config: InputConfig,
-  /// The output in pixels, for absolute and touch positions.
+  /// The first lit output's size in pixels, which libinput transforms
+  /// absolute and touch positions to before they are mapped onto their
+  /// output or the layout.
   output_size: (u32, u32),
   /// Whether the seat is enabled.
   active: bool,
@@ -163,8 +172,12 @@ pub struct Backend<S: Session, I: InputSource> {
   renderer: Option<Box<dyn FrameRenderer>>,
   factory: RendererFactory,
   health: GpuHealth,
-  /// The DPMS state the display was last asked for.
-  dpms: DpmsState,
+  /// Whether each lit output was last asked to be on.
+  powered: HashMap<String, bool>,
+  /// The size each lit output was last given, in physical pixels.
+  sizes: HashMap<String, (u32, u32)>,
+  /// Whether the compositor's default output was renamed to a monitor.
+  described: bool,
   /// Why the loop ended, if it had to.
   fatal: Option<Fatal>,
   /// Whether every presented page flip is logged.
@@ -186,10 +199,10 @@ pub struct Backend<S: Session, I: InputSource> {
 impl<S: Session, I: InputSource> Backend<S, I> {
   /// Sets up the frontend for the native backend on an enabled seat and
   /// makes the display's first modeset: the compositor describes the lit
-  /// output (before any client could bind it) and draws its own cursor,
-  /// libinput applies natural scrolling, the output has the mode's size
-  /// ([`OUTPUT_SIZE`] while none is lit) and the pointer starts in its
-  /// middle.
+  /// outputs (before any client could bind them) and draws its own
+  /// cursor, libinput applies natural scrolling, each output has its
+  /// mode's size (the default output [`OUTPUT_SIZE`] while none is lit)
+  /// and the pointer starts in the middle of the first.
   pub fn new(
     mut frontend: Frontend,
     session: Rc<RefCell<S>>,
@@ -200,29 +213,21 @@ impl<S: Session, I: InputSource> Backend<S, I> {
   ) -> Result<Self, Box<dyn Error>> {
     let output_size = display.size().unwrap_or(OUTPUT_SIZE);
     let compositor = frontend.compositor_mut();
-    if let Some(info) = display.output_info() {
-      compositor.set_output_info(info);
-    }
     compositor.set_default_cursor(true);
     compositor.set_device_natural_scroll(true);
-    frontend.set_output_size(output_size.0, output_size.1)?;
+    if display.size().is_none() {
+      frontend.set_output_size(output_size.0, output_size.1)?;
+    }
     if let Some(gpu) = rendering.renderer.gpu() {
       frontend.attach_gpu(gpu);
     }
     display.start()?;
-    let output = frontend.compositor().output();
-    let mut translator = Translator::default();
-    translator.pointer = (
-      f64::from(output.x) + f64::from(output.width) / 2.0,
-      f64::from(output.y) + f64::from(output.height) / 2.0,
-    );
-    let dpms = frontend.compositor().dpms_state();
-    Ok(Self {
+    let mut backend = Self {
       frontend,
       host: NativeHost::new(session),
       input,
       devices: DeviceRegistry::default(),
-      translator,
+      translator: Translator::default(),
       config,
       output_size,
       active: true,
@@ -230,7 +235,9 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       renderer: Some(rendering.renderer),
       factory: rendering.factory,
       health: GpuHealth::default(),
-      dpms,
+      powered: HashMap::new(),
+      sizes: HashMap::new(),
+      described: false,
       fatal: None,
       trace_flips: false,
       leds: None,
@@ -239,7 +246,14 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       output_requests: Vec::new(),
       hotplug_pending: false,
       policy_pending: None,
-    })
+    };
+    backend.sync_outputs();
+    let output = backend.frontend.compositor().output();
+    backend.translator.pointer = (
+      f64::from(output.x) + f64::from(output.width) / 2.0,
+      f64::from(output.y) + f64::from(output.height) / 2.0,
+    );
+    Ok(backend)
   }
 
   /// Follows DRM hotplug events from `monitor`.
@@ -345,7 +359,12 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     if let Some(deadline) = self.display.deadline() {
       wake = wake.min(deadline);
     }
-    if self.host.redraw && self.display.ready() {
+    let ready = self
+      .host
+      .redraw
+      .iter()
+      .any(|output| self.display.ready_on(output.name()));
+    if ready && !self.modeset_waiting() {
       wake = now;
     }
     wake.saturating_duration_since(now)
@@ -431,30 +450,129 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     {
       diagnostics::log(&format!("input device {} is gone", device.0));
     }
-    let resumed = self.display.resume();
-    if resumed.output_changed || resumed.resized.is_some() {
-      self.describe_output();
-    }
+    self.display.resume();
     self.active = true;
+    self.sync_outputs();
     self.frontend.set_session_active(&mut self.host, true);
     self.leds = None;
-    self.host.redraw = true;
+    self.redraw_all();
     diagnostics::log("seat enabled; resumed");
   }
 
-  /// Tells the compositor about the lit output, if one is lit, and gives
-  /// the frontend, renderer and input mapping its size. With none lit, the
-  /// compositor keeps the last output, so windows stay where they are.
-  fn describe_output(&mut self) {
-    if let Some(info) = self.display.output_info() {
-      self.frontend.compositor_mut().set_output_info(info);
+  /// Asks for a frame of every lit output.
+  fn redraw_all(&mut self) {
+    for name in self.display.outputs() {
+      self.host.redraw.insert(OutputHandle::new(name));
     }
-    if let Some(size) = self.display.size()
-      && size != self.output_size
+  }
+
+  /// Brings the compositor's outputs in line with the lit connectors: the
+  /// first monitor lit renames the default output, the others are added
+  /// (or the dark last output lit again), lit outputs get their
+  /// description and mode size, outputs no longer lit are removed under
+  /// `output_layout.unplug` or, if their monitor is still connected,
+  /// turned off and kept as disabled heads, and connected monitors that
+  /// are not lit are listed as disabled heads. New outputs are added
+  /// before gone ones are removed, so that windows have somewhere to go.
+  pub fn sync_outputs(&mut self) {
+    let lit = self.display.outputs();
+    let unlit = self.display.unlit();
+    if !self.described
+      && let Some(info) = lit
+        .first()
+        .and_then(|first| self.display.output_info_of(first))
     {
-      self.resize(size);
+      let compositor = self.frontend.compositor_mut();
+      let primary = compositor.primary_output();
+      compositor.describe_output(&primary, info);
+      self.described = true;
     }
-    self.host.redraw = true;
+    for name in &lit {
+      let (Some(info), Some(size)) = (
+        self.display.output_info_of(name),
+        self.display.size_of(name),
+      ) else {
+        continue;
+      };
+      let handle = OutputHandle::new(name.clone());
+      let compositor = self.frontend.compositor_mut();
+      match compositor.output_view(&handle) {
+        Some(view) if !view.dark => {
+          if view.info != info {
+            compositor.describe_output(&handle, info);
+          }
+        }
+        _ => {
+          if let Err(error) = compositor.add_output(info, size) {
+            diagnostics::log(&format!("adding output {name} failed: {error}"));
+            continue;
+          }
+          self.sizes.insert(name.clone(), size);
+        }
+      }
+      if self.sizes.get(name) != Some(&size) {
+        if let Err(error) =
+          self.frontend.output_resized_on(&handle, size.0, size.1)
+        {
+          diagnostics::log(&format!("resizing {name} failed: {error}"));
+        }
+        self.sizes.insert(name.clone(), size);
+      }
+      self.host.redraw.insert(handle);
+    }
+    let connected =
+      |name: &str| unlit.iter().any(|(info, _)| info.name == name);
+    let is_lit = |name: &str| lit.iter().any(|lit| lit == name);
+    let gone: Vec<OutputHandle> = self
+      .frontend
+      .compositor()
+      .outputs()
+      .into_iter()
+      .filter(|view| view.kind == OutputKind::Backend && !view.dark)
+      .map(|view| view.handle)
+      .filter(|handle| !is_lit(handle.name()))
+      .collect();
+    // The default output stays until a monitor is lit.
+    if self.described {
+      for handle in gone {
+        let compositor = self.frontend.compositor_mut();
+        let result = if connected(handle.name()) {
+          compositor.disable_output(&handle)
+        } else {
+          compositor.remove_output(&handle)
+        };
+        if let Err(error) = result {
+          let name = handle.name();
+          diagnostics::log(&format!("removing {name} failed: {error}"));
+        }
+        self.forget_output(&handle);
+      }
+    }
+    let compositor = self.frontend.compositor_mut();
+    for handle in compositor.disabled_outputs() {
+      if !connected(handle.name()) && !is_lit(handle.name()) {
+        let _ = compositor.remove_output(&handle);
+      }
+    }
+    for (info, size) in unlit.clone() {
+      if let Err(error) = compositor.add_disabled_output(info, size) {
+        diagnostics::log(&format!("listing an unlit output failed: {error}"));
+      }
+    }
+    self.host.redraw.retain(|output| is_lit(output.name()));
+    if let Some(size) = self.display.size() {
+      self.output_size = size;
+    }
+  }
+
+  /// Forgets what the backend kept for an output that is no longer lit.
+  fn forget_output(&mut self, output: &OutputHandle) {
+    self.sizes.remove(output.name());
+    self.powered.remove(output.name());
+    self.host.redraw.remove(output);
+    if let Some(renderer) = self.renderer.as_mut() {
+      renderer.forget(output);
+    }
   }
 
   /// Reads DRM hotplug events. While the seat is disabled they are
@@ -486,30 +604,42 @@ impl<S: Session, I: InputSource> Backend<S, I> {
   }
 
   /// Follows a hotplug and reloaded output modes once no page flip is
-  /// pending, since lighting an output takes a modeset: the display
-  /// probes the card again, and the compositor learns about a different
-  /// output. A flip that never completes times out within a second.
+  /// pending on any output, since lighting outputs takes a full modeset:
+  /// the display probes the card again, and the compositor's outputs
+  /// follow. A flip that never completes times out within a second.
   fn apply_output_changes(&mut self) {
     if !self.active || self.display.flip_pending() {
       return;
     }
     let mut changed = false;
     if let Some(policy) = self.policy_pending.take() {
-      let change = self.display.set_policy(policy);
-      changed |= change.output_changed || change.resized.is_some();
+      self.display.set_policy(policy);
+      changed = true;
     }
     if std::mem::take(&mut self.hotplug_pending) {
-      let change = self.display.hotplug();
-      changed |= change.output_changed || change.resized.is_some();
+      self.display.hotplug();
+      changed = true;
     }
     if changed {
-      self.describe_output();
+      self.sync_outputs();
     }
   }
 
-  /// Tests or makes the mode changes wlr-output-management clients asked
-  /// for, each with a `TEST_ONLY` modeset first, and answers them. A
-  /// change waits while a page flip is pending, because no modeset may be
+  /// Whether a full modeset waits for the pending flips: no new frame
+  /// starts meanwhile, so that it does not wait long.
+  fn modeset_waiting(&self) -> bool {
+    self.hotplug_pending
+      || self.policy_pending.is_some()
+      || self
+        .output_requests
+        .iter()
+        .any(|request| !request.test_only)
+  }
+
+  /// Tests or carries out the configurations wlr-output-management
+  /// clients asked for, each with one `TEST_ONLY` modeset of every head
+  /// first, and answers them. A configuration that changes something
+  /// waits while a page flip is pending, because no full modeset may be
   /// committed then; tests do not.
   fn handle_output_requests(&mut self) {
     let requests = self.frontend.compositor_mut().take_output_requests();
@@ -519,26 +649,20 @@ impl<S: Session, I: InputSource> Backend<S, I> {
         return;
       }
       self.output_requests.remove(0);
-      let mode = match request.heads.as_slice() {
-        [
-          HeadRequest {
-            state: HeadState::On(Some(mode)),
-            ..
-          },
-        ] => Ok(*mode),
-        _ => Err("only one output is lit".to_owned()),
+      let heads: Vec<(String, HeadState)> = request
+        .heads
+        .iter()
+        .map(|head| (head.output.name().to_owned(), head.state))
+        .collect();
+      let result = if request.test_only {
+        self.display.test_configuration(&heads)
+      } else {
+        let result = self.display.apply_configuration(&heads).map(|_| ());
+        self.sync_outputs();
+        result
       };
-      let result = mode.and_then(|mode| {
-        if request.test_only {
-          self.display.test_mode(mode)
-        } else {
-          self.display.set_mode(mode).map(|_| {
-            self.describe_output();
-          })
-        }
-      });
       if let Err(error) = &result {
-        diagnostics::log(&format!("output mode {:?}: {error}", request.heads));
+        diagnostics::log(&format!("output configuration {heads:?}: {error}"));
       }
       self
         .frontend
@@ -547,33 +671,19 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     }
   }
 
-  /// Follows a new mode: the frontend's output, the renderer and the
-  /// input mapping get the new size.
-  fn resize(&mut self, size: (u32, u32)) {
-    self.output_size = size;
-    if let Err(error) = self.frontend.output_resized(size.0, size.1) {
-      diagnostics::log(&format!("resizing the output failed: {error}"));
-    }
-    if let Some(renderer) = self.renderer.as_mut()
-      && let Err(error) = renderer.resize(size)
-    {
-      diagnostics::log(&format!("resizing the renderer failed: {error}"));
-      self.renderer = None;
-    }
-  }
-
   /// Reports completed page flips to the compositor, which sends frame
   /// callbacks and presentation feedback with their times, and recovers
   /// from a flip that never completes.
   fn dispatch_display(&mut self, now: Instant) {
-    for info in self.display.dispatch() {
+    for (output, info) in self.display.dispatch_flips() {
       if self.trace_flips {
-        diagnostics::log(&flip_line(&info));
+        diagnostics::log(&format!("{output}: {}", flip_line(&info)));
       }
-      let compositor = self.frontend.compositor_mut();
-      // Native lights one output, the compositor's first, until MO-7.
-      let output = compositor.primary_output();
-      compositor.frame_presented(&output, info);
+      let output = OutputHandle::new(output);
+      self
+        .frontend
+        .compositor_mut()
+        .frame_presented(&output, info);
     }
     if let Err(fatal) = self.display.check_timeout(now) {
       self.fail(fatal);
@@ -587,19 +697,24 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     self.host.exit = true;
   }
 
-  /// Turns the display off or on when the compositor's DPMS state
+  /// Turns each output off or on when the compositor's power state of it
   /// changes (wlr-output-power-management, idle timeouts, activity).
   fn update_dpms(&mut self) {
-    let state = self.frontend.compositor().dpms_state();
-    if state == self.dpms {
-      return;
-    }
-    self.dpms = state;
-    let on = state == DpmsState::On;
-    diagnostics::log(if on { "display on" } else { "display off" });
-    self.display.set_dpms(on);
-    if on {
-      self.host.redraw = true;
+    for name in self.display.outputs() {
+      let handle = OutputHandle::new(name.clone());
+      let on = self.frontend.compositor().output_powered(&handle);
+      let before = self.powered.insert(name.clone(), on);
+      if before == Some(on) {
+        continue;
+      }
+      if before.is_some() {
+        let state = if on { "on" } else { "off" };
+        diagnostics::log(&format!("output {name} {state}"));
+      }
+      self.display.set_output_dpms(&name, on);
+      if on {
+        self.host.redraw.insert(handle);
+      }
     }
   }
 
@@ -709,11 +824,20 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       return;
     }
     let compositor = self.frontend.compositor();
-    let (width, height) = self.output_size;
-    let map = |x, y| compositor.map_output_point(x, y, width, height);
+    let mapped = self
+      .devices
+      .owner(id)
+      .and_then(|owner| compositor.input_device_output(&owner.name));
+    let size = self.output_size;
+    let map = |x, y| absolute_position(compositor, mapped.as_ref(), size, x, y);
+    let clamp = |x, y| compositor.clamp_to_layout(x, y);
     let output = OutputGeometry {
-      bounds: compositor.output(),
+      clamp: &clamp,
       map: &map,
+      output: mapped.as_ref().and_then(|output| {
+        let rect = compositor.output_view(output)?.rect;
+        Some((output.clone(), (f64::from(rect.x), f64::from(rect.y))))
+      }),
       constrained: compositor.pointer_constrained(),
     };
     let events = self.translator.translate(device, input, &output);
@@ -798,39 +922,58 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     }
   }
 
-  /// Draws and flips a frame if one was requested and the display is
-  /// ready for it: the seat is enabled, an output is lit, the display is
-  /// on and no flip is pending.
+  /// Draws and flips a frame of each output that wants one and is ready
+  /// for it: the seat is enabled, the output is lit and on and no flip of
+  /// it is pending, and no full modeset waits for the flips to end.
   fn render_if_wanted(&mut self, now: Instant) {
-    if !self.active || !self.host.redraw || !self.display.begin_frame() {
+    if !self.active || self.modeset_waiting() {
       return;
     }
-    self.host.redraw = false;
-    let result = match self.renderer.as_mut() {
-      Some(renderer) => renderer.draw(&mut self.frontend, &mut self.host),
-      None => Err(RenderFailure::Lost("no renderer".into())),
-    };
-    match result {
-      Ok(frame) => {
-        self.health.success();
-        self.display.present(&frame, now);
+    for name in self.display.outputs() {
+      let output = OutputHandle::new(name.clone());
+      if !self.host.redraw.contains(&output)
+        || !self.display.begin_frame_on(&name)
+      {
+        continue;
       }
-      Err(failure) => {
-        self.display.abandon_frame();
-        self.render_failed(&failure, now);
+      self.host.redraw.remove(&output);
+      let size = self.display.size_of(&name).unwrap_or(self.output_size);
+      let result = match self.renderer.as_mut() {
+        Some(renderer) => {
+          renderer.draw(&mut self.frontend, &mut self.host, &output, size)
+        }
+        None => Err(RenderFailure::Lost("no renderer".into())),
+      };
+      match result {
+        Ok(frame) => {
+          self.health.success();
+          self.display.present_on(&name, &frame, now);
+        }
+        Err(failure) => {
+          self.display.abandon_frame_on(&name);
+          self.render_failed(&failure, &output, now);
+          if self.renderer.is_none() || self.host.exit {
+            break;
+          }
+        }
       }
     }
   }
 
   /// Decides what a failed frame means and acts on it.
-  fn render_failed(&mut self, failure: &RenderFailure, now: Instant) {
-    diagnostics::log(&failure.to_string());
+  fn render_failed(
+    &mut self,
+    failure: &RenderFailure,
+    output: &OutputHandle,
+    now: Instant,
+  ) {
+    diagnostics::log(&format!("{}: {failure}", output.name()));
     match self.health.failure(failure, now) {
       Verdict::Skip => {
         // A slow frame is drawn again; another error waits for the next
         // change.
         if *failure == RenderFailure::Timeout {
-          self.host.redraw = true;
+          self.host.redraw.insert(output.clone());
         }
       }
       Verdict::Recreate => self.recreate_renderer(),
@@ -862,8 +1005,61 @@ impl<S: Session, I: InputSource> Backend<S, I> {
         diagnostics::log(&format!("creating a GPU context failed: {error}"))
       }
     }
-    self.host.redraw = true;
+    self.redraw_all();
   }
+}
+
+/// Where an absolute position `(x, y)` of a device, which libinput
+/// transformed to `size` pixels, lies in the layout: on `mapped`, the
+/// output configured for the device, undoing its scale and transform; else
+/// on the only output, the same way; else on the bounding box of the
+/// outputs, as wlroots maps unmapped absolute devices onto the whole
+/// layout. IPC outputs, which nobody sees, do not count.
+fn absolute_position(
+  compositor: &Compositor,
+  mapped: Option<&OutputHandle>,
+  size: (u32, u32),
+  x: f64,
+  y: f64,
+) -> (f64, f64) {
+  let views: Vec<_> = compositor
+    .outputs()
+    .into_iter()
+    .filter(|view| view.kind == OutputKind::Backend && !view.dark)
+    .collect();
+  let target = mapped
+    .cloned()
+    .or_else(|| (views.len() == 1).then(|| views[0].handle.clone()))
+    .and_then(|output| compositor.output_view(&output));
+  if let Some(view) = target {
+    let (local_x, local_y) = compositor
+      .map_point_on(&view.handle, x, y, size.0, size.1)
+      .unwrap_or((x, y));
+    return (
+      f64::from(view.rect.x) + local_x,
+      f64::from(view.rect.y) + local_y,
+    );
+  }
+  if views.is_empty() {
+    return compositor.map_output_point(x, y, size.0, size.1);
+  }
+  let left = views.iter().map(|view| view.rect.x).min().unwrap_or(0);
+  let top = views.iter().map(|view| view.rect.y).min().unwrap_or(0);
+  let right = views
+    .iter()
+    .map(|view| i64::from(view.rect.x) + i64::from(view.rect.width))
+    .max()
+    .unwrap_or(0);
+  let bottom = views
+    .iter()
+    .map(|view| i64::from(view.rect.y) + i64::from(view.rect.height))
+    .max()
+    .unwrap_or(0);
+  let (width, height) = (f64::from(size.0.max(1)), f64::from(size.1.max(1)));
+  (
+    f64::from(left) + x / width * (right - i64::from(left)) as f64,
+    f64::from(top) + y / height * (bottom - i64::from(top)) as f64,
+  )
 }
 
 /// The log line for a presented flip: `page flip seq=S at SEC.NSEC s`.

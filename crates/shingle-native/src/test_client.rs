@@ -64,6 +64,11 @@ pub(crate) struct Events {
   pub(crate) power_modes: Vec<u32>,
   /// Output-management heads that are not finished.
   heads: Vec<zwlr_output_head_v1::ZwlrOutputHeadV1>,
+  /// Each head's name and whether it is enabled.
+  pub(crate) head_states: std::collections::HashMap<
+    wayland_client::backend::ObjectId,
+    (String, bool),
+  >,
   /// Output-management modes that are not finished, in order, with their
   /// sizes.
   pub(crate) modes: Vec<(zwlr_output_mode_v1::ZwlrOutputModeV1, (i32, i32))>,
@@ -219,6 +224,70 @@ impl TestClient {
     seat.get_pointer(&self.handle, ());
     seat.get_touch(&self.handle, ());
     self.seat = Some(seat);
+    self.roundtrip(compositor);
+  }
+
+  /// Binds the `wl_output` named `name`, binding every output global in
+  /// turn until one reports that name.
+  pub(crate) fn output_named(
+    &mut self,
+    compositor: &mut Compositor,
+    name: &str,
+  ) -> wl_output::WlOutput {
+    let globals: Vec<u32> = self
+      .events
+      .globals
+      .iter()
+      .filter(|(_, interface, _)| interface == "wl_output")
+      .map(|(global, ..)| *global)
+      .collect();
+    for global in globals {
+      self.events.output_name = None;
+      let output: wl_output::WlOutput =
+        self.registry.bind(global, 4, &self.handle, ());
+      self.roundtrip(compositor);
+      if self.events.output_name.as_deref() == Some(name) {
+        return output;
+      }
+    }
+    panic!("no wl_output named {name}");
+  }
+
+  /// The output-management heads by name, with whether each is enabled.
+  pub(crate) fn heads(&self) -> std::collections::BTreeMap<String, bool> {
+    self
+      .events
+      .heads
+      .iter()
+      .filter_map(|head| self.events.head_states.get(&head.id()).cloned())
+      .collect()
+  }
+
+  /// Applies a configuration of every head through `manager`, with the
+  /// heads named in `off` disabled and the others enabled as they are.
+  /// The answer arrives in a later round trip.
+  pub(crate) fn configure_heads(
+    &mut self,
+    compositor: &mut Compositor,
+    manager: &zwlr_output_manager_v1::ZwlrOutputManagerV1,
+    off: &[&str],
+  ) {
+    let configuration =
+      manager.create_configuration(self.events.serial, &self.handle, ());
+    for head in self.events.heads.clone() {
+      let name = self
+        .events
+        .head_states
+        .get(&head.id())
+        .map(|(name, _)| name.clone())
+        .unwrap_or_default();
+      if off.contains(&name.as_str()) {
+        configuration.disable_head(&head);
+      } else {
+        configuration.enable_head(&head, &self.handle, ());
+      }
+    }
+    configuration.apply();
     self.roundtrip(compositor);
   }
 
@@ -486,6 +555,12 @@ impl Dispatch<zwlr_output_head_v1::ZwlrOutputHeadV1, ()> for Events {
     match event {
       zwlr_output_head_v1::Event::Mode { mode } => {
         events.modes.push((mode, (0, 0)));
+      }
+      zwlr_output_head_v1::Event::Name { name } => {
+        events.head_states.entry(head.id()).or_default().0 = name;
+      }
+      zwlr_output_head_v1::Event::Enabled { enabled } => {
+        events.head_states.entry(head.id()).or_default().1 = enabled != 0;
       }
       zwlr_output_head_v1::Event::Finished => {
         events.heads.retain(|known| known.id() != head.id());

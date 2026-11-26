@@ -14,6 +14,7 @@ mod libinput;
 
 use std::{collections::HashMap, io, os::fd::BorrowedFd};
 
+use shingle::OutputHandle;
 use shingle_config::InputConfig;
 use shingle_core::Rect;
 use shingle_frontend::{
@@ -373,16 +374,33 @@ pub struct Translator {
   wheel: HashMap<DeviceKey, (f64, f64)>,
 }
 
-/// The output as the translation sees it.
+/// The outputs as the translation of one device's input sees them.
 pub struct OutputGeometry<'a> {
-  /// The output rectangle in compositor coordinates, which the pointer
-  /// stays inside.
-  pub bounds: Rect,
-  /// Maps a point in output pixels to compositor coordinates, undoing
-  /// the output scale and transform (`Compositor::map_output_point`).
+  /// Pulls a point in layout coordinates onto the closest point of an
+  /// output, so the pointer stays on the layout
+  /// (`Compositor::clamp_to_layout`).
+  pub clamp: &'a dyn Fn(f64, f64) -> (f64, f64),
+  /// Maps an absolute position of the device, as libinput transformed
+  /// it, to layout coordinates: onto the output it is mapped to, undoing
+  /// that output's scale and transform, or else onto the whole layout.
   pub map: &'a dyn Fn(f64, f64) -> (f64, f64),
+  /// The output the device is mapped to (`input_devices.NAME.output`),
+  /// with its top-left corner in the layout. Its absolute events name it,
+  /// with positions in its coordinates.
+  pub output: Option<(OutputHandle, (f64, f64))>,
   /// Whether a client constrains the pointer, which then does not move.
   pub constrained: bool,
+}
+
+impl OutputGeometry<'_> {
+  /// The output a position in layout coordinates is reported on, and the
+  /// position as reported.
+  fn reported(&self, (x, y): (f64, f64)) -> (f64, f64, Option<OutputHandle>) {
+    match &self.output {
+      Some((output, (left, top))) => (x - left, y - top, Some(output.clone())),
+      None => (x, y, None),
+    }
+  }
 }
 
 impl Translator {
@@ -419,7 +437,7 @@ impl Translator {
         }];
         if !output.constrained {
           let (x, y) = self.pointer;
-          self.pointer = clamp(output.bounds, x + dx, y + dy);
+          self.pointer = (output.clamp)(x + dx, y + dy);
           let (x, y) = self.pointer;
           events.push(InputEvent::PointerMotionAbsolute { x, y, output: None });
         }
@@ -427,9 +445,9 @@ impl Translator {
       }
       DeviceInput::MotionAbsolute { x, y } => {
         let (x, y) = (output.map)(x, y);
-        self.pointer = clamp(output.bounds, x, y);
-        let (x, y) = self.pointer;
-        vec![InputEvent::PointerMotionAbsolute { x, y, output: None }]
+        self.pointer = (output.clamp)(x, y);
+        let (x, y, output) = output.reported(self.pointer);
+        vec![InputEvent::PointerMotionAbsolute { x, y, output }]
       }
       DeviceInput::Button { code, pressed } => {
         vec![InputEvent::PointerButton { code, pressed }]
@@ -457,12 +475,13 @@ impl Translator {
         if matches!(phase, TouchPhase::Up | TouchPhase::Cancel) {
           self.touches.remove(&slot);
         }
+        let (x, y, output) = output.reported(position);
         vec![InputEvent::Touch(Touch {
           id: u64::from(slot),
           phase,
-          x: position.0,
-          y: position.1,
-          output: None,
+          x,
+          y,
+          output,
         })]
       }
       DeviceInput::Swipe(gesture) => vec![InputEvent::Swipe(gesture)],
@@ -530,8 +549,9 @@ fn whole_clicks(pending: &mut f64, axis: Option<ScrollAxis>) -> i32 {
   clicks as i32
 }
 
-/// Keeps `(x, y)` inside `bounds`.
-fn clamp(bounds: Rect, x: f64, y: f64) -> (f64, f64) {
+/// Keeps `(x, y)` inside `bounds`, as the host keeps the pointer on an
+/// output when the compositor has none to clamp it to.
+pub fn clamp(bounds: Rect, x: f64, y: f64) -> (f64, f64) {
   let left = f64::from(bounds.x);
   let top = f64::from(bounds.y);
   let right = left + f64::from(bounds.width.max(1)) - EDGE;
@@ -638,10 +658,15 @@ pub(crate) mod tests {
     (x / 2.0, y / 2.0)
   }
 
+  fn bounded(x: f64, y: f64) -> (f64, f64) {
+    clamp(Rect::new(0, 0, 1280, 720), x, y)
+  }
+
   fn output(map: &dyn Fn(f64, f64) -> (f64, f64)) -> OutputGeometry<'_> {
     OutputGeometry {
-      bounds: Rect::new(0, 0, 1280, 720),
+      clamp: &bounded,
       map,
+      output: None,
       constrained: false,
     }
   }
@@ -759,6 +784,65 @@ pub(crate) mod tests {
         output: None,
       })]
     );
+  }
+
+  #[test]
+  fn a_device_mapped_to_an_output_reports_on_it() {
+    let mut translator = Translator::default();
+    let tablet = key("event7");
+    let right = |x: f64, y: f64| (x + 1280.0, y);
+    let layout = |x: f64, y: f64| (x.clamp(0.0, 3200.0), y.clamp(0.0, 1080.0));
+    let geometry = OutputGeometry {
+      clamp: &layout,
+      map: &right,
+      output: Some((OutputHandle::new("DP-1"), (1280.0, 0.0))),
+      constrained: false,
+    };
+    let events = translator.translate(
+      &tablet,
+      DeviceInput::MotionAbsolute { x: 100.0, y: 50.0 },
+      &geometry,
+    );
+    assert_eq!(
+      events,
+      [InputEvent::PointerMotionAbsolute {
+        x: 100.0,
+        y: 50.0,
+        output: Some(OutputHandle::new("DP-1")),
+      }]
+    );
+    assert_eq!(translator.pointer, (1380.0, 50.0), "in the layout");
+    let down = translator.translate(
+      &tablet,
+      DeviceInput::Touch {
+        slot: 0,
+        phase: TouchPhase::Down,
+        position: Some((10.0, 20.0)),
+      },
+      &geometry,
+    );
+    assert_eq!(
+      down,
+      [InputEvent::Touch(Touch {
+        id: 0,
+        phase: TouchPhase::Down,
+        x: 10.0,
+        y: 20.0,
+        output: Some(OutputHandle::new("DP-1")),
+      })]
+    );
+    // Relative motion crosses the layout freely.
+    translator.translate(
+      &key("event3"),
+      DeviceInput::Motion {
+        dx: -500.0,
+        dy: 0.0,
+        dx_unaccel: -500.0,
+        dy_unaccel: 0.0,
+      },
+      &geometry,
+    );
+    assert_eq!(translator.pointer, (880.0, 50.0));
   }
 
   fn wheel(v120: f64) -> DeviceInput {
