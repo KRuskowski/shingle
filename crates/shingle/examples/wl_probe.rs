@@ -4,9 +4,10 @@
 //! harness can check focus moving between X and Wayland windows
 //! (docs/design/xwayland.md, section 7).
 //!
-//! It runs only inside tools/xwayland_test/run.py's or
-//! tools/gpu_test/run.py's namespace, which set
-//! `SHINGLE_XWAYLAND_TEST_NAMESPACE=1` or `SHINGLE_GPU_TEST_NAMESPACE=1`,
+//! It runs only inside tools/xwayland_test/run.py's,
+//! tools/gpu_test/run.py's or tools/session_test/run.py's namespace,
+//! which set `SHINGLE_XWAYLAND_TEST_NAMESPACE=1`,
+//! `SHINGLE_GPU_TEST_NAMESPACE=1` or `SHINGLE_SESSION_TEST_NAMESPACE=1`,
 //! so that it never opens a window on the host's Wayland session.
 //!
 //! ```text
@@ -75,9 +76,10 @@ use wayland_protocols::{
 };
 
 /// The variables the test harnesses set inside their namespaces.
-const NAMESPACE_VARIABLES: [&str; 2] = [
+const NAMESPACE_VARIABLES: [&str; 3] = [
   "SHINGLE_XWAYLAND_TEST_NAMESPACE",
   "SHINGLE_GPU_TEST_NAMESPACE",
+  "SHINGLE_SESSION_TEST_NAMESPACE",
 ];
 
 /// The size drawn before the first configure that names one.
@@ -827,8 +829,8 @@ fn main() {
   if !inside {
     eprintln!(
       "wl_probe: refusing to run outside a test harness's namespace \
-       (neither {} nor {} is 1)",
-      NAMESPACE_VARIABLES[0], NAMESPACE_VARIABLES[1]
+       (none of {} is 1)",
+      NAMESPACE_VARIABLES.join(", ")
     );
     std::process::exit(2);
   }
