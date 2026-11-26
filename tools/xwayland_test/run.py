@@ -22,7 +22,7 @@ user namespaces:
       [--probe target/debug/examples/xw_probe]
       [--wl-probe target/debug/examples/wl_probe] [--keep]
       [--only lazy|disabled|eager|running|idle|windows|probe|behaviour|
-              session|nested|selection|outputs|decoration ...]
+              session|nested|selection|outputs|decoration|dnd ...]
 
 It prints one line per check and exits 0 when all pass. Every signal it
 sends goes to its own children or, through `kill_xwayland`, to a
@@ -45,7 +45,12 @@ positions and `xdpyinfo` reports their union as the root, also after
 `wlr-randr --pos` moves one. The `decoration` group (WG-6,
 docs/design/wayfire-gaps.md) checks that `xterm` gets a server-side
 frame and an `xw_probe --no-decorations` window none, tiled and
-floating, from IPC's geometries and `xwininfo`.
+floating, from IPC's geometries and `xwininfo`. The `dnd` group (XW-6)
+drags text with STIPC's pointer from an `xw_probe --xdnd-source` window
+into a `wl_probe --drop` window and from a `wl_probe --drag` window into
+an `xw_probe --xdnd-target` window, and between two X windows, and checks
+that the data arrives, that each side hears the other's answers and that
+the X drag icon is drawn above the windows in a capture.
 """
 
 import argparse
@@ -2660,7 +2665,235 @@ def _selection_no_primary(results, binary):
 
 GROUPS = ('lazy', 'disabled', 'eager', 'running', 'idle', 'windows', 'probe',
           'behaviour', 'session', 'nested', 'selection', 'outputs',
-          'decoration')
+          'decoration', 'dnd')
+
+def path_points(start, end, steps):
+  """`steps` integer points from just after `start` to `end`, evenly
+  spaced, for a pointer that moves rather than jumps."""
+  (x0, y0), (x1, y1) = start, end
+  return [(round(x0 + (x1 - x0) * step / steps),
+           round(y0 + (y1 - y0) * step / steps))
+          for step in range(1, steps + 1)]
+
+def drag_pointer(shingle, start, end, steps=12, pause=0.05):
+  """Presses the left button at `start`, moves to `end` in `steps`
+  motions, the first few within a few pixels so that a drag starts on
+  the source, and leaves the button pressed."""
+  shingle.call('stipc/move_cursor', {'x': start[0], 'y': start[1]})
+  shingle.call('stipc/feed_button', {'combo': 'BTN_LEFT', 'mode': 'press'})
+  for dx in (2, 5, 8):
+    shingle.call('stipc/move_cursor', {'x': start[0] + dx, 'y': start[1]})
+    time.sleep(pause)
+  for x, y in path_points((start[0] + 8, start[1]), end, steps):
+    shingle.call('stipc/move_cursor', {'x': x, 'y': y})
+    time.sleep(pause)
+
+def release_pointer(shingle):
+  """Releases the left button."""
+  shingle.call('stipc/feed_button', {'combo': 'BTN_LEFT', 'mode': 'release'})
+
+def magenta(r, g, b):
+  """A clearly magenta pixel, the probe's drag icon."""
+  return r > 200 and b > 200 and g < 60
+
+def dnd_checks(results, binary, work, probe, wl_probe):
+  """XW-6: drag and drop between X and Wayland in both directions, and
+  between X windows, with STIPC's pointer."""
+  del work
+  shingle = Shingle(binary, None, 'dnd', {'xwayland': {'mode': True}})
+  shingle.wait_pid(lambda value: value > 0)
+  results.check('dnd: Xwayland is ready',
+                wait_for(lambda: 'Xwayland ready' in shingle.log_text()))
+  display = ':0'
+  try:
+    _dnd_x_to_wayland(results, shingle, display, probe, wl_probe)
+    _dnd_wayland_to_x(results, shingle, display, probe, wl_probe)
+    _dnd_x_to_x(results, shingle, display, probe)
+    _dnd_refused(results, shingle, display, probe, wl_probe)
+  finally:
+    release_pointer(shingle)
+  results.check('dnd: SIGTERM exits with status 0', shingle.stop() == 0)
+  return shingle.log_text()
+
+def _dnd_pair(shingle, first, second):
+  """Waits until the views `first` and `second` are mapped side by side
+  and returns their centres."""
+  views = wait_for(lambda: all(
+      (shingle.view(app_id) or {}).get('mapped') for app_id in (first, second))
+                   and [shingle.view(app_id) for app_id in (first, second)])
+  if not views:
+    return None
+  return [centre(view['geometry']) for view in views]
+
+def _stop_all(shingle, clients):
+  """Stops `clients` and waits until their views are gone."""
+  for client in clients:
+    client.stop()
+  wait_for(lambda: shingle.views() == [])
+
+def _dnd_x_to_wayland(results, shingle, display, probe, wl_probe):
+  """An X source's drag, with its icon, into a Wayland window."""
+  text = 'dragged from X'
+  source, _, _ = start_probe(shingle, probe, display, 'DragSource',
+                             '--xdnd-source', text, '--drag-icon')
+  target = WaylandClient(shingle, wl_probe, 'wl-drop', '--drop')
+  clients = [source, target]
+  try:
+    centres = _dnd_pair(shingle, 'DragSource', 'wl-drop')
+    results.check('x-to-wayland: the X source and the Wayland target map',
+                  centres is not None, json.dumps(shingle.views()))
+    if not centres:
+      return
+    drag_pointer(shingle, centres[0], centres[1])
+    results.check('x-to-wayland: the X client starts its drag',
+                  has_event(source, 'drag_started', timeout=5))
+    entered = target.wait_event('drop_enter', timeout=5) or {}
+    results.check('x-to-wayland: the Wayland window is offered UTF-8 text',
+                  'text/plain;charset=utf-8' in entered.get('types', []),
+                  json.dumps(entered) + ' | ' + ' | '.join(target.lines[-3:]))
+    status = wait_for(lambda: (last_event(source, 'drag_status') or {}).get(
+        'accepted') and last_event(source, 'drag_status'), timeout=5)
+    results.check('x-to-wayland: the X source hears that it is accepted, '
+                  'with XdndActionCopy',
+                  status and status.get('action') == 'XdndActionCopy',
+                  json.dumps(last_event(source, 'drag_status')))
+    icon_area = {'x': centres[1][0] + 4, 'y': centres[1][1] + 4,
+                 'width': 40, 'height': 40}
+    shot = settled_capture(
+        shingle, lambda shot: shot.matching(magenta, icon_area)[0] > 500,
+        timeout=5)
+    count = shot.matching(magenta, icon_area)[0] if shot else 0
+    results.check('x-to-wayland: the drag icon is drawn over the Wayland '
+                  'window, next to the pointer', count > 500,
+                  f'{count} magenta pixels')
+    release_pointer(shingle)
+    results.check('x-to-wayland: the X client drops on the proxy',
+                  has_event(source, 'drag_dropped', timeout=5))
+    dropped = target.wait_event('dropped', timeout=5) or {}
+    results.check('x-to-wayland: the Wayland window receives the text',
+                  dropped.get('text') == text, json.dumps(dropped))
+    finished = source.wait_event('drag_finished', timeout=5) or {}
+    results.check('x-to-wayland: the X source gets XdndFinished, performed '
+                  'as a copy',
+                  finished.get('performed') is True
+                  and finished.get('action') == 'XdndActionCopy',
+                  json.dumps(finished))
+    shot = settled_capture(
+        shingle, lambda shot: shot.matching(magenta)[0] == 0, timeout=5)
+    results.check('x-to-wayland: the icon is gone after the drop',
+                  shot is not None and shot.matching(magenta)[0] == 0)
+  finally:
+    _stop_all(shingle, clients)
+
+def _dnd_wayland_to_x(results, shingle, display, probe, wl_probe):
+  """A Wayland source's drag into an X window."""
+  text = 'dragged from Wayland'
+  source = WaylandClient(shingle, wl_probe, 'wl-drag', '--drag', text)
+  target, _, _ = start_probe(shingle, probe, display, 'DropTarget',
+                             '--xdnd-target')
+  clients = [source, target]
+  try:
+    centres = _dnd_pair(shingle, 'wl-drag', 'DropTarget')
+    results.check('wayland-to-x: the Wayland source and the X target map',
+                  centres is not None, json.dumps(shingle.views()))
+    if not centres:
+      return
+    drag_pointer(shingle, centres[0], centres[1])
+    results.check('wayland-to-x: the Wayland client starts its drag',
+                  has_event(source, 'drag_started', timeout=5))
+    entered = target.wait_event('drag_enter', timeout=5) or {}
+    results.check('wayland-to-x: the X window gets XdndEnter with '
+                  'UTF8_STRING, version 5',
+                  entered.get('types') == ['UTF8_STRING']
+                  and entered.get('version') == 5, json.dumps(entered))
+    position = target.wait_event('drag_position', timeout=5) or {}
+    last = last_event(target, 'drag_position') or {}
+    results.check('wayland-to-x: XdndPosition follows the pointer in root '
+                  'coordinates',
+                  bool(position) and wait_for(
+                      lambda: (last_event(target, 'drag_position') or {})
+                      .get('x') == centres[1][0], timeout=5),
+                  json.dumps(last))
+    accepted = wait_for(lambda: any(
+        event.get('event') == 'drag_target'
+        and event.get('mime') == 'text/plain;charset=utf-8'
+        for event in source.events()), timeout=5)
+    results.check('wayland-to-x: the Wayland source hears that the X '
+                  'window accepts', accepted,
+                  ' | '.join(source.lines[-4:]))
+    release_pointer(shingle)
+    results.check('wayland-to-x: the drop is performed for the source',
+                  has_event(source, 'drag_drop_performed', timeout=5))
+    dropped = target.wait_event('dropped', timeout=5) or {}
+    results.check('wayland-to-x: the X window receives the text',
+                  dropped.get('text') == text, json.dumps(dropped))
+    results.check('wayland-to-x: the source hears that the drag finished',
+                  has_event(source, 'drag_finished', timeout=5),
+                  ' | '.join(source.lines[-4:]))
+  finally:
+    _stop_all(shingle, clients)
+
+def _dnd_x_to_x(results, shingle, display, probe):
+  """A drag between two X windows still goes from X to X, past the
+  window manager's proxy."""
+  text = 'dragged within X'
+  source, _, _ = start_probe(shingle, probe, display, 'XSource',
+                             '--xdnd-source', text)
+  target, target_window, _ = start_probe(shingle, probe, display, 'XTarget',
+                                         '--xdnd-target')
+  clients = [source, target]
+  try:
+    centres = _dnd_pair(shingle, 'XSource', 'XTarget')
+    if not centres:
+      results.check('x-to-x: both X windows map', False)
+      return
+    drag_pointer(shingle, centres[0], centres[1])
+    chosen = wait_for(lambda: (last_event(source, 'drag_target') or {}).get(
+        'window') == target_window, timeout=5)
+    results.check('x-to-x: the X source finds the X target, not the proxy',
+                  chosen, json.dumps(last_event(source, 'drag_target')))
+    release_pointer(shingle)
+    dropped = target.wait_event('dropped', timeout=5) or {}
+    results.check('x-to-x: the X target receives the text',
+                  dropped.get('text') == text, json.dumps(dropped))
+    finished = source.wait_event('drag_finished', timeout=5) or {}
+    results.check('x-to-x: the source gets the target\'s XdndFinished',
+                  finished.get('performed') is True, json.dumps(finished))
+  finally:
+    _stop_all(shingle, clients)
+
+def _dnd_refused(results, shingle, display, probe, wl_probe):
+  """A drag over a Wayland window that takes no drags is refused, and
+  the next drag still works."""
+  source, _, _ = start_probe(shingle, probe, display, 'Refused',
+                             '--xdnd-source', 'unwanted')
+  target = WaylandClient(shingle, wl_probe, 'wl-plain')
+  clients = [source, target]
+  try:
+    centres = _dnd_pair(shingle, 'Refused', 'wl-plain')
+    if not centres:
+      results.check('refused: both windows map', False)
+      return
+    drag_pointer(shingle, centres[0], centres[1])
+    results.check('refused: the X client starts its drag',
+                  has_event(source, 'drag_started', timeout=5))
+    time.sleep(0.5)
+    accepted = [event for event in source.events()
+                if event.get('event') == 'drag_status' and event['accepted']]
+    results.check('refused: nothing accepts it', not accepted,
+                  json.dumps(accepted))
+    release_pointer(shingle)
+    results.check('refused: the X client cancels it',
+                  has_event(source, 'drag_cancelled', timeout=5))
+    count = len(source.events())
+    drag_pointer(shingle, centres[0], centres[1])
+    results.check('refused: a second drag starts',
+                  has_event(source, 'drag_started', after=count, timeout=5))
+    release_pointer(shingle)
+    results.check('refused: Shingle still answers',
+                  shingle.call('stipc/ping').get('result') == 'ok')
+  finally:
+    _stop_all(shingle, clients)
 
 def decoration_checks(results, binary, work, probe):
   """WG-6: xterm, which sets no _MOTIF_WM_HINTS, gets a server-side frame
@@ -2809,9 +3042,10 @@ def inner(binary, probe, wl_probe, work, groups):
       'selection': selection_checks,
       'outputs': outputs_checks,
       'decoration': decoration_checks,
+      'dnd': dnd_checks,
   }
   for group in groups:
-    if group == 'behaviour':
+    if group in ('behaviour', 'dnd'):
       log = checks[group](results, binary, work, probe, wl_probe)
     elif group == 'selection':
       log = checks[group](results, binary, work, wl_probe)

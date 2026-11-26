@@ -24,6 +24,16 @@ class FramingTest(unittest.TestCase):
     data = run.encode_message({'a': 1})
     self.assertEqual(run.decode_messages(data[:-1]), ([], data[:-1]))
 
+class PathPointsTest(unittest.TestCase):
+  """The pointer path of a drag."""
+
+  def test_points_end_at_the_target(self):
+    points = run.path_points((0, 0), (100, 50), 4)
+    self.assertEqual(points, [(25, 12), (50, 25), (75, 38), (100, 50)])
+
+  def test_one_step_jumps(self):
+    self.assertEqual(run.path_points((3, 4), (5, 6), 1), [(5, 6)])
+
 class XpropTest(unittest.TestCase):
   """Parsing xprop output."""
 
