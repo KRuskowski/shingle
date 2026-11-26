@@ -80,7 +80,9 @@ pub fn run(
     if host.redraw && pacer.ready(now) {
       host.redraw = false;
       output.resize(frontend.compositor().output_physical_size());
-      match frontend.render(&mut host, &mut output) {
+      // The offscreen target is the first output's.
+      let primary = frontend.compositor().primary_output();
+      match frontend.render(&mut host, &primary, &mut output) {
         Ok(()) => errors.clear(),
         Err(error) => {
           errors.log(&error.to_string());
@@ -89,8 +91,6 @@ pub fn run(
       if output.take_presented() {
         sequence += 1;
         let compositor = frontend.compositor_mut();
-        // The offscreen target is the first output's until MO-5.
-        let primary = compositor.primary_output();
         compositor.frame_presented(
           &primary,
           PresentInfo {
@@ -138,11 +138,17 @@ struct OffscreenHost {
 }
 
 impl Host for OffscreenHost {
-  fn request_redraw(&mut self) {
+  fn request_redraw(&mut self, _output: &shingle::OutputHandle) {
     self.redraw = true;
   }
 
-  fn warp_pointer(&mut self, _x: f64, _y: f64) {}
+  fn warp_pointer(
+    &mut self,
+    _output: &shingle::OutputHandle,
+    _x: f64,
+    _y: f64,
+  ) {
+  }
 
   fn switch_vt(&mut self, _vt: u32) -> bool {
     false
@@ -427,8 +433,9 @@ mod tests {
   #[test]
   fn the_host_records_redraws_and_exits_and_cannot_switch_vt() {
     let mut host = OffscreenHost::default();
-    host.request_redraw();
-    host.warp_pointer(1.0, 2.0);
+    let output = shingle::OutputHandle::new("HEADLESS-1");
+    host.request_redraw(&output);
+    host.warp_pointer(&output, 1.0, 2.0);
     assert!(!host.switch_vt(2));
     host.exit();
     assert!(host.redraw && host.exit);

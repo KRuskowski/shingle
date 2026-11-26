@@ -17,6 +17,8 @@ pub(super) struct GeometryAnimation {
 
 pub(super) struct ClosingAnimation {
   pub(super) window: TileWindowId,
+  /// The output it is drawn on, where its surface was drawn last.
+  pub(super) output: shingle::OutputHandle,
   pub(super) started: Instant,
   pub(super) geometry: RenderRect,
   pub(super) buffer: BufferSnapshot,
@@ -82,31 +84,23 @@ impl Frontend {
     if self.animate.minimize_animation == "none" {
       return;
     }
-    let Some(surface) =
-      self
-        .surface_windows
-        .iter()
-        .find_map(|(surface, candidate)| {
-          (*candidate == window).then_some(*surface)
-        })
-    else {
+    let Some(surface) = self.window_surface(window) else {
       return;
     };
-    if !self.animation_enabled.contains(&surface)
+    if !self.animation_enabled_for(surface)
       || self.closing_animations.contains_key(&surface)
       || !self.textures.contains_key(&surface)
     {
       return;
     }
-    let Some((geometry, buffer)) =
-      self.previous_surfaces.get(&surface).cloned()
-    else {
+    let Some((output, (geometry, buffer))) = self.previous_of(surface) else {
       return;
     };
     self.minimize_animations.insert(
       surface,
       ClosingAnimation {
         window,
+        output,
         started: Instant::now(),
         geometry,
         buffer,

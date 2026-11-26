@@ -754,6 +754,38 @@ fn stipc_keys_run_oswitch_without_a_frontend() {
   let _ = std::fs::remove_file(path);
 }
 
+#[test]
+fn selecting_a_wset_asks_for_its_label_on_both_outputs() {
+  let (mut compositor, path) = two_outputs(Config::default());
+  let mut client = TestClient::connect(&mut compositor, &path);
+  one_on_each(&mut compositor, &mut client);
+  let labels = |compositor: &mut Compositor| {
+    compositor
+      .drain_events()
+      .into_iter()
+      .filter_map(|event| match event {
+        Event::WsetSelected { output, wset } => {
+          Some((output.name().to_owned(), wset))
+        }
+        _ => None,
+      })
+      .collect::<Vec<_>>()
+  };
+  compositor.show_wset(&handle("HEADLESS-1"), 2).unwrap();
+  assert_eq!(
+    labels(&mut compositor),
+    [("HEADLESS-1".to_owned(), 2), ("HEADLESS-2".to_owned(), 3)],
+    "HEADLESS-2 lost set 2 and shows a new one"
+  );
+  compositor.show_wset(&handle("HEADLESS-1"), 2).unwrap();
+  assert_eq!(
+    labels(&mut compositor),
+    [("HEADLESS-1".to_owned(), 2)],
+    "the label is shown even when the set stays"
+  );
+  let _ = std::fs::remove_file(path);
+}
+
 /// The windows among the surfaces drawn on `output`.
 fn windows_on(compositor: &Compositor, output: &str) -> Vec<WindowId> {
   compositor

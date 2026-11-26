@@ -414,7 +414,9 @@ impl FrameRenderer for GpuRenderer {
     host: &mut dyn Host,
   ) -> Result<Frame, RenderFailure> {
     self.last = None;
-    let result = frontend.render(host, self);
+    // Native lights the compositor's first output until MO-7.
+    let output = frontend.compositor().primary_output();
+    let result = frontend.render(host, &output, self);
     match (self.last.take(), result) {
       (Some(frame), _) => frame,
       (None, _) if self.lost() => {

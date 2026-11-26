@@ -2,12 +2,14 @@
 //! visual state into render tiles and draws them.
 
 use std::{
-  collections::{HashMap, HashSet},
+  collections::{BTreeSet, HashMap, HashSet},
   error::Error,
   time::{Duration, Instant},
 };
 
-use shingle::{BufferSnapshot, SurfaceId, SurfaceRole};
+use shingle::{
+  BufferSnapshot, OutputHandle, OutputKind, SurfaceId, SurfaceRole,
+};
 use shingle_core::WindowId as TileWindowId;
 use shingle_render::{
   GpuTexture, RenderRect, RenderTile, TextureTransform, animation_progress,
@@ -17,6 +19,10 @@ use shingle_render::{
 use super::{
   Frontend,
   animation::{ClosingAnimation, GeometryAnimation, apply_opening_animation},
+  drag::DragState,
+  outputs::{
+    OutputScene, WsetLabel, label_rect, overlaps, rasterize_label, translate,
+  },
   scale::ScaleTitle,
 };
 use crate::{
@@ -30,9 +36,11 @@ use crate::{
 };
 
 impl Frontend {
+  /// Appends the closing or minimizing `animations` drawn on `output`.
   pub(super) fn append_closing_surfaces<'a>(
     animations: &'a HashMap<SurfaceId, ClosingAnimation>,
     textures: &'a HashMap<SurfaceId, GpuTexture>,
+    output: &OutputHandle,
     now: Instant,
     config: &shingle_config::AnimateConfig,
     effect: &str,
@@ -42,6 +50,9 @@ impl Frontend {
     surfaces.sort_unstable();
     for surface in surfaces {
       let animation = &animations[&surface];
+      if animation.output != *output {
+        continue;
+      }
       let Some(texture) = textures.get(&surface) else {
         continue;
       };
@@ -274,50 +285,112 @@ impl Frontend {
     Ok(())
   }
 
-  /// Builds the scene and draws it into `target`, then sends frame
-  /// callbacks if a frame was presented. Asks the host for another frame
-  /// while animations run.
+  /// Builds the scene of `output` and draws it into `target`, the host's
+  /// target for that output, then sends that output's frame callbacks if
+  /// a frame was presented. Screencopy captures of `output`, and of
+  /// outputs created over IPC, which no host draws, are answered from
+  /// scenes drawn with the same target. Asks the host for another frame
+  /// of each output whose animations run.
   pub fn render(
     &mut self,
     host: &mut dyn Host,
+    output: &OutputHandle,
     target: &mut dyn RenderTarget,
   ) -> Result<(), Box<dyn Error>> {
-    let result = self.render_frame(target);
+    let result = self.render_frame(output, target);
     self.flush(host);
     result
   }
 
-  /// Draws one frame. Every animation is drawn and then continued or
-  /// ended at one time, `now`, taken before drawing. An animation that
-  /// was drawn short of its end therefore always gets another frame, even
-  /// if drawing took longer than what was left of it, and ends only after
-  /// a frame has shown its final state, as Wayfire's `duration_t` does.
+  /// Draws one frame of `output`. Every animation is drawn and then
+  /// continued or ended at one time, `now`, taken before drawing. An
+  /// animation that was drawn short of its end therefore always gets
+  /// another frame, even if drawing took longer than what was left of it,
+  /// and ends only after a frame has shown its final state, as Wayfire's
+  /// `duration_t` does.
   pub(super) fn render_frame(
     &mut self,
+    output: &OutputHandle,
     target: &mut dyn RenderTarget,
   ) -> Result<(), Box<dyn Error>> {
     self.update_expo_layout();
     self.retire_frames();
     let now = Instant::now();
-    if let Some((started, start)) = self.zoom_animation {
+    let Some(view) = self.compositor.output_view(output) else {
+      return Ok(());
+    };
+    self.draw_output(&view, target, now, true)?;
+    // Outputs created over IPC are drawn only for their captures.
+    let virtual_outputs = self
+      .captures
+      .iter()
+      .map(|(_, captured, _)| captured.clone())
+      .collect::<BTreeSet<_>>()
+      .into_iter()
+      .filter_map(|captured| self.compositor.output_view(&captured))
+      .filter(|view| view.kind == OutputKind::Virtual)
+      .collect::<Vec<_>>();
+    for view in &virtual_outputs {
+      self.draw_output(view, target, now, false)?;
+    }
+    self.finish_frame(now);
+    Ok(())
+  }
+
+  /// Builds the scene of the output `view` describes at frame time `now`
+  /// and, with `present`, draws and presents it into `target`; then
+  /// answers its captures. Its own animations, zoom and workspace slide
+  /// are continued or ended.
+  fn draw_output(
+    &mut self,
+    view: &shingle::OutputView,
+    target: &mut dyn RenderTarget,
+    now: Instant,
+    present: bool,
+  ) -> Result<(), Box<dyn Error>> {
+    let output = &view.handle;
+    self.scene_mut(output);
+    let mut scene = self.scenes.remove(output).expect("made above");
+    let result = self.draw_scene(view, &mut scene, target, now, present);
+    self.end_scene_animations(output, &mut scene, now);
+    self.scenes.insert(output.clone(), scene);
+    result
+  }
+
+  /// [`Frontend::draw_output`] with the output's scene taken out of the
+  /// map, so that the tiles can borrow it.
+  fn draw_scene(
+    &mut self,
+    view: &shingle::OutputView,
+    scene: &mut OutputScene,
+    target: &mut dyn RenderTarget,
+    now: Instant,
+    present: bool,
+  ) -> Result<(), Box<dyn Error>> {
+    let output = &view.handle;
+    let rect = view.rect;
+    if let Some((started, start)) = scene.zoom_animation {
       let progress = animation_progress(
         started,
         now,
         Duration::from_millis(self.zoom.smoothing_ms),
       );
-      self.zoom_factor =
-        shingle_render::interpolate_zoom(start, self.zoom_target, progress);
+      scene.zoom_factor =
+        shingle_render::interpolate_zoom(start, scene.zoom_target, progress);
       if progress >= 1.0 {
-        self.zoom_factor = self.zoom_target;
-        self.zoom_animation = None;
+        scene.zoom_factor = scene.zoom_target;
+        scene.zoom_animation = None;
       }
     }
+    let overview_here = self.overview_output() == *output;
+    let expo_here =
+      overview_here && (self.expo.is_some() || self.expo_exit.is_some());
+    let scale_here =
+      overview_here && (self.scale.is_some() || self.scale_exit.is_some());
     let (mut tiles, mut locks) = {
       let renderer = &mut *target;
-      renderer.set_scale_factor(self.compositor.output_scale());
-      renderer.set_output_transform(render_output_transform(
-        self.compositor.output_transform(),
-      ));
+      renderer.set_scale_factor(view.scale);
+      renderer.set_output_transform(render_output_transform(view.transform));
       let nearest = self.zoom.interpolation == "nearest";
       if renderer.set_nearest_filter(nearest) {
         // Uploaded shm buffers were given back, so their textures are
@@ -330,8 +403,10 @@ impl Frontend {
         } else {
           self.textures.clear();
         }
-        self.previous_surfaces.clear();
-        self.animations.clear();
+        scene.forget_surfaces();
+        for other in self.scenes.values_mut() {
+          other.forget_surfaces();
+        }
       }
       if let Some(cache) = &self.dmabuf {
         cache.borrow_mut().set_filter(if nearest {
@@ -341,45 +416,56 @@ impl Frontend {
         });
       }
       renderer.set_zoom(
-        self.zoom_factor,
-        self.zoom_origin.0,
-        self.zoom_origin.1,
+        scene.zoom_factor,
+        scene.zoom_origin.0,
+        scene.zoom_origin.1,
       );
-      renderer.set_gamma_ramp(self.compositor.gamma_ramp())?;
+      renderer.set_gamma_ramp(self.compositor.gamma_ramp_of(output))?;
       renderer.set_inversion(self.inverted, self.invert_preserve_hue);
-      let mut snapshots = if self.expo.is_some() || self.expo_exit.is_some() {
-        self.compositor.scale_surfaces(true, false)
+      let mut snapshots = if expo_here {
+        self.compositor.scale_surfaces_on(output, true, false)
       } else {
-        self.compositor.visible_surfaces()
+        self.compositor.visible_surfaces_on(output)
       };
-      if let Some(state) = self.scale.as_ref().or(self.scale_exit.as_ref()) {
+      let extend = |snapshots: &mut Vec<shingle::SurfaceSnapshot>,
+                    extra: Vec<shingle::SurfaceSnapshot>| {
         let visible = snapshots
           .iter()
           .map(|snapshot| snapshot.id)
           .collect::<HashSet<_>>();
         snapshots.extend(
-          self
-            .compositor
-            .scale_surfaces(
-              state.all_workspaces,
-              self.scale_config.include_minimized,
-            )
+          extra
             .into_iter()
             .filter(|snapshot| !visible.contains(&snapshot.id)),
+        );
+      };
+      if scale_here
+        && let Some(state) = self.scale.as_ref().or(self.scale_exit.as_ref())
+      {
+        extend(
+          &mut snapshots,
+          self.compositor.scale_surfaces_on(
+            output,
+            state.all_workspaces,
+            self.scale_config.include_minimized,
+          ),
         );
       }
-      if self.workspace_transition.is_some() {
-        let visible = snapshots
-          .iter()
-          .map(|snapshot| snapshot.id)
-          .collect::<HashSet<_>>();
-        snapshots.extend(
-          self
-            .compositor
-            .scale_surfaces(true, false)
-            .into_iter()
-            .filter(|snapshot| !visible.contains(&snapshot.id)),
+      if scene.workspace_transition.is_some() {
+        extend(
+          &mut snapshots,
+          self.compositor.scale_surfaces_on(output, true, false),
         );
+      }
+      // A window being dragged is drawn on every output it crosses.
+      if let Some(DragState::Move { source, .. }) = &self.drag {
+        let dragged = self.compositor.window_surfaces(*source);
+        if dragged
+          .iter()
+          .any(|snapshot| overlaps(snapshot.geometry, rect))
+        {
+          extend(&mut snapshots, dragged);
+        }
       }
       for snapshot in &snapshots {
         let Some(buffer) = &snapshot.buffer else {
@@ -393,7 +479,7 @@ impl Frontend {
             .as_ref()
             .and_then(|cache| cache.borrow_mut().texture(&content.buffer));
           if let Some(texture) = texture {
-            if self.dirty.contains(&snapshot.id) {
+            if scene.dirty.contains(&snapshot.id) {
               shingle::trace::buffer(format_args!(
                 "dmabuf cached dmabuf={} surface={}",
                 content.buffer.serial,
@@ -426,7 +512,7 @@ impl Frontend {
           let texture =
             renderer.create_texture(buffer.width, buffer.height, &rgba)?;
           self.textures.insert(snapshot.id, texture);
-        } else if self.dirty.contains(&snapshot.id) {
+        } else if scene.dirty.contains(&snapshot.id) {
           renderer.update_texture(&self.textures[&snapshot.id], &rgba)?;
         } else {
           continue;
@@ -448,12 +534,12 @@ impl Frontend {
           height: snapshot.geometry.height,
         };
         let Some((old_geometry, old_buffer)) =
-          self.previous_surfaces.get(&snapshot.id)
+          scene.previous_surfaces.get(&snapshot.id)
         else {
           continue;
         };
         if *old_geometry == geometry
-          || self.animations.contains_key(&snapshot.id)
+          || scene.animations.contains_key(&snapshot.id)
           || self.animation_duration.is_zero()
         {
           continue;
@@ -480,7 +566,7 @@ impl Frontend {
             &old_rgba,
           )?
         };
-        self.animations.insert(
+        scene.animations.insert(
           snapshot.id,
           GeometryAnimation {
             started: now,
@@ -489,12 +575,12 @@ impl Frontend {
           },
         );
       }
-      self.animation_enabled = snapshots
+      scene.animation_enabled = snapshots
         .iter()
         .filter(|snapshot| self.animation_matches(snapshot))
         .map(|snapshot| snapshot.id)
         .collect();
-      self.surface_windows = snapshots
+      scene.surface_windows = snapshots
         .iter()
         .filter(|snapshot| {
           snapshot.role == SurfaceRole::Toplevel && snapshot.buffer.is_some()
@@ -503,18 +589,22 @@ impl Frontend {
           snapshot.window.map(|window| (snapshot.id, window))
         })
         .collect();
-      let visible = snapshots
+      scene.drawn = snapshots
         .iter()
         .filter(|snapshot| snapshot.buffer.is_some())
         .map(|snapshot| snapshot.id)
         .collect::<HashSet<_>>();
+      // Textures go once no output draws their surface.
+      let drawn = &scene.drawn;
+      let others = &self.scenes;
       self.textures.retain(|id, _| {
-        visible.contains(id)
+        drawn.contains(id)
+          || others.values().any(|other| other.drawn.contains(id))
           || self.uploaded.contains(id)
           || self.closing_animations.contains_key(id)
           || self.minimize_animations.contains_key(id)
       });
-      self.animations.retain(|id, _| visible.contains(id));
+      scene.animations.retain(|id, _| drawn.contains(id));
       let tiles = snapshots
         .iter()
         .filter_map(|snapshot| {
@@ -534,9 +624,9 @@ impl Frontend {
             apply_buffer(&mut tile, buffer);
           }
           let mut tiles = Vec::with_capacity(2);
-          if let Some(animation) = self.animations.get(&snapshot.id)
+          if let Some(animation) = scene.animations.get(&snapshot.id)
             && let Some((_, old_buffer)) =
-              self.previous_surfaces.get(&snapshot.id)
+              scene.previous_surfaces.get(&snapshot.id)
           {
             let progress = animation_progress(
               animation.started,
@@ -567,7 +657,8 @@ impl Frontend {
             );
           }
           tiles.push(tile);
-          if snapshot.role == SurfaceRole::Toplevel
+          if scale_here
+            && snapshot.role == SurfaceRole::Toplevel
             && !self.minimize_animations.contains_key(&snapshot.id)
             && let Some(window) = snapshot.window
             && let Some(state) =
@@ -611,7 +702,8 @@ impl Frontend {
               tile.color[3] *= opacity;
             }
           }
-          if let Some(window) = snapshot.window
+          if expo_here
+            && let Some(window) = snapshot.window
             && let Some(state) = self.expo.as_ref().or(self.expo_exit.as_ref())
             && let Some(geometry) = state.geometry.get(&window)
             && let Ok(info) = self.compositor.core().window_info(window)
@@ -651,15 +743,16 @@ impl Frontend {
             }
           }
           if let Some(window) = snapshot.window
-            && let Some(transition) = &self.workspace_transition
+            && let Some(transition) = &scene.workspace_transition
             && let Ok(info) = self.compositor.core().window_info(window)
+            && info.location.output.as_str() == output.name()
           {
             let (grid_width, _) = self.compositor.workspace_grid_dimensions();
             let workspace = info.location.workspace.y as usize
               * grid_width as usize
               + info.location.workspace.x as usize;
             let layout = workspace_transition::TransitionLayout {
-              output: self.compositor.output(),
+              output: rect,
               grid_width,
               gap: self.vswitch.gap,
             };
@@ -686,7 +779,7 @@ impl Frontend {
         })
         .flatten()
         .collect::<Vec<_>>();
-      self.previous_surfaces = snapshots
+      scene.previous_surfaces = snapshots
         .iter()
         .filter_map(|snapshot| {
           let geometry = snapshot.geometry;
@@ -711,7 +804,9 @@ impl Frontend {
         .collect::<Vec<_>>();
       (tiles, locks)
     };
-    if let Some(state) = self.expo.as_ref().or(self.expo_exit.as_ref()) {
+    if expo_here
+      && let Some(state) = self.expo.as_ref().or(self.expo_exit.as_ref())
+    {
       let duration = Duration::from_millis(self.expo_config.duration_ms);
       let transition =
         Duration::from_millis(self.expo_config.transition_length_ms);
@@ -738,8 +833,8 @@ impl Frontend {
       tiles = cells;
     }
     self.append_drop_preview(&mut tiles);
-    if let Some(state) = &self.scale {
-      let snapshots = self.compositor.scale_surfaces(true, true);
+    if overview_here && let Some(state) = &self.scale {
+      let snapshots = self.compositor.scale_surfaces_on(output, true, true);
       let titles = snapshots
         .iter()
         .filter_map(|snapshot| {
@@ -770,19 +865,20 @@ impl Frontend {
         &mut tiles,
       )?;
     }
-    if self.scale.is_some() {
+    if overview_here && self.scale.is_some() {
       Self::append_scale_filter_overlay(
         &*target,
         &mut self.scale_filter_texture,
         &self.scale_filter,
         &self.scale_title_filter,
-        self.compositor.output(),
+        rect,
         &mut tiles,
       )?;
     }
     Self::append_closing_surfaces(
       &self.closing_animations,
       &self.textures,
+      output,
       now,
       &self.animate,
       &self.animate.close_animation,
@@ -791,113 +887,222 @@ impl Frontend {
     Self::append_closing_surfaces(
       &self.minimize_animations,
       &self.textures,
+      output,
       now,
       &self.animate,
       &self.animate.minimize_animation,
       &mut tiles,
     );
+    Self::append_label(
+      &*target,
+      &mut scene.label,
+      rect,
+      now,
+      self.wsets_label_duration,
+      &mut tiles,
+    )?;
+    // Tiles are in layout coordinates; the target is the output.
+    for tile in &mut tiles {
+      tile.geometry = translate(tile.geometry, -rect.x, -rect.y);
+    }
     let renderer = target;
-    renderer.set_tearing(self.compositor.allows_tearing());
-    let background = if self.expo.is_some() || self.expo_exit.is_some() {
+    let background = if expo_here {
       self.expo_config.background
-    } else if self.workspace_transition.is_some() {
+    } else if scene.workspace_transition.is_some() {
       self.vswitch.background
     } else {
       self.background_color
     };
-    let presented = renderer.render(&tiles, background)?;
-    // The buffers this frame samples stay locked until the GPU is done.
-    if let Some(cache) = &self.dmabuf {
-      locks.extend(
-        self
-          .closing_animations
-          .values()
-          .chain(self.minimize_animations.values())
-          .filter_map(|animation| animation.buffer.dmabuf())
-          .map(|content| content.lock.clone()),
-      );
-      cache.borrow_mut().frame_submitted(locks);
-    }
-    if presented {
-      self.compositor.frame();
+    if present {
+      renderer.set_tearing(self.compositor.allows_tearing_on(output));
+      let presented = renderer.render(&tiles, background)?;
+      // The buffers this frame samples stay locked until the GPU is done.
+      if let Some(cache) = &self.dmabuf {
+        locks.extend(
+          self
+            .closing_animations
+            .values()
+            .chain(self.minimize_animations.values())
+            .filter_map(|animation| animation.buffer.dmabuf())
+            .map(|content| content.lock.clone()),
+        );
+        cache.borrow_mut().frame_submitted(locks);
+      }
+      if presented {
+        self.compositor.frame_now(output);
+      }
+    } else {
+      // A capture reads its frame back before it returns.
+      drop(locks);
     }
     // The tiles borrow textures from `self`, so only these two fields.
     answer_captures(
       &mut self.compositor,
       &mut self.captures,
+      output,
+      (rect.width, rect.height),
       renderer,
       &tiles,
       background,
     );
+    Ok(())
+  }
+
+  /// Continues or ends the animations of `scene`, the scene of `output`
+  /// just drawn at `now`, and asks for another frame of it while any run.
+  fn end_scene_animations(
+    &mut self,
+    output: &OutputHandle,
+    scene: &mut OutputScene,
+    now: Instant,
+  ) {
     // Decide with the time this frame was drawn at, not the time drawing
     // finished: a slow frame must not skip an animation's final state.
-    self.animations.retain(|_, animation| {
+    scene.animations.retain(|_, animation| {
       animation_progress(animation.started, now, self.animation_duration) < 1.0
     });
-    self.open_animations.retain(|_, started| {
-      animation_progress(
-        *started,
-        now,
-        Duration::from_millis(self.animate.duration_ms),
-      ) < 1.0
-    });
-    self.expire_closing_animations(now);
-    self.expire_minimize_animations(now);
-    self.expire_scale_exit(now);
-    if self
+    let vswitch = Duration::from_millis(self.vswitch.duration_ms);
+    if scene
       .workspace_transition
       .as_ref()
       .is_some_and(|transition| {
-        animation_progress(
-          transition.started,
-          now,
-          Duration::from_millis(self.vswitch.duration_ms),
-        ) >= 1.0
+        animation_progress(transition.started, now, vswitch) >= 1.0
       })
     {
-      self.workspace_transition = None;
+      scene.workspace_transition = None;
     }
-    let expo_duration = Duration::from_millis(self.expo_config.duration_ms);
-    if self.expo_exit.as_ref().is_some_and(|state| {
-      animation_progress(state.animation_started, now, expo_duration) >= 1.0
+    if scene.label.as_ref().is_some_and(|label| {
+      now.saturating_duration_since(label.started) >= self.wsets_label_duration
     }) {
-      self.expo_exit = None;
+      scene.label = None;
     }
+    let open = Duration::from_millis(self.animate.duration_ms);
+    let opening = scene.drawn.iter().any(|surface| {
+      self
+        .open_animations
+        .get(surface)
+        .is_some_and(|started| animation_progress(*started, now, open) < 1.0)
+    });
+    if !scene.animations.is_empty()
+      || scene.workspace_transition.is_some()
+      || scene.zoom_animation.is_some()
+      || opening
+    {
+      self.request_redraw_on(output);
+    }
+    scene.dirty.clear();
+  }
+
+  /// Continues or ends the animations that are not one output's: opening,
+  /// closing and minimizing windows, Scale and Expo, asking for frames of
+  /// the outputs they are drawn on while they run and once more after
+  /// they end, so that the final state is drawn.
+  fn finish_frame(&mut self, now: Instant) {
+    let open = Duration::from_millis(self.animate.duration_ms);
+    let ended = self
+      .open_animations
+      .iter()
+      .filter(|(_, started)| animation_progress(**started, now, open) >= 1.0)
+      .map(|(surface, _)| *surface)
+      .collect::<Vec<_>>();
+    for surface in ended {
+      self.open_animations.remove(&surface);
+      let outputs = self
+        .scenes
+        .iter()
+        .filter(|(_, scene)| scene.drawn.contains(&surface))
+        .map(|(output, _)| output.clone())
+        .collect::<Vec<_>>();
+      for output in outputs {
+        self.request_redraw_on(&output);
+      }
+    }
+    let closing = self
+      .closing_animations
+      .values()
+      .chain(self.minimize_animations.values())
+      .map(|animation| animation.output.clone())
+      .collect::<HashSet<_>>();
+    for output in closing {
+      self.request_redraw_on(&output);
+    }
+    self.expire_closing_animations(now);
+    self.expire_minimize_animations(now);
+    let overview = self.overview_output();
+    let drawn = self.scenes.contains_key(&overview);
+    let scale = Duration::from_millis(self.scale_config.duration_ms);
+    let expo = Duration::from_millis(self.expo_config.duration_ms);
     let expo_transition =
       Duration::from_millis(self.expo_config.transition_length_ms);
-    if !self.animations.is_empty()
-      || !self.open_animations.is_empty()
-      || !self.closing_animations.is_empty()
-      || !self.minimize_animations.is_empty()
-      || self.scale.as_ref().is_some_and(|state| {
-        animation_progress(
-          state.animation_started,
-          now,
-          Duration::from_millis(self.scale_config.duration_ms),
-        ) < 1.0
-      })
-      || self.scale_exit.is_some()
+    let overview_running = self.scale.as_ref().is_some_and(|state| {
+      animation_progress(state.animation_started, now, scale) < 1.0
+    }) || self.scale_exit.is_some()
       || self.expo.as_ref().is_some_and(|state| {
-        animation_progress(state.animation_started, now, expo_duration) < 1.0
+        animation_progress(state.animation_started, now, expo) < 1.0
           || animation_progress(state.selection_started, now, expo_transition)
             < 1.0
       })
-      || self.expo_exit.is_some()
-      || self.workspace_transition.is_some()
-      || self.zoom_animation.is_some()
-    {
-      self.request_redraw();
+      || self.expo_exit.is_some();
+    if drawn {
+      self.expire_scale_exit(now);
+      if self.expo_exit.as_ref().is_some_and(|state| {
+        animation_progress(state.animation_started, now, expo) >= 1.0
+      }) {
+        self.expo_exit = None;
+      }
     }
-    self.dirty.clear();
+    if overview_running {
+      self.request_redraw_on(&overview);
+    }
+    if self.scale.is_none()
+      && self.scale_exit.is_none()
+      && self.expo.is_none()
+      && self.expo_exit.is_none()
+    {
+      self.overview_output = None;
+    }
+  }
+
+  /// Appends the "Workspace set N" label of an output at `rect` while it
+  /// is shown at `now`, rasterizing it on first use.
+  fn append_label<'a>(
+    renderer: &dyn RenderTarget,
+    label: &'a mut Option<WsetLabel>,
+    rect: shingle_core::Rect,
+    now: Instant,
+    duration: Duration,
+    tiles: &mut Vec<RenderTile<'a>>,
+  ) -> Result<(), Box<dyn Error>> {
+    let Some(shown) = label.as_mut() else {
+      return Ok(());
+    };
+    if now.saturating_duration_since(shown.started) >= duration {
+      return Ok(());
+    }
+    if shown.texture.is_none()
+      && let Some(raster) = rasterize_label(&shown.text, rect.width)
+    {
+      shown.texture = Some(renderer.create_texture(
+        raster.width,
+        raster.height,
+        &raster.rgba,
+      )?);
+    }
+    if let Some(texture) = &shown.texture {
+      tiles.push(RenderTile::textured(
+        label_rect(rect, (texture.width(), texture.height())),
+        texture,
+      ));
+    }
     Ok(())
   }
 }
 
-/// Answers the screencopy `captures` requested since the last frame with
-/// the frame just drawn: drawn once more offscreen, at the output's
-/// logical size, and cut to each capture's region, which the compositor
-/// scales into the client's buffer. Until the frontend draws every output
-/// (MO-5), captures of other outputs fail.
+/// Answers the screencopy `captures` of `output` requested since its last
+/// frame with the frame just built from `tiles`, which are relative to the
+/// output: drawn once more offscreen at the output's logical `size` and cut
+/// to each capture's region, which the compositor scales into the client's
+/// buffer. Captures of other outputs wait for their own frames.
 fn answer_captures(
   compositor: &mut shingle::Compositor,
   captures: &mut Vec<(
@@ -905,27 +1110,23 @@ fn answer_captures(
     shingle::OutputHandle,
     shingle_core::Rect,
   )>,
+  output: &OutputHandle,
+  size: (u32, u32),
   target: &mut dyn RenderTarget,
   tiles: &[RenderTile<'_>],
   background: [f64; 4],
 ) {
-  if captures.is_empty() {
+  if !captures.iter().any(|(_, captured, _)| captured == output) {
     return;
   }
-  let output = compositor.output();
-  let size = (output.width, output.height);
   let frame = target
     .capture(tiles, background, size)
     .map_err(|error| error.to_string());
-  let drawn = compositor.primary_output();
-  for (id, captured, region) in std::mem::take(captures) {
-    if captured != drawn {
-      compositor.finish_capture(
-        id,
-        Err(format!("{} is not drawn yet", captured.name())),
-      );
-      continue;
-    }
+  let (mine, others) = std::mem::take(captures)
+    .into_iter()
+    .partition::<Vec<_>, _>(|(_, captured, _)| captured == output);
+  *captures = others;
+  for (id, _, region) in mine {
     let result = frame.as_ref().map_err(Clone::clone).map(|rgba| {
       crop_rgba(
         rgba,

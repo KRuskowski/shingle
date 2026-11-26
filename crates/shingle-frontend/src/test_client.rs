@@ -36,8 +36,13 @@ pub(crate) struct Events {
   pub(crate) captures: Vec<&'static str>,
   /// The `wl_buffer`s that received `release`, in order.
   pub(crate) releases: Vec<wayland_client::backend::ObjectId>,
+  /// The frame callbacks that are done, by number, in order.
+  frames_done: Vec<u32>,
   synced: bool,
 }
+
+/// The user data of a frame callback: the number the test gave it.
+pub(crate) struct FrameCallback(u32);
 
 /// A screencopy copy in flight, with the memory its buffer lives in.
 pub(crate) struct Capture {
@@ -168,14 +173,38 @@ impl TestClient {
   }
 
   /// Asks wlr-screencopy for the `width` by `height` region at (`x`, `y`)
-  /// and copies it into a new shm buffer.
+  /// of the first output and copies it into a new shm buffer.
   pub(crate) fn capture(
     &mut self,
     compositor: &mut Compositor,
+    region: (i32, i32, i32, i32),
+  ) -> Capture {
+    self.capture_on(compositor, 0, region)
+  }
+
+  /// [`TestClient::capture`] of the `nth` `wl_output` global announced,
+  /// counted from 0.
+  pub(crate) fn capture_on(
+    &mut self,
+    compositor: &mut Compositor,
+    nth: usize,
     (x, y, width, height): (i32, i32, i32, i32),
   ) -> Capture {
     let manager = self.bind::<ZwlrScreencopyManagerV1>(3);
-    let output = self.bind::<wl_output::WlOutput>(1);
+    let name = self
+      .events
+      .globals
+      .iter()
+      .filter(|(_, interface, _)| interface == "wl_output")
+      .nth(nth)
+      .map(|(name, ..)| *name)
+      .expect("that many outputs");
+    let output = self.registry.bind::<wl_output::WlOutput, _, _>(
+      name,
+      1,
+      &self.handle,
+      (),
+    );
     let frame = manager.capture_output_region(
       0,
       &output,
@@ -262,6 +291,24 @@ impl TestClient {
   /// The buffers released so far.
   pub(crate) fn releases(&self) -> &[wayland_client::backend::ObjectId] {
     &self.events.releases
+  }
+
+  /// Asks for a frame callback numbered `number` on `surface` and
+  /// commits.
+  pub(crate) fn request_frame(
+    &mut self,
+    compositor: &mut Compositor,
+    surface: &wl_surface::WlSurface,
+    number: u32,
+  ) {
+    surface.frame(&self.handle, FrameCallback(number));
+    surface.commit();
+    self.roundtrip(compositor);
+  }
+
+  /// The numbers of the frame callbacks that are done, in order.
+  pub(crate) fn frames_done(&self) -> &[u32] {
+    &self.events.frames_done
   }
 
   /// The screencopy outcomes so far.
@@ -357,6 +404,19 @@ impl Dispatch<wl_callback::WlCallback, ()> for Events {
     _: &QueueHandle<Self>,
   ) {
     events.synced = true;
+  }
+}
+
+impl Dispatch<wl_callback::WlCallback, FrameCallback> for Events {
+  fn event(
+    events: &mut Self,
+    _: &wl_callback::WlCallback,
+    _: wl_callback::Event,
+    callback: &FrameCallback,
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.frames_done.push(callback.0);
   }
 }
 

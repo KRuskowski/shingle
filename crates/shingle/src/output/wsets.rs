@@ -26,6 +26,8 @@ pub(crate) fn select_wset(
   state.core.ensure_wset(wset, rect)?;
   let previous = state.core.wset_of(output);
   if previous == Some(wset) {
+    // Wayfire shows the label even when the set stays.
+    label(state, output, wset);
     return Ok(());
   }
   let elsewhere = state.core.wset(wset)?.output;
@@ -59,6 +61,7 @@ pub(crate) fn select_wset(
   }
   for (id, now) in &changed {
     crate::ipc::output_wset_changed(state, id, *now);
+    label(state, id, *now);
   }
   if let Some(previous) = previous
     && state
@@ -91,6 +94,14 @@ pub(crate) fn send_to_wset(
   move_window_to_wset(state, window, wset, MoveGeometry::Translate)?;
   crate::input::sync_focus(state);
   Ok(())
+}
+
+/// Asks the frontend to show the "Workspace set N" label on `output`.
+fn label(state: &mut CompositorState, output: &OutputId, wset: WsetId) {
+  state.events.push(crate::Event::WsetSelected {
+    output: crate::OutputHandle::from(output),
+    wset: wset.0,
+  });
 }
 
 /// Sends `view-set-output` for every window of `wset`, whose output just

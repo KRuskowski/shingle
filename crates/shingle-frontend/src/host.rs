@@ -17,14 +17,19 @@ use shingle::{InputDeviceId, OutputHandle};
 /// [`crate::Frontend::process`], [`crate::Frontend::render`] and
 /// [`crate::Frontend::update_keyboard`], never from anywhere else.
 pub trait Host {
-  /// Asks for [`crate::Frontend::render`] to be called soon. Several
-  /// requests before the next frame are one request.
-  fn request_redraw(&mut self);
+  /// Asks for [`crate::Frontend::render`] of `output` to be called soon.
+  /// Several requests before the next frame of an output are one request.
+  /// The frontend asks only for outputs that a host may draw: those the
+  /// backend added, not those created over IPC, which it draws itself
+  /// when a screencopy asks. A host that draws only some of them ignores
+  /// the others.
+  fn request_redraw(&mut self, output: &OutputHandle);
 
-  /// Moves the host pointer to `(x, y)` in output pixels, zoom already
+  /// Moves the host pointer to `(x, y)` on `output`, in that output's
+  /// logical pixels with its top-left corner at 0,0 and its zoom already
   /// applied. Nested warps the host cursor; native only records the new
   /// position.
-  fn warp_pointer(&mut self, x: f64, y: f64);
+  fn warp_pointer(&mut self, output: &OutputHandle, x: f64, y: f64);
 
   /// Switches to virtual terminal `vt`, for the `XF86Switch_VT_n` keysyms
   /// that Ctrl+Alt+Fn produces. Returns false if the host cannot switch,

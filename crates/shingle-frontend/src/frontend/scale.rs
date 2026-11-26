@@ -30,8 +30,12 @@ impl Frontend {
   /// should be restored by a later cancellation.
   pub(super) fn toggle_scale(&mut self, all_workspaces: bool) {
     self.clear_expo();
-    self.workspace_transition = None;
+    let active = self.compositor.active_output();
+    if let Some(scene) = self.scenes.get_mut(&active) {
+      scene.workspace_transition = None;
+    }
     self.scale_exit = None;
+    self.overview_output = Some(active);
     if let Some(state) = &self.scale {
       let no_remote_windows = self
         .compositor
@@ -170,7 +174,7 @@ impl Frontend {
     let windows = state.windows.clone();
     let original = self.original_scale_geometry(&windows);
     let cells = scale_cells(
-      self.compositor.output(),
+      self.output_rect(&self.overview_output()),
       windows.len(),
       self.scale_config.spacing,
       self.scale_config.outer_margin,

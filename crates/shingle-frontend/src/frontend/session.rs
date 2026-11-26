@@ -70,9 +70,11 @@ impl Frontend {
         self.finish_switcher();
         self.cancel_scale();
         self.clear_expo();
-        self.workspace_transition = None;
-        self.last_workspace =
-          self.compositor.current_workspace_index().unwrap_or(0);
+        for scene in self.scenes.values_mut() {
+          scene.workspace_transition = None;
+        }
+        self.wsets_label_duration =
+          Duration::from_millis(config.wsets.label_duration);
         self.scale_exit = None;
         self.scale_titles.clear();
         self.scale_icons.clear();

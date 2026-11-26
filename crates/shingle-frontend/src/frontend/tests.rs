@@ -13,6 +13,7 @@ use std::{
 
 use shingle::{
   Compositor, Config, InputDeviceId, InputDeviceInfo, InputDeviceKind,
+  OutputHandle,
 };
 use shingle_config::{ConfigFormat, ShingleConfig};
 use shingle_core::WindowId as TileWindowId;
@@ -24,6 +25,8 @@ use shingle_session::SessionStore;
 use wayland_client::Proxy;
 
 use super::{Frontend, drag::DragState, switcher::SwitcherKind};
+
+mod outputs;
 use crate::{
   host::{Axis, Host, InputEvent, Touch, TouchPhase},
   render_target::RenderTarget,
@@ -46,11 +49,20 @@ const KEY_RIGHT: u32 = 106;
 const KEY_LEFTMETA: u32 = 125;
 const BTN_LEFT: u32 = 0x110;
 
+/// The output every fixture starts with.
+fn primary() -> OutputHandle {
+  OutputHandle::new("HEADLESS-1")
+}
+
 /// Records what the frontend asks of its host.
 #[derive(Debug, Default)]
 struct FakeHost {
   redraws: usize,
+  /// The output of each redraw request, in order.
+  redrawn: Vec<OutputHandle>,
   warps: Vec<(f64, f64)>,
+  /// The output of each warp.
+  warped_on: Vec<OutputHandle>,
   /// Whether `switch_vt` succeeds.
   vt_switching: bool,
   vt_switches: Vec<u32>,
@@ -59,12 +71,14 @@ struct FakeHost {
 }
 
 impl Host for FakeHost {
-  fn request_redraw(&mut self) {
+  fn request_redraw(&mut self, output: &OutputHandle) {
     self.redraws += 1;
+    self.redrawn.push(output.clone());
   }
 
-  fn warp_pointer(&mut self, x: f64, y: f64) {
+  fn warp_pointer(&mut self, output: &OutputHandle, x: f64, y: f64) {
     self.warps.push((x, y));
+    self.warped_on.push(output.clone());
   }
 
   fn switch_vt(&mut self, vt: u32) -> bool {
@@ -479,7 +493,9 @@ fn a_workspace_switch_animates_and_moves_the_focus() {
   fixture.tap(KEY_2, &[KEY_LEFTMETA]);
   assert_eq!(fixture.workspace(), 1);
   assert!(
-    fixture.frontend.workspace_transition.is_some(),
+    fixture.frontend.scenes[&primary()]
+      .workspace_transition
+      .is_some(),
     "vswitch slides to the new workspace"
   );
   assert_eq!(fixture.focused(), None, "the new workspace is empty");
@@ -628,8 +644,9 @@ fn zoom_follows_the_wheel_with_its_modifier() {
     }),
   );
   fixture.key(KEY_LEFTMETA, false);
-  assert!(fixture.frontend.zoom_target > 1.0, "scrolling up zooms in");
-  assert_eq!(fixture.frontend.zoom_origin, (100.0, 200.0));
+  let scene = &fixture.frontend.scenes[&primary()];
+  assert!(scene.zoom_target > 1.0, "scrolling up zooms in");
+  assert_eq!(scene.zoom_origin, (100.0, 200.0));
   assert!(fixture.host.redraws > redraws);
 }
 
@@ -870,7 +887,7 @@ fn the_scene_draws_tiles_and_then_scale_thumbnails_with_titles() {
   };
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   let tiled = fixture
     .tiles()
@@ -899,7 +916,7 @@ fn the_scene_draws_tiles_and_then_scale_thumbnails_with_titles() {
   let thumbnail = scale_geometry(&fixture, alpha);
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   let frame = target.frames.last().expect("a frame");
   assert!(
@@ -932,7 +949,7 @@ fn render_until_idle(fixture: &mut Fixture, target: &mut RecordingTarget) {
     let redraws = fixture.host.redraws;
     fixture
       .frontend
-      .render(&mut fixture.host, target)
+      .render(&mut fixture.host, &primary(), target)
       .expect("the frame renders");
     if fixture.host.redraws == redraws {
       return;
@@ -991,11 +1008,19 @@ fn a_slow_frame_does_not_end_the_workspace_slide_early() {
   fixture.window("alpha");
   render_until_idle(&mut fixture, &mut target);
   fixture.tap(KEY_2, &[KEY_LEFTMETA]);
-  assert!(fixture.frontend.workspace_transition.is_some());
+  assert!(
+    fixture.frontend.scenes[&primary()]
+      .workspace_transition
+      .is_some()
+  );
   target.frames.clear();
   target.delay = Duration::from_millis(400);
   render_until_idle(&mut fixture, &mut target);
-  assert!(fixture.frontend.workspace_transition.is_none());
+  assert!(
+    fixture.frontend.scenes[&primary()]
+      .workspace_transition
+      .is_none()
+  );
   // At the end of the slide the old workspace is entirely off screen.
   let output = fixture.frontend.compositor().output();
   let last = target.frames.last().expect("a frame");
@@ -1033,7 +1058,7 @@ fn screencopy_captures_the_frame_as_drawn_including_inversion() {
   assert!(fixture.host.redraws > 0, "a capture asks for a frame");
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   fixture.process();
   assert_eq!(fixture.client.captures(), ["ready"]);
@@ -1052,7 +1077,7 @@ fn screencopy_captures_the_frame_as_drawn_including_inversion() {
   fixture.frontend.process(&mut fixture.host);
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   fixture.process();
   assert_eq!(fixture.client.captures(), ["ready", "ready"]);
@@ -1107,7 +1132,7 @@ fn dmabuf_surfaces_draw_cached_imports_and_release_after_the_gpu() {
     fixture.frontend.process(&mut fixture.host);
     fixture
       .frontend
-      .render(&mut fixture.host, target)
+      .render(&mut fixture.host, &primary(), target)
       .expect("the frame renders");
   };
   show(&mut fixture, &first, &mut target);
@@ -1151,13 +1176,13 @@ fn dmabuf_textures_are_imported_again_after_a_gpu_loss() {
   fixture.frontend.process(&mut fixture.host);
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   assert_eq!(fake.imports.get(), 1);
   fixture.frontend.drop_gpu_resources();
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   assert_eq!(fake.imports.get(), 2, "imported again from the kept fds");
   assert!(
@@ -1184,7 +1209,7 @@ fn a_surface_that_goes_from_dmabuf_to_shm_gets_an_uploaded_texture() {
   fixture.frontend.process(&mut fixture.host);
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   fixture.client.attach_buffer(
     fixture.frontend.compositor_mut(),
@@ -1196,7 +1221,7 @@ fn a_surface_that_goes_from_dmabuf_to_shm_gets_an_uploaded_texture() {
   // Writing shm pixels into the imported texture would fail validation.
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
 }
 
@@ -1266,7 +1291,7 @@ fn shm_commits_upload_their_damage_and_are_released_without_a_frame() {
   assert_eq!(fixture.frontend.uploads.len(), uploads);
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   assert!(drew_texture(&target), "drawn from the uploaded texture");
 }
@@ -1280,7 +1305,7 @@ fn uploaded_textures_survive_a_filter_change_and_go_when_unmapped() {
   let toplevel = fixture.window("shm");
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   assert!(drew_texture(&target));
   let id = fixture.frontend.uploads.last().expect("an upload").0;
@@ -1288,7 +1313,7 @@ fn uploaded_textures_survive_a_filter_change_and_go_when_unmapped() {
   fixture.frontend.zoom.interpolation = "nearest".into();
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   assert!(drew_texture(&target), "rebound, not lost");
   assert_eq!(fixture.frontend.uploads.len(), uploads, "nothing uploaded");
@@ -1298,7 +1323,7 @@ fn uploaded_textures_survive_a_filter_change_and_go_when_unmapped() {
   fixture.process();
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   assert!(
     !fixture.frontend.textures.contains_key(&id),
@@ -1315,7 +1340,7 @@ fn a_buffer_whose_upload_was_missed_is_uploaded_in_full_by_the_frame() {
   let toplevel = fixture.window("shm");
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   let buffer = fixture.client.shm_buffer(40, 30);
   let surface = toplevel.surface.clone();
@@ -1333,7 +1358,7 @@ fn a_buffer_whose_upload_was_missed_is_uploaded_in_full_by_the_frame() {
   let uploads = fixture.frontend.uploads.len();
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   assert_eq!(fixture.frontend.uploads.len(), uploads + 1);
   assert_eq!(fixture.frontend.uploads.last().unwrap().1, 40 * 30 * 4);
@@ -1357,7 +1382,7 @@ fn an_uploaded_texture_stays_while_its_surface_is_hidden() {
   fixture.process();
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   assert!(!drew_texture(&target), "nothing on the other workspace");
   assert!(
@@ -1373,7 +1398,7 @@ fn an_uploaded_texture_stays_while_its_surface_is_hidden() {
   fixture.process();
   fixture
     .frontend
-    .render(&mut fixture.host, &mut target)
+    .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
   assert!(drew_texture(&target), "shown again without a commit");
   assert_eq!(fixture.frontend.uploads.len(), uploads);

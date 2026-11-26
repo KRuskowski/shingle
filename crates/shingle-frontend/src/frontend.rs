@@ -1,7 +1,8 @@
 //! The [`Frontend`] struct, its public API and input dispatch. Each child
 //! module adds the methods for one area: `bindings` (key and pointer
 //! bindings, key repeat), `scale` and `expo` (the overviews), `switcher`,
-//! `drag`, `effects` (zoom, inversion, alpha), `animation`, `scene` (the
+//! `drag`, `effects` (zoom, inversion, alpha), `animation`, `outputs`
+//! (what is kept per output, and which outputs need a frame), `scene` (the
 //! scene build and drawing) and `session` (saving, config reload, the lock
 //! client).
 
@@ -10,6 +11,7 @@ mod bindings;
 mod drag;
 mod effects;
 mod expo;
+mod outputs;
 mod scale;
 mod scene;
 mod session;
@@ -27,8 +29,8 @@ use std::{
 };
 
 use shingle::{
-  BufferSnapshot, CaptureId, Compositor, Config, Direction, Event,
-  InputDeviceId, InputDeviceKind, SurfaceId,
+  CaptureId, Compositor, Config, Direction, Event, InputDeviceId,
+  InputDeviceKind, OutputHandle, SurfaceId,
 };
 use shingle_config::{
   CommandBinding, ConfigWatcher, Keybindings, PointerBindings, ShingleConfig,
@@ -49,8 +51,9 @@ use crate::{
   workspace_transition,
 };
 
-use animation::{ClosingAnimation, GeometryAnimation};
+use animation::ClosingAnimation;
 use drag::{DragState, RotationDrag};
+use outputs::OutputScene;
 use scale::ScaleTitle;
 use switcher::SwitcherState;
 
@@ -69,24 +72,31 @@ const BTN_MIDDLE: u32 = 0x112;
 /// inversion, alpha, animations, the scene build, binding dispatch, config
 /// reload, session saving and the lock client. A host feeds it input with
 /// [`Frontend::handle_input`], calls [`Frontend::process`] on every turn of
-/// its event loop and [`Frontend::render`] when it can draw, and wakes up
-/// by [`Frontend::next_deadline`].
+/// its event loop and [`Frontend::render`] for each output it draws when
+/// [`Host::request_redraw`] asked for one, and wakes up by
+/// [`Frontend::next_deadline`]. Each output has its own scene, zoom,
+/// workspace slide and redraw requests; Scale and Expo run on the output
+/// that was active when they started.
 pub struct Frontend {
   compositor: Compositor,
   /// Saves sessions off this thread; `None` once [`Frontend::shutdown`]
   /// has saved the session for the last time.
   session: Option<SessionWriter>,
   textures: HashMap<SurfaceId, GpuTexture>,
-  animations: HashMap<SurfaceId, GeometryAnimation>,
   open_animations: HashMap<SurfaceId, Instant>,
   closing_animations: HashMap<SurfaceId, ClosingAnimation>,
   minimize_animations: HashMap<SurfaceId, ClosingAnimation>,
-  animation_enabled: HashSet<SurfaceId>,
-  surface_windows: HashMap<SurfaceId, TileWindowId>,
   animate: shingle_config::AnimateConfig,
-  previous_surfaces: HashMap<SurfaceId, (RenderRect, BufferSnapshot)>,
   animation_duration: Duration,
-  dirty: HashSet<SurfaceId>,
+  /// What is drawn, zoomed and animated on each output.
+  scenes: HashMap<OutputHandle, OutputScene>,
+  /// The output Scale and Expo run on, from when they start until their
+  /// exit animations end.
+  overview_output: Option<OutputHandle>,
+  /// When the outputs created over IPC get their next frame.
+  virtual_frame: Option<Instant>,
+  /// How long the "Workspace set N" label stays (`wsets.label_duration`).
+  wsets_label_duration: Duration,
   lock_client: Option<Child>,
   session_children: Vec<Child>,
   keyboard: Keyboard,
@@ -107,9 +117,7 @@ pub struct Frontend {
   expo_exit: Option<crate::expo::ExpoState>,
   expo_touch: Option<u64>,
   expo_config: shingle_config::ExpoConfig,
-  workspace_transition: Option<workspace_transition::WorkspaceTransition>,
   vswitch: shingle_config::VswitchConfig,
-  last_workspace: usize,
   left_handed_mode: bool,
   middle_emulation: bool,
   pointer_x: f64,
@@ -129,10 +137,6 @@ pub struct Frontend {
   alpha: shingle_config::AlphaConfig,
   inverted: bool,
   invert_preserve_hue: bool,
-  zoom_factor: f32,
-  zoom_target: f32,
-  zoom_animation: Option<(Instant, f32)>,
-  zoom_origin: (f32, f32),
   background_color: [f64; 4],
   preview_base_color: [f64; 4],
   preview_border_color: [f64; 4],
@@ -155,11 +159,15 @@ pub struct Frontend {
   config_reload_delay: Duration,
   last_config_poll: Instant,
   quit: bool,
-  /// Whether the host should be asked for a frame at the end of the call.
-  redraw_requested: bool,
-  /// Screencopy captures the next frame answers, with their outputs and
-  /// regions.
-  captures: Vec<(CaptureId, shingle::OutputHandle, shingle_core::Rect)>,
+  /// Whether the host should be asked for a frame of every output it
+  /// draws at the end of the call.
+  redraw_all: bool,
+  /// The outputs the host should be asked for a frame of at the end of the
+  /// call.
+  redraw_outputs: HashSet<OutputHandle>,
+  /// Screencopy captures the next frame of their output answers, with
+  /// their outputs and regions.
+  captures: Vec<(CaptureId, OutputHandle, shingle_core::Rect)>,
   /// Imported DMA-BUF textures and the locks of frames in flight, once
   /// linux-dmabuf is offered.
   dmabuf: Option<Rc<RefCell<crate::dmabuf::DmabufTextures>>>,
@@ -416,24 +424,21 @@ impl Frontend {
       compositor.locked_modifiers(),
       compositor.keyboard_layout_index(),
     );
-    let compositor_workspace =
-      compositor.current_workspace_index().unwrap_or(0);
     Ok(Self {
       compositor,
       session: Some(SessionWriter::for_store(store)?),
       textures: HashMap::new(),
-      animations: HashMap::new(),
       open_animations: HashMap::new(),
       closing_animations: HashMap::new(),
       minimize_animations: HashMap::new(),
-      animation_enabled: HashSet::new(),
-      surface_windows: HashMap::new(),
       animate: config.animate.clone(),
-      previous_surfaces: HashMap::new(),
       animation_duration: Duration::from_millis(
         config.tiling.animation_duration,
       ),
-      dirty: HashSet::new(),
+      scenes: HashMap::new(),
+      overview_output: None,
+      virtual_frame: None,
+      wsets_label_duration: Duration::from_millis(config.wsets.label_duration),
       lock_client: None,
       session_children,
       keyboard,
@@ -456,9 +461,7 @@ impl Frontend {
       expo_exit: None,
       expo_touch: None,
       expo_config: config.expo.clone(),
-      workspace_transition: None,
       vswitch: config.vswitch.clone(),
-      last_workspace: compositor_workspace,
       left_handed_mode: config.input.left_handed_mode,
       middle_emulation: config.input.middle_emulation,
       pointer_x: 0.0,
@@ -480,10 +483,6 @@ impl Frontend {
       alpha: config.alpha.clone(),
       inverted: false,
       invert_preserve_hue: config.effects.invert_preserve_hue,
-      zoom_factor: 1.0,
-      zoom_target: 1.0,
-      zoom_animation: None,
-      zoom_origin: (0.0, 0.0),
       background_color: config.background_color,
       preview_base_color: config.tiling.preview_base_color,
       preview_border_color: config.tiling.preview_border_color,
@@ -513,7 +512,8 @@ impl Frontend {
       ),
       last_config_poll: Instant::now(),
       quit: false,
-      redraw_requested: false,
+      redraw_all: false,
+      redraw_outputs: HashSet::new(),
       captures: Vec::new(),
       dmabuf: None,
       uploader: None,
@@ -524,9 +524,14 @@ impl Frontend {
     })
   }
 
+  /// Handles the compositor's events. Returns whether any but surface
+  /// commits came, which may change what every output shows; a commit
+  /// asks only for the outputs its surface overlaps.
   fn process_events(&mut self, host: &mut dyn Host) -> bool {
     let events = self.compositor.drain_events();
-    let changed = !events.is_empty();
+    let changed = events
+      .iter()
+      .any(|event| !matches!(event, Event::SurfaceCommitted(_)));
     let mut save = false;
     for event in events {
       match event {
@@ -574,44 +579,56 @@ impl Frontend {
         | Event::StackingChanged { .. }
         | Event::StackingOrderChanged { .. }
         | Event::ShowDesktopChanged(_)
-        | Event::OutputFocused { .. }
         | Event::LayoutChanged => save = true,
-        Event::OutputChanged { .. }
-        | Event::OutputAdded { .. }
-        | Event::OutputRemoved { .. } => {
-          self.workspace_transition = None;
+        Event::OutputFocused { output } => {
+          // Scale and Expo stay on their output; focus elsewhere ends them.
+          if self.overview_output.as_ref().is_some_and(|overview| {
+            *overview != output && (self.scale.is_some() || self.expo.is_some())
+          }) {
+            self.end_overviews();
+          }
           save = true;
+        }
+        Event::OutputChanged { output, .. } => {
+          if let Some(scene) = self.scenes.get_mut(&output) {
+            scene.workspace_transition = None;
+          }
+          if self.overview_output.as_ref() == Some(&output) {
+            self.expo_exit = None;
+            self.update_scale_layout();
+            self.update_expo_layout();
+          }
+          save = true;
+        }
+        Event::OutputAdded { .. } | Event::OutputRemoved { .. } => {
+          self.prune_scenes();
+          save = true;
+        }
+        Event::WsetSelected { output, wset } => {
+          self.show_wset_label(&output, wset);
         }
         Event::ToggleScale(all_workspaces) => {
           self.toggle_scale(all_workspaces);
         }
         Event::ToggleExpo => self.toggle_expo(),
         Event::InvertToggle => self.toggle_inversion(),
-        // Only the first output is drawn until MO-5, so only its
-        // workspace changes are animated.
-        Event::WorkspaceChanged { output, .. }
-          if output != self.compositor.primary_output() =>
-        {
-          save = true;
-        }
-        Event::WorkspaceChanged { workspace, .. } => {
+        Event::WorkspaceChanged {
+          workspace,
+          previous,
+          output,
+        } => {
           let target = workspace.saturating_sub(1) as usize;
-          let overview_active = self.scale.is_some()
-            || self.scale_exit.is_some()
-            || self.expo.is_some()
-            || self.expo_exit.is_some();
-          self.workspace_transition = if self.last_workspace != target
-            && !overview_active
-            && self.vswitch.duration_ms > 0
-          {
-            Some(workspace_transition::WorkspaceTransition::new(
-              self.last_workspace,
-              target,
-            ))
-          } else {
-            None
-          };
-          self.last_workspace = target;
+          let from = previous.saturating_sub(1) as usize;
+          let overview_active = self.overview_output.as_ref() == Some(&output)
+            && (self.scale.is_some()
+              || self.scale_exit.is_some()
+              || self.expo.is_some()
+              || self.expo_exit.is_some());
+          let animate = !overview_active && self.vswitch.duration_ms > 0;
+          let scene = self.scene_mut(&output);
+          scene.workspace_transition = (from != target && animate).then(|| {
+            workspace_transition::WorkspaceTransition::new(from, target)
+          });
           save = true;
         }
         Event::BeginMove { window } => {
@@ -648,29 +665,31 @@ impl Frontend {
             && self.animate.open_animation != "none"
             && self.animation_matches(&snapshot)
             && !self.textures.contains_key(&snapshot.id)
-            && !self.previous_surfaces.contains_key(&snapshot.id)
+            && self.previous_of(snapshot.id).is_none()
           {
             self
               .open_animations
               .entry(snapshot.id)
               .or_insert_with(Instant::now);
           }
-          self.dirty.insert(snapshot.id);
+          self.mark_dirty(snapshot.id);
+          self.damage(snapshot.geometry);
           self.upload_committed(&snapshot);
         }
         Event::SurfaceDestroyed { surface } => {
           self.uploaded.remove(&surface);
-          let previous = self.previous_surfaces.get(&surface).cloned();
+          let previous = self.previous_of(surface);
           if self.animate.close_animation != "none"
-            && self.animation_enabled.contains(&surface)
-            && self.surface_windows.contains_key(&surface)
+            && self.animation_enabled_for(surface)
             && self.textures.contains_key(&surface)
-            && let Some((geometry, buffer)) = previous
+            && let Some(window) = self.surface_window(surface)
+            && let Some((output, (geometry, buffer))) = previous
           {
             self.closing_animations.insert(
               surface,
               ClosingAnimation {
-                window: self.surface_windows[&surface],
+                window,
+                output,
                 started: Instant::now(),
                 geometry,
                 buffer,
@@ -679,28 +698,28 @@ impl Frontend {
           } else {
             self.textures.remove(&surface);
           }
-          self.animations.remove(&surface);
           self.open_animations.remove(&surface);
           self.minimize_animations.remove(&surface);
-          self.animation_enabled.remove(&surface);
-          self.previous_surfaces.remove(&surface);
-          self.surface_windows.remove(&surface);
-          self.dirty.remove(&surface);
+          for scene in self.scenes.values_mut() {
+            scene.surface_destroyed(surface);
+          }
         }
-        Event::PointerWarp { x, y, .. } => {
+        Event::PointerWarp { x, y, output } => {
           self.pointer_x = x;
           self.pointer_y = y;
-          let output = self.compositor.output();
+          let output = output.unwrap_or_else(|| self.output_under(x, y));
+          let rect = self.output_rect(&output);
+          let (factor, origin) = self.zoom_of(&output);
           let point = shingle_render::zoom_output_point(
-            x - f64::from(output.x),
-            y - f64::from(output.y),
-            output.width,
-            output.height,
-            self.zoom_factor,
-            self.zoom_origin.0,
-            self.zoom_origin.1,
+            x - f64::from(rect.x),
+            y - f64::from(rect.y),
+            rect.width,
+            rect.height,
+            factor,
+            origin.0,
+            origin.1,
           );
-          host.warp_pointer(point.0, point.1);
+          host.warp_pointer(&output, point.0, point.1);
         }
         Event::StartLockClient => self.start_lock_client(),
         Event::InputDeviceChanged { id, enabled } => {
@@ -738,10 +757,12 @@ impl Frontend {
         | Event::GeometryChanged { .. }
         | Event::LockStateChanged(_) => {}
         Event::CaptureRequested { id, output, region } => {
+          self.request_redraw_on(&output);
           self.captures.push((id, output, region));
         }
       }
     }
+    self.fail_undrawable_captures();
     if save {
       self.save();
     }
@@ -916,14 +937,25 @@ impl Frontend {
     if changed || self.compositor.needs_frame() {
       self.request_redraw();
     }
+    let now = Instant::now();
+    self.pace_virtual_outputs(now);
+    self.expire_labels(now);
     self.flush(host);
   }
 
   /// Returns when [`Frontend::process`] next has timed work: a key
-  /// repeat. Hosts also call it at least every 16 ms, for config reload,
-  /// drag and gesture timers and child reaping.
+  /// repeat, a frame of the outputs created over IPC, or the end of a
+  /// workspace set label. Hosts also call it at least every 16 ms, for
+  /// config reload, drag and gesture timers and child reaping.
   pub fn next_deadline(&self) -> Option<Instant> {
-    self.key_repeat.deadline()
+    [
+      self.key_repeat.deadline(),
+      self.virtual_frame,
+      self.label_deadline(),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
   }
 
   /// Sets the output to a `width` by `height` pixel display, in logical
@@ -958,7 +990,10 @@ impl Frontend {
   ) -> Result<(), shingle::Error> {
     let result = self.set_output_size(width, height);
     self.expo_exit = None;
-    self.workspace_transition = None;
+    let primary = self.compositor.primary_output();
+    if let Some(scene) = self.scenes.get_mut(&primary) {
+      scene.workspace_transition = None;
+    }
     self.update_scale_layout();
     self.update_expo_layout();
     result
@@ -1012,8 +1047,9 @@ impl Frontend {
     }
     self.textures.clear();
     self.uploaded.clear();
-    self.previous_surfaces.clear();
-    self.animations.clear();
+    for scene in self.scenes.values_mut() {
+      scene.forget_surfaces();
+    }
     self.scale_titles.clear();
     self.scale_icons.clear();
     self.scale_filter_texture = None;
@@ -1053,10 +1089,6 @@ impl Frontend {
     if let Err(error) = session.finish(snapshot) {
       eprintln!("shingle: failed to save session: {error}");
     }
-  }
-
-  fn request_redraw(&mut self) {
-    self.redraw_requested = true;
   }
 
   /// The filter new textures are sampled with.
@@ -1142,13 +1174,6 @@ impl Frontend {
       let mut cache = cache.borrow_mut();
       cache.retire();
       cache.prune();
-    }
-  }
-
-  /// Passes a pending redraw request on to the host.
-  fn flush(&mut self, host: &mut dyn Host) {
-    if std::mem::take(&mut self.redraw_requested) {
-      host.request_redraw();
     }
   }
 
@@ -1241,9 +1266,7 @@ impl Frontend {
       self.select_scale_at(x, y);
       return;
     }
-    if self.zoom_factor > 1.0 {
-      self.zoom_origin = (x as f32, y as f32);
-    }
+    self.follow_zoom(x, y);
     if self.rotation_drag.is_some() {
       self.rotate_pointer(x, y);
       return;

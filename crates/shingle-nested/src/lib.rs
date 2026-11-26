@@ -176,7 +176,10 @@ impl SeatDevices {
 #[derive(Default)]
 struct WindowHost {
   window: Option<Arc<Window>>,
-  /// A pointer warp the frontend asked for, in output pixels.
+  /// The output the window shows: the compositor's first, until nested
+  /// opens a window per output (MO-6).
+  output: Option<OutputHandle>,
+  /// A pointer warp the frontend asked for, in layout pixels.
   warp: Option<(f64, f64)>,
   /// Where the last warp put the host cursor, in window pixels, until the
   /// host echoes it back as a cursor motion.
@@ -189,14 +192,18 @@ struct WindowHost {
 }
 
 impl Host for WindowHost {
-  fn request_redraw(&mut self) {
-    if let Some(window) = &self.window {
+  fn request_redraw(&mut self, output: &OutputHandle) {
+    if let Some(window) = &self.window
+      && self.output.as_ref() == Some(output)
+    {
       window.request_redraw();
     }
   }
 
-  fn warp_pointer(&mut self, x: f64, y: f64) {
-    self.warp = Some((x, y));
+  fn warp_pointer(&mut self, output: &OutputHandle, x: f64, y: f64) {
+    if self.output.as_ref() == Some(output) {
+      self.warp = Some((x, y));
+    }
   }
 
   fn switch_vt(&mut self, _vt: u32) -> bool {
@@ -265,9 +272,11 @@ impl App {
       && let Some(window) = &self.host.window
     {
       let size = window.inner_size();
-      let point = self.frontend.compositor().unmap_output_point(
-        x,
-        y,
+      let compositor = self.frontend.compositor();
+      let output = compositor.output();
+      let point = compositor.unmap_output_point(
+        x + f64::from(output.x),
+        y + f64::from(output.y),
         size.width,
         size.height,
       );
@@ -423,6 +432,7 @@ impl ApplicationHandler for App {
     }
     self.renderer = Some(renderer);
     self.host.window = Some(window);
+    self.host.output = Some(self.frontend.compositor().primary_output());
   }
 
   fn window_event(
@@ -465,8 +475,11 @@ impl ApplicationHandler for App {
         }
       }
       WindowEvent::RedrawRequested => {
+        let output = self.frontend.compositor().primary_output();
+        self.host.output = Some(output.clone());
         if let Some(renderer) = self.renderer.as_mut()
-          && let Err(error) = self.frontend.render(&mut self.host, renderer)
+          && let Err(error) =
+            self.frontend.render(&mut self.host, &output, renderer)
         {
           eprintln!("shingle: render failed: {error}");
           event_loop.exit();
@@ -571,6 +584,10 @@ impl ApplicationHandler for App {
   }
 
   fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    // The window shows the first output, whichever that is now.
+    if self.host.window.is_some() {
+      self.host.output = Some(self.frontend.compositor().primary_output());
+    }
     self.frontend.process(&mut self.host);
     // A reload sizes the output from the config; the window decides.
     if self.frontend.take_reloaded_config().is_some()

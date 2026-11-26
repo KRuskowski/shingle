@@ -1009,6 +1009,17 @@ pub enum Event {
     /// Press or release.
     pressed: bool,
   },
+  /// `output` shows workspace set `wset` after a `wsets` binding or
+  /// `wsets/set-output-wset` selected it there, even one it showed
+  /// already, or after the set it showed was taken by another output and
+  /// it got a new empty one. The frontend shows Wayfire's "Workspace set
+  /// N" label on the output.
+  WsetSelected {
+    /// The output.
+    output: OutputHandle,
+    /// The index of the set it shows now.
+    wset: u32,
+  },
   /// A wlr-screencopy client asked for `region` of `output`, and frame
   /// capture is on ([`Compositor::set_frame_capture`]). The frontend
   /// draws that output's frame as it shows it and answers with

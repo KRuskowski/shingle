@@ -48,7 +48,9 @@ use std::{
   time::{Duration, Instant},
 };
 
-use shingle::{DpmsState, InputDeviceId, InputDeviceKind, OutputRequest};
+use shingle::{
+  DpmsState, InputDeviceId, InputDeviceKind, OutputHandle, OutputRequest,
+};
 use shingle_config::InputConfig;
 use shingle_frontend::{
   Frontend,
@@ -80,8 +82,8 @@ pub struct NativeHost<S> {
   session: Rc<RefCell<S>>,
   /// A frame was requested.
   redraw: bool,
-  /// The frontend warped the pointer here.
-  warp: Option<(f64, f64)>,
+  /// The frontend warped the pointer here, relative to this output.
+  warp: Option<(OutputHandle, f64, f64)>,
   /// The frontend asked the loop to end.
   exit: bool,
   /// Seat devices IPC enabled or disabled.
@@ -102,12 +104,14 @@ impl<S> NativeHost<S> {
 }
 
 impl<S: Session> Host for NativeHost<S> {
-  fn request_redraw(&mut self) {
+  /// Native lights one output, the compositor's first, until MO-7; the
+  /// frontend asks only for outputs a backend added, which is that one.
+  fn request_redraw(&mut self, _output: &OutputHandle) {
     self.redraw = true;
   }
 
-  fn warp_pointer(&mut self, x: f64, y: f64) {
-    self.warp = Some((x, y));
+  fn warp_pointer(&mut self, output: &OutputHandle, x: f64, y: f64) {
+    self.warp = Some((output.clone(), x, y));
   }
 
   /// Asks libseat to switch VT. A refusal is logged and the key handled
@@ -710,8 +714,15 @@ impl<S: Session, I: InputSource> Backend<S, I> {
   /// Carries out what the frontend asked: records a pointer warp and
   /// applies send-events modes for devices IPC enabled or disabled.
   fn apply_host_requests(&mut self) {
-    if let Some(position) = self.host.warp.take() {
-      self.translator.pointer = position;
+    if let Some((output, x, y)) = self.host.warp.take() {
+      // The translator works in layout coordinates.
+      let origin = self
+        .frontend
+        .compositor()
+        .output_view(&output)
+        .map_or((0, 0), |view| (view.rect.x, view.rect.y));
+      self.translator.pointer =
+        (x + f64::from(origin.0), y + f64::from(origin.1));
     }
     while !self.host.device_changes.is_empty() {
       let changes = std::mem::take(&mut self.host.device_changes);

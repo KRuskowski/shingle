@@ -22,9 +22,13 @@ impl Frontend {
       return;
     }
     self.expo_exit = None;
-    self.workspace_transition = None;
+    let active = self.compositor.active_output();
+    if let Some(scene) = self.scenes.get_mut(&active) {
+      scene.workspace_transition = None;
+    }
     self.cancel_scale();
     self.scale_exit = None;
+    self.overview_output = Some(active);
     if self.switcher.is_some() {
       self.finish_switcher();
     }
@@ -35,7 +39,7 @@ impl Frontend {
     let (width, height) = self.compositor.workspace_grid_dimensions();
     self.expo = Some(expo::ExpoState::new(
       selected,
-      self.compositor.output(),
+      self.output_rect(&self.overview_output()),
       width,
       height,
       self.expo_config.offset,
@@ -77,7 +81,7 @@ impl Frontend {
     state.geometry_origin = state.geometry_at(now, duration);
     let (width, height) = self.compositor.workspace_grid_dimensions();
     state.cells = expo::expo_wall_cells(
-      self.compositor.output(),
+      self.output_rect(&self.overview_output()),
       width,
       height,
       state.selected,
@@ -147,7 +151,7 @@ impl Frontend {
     &self,
     selected: usize,
   ) -> HashMap<TileWindowId, RenderRect> {
-    let output = self.compositor.output();
+    let output = self.output_rect(&self.overview_output());
     let (grid_width, grid_height) = self.compositor.workspace_grid_dimensions();
     let cells =
       expo::expo_wall_cells(output, grid_width, grid_height, selected);
@@ -203,7 +207,7 @@ impl Frontend {
     });
     let (grid_width, grid_height) = self.compositor.workspace_grid_dimensions();
     let cells = expo::expo_cells(
-      self.compositor.output(),
+      self.output_rect(&self.overview_output()),
       grid_width,
       grid_height,
       self.expo_config.offset,
