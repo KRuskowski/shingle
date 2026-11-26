@@ -87,7 +87,8 @@
 //! milliseconds), for the harness's CPU measurement (DB-6). With
 //! `--presentation` too, each frame asks for `wp_presentation` feedback,
 //! and the probe reports `presented` (output, the name of its
-//! `sync_output`; seq; msec, the presentation time in milliseconds) or
+//! `sync_output`; seq; msec, the presentation time in milliseconds;
+//! latency_us, the microseconds from the frame's commit to that time) or
 //! `discarded` for each, so that the harness can count the frames each
 //! output presents and check that feedback names the output the window
 //! is on (docs/design/multi-output.md, MO-5).
@@ -101,7 +102,8 @@
 //! Events: `configure` (width, height, activated), `enter`, `leave`,
 //! `key` (key, pressed), `copied`, `send` (mime), `sent`, `cancelled`,
 //! `fifo`, `fullscreen`, `release` (buffer), `damage` (step), `animated`
-//! (frames, milliseconds), `presented` (output, seq, msec), `discarded`,
+//! (frames, milliseconds), `presented` (output, seq, msec, latency_us),
+//! `discarded`,
 //! `output-enter` and `output-leave` (output),
 //! `preferred-scale` (scale), `buffer-scale` (factor), `layer-configure`
 //! (width, height), `layer-closed`, `decoration` (mode), `close` and
@@ -1221,7 +1223,7 @@ fn animate(
       .map_err(|error| error.to_string())?;
     probe.frame_done = false;
     if let Some(presentation) = &probe.presentation {
-      presentation.feedback(&surface, &handle, ());
+      presentation.feedback(&surface, &handle, monotonic_micros());
     }
     surface.frame(&handle, ());
     surface.attach(Some(&buffers[index]), 0, 0);
@@ -1240,12 +1242,27 @@ fn animate(
   Ok(())
 }
 
-impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for Probe {
+/// `CLOCK_MONOTONIC` in microseconds, the clock Shingle's
+/// `wp_presentation` reports in.
+fn monotonic_micros() -> u64 {
+  let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+  now.tv_sec as u64 * 1_000_000 + now.tv_nsec as u64 / 1000
+}
+
+/// Microseconds from a frame's commit at `committed` to its presentation
+/// at `seconds` and `nanoseconds`, both on `CLOCK_MONOTONIC`; zero when
+/// the presentation time is earlier.
+fn latency_micros(committed: u64, seconds: u64, nanoseconds: u32) -> u64 {
+  (seconds * 1_000_000 + u64::from(nanoseconds) / 1000)
+    .saturating_sub(committed)
+}
+
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, u64> for Probe {
   fn event(
     probe: &mut Self,
     _: &wp_presentation_feedback::WpPresentationFeedback,
     event: wp_presentation_feedback::Event,
-    _: &(),
+    committed: &u64,
     _: &Connection,
     _: &QueueHandle<Self>,
   ) {
@@ -1271,6 +1288,10 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for Probe {
             ("output", format!("{output:?}")),
             ("seq", seq.to_string()),
             ("msec", msec.to_string()),
+            (
+              "latency_us",
+              latency_micros(*committed, seconds, tv_nsec).to_string(),
+            ),
           ],
         );
       }
@@ -1605,5 +1626,12 @@ mod tests {
     assert_eq!(bytes[..4], red);
     assert_eq!(bytes[28..], [0xff; 4]);
     assert_eq!(buffer_bytes(2, 1, false), [0xff; 8]);
+  }
+
+  #[test]
+  fn latency_runs_from_the_commit_to_the_presentation() {
+    assert_eq!(latency_micros(1_000_000, 1, 16_500_000), 16_500);
+    assert_eq!(latency_micros(2_000_000, 1, 0), 0);
+    assert!(monotonic_micros() > 0);
   }
 }
