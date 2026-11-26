@@ -44,6 +44,7 @@ mod alpha_modifier;
 mod buffer;
 mod buffer_lock;
 mod clock;
+mod commit_queue;
 mod commit_timing;
 mod cursor_shape;
 mod data_control;

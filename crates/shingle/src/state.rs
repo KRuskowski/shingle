@@ -176,6 +176,7 @@ pub(crate) struct CompositorState {
   pub(crate) buffers: HashMap<ObjectId, Attachment>,
   /// Buffers whose last lock dropped, released at the end of each turn.
   pub(crate) buffer_releases: ReleaseQueue,
+  pub(crate) commit_queue: crate::commit_queue::CommitQueues,
   pub(crate) outputs: HashMap<ObjectId, WlOutput>,
   pub(crate) xdg_outputs: HashMap<ObjectId, ZxdgOutputV1>,
   pub(crate) events: Vec<Event>,
@@ -341,6 +342,7 @@ impl CompositorState {
       pools: HashMap::new(),
       buffers: HashMap::new(),
       buffer_releases: ReleaseQueue::default(),
+      commit_queue: Default::default(),
       outputs: HashMap::new(),
       xdg_outputs: HashMap::new(),
       events: Vec::new(),
@@ -1194,6 +1196,7 @@ impl CompositorState {
       return;
     };
     self.surface_ids.remove(&surface.id);
+    crate::commit_queue::surface_destroyed(self, object);
     crate::fifo::surface_destroyed(self, object);
     crate::commit_timing::surface_destroyed(self, object);
     crate::presentation::surface_destroyed(self, surface.id);
@@ -1246,9 +1249,10 @@ impl CompositorState {
     );
   }
 
-  /// `wl_surface.commit`.
+  /// `wl_surface.commit`, which goes through the surface's commit queue
+  /// first.
   fn commit(&mut self, object: &ObjectId) {
-    self.commit_inner(object, false);
+    crate::commit_queue::commit(self, object);
   }
 
   /// Applies a synchronized subsurface's cached commit, when its parent
