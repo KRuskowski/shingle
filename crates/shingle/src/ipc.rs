@@ -2611,27 +2611,6 @@ fn configure_view(state: &mut CompositorState, data: &Value) -> Value {
   json_ok()
 }
 
-const CONFIG_OPTIONS: &[&str] = &[
-  "core/vwidth",
-  "core/vheight",
-  "core/background_color",
-  "core/preferred_decoration_mode",
-  "output/mode",
-  "output/position",
-  "output/scale",
-  "output/transform",
-  "input/cursor_theme",
-  "input/cursor_size",
-  "input/mouse_scroll_speed",
-  "input/mouse_natural_scroll",
-  "simple-tile/keep_fullscreen_on_adjacent",
-  "simple-tile/inner_gap_size",
-  "simple-tile/outer_horiz_gap_size",
-  "simple-tile/outer_vert_gap_size",
-  "workarounds/max_buffer_size",
-  "workarounds/focus_main_surface_instead_of_popup",
-];
-
 fn output_transform_name(
   transform: wayland_server::protocol::wl_output::Transform,
 ) -> &'static str {
@@ -2649,67 +2628,68 @@ fn output_transform_name(
   }
 }
 
-fn config_option(
-  state: &CompositorState,
-  name: &str,
-) -> Option<(String, String)> {
+/// The live value of option `name` (`section/option`), for the options
+/// Shingle keeps in the compositor state and that `set-config-options`
+/// changes. Every other option reports what the configuration imported.
+fn live_option(state: &CompositorState, name: &str) -> Option<String> {
   let (scroll_speed, natural_scroll) = input::scroll_config(state);
   let decoration = match state.preferred_decoration_mode {
     DecorationMode::ServerSide => "server",
     _ => "client",
   };
   Some(match name {
-    "core/vwidth" => (state.workspace_width.to_string(), "10".into()),
-    "core/vheight" => (state.workspace_height.to_string(), "1".into()),
-    "core/background_color" => (
-      state
-        .background_color
-        .map(|channel| channel.to_string())
-        .join(" "),
-      "0.1 0.1 0.1 1".into(),
+    "core/vwidth" => state.workspace_width.to_string(),
+    "core/vheight" => state.workspace_height.to_string(),
+    "core/background_color" => state
+      .background_color
+      .map(|channel| channel.to_string())
+      .join(" "),
+    "core/preferred_decoration_mode" => decoration.into(),
+    "output/mode" => format!(
+      "{}x{}",
+      state.active().rect.width,
+      state.active().rect.height
     ),
-    "core/preferred_decoration_mode" => (decoration.into(), "client".into()),
-    "output/mode" => (
-      format!(
-        "{}x{}",
-        state.active().rect.width,
-        state.active().rect.height
-      ),
-      "1280x720".into(),
-    ),
-    "output/position" => (
-      format!("{},{}", state.active().rect.x, state.active().rect.y),
-      "0,0".into(),
-    ),
-    "output/scale" => (state.active().scale.to_string(), "1".into()),
-    "output/transform" => (
-      output_transform_name(state.active().transform).into(),
-      "normal".into(),
-    ),
-    "input/cursor_theme" => (state.cursor_theme.clone(), "default".into()),
-    "input/cursor_size" => (state.cursor_size.to_string(), "24".into()),
-    "input/mouse_scroll_speed" => (scroll_speed.to_string(), "1".into()),
-    "input/mouse_natural_scroll" => {
-      (natural_scroll.to_string(), "false".into())
+    "output/position" => {
+      format!("{},{}", state.active().rect.x, state.active().rect.y)
     }
+    "output/scale" => state.active().scale.to_string(),
+    "output/transform" => {
+      output_transform_name(state.active().transform).into()
+    }
+    "input/cursor_theme" => state.cursor_theme.clone(),
+    "input/cursor_size" => state.cursor_size.to_string(),
+    "input/mouse_scroll_speed" => scroll_speed.to_string(),
+    "input/mouse_natural_scroll" => natural_scroll.to_string(),
     "simple-tile/keep_fullscreen_on_adjacent" => {
-      (state.keep_fullscreen_on_adjacent.to_string(), "true".into())
+      state.keep_fullscreen_on_adjacent.to_string()
     }
-    "simple-tile/inner_gap_size" => (state.gaps.inner.to_string(), "0".into()),
-    "simple-tile/outer_horiz_gap_size" => {
-      (state.gaps.left.to_string(), "0".into())
+    "simple-tile/inner_gap_size" => state.gaps.inner.to_string(),
+    "simple-tile/outer_horiz_gap_size" => state.gaps.left.to_string(),
+    "simple-tile/outer_vert_gap_size" => state.gaps.top.to_string(),
+    "workarounds/max_buffer_size" => state.max_buffer_size.to_string(),
+    "workarounds/focus_main_surface_instead_of_popup" => {
+      state.focus_main_surface_instead_of_popup.to_string()
     }
-    "simple-tile/outer_vert_gap_size" => {
-      (state.gaps.top.to_string(), "0".into())
-    }
-    "workarounds/max_buffer_size" => {
-      (state.max_buffer_size.to_string(), "16384".into())
-    }
-    "workarounds/focus_main_surface_instead_of_popup" => (
-      state.focus_main_surface_instead_of_popup.to_string(),
-      "false".into(),
-    ),
     _ => return None,
+  })
+}
+
+/// One option as Wayfire's `option_value_to_json` writes it: `value` and
+/// `default` for a plain option, only `value`, a list of entries, for a
+/// dynamic list. `None` when Wayfire's metadata has no such option.
+fn config_option(
+  state: &CompositorState,
+  section: &str,
+  option: &str,
+) -> Option<Value> {
+  Some(match state.wayfire_values.value(section, option)? {
+    shingle_config::OptionValue::Text { value, default } => {
+      let value =
+        live_option(state, &format!("{section}/{option}")).unwrap_or(value);
+      json!({"value": value, "default": default})
+    }
+    shingle_config::OptionValue::List(entries) => json!({"value": entries}),
   })
 }
 
@@ -2717,23 +2697,31 @@ fn get_config_option(state: &CompositorState, data: &Value) -> Value {
   let Some(name) = data.get("option").and_then(Value::as_str) else {
     return json_error("missing or invalid option");
   };
-  let Some((value, default)) = config_option(state, name) else {
+  let Some(entry) = name
+    .split_once('/')
+    .and_then(|(section, option)| config_option(state, section, option))
+  else {
     return json_error("option not found");
   };
-  json!({"result": "ok", "value": value, "default": default})
+  let mut reply = json!({"result": "ok"});
+  for (key, value) in entry.as_object().into_iter().flatten() {
+    reply[key] = value.clone();
+  }
+  reply
 }
 
+/// Every option of Wayfire's metadata, by section, as
+/// `wayfire/list-config-options` reports them.
 fn list_config_options(state: &CompositorState) -> Value {
   let mut sections = serde_json::Map::new();
-  for name in CONFIG_OPTIONS {
-    let Some((value, default)) = config_option(state, name) else {
-      continue;
-    };
-    let (section, option) = name.split_once('/').unwrap();
-    let section = sections
-      .entry(section)
-      .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    section[option] = json!({"value": value, "default": default});
+  for section in state.wayfire_values.sections() {
+    let mut options = serde_json::Map::new();
+    for option in shingle_config::WayfireValues::options(&section) {
+      if let Some(entry) = config_option(state, &section, option.name) {
+        options.insert(option.name.to_owned(), entry);
+      }
+    }
+    sections.insert(section, Value::Object(options));
   }
   json!({"result": "ok", "options": Value::Object(sections)})
 }
@@ -3244,6 +3232,81 @@ mod tests {
     assert_eq!(get(&mut state, "simple-tile/inner_gap_size"), "7");
     assert_eq!(get(&mut state, "simple-tile/outer_horiz_gap_size"), "3");
     assert_eq!(get(&mut state, "simple-tile/outer_vert_gap_size"), "2");
+  }
+
+  #[test]
+  fn config_options_answer_every_wayfire_option() {
+    let mut state = test_state();
+    let get = |state: &mut CompositorState, option: &str| {
+      call(
+        state,
+        "wayfire/get-config-option",
+        json!({"option": option}),
+      )
+    };
+    // Live values come from the compositor, defaults from the metadata.
+    let vwidth = get(&mut state, "core/vwidth");
+    assert_eq!(
+      (&vwidth["value"], &vwidth["default"]),
+      (&json!("10"), &json!("3"))
+    );
+    let duration = get(&mut state, "scale/duration");
+    assert_eq!(duration["value"], "750ms");
+    assert_eq!(duration["default"], "750ms");
+    let rules = get(&mut state, "window-rules/rules");
+    assert_eq!(rules["result"], "ok");
+    assert_eq!(rules["value"], json!([]));
+    assert!(rules.get("default").is_none());
+    for missing in ["core/nonsense", "nonsense", "fisheye/radius"] {
+      assert_eq!(get(&mut state, missing)["error"], "option not found");
+    }
+    let reply = call(&mut state, "wayfire/list-config-options", Value::Null);
+    let sections = reply["options"].as_object().unwrap();
+    let count = sections
+      .values()
+      .map(|options| options.as_object().unwrap().len())
+      .sum::<usize>();
+    assert_eq!(count, shingle_config::wayfire_options().len());
+    assert_eq!(sections["core"]["vheight"]["value"], "1");
+    assert_eq!(sections["input"]["xkb_layout"]["default"], "us");
+  }
+
+  #[test]
+  fn config_options_report_what_the_wayfire_file_set() {
+    let mut state = test_state();
+    let config = shingle_config::ShingleConfig::parse(
+      concat!(
+        "[core]\nplugins = command\n",
+        "[scale]\nduration = 300ms\n",
+        "[output:HEADLESS-1]\nmode = 800x600\n",
+        "[command]\nbinding_t = <super> KEY_T\ncommand_t = foot\n",
+      ),
+      shingle_config::ConfigFormat::Wayfire,
+    )
+    .unwrap();
+    state.wayfire_values = config.wayfire_values;
+    let get = |state: &mut CompositorState, option: &str| {
+      call(
+        state,
+        "wayfire/get-config-option",
+        json!({"option": option}),
+      )
+    };
+    // Scale is not loaded, but its option is still what the file says.
+    assert_eq!(get(&mut state, "scale/duration")["value"], "300ms");
+    assert_eq!(
+      get(&mut state, "output:HEADLESS-1/mode")["value"],
+      "800x600"
+    );
+    assert_eq!(
+      get(&mut state, "command/bindings")["value"],
+      json!([["t", "foot", "<super> KEY_T"]])
+    );
+    let reply = call(&mut state, "wayfire/list-config-options", Value::Null);
+    assert_eq!(
+      reply["options"]["output:HEADLESS-1"]["mode"]["value"],
+      "800x600"
+    );
   }
 
   #[test]
