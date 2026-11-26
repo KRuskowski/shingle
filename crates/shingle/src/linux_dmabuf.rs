@@ -310,7 +310,7 @@ impl Dispatch<ZwpLinuxDmabufV1, ()> for CompositorState {
   fn request(
     state: &mut Self,
     _client: &Client,
-    resource: &ZwpLinuxDmabufV1,
+    _resource: &ZwpLinuxDmabufV1,
     request: zwp_linux_dmabuf_v1::Request,
     _data: &(),
     _dhandle: &DisplayHandle,
@@ -333,7 +333,6 @@ impl Dispatch<ZwpLinuxDmabufV1, ()> for CompositorState {
       zwp_linux_dmabuf_v1::Request::Destroy => {}
       _ => {}
     }
-    let _ = resource;
   }
 }
 
@@ -671,6 +670,14 @@ fn create(
     .filter_map(Option::take)
     .collect::<Vec<_>>();
   let Some(dmabuf) = &mut state.dmabuf else {
+    // The global exists only with DMA-BUF state, so this is not reached.
+    match request {
+      Create::Event => resource.failed(),
+      Create::Immediate(id) => {
+        data_init.init(id, BufferData);
+        resource.post_error(Error::InvalidWlBuffer, "DMA-BUFs are off");
+      }
+    }
     return;
   };
   let modifier = planes.first().map_or(MOD_INVALID, |plane| plane.modifier);
