@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-  Direction, Gaps, LeafState, Rect, Result, ShingleError, SplitDirection,
-  TileTree, WindowId, WindowLayout,
+  Direction, Gaps, LeafState, OutputIdentity, Rect, Result, ShingleError,
+  SplitDirection, TileTree, WindowId, WindowLayout, WorkspaceSnapshot, WsetId,
 };
 
 /// Stable identity of an output, such as its connector name.
@@ -38,7 +38,7 @@ impl From<String> for OutputId {
   }
 }
 
-/// Position of a workspace in an output's workspace grid, zero based. Ordered
+/// Position of a workspace in a workspace set's grid, zero based. Ordered
 /// by column, then row.
 #[derive(
   Clone,
@@ -62,7 +62,7 @@ pub struct WorkspaceId {
 }
 
 impl WorkspaceId {
-  /// The top-left workspace, which every new output starts on.
+  /// The top-left workspace, which every new workspace set starts on.
   pub const ORIGIN: Self = Self { x: 0, y: 0 };
 
   /// Creates a workspace id.
@@ -71,7 +71,12 @@ impl WorkspaceId {
   }
 }
 
-/// A workspace on a specific output.
+/// A workspace as the output-keyed calls see it: the output showing the
+/// workspace set that holds it, and the workspace in that set.
+///
+/// While the set is parked (shown on no output), `output` is the output
+/// the set was last shown on, its home; for a set that was never shown it
+/// is empty. [`WindowInfo::wset`] names the set itself.
 #[derive(
   Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
 )]
@@ -177,6 +182,12 @@ pub struct WindowInfo {
   pub presence: WindowPresence,
   /// The workspace holding the window.
   pub location: WorkspaceRef,
+  /// The workspace set holding the window.
+  pub wset: WsetId,
+  /// The set the window was moved away from when its output went, and
+  /// returns to when the output comes back; see
+  /// [`Shingle::transfer_wset`].
+  pub away_from: Option<WsetId>,
   /// The window's leaf state.
   pub state: LeafState,
   /// Parent window, for dialogs and other transient windows.
@@ -200,32 +211,95 @@ pub struct DetachedWindow {
   pub parent: Option<WindowId>,
 }
 
+/// A workspace set: a grid of workspaces with one tiling tree each, shown
+/// on at most one output.
 #[derive(Clone, Debug)]
-pub(crate) struct OutputState {
+pub(crate) struct WsetState {
   pub workarea: Rect,
   pub current_workspace: WorkspaceId,
   pub workspaces: BTreeMap<WorkspaceId, TileTree>,
+  /// The output showing the set; `None` while it is parked.
+  pub output: Option<OutputId>,
+  /// The output the set was last shown on.
+  pub home: Option<OutputId>,
+  /// That output's EDID identity.
+  pub identity: Option<OutputIdentity>,
+  /// The trees as they were when an unplug moved the set's windows away,
+  /// for [`Shingle::return_windows`].
+  pub away: Option<Vec<WorkspaceSnapshot>>,
+}
+
+impl WsetState {
+  /// A set with one empty, current workspace, [`WorkspaceId::ORIGIN`].
+  pub fn new(workarea: Rect) -> Result<Self> {
+    let workarea = workarea.validate()?;
+    Ok(Self {
+      workarea,
+      current_workspace: WorkspaceId::ORIGIN,
+      workspaces: BTreeMap::from([(
+        WorkspaceId::ORIGIN,
+        TileTree::new(SplitDirection::Vertical, workarea)?,
+      )]),
+      output: None,
+      home: None,
+      identity: None,
+      away: None,
+    })
+  }
+
+  /// Whether no workspace of the set holds a window.
+  pub fn is_empty(&self) -> bool {
+    self.workspaces.values().all(TileTree::is_empty)
+  }
+
+  /// The workspace's tree, created empty in the set's workarea if missing.
+  pub fn ensure_tree(&mut self, workspace: WorkspaceId) -> Result<()> {
+    if !self.workspaces.contains_key(&workspace) {
+      self.workspaces.insert(
+        workspace,
+        TileTree::new(SplitDirection::Vertical, self.workarea)?,
+      );
+    }
+    Ok(())
+  }
+}
+
+/// Where a window's leaf is: a workspace of a workspace set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Place {
+  pub wset: WsetId,
+  pub workspace: WorkspaceId,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct WindowRecord {
   pub identity: LaunchIdentity,
   pub mapped: bool,
-  pub location: WorkspaceRef,
+  pub place: Place,
   pub parent: Option<WindowId>,
+  /// See [`WindowInfo::away_from`]. Never the set holding the window.
+  pub away_from: Option<WsetId>,
 }
 
-/// The window model: outputs, their workspaces and tiling trees, and a record
-/// for every window.
+/// The window model: workspace sets, their workspaces and tiling trees,
+/// which outputs show them, and a record for every window.
 ///
-/// Every window record has exactly one leaf, in the tree of the workspace its
-/// location names. New windows are mapped; restored windows start as
-/// placeholders.
+/// Every window record has exactly one leaf, in the tree of the workspace
+/// its place names. Each output shows at most one set and each set is
+/// shown on at most one output; a set on no output is parked and keeps its
+/// trees. New windows are mapped; restored windows start as placeholders.
+///
+/// The output-keyed calls ([`Shingle::add_output`],
+/// [`Shingle::current_workspace`], [`Shingle::tree`],
+/// [`Shingle::attach_window`] and the others taking an [`OutputId`]) work
+/// on the set the output shows, so code that knows only outputs keeps
+/// working; the calls taking a [`WsetId`] also reach parked sets.
 #[derive(Clone, Debug)]
 pub struct Shingle {
-  pub(crate) outputs: BTreeMap<OutputId, OutputState>,
+  pub(crate) wsets: BTreeMap<WsetId, WsetState>,
   pub(crate) windows: BTreeMap<WindowId, WindowRecord>,
   pub(crate) next_window_id: u64,
+  pub(crate) active_output: Option<OutputId>,
 }
 
 impl Default for Shingle {
@@ -238,63 +312,78 @@ impl Shingle {
   /// Creates an empty model with no outputs.
   pub fn new() -> Self {
     Self {
-      outputs: BTreeMap::new(),
+      wsets: BTreeMap::new(),
       windows: BTreeMap::new(),
       next_window_id: 1,
+      active_output: None,
     }
   }
 
-  /// Adds an output with one empty workspace, [`WorkspaceId::ORIGIN`], which is
+  /// Adds an output showing a new workspace set, with the lowest free
+  /// index, that has one empty workspace, [`WorkspaceId::ORIGIN`], which is
   /// current.
   ///
   /// # Errors
   ///
-  /// [`ShingleError::InvalidOutputId`], [`ShingleError::OutputExists`] or
+  /// [`ShingleError::InvalidOutputId`], [`ShingleError::OutputExists`] if a
+  /// set is already shown on the output, or
   /// [`ShingleError::InvalidWorkarea`].
   pub fn add_output(&mut self, output: OutputId, workarea: Rect) -> Result<()> {
     if output.0.is_empty() {
       return Err(ShingleError::InvalidOutputId);
     }
-    if self.outputs.contains_key(&output) {
+    if self.wset_of(&output).is_some() {
       return Err(ShingleError::OutputExists(output.0));
     }
-    let workarea = workarea.validate()?;
-    self.outputs.insert(
-      output,
-      OutputState {
-        workarea,
-        current_workspace: WorkspaceId::ORIGIN,
-        workspaces: BTreeMap::from([(
-          WorkspaceId::ORIGIN,
-          TileTree::new(SplitDirection::Vertical, workarea)?,
-        )]),
-      },
-    );
+    let mut state = WsetState::new(workarea)?;
+    state.output = Some(output.clone());
+    state.home = Some(output);
+    let id = self.free_wset_id()?;
+    self.wsets.insert(id, state);
     Ok(())
   }
 
-  /// Iterates over output ids in sorted order.
+  /// Iterates over the outputs showing a workspace set, in sorted order.
   pub fn outputs(&self) -> impl Iterator<Item = &OutputId> {
-    self.outputs.keys()
+    let mut outputs = self
+      .wsets
+      .values()
+      .filter_map(|state| state.output.as_ref())
+      .collect::<Vec<_>>();
+    outputs.sort();
+    outputs.into_iter()
   }
 
-  /// Gives `output` the id `to`, keeping its workspaces, tiling trees and
-  /// windows, whose locations follow. A backend calls this when the
-  /// physical output behind the same layout changes name, such as a
-  /// native output that is described for the first time or replaced by
-  /// another connector.
+  /// The output that is focused, as last set with
+  /// [`Shingle::set_active_output`] or restored from a session.
+  pub fn active_output(&self) -> Option<&OutputId> {
+    self.active_output.as_ref()
+  }
+
+  /// Records the focused output, so that sessions remember it. The output
+  /// need not show a set.
+  pub fn set_active_output(&mut self, output: Option<OutputId>) {
+    self.active_output = output;
+  }
+
+  /// Moves `output`'s workspace set to the output `to`, keeping its
+  /// workspaces, tiling trees and windows, whose locations follow. A
+  /// backend calls this when the physical output behind the same layout
+  /// changes name, such as a native output that is described for the
+  /// first time or replaced by another connector.
   ///
-  /// If `to` exists already, as when a restored session saved it, the two
-  /// are merged into `to`: it takes `output`'s workarea, and each of
-  /// `output`'s workspaces either replaces an empty workspace of `to`, tree
-  /// and all, or has its windows appended to the non-empty one. `to` keeps
-  /// its current workspace if it holds any window, else takes `output`'s.
-  /// Renaming an output to itself does nothing.
+  /// If `to` shows a set already, as when a restored session saved it, the
+  /// two are merged into `to`'s set: it takes `output`'s workarea, and each
+  /// of `output`'s workspaces either replaces an empty workspace of `to`,
+  /// tree and all, or has its windows appended to the non-empty one. `to`
+  /// keeps its current workspace if it holds any window, else takes
+  /// `output`'s. `output`'s set is then gone, and windows away from it are
+  /// away from the merged set. Renaming an output to itself does nothing.
   ///
   /// # Errors
   ///
   /// [`ShingleError::InvalidOutputId`] for an empty `to`, or
-  /// [`ShingleError::OutputNotFound`] for an unknown `output`.
+  /// [`ShingleError::OutputNotFound`] for an `output` showing no set.
   pub fn rename_output(
     &mut self,
     output: &OutputId,
@@ -303,30 +392,31 @@ impl Shingle {
     if to.0.is_empty() {
       return Err(ShingleError::InvalidOutputId);
     }
-    self.output(output)?;
+    let source_id = self.wset_for(output)?;
     if *output == to {
       return Ok(());
     }
-    let source = self
-      .outputs
-      .remove(output)
-      .ok_or_else(|| ShingleError::OutputNotFound(output.0.clone()))?;
-    for record in self.windows.values_mut() {
-      if record.location.output == *output {
-        record.location.output = to.clone();
-      }
-    }
-    let Some(mut target) = self.outputs.remove(&to) else {
-      self.outputs.insert(to, source);
+    let Some(target_id) = self.wset_of(&to) else {
+      let source = self.wset_state_mut(source_id)?;
+      source.output = Some(to.clone());
+      source.home = Some(to);
       return Ok(());
     };
-    let target_used = target.workspaces.values().any(|tree| !tree.is_empty());
+    let source = self
+      .wsets
+      .remove(&source_id)
+      .ok_or(ShingleError::WsetNotFound(source_id.0))?;
+    let target = self.wset_state_mut(target_id)?;
+    let target_used = !target.is_empty();
     if !target_used {
       target.current_workspace = source.current_workspace;
     }
     target.workarea = source.workarea;
     for tree in target.workspaces.values_mut() {
       tree.set_workarea(source.workarea)?;
+    }
+    if target.away.is_none() {
+      target.away = source.away;
     }
     for (workspace, mut tree) in source.workspaces {
       match target.workspaces.get_mut(&workspace) {
@@ -341,29 +431,34 @@ impl Shingle {
         }
       }
     }
-    self.outputs.insert(to, target);
+    for record in self.windows.values_mut() {
+      if record.place.wset == source_id {
+        record.place.wset = target_id;
+      }
+      if record.away_from == Some(source_id) {
+        record.away_from = Some(target_id);
+      }
+      if record.away_from == Some(record.place.wset) {
+        record.away_from = None;
+      }
+    }
     Ok(())
   }
 
-  /// Returns the output's workarea.
+  /// Returns the workarea of the set shown on the output.
   pub fn output_workarea(&self, output: &OutputId) -> Result<Rect> {
     Ok(self.output(output)?.workarea)
   }
 
-  /// Sets the output's workarea and lays out all of its workspaces in it,
-  /// keeping tile proportions.
+  /// Sets the workarea of the set shown on the output and lays out all of
+  /// its workspaces in it, keeping tile proportions.
   pub fn set_output_workarea(
     &mut self,
     output: &OutputId,
     workarea: Rect,
   ) -> Result<()> {
-    let workarea = workarea.validate()?;
-    let output = self.output_mut(output)?;
-    output.workarea = workarea;
-    for tree in output.workspaces.values_mut() {
-      tree.set_workarea(workarea)?;
-    }
-    Ok(())
+    let wset = self.wset_for(output)?;
+    self.set_wset_workarea(wset, workarea)
   }
 
   /// Returns the output's current workspace.
@@ -381,12 +476,8 @@ impl Shingle {
     output: &OutputId,
     workspace: WorkspaceId,
   ) -> Result<()> {
-    let output = self.output_mut(output)?;
-    if !output.workspaces.contains_key(&workspace) {
-      return Err(ShingleError::WorkspaceNotFound);
-    }
-    output.current_workspace = workspace;
-    Ok(())
+    let wset = self.wset_for(output)?;
+    self.set_wset_current_workspace(wset, workspace)
   }
 
   /// Creates the workspace if it does not exist and returns whether it was
@@ -396,15 +487,8 @@ impl Shingle {
     output: &OutputId,
     workspace: WorkspaceId,
   ) -> Result<bool> {
-    let output = self.output_mut(output)?;
-    if output.workspaces.contains_key(&workspace) {
-      return Ok(false);
-    }
-    output.workspaces.insert(
-      workspace,
-      TileTree::new(SplitDirection::Vertical, output.workarea)?,
-    );
-    Ok(true)
+    let wset = self.wset_for(output)?;
+    self.ensure_wset_workspace(wset, workspace)
   }
 
   /// Returns the output's workspaces in [`WorkspaceId`] order.
@@ -478,19 +562,31 @@ impl Shingle {
     state: LeafState,
     parent: Option<WindowId>,
   ) -> Result<WindowId> {
-    let location = WorkspaceRef {
-      output: output.clone(),
-      workspace,
-    };
+    let wset = self.wset_for(output)?;
+    self.attach_window_to_wset(wset, workspace, identity, state, parent)
+  }
+
+  /// Adds a mapped window with initial leaf state and parent to an existing
+  /// workspace of a workspace set, shown or parked, and returns its new id.
+  pub fn attach_window_to_wset(
+    &mut self,
+    wset: WsetId,
+    workspace: WorkspaceId,
+    identity: LaunchIdentity,
+    state: LeafState,
+    parent: Option<WindowId>,
+  ) -> Result<WindowId> {
+    let place = Place { wset, workspace };
     let id = self.allocate_window_id()?;
-    self.tree_mut(&location)?.attach_with_state(id, state)?;
+    self.tree_mut(place)?.attach_with_state(id, state)?;
     self.windows.insert(
       id,
       WindowRecord {
         identity,
         mapped: true,
-        location,
+        place,
         parent,
+        away_from: None,
       },
     );
     Ok(id)
@@ -504,7 +600,8 @@ impl Shingle {
       .get(&window)
       .cloned()
       .ok_or(ShingleError::WindowNotFound(window.0))?;
-    let state = self.tree_mut(&record.location)?.detach(window)?;
+    let location = self.workspace_ref(record.place);
+    let state = self.tree_mut(record.place)?.detach(window)?;
     self.windows.remove(&window);
     Ok(DetachedWindow {
       id: window,
@@ -514,7 +611,7 @@ impl Shingle {
       } else {
         WindowPresence::Placeholder
       },
-      location: record.location,
+      location,
       state,
       parent: record.parent,
     })
@@ -535,22 +632,14 @@ impl Shingle {
     if self.windows.contains_key(&detached.id) {
       return Err(ShingleError::DuplicateWindow(detached.id.0));
     }
-    let location = WorkspaceRef {
-      output: output.clone(),
+    let place = Place {
+      wset: self.wset_for(output)?,
       workspace,
     };
     self
-      .tree_mut(&location)?
+      .tree_mut(place)?
       .attach_with_state(detached.id, detached.state)?;
-    self.windows.insert(
-      detached.id,
-      WindowRecord {
-        identity: detached.identity,
-        mapped: detached.presence == WindowPresence::Mapped,
-        location,
-        parent: detached.parent,
-      },
-    );
+    self.insert_detached(detached, place);
     Ok(())
   }
 
@@ -565,27 +654,21 @@ impl Shingle {
     if self.windows.contains_key(&detached.id) {
       return Err(ShingleError::DuplicateWindow(detached.id.0));
     }
-    let location = self.location(target)?.clone();
-    self.tree_mut(&location)?.attach_at_with_state(
+    let place = self.place(target)?;
+    self.tree_mut(place)?.attach_at_with_state(
       detached.id,
       detached.state,
       target,
       position,
     )?;
-    self.windows.insert(
-      detached.id,
-      WindowRecord {
-        identity: detached.identity,
-        mapped: detached.presence == WindowPresence::Mapped,
-        location,
-        parent: detached.parent,
-      },
-    );
+    self.insert_detached(detached, place);
     Ok(())
   }
 
   /// Moves `source` beside `target`, across workspaces and outputs if needed;
-  /// see [`TileTree::drop`]. If insertion fails, both trees are restored.
+  /// see [`TileTree::drop`]. If insertion fails, both trees are restored. A
+  /// window dropped on another workspace no longer returns to the set it
+  /// was moved away from.
   pub fn drop_window(
     &mut self,
     source: WindowId,
@@ -595,34 +678,24 @@ impl Shingle {
     if source == target {
       return Err(ShingleError::SameWindow);
     }
-    let source_location = self.location(source)?.clone();
-    let target_location = self.location(target)?.clone();
-    if source_location == target_location {
-      return self
-        .tree_mut(&source_location)?
-        .drop(source, target, position);
+    let source_place = self.place(source)?;
+    let target_place = self.place(target)?;
+    if source_place == target_place {
+      return self.tree_mut(source_place)?.drop(source, target, position);
     }
 
-    let source_backup = self
-      .tree(&source_location.output, source_location.workspace)?
-      .clone();
-    let target_backup = self
-      .tree(&target_location.output, target_location.workspace)?
-      .clone();
-    let state = self.tree_mut(&source_location)?.detach(source)?;
+    let source_backup = self.tree_at(source_place)?.clone();
+    let target_backup = self.tree_at(target_place)?.clone();
+    let state = self.tree_mut(source_place)?.detach(source)?;
     if let Err(error) = self
-      .tree_mut(&target_location)?
+      .tree_mut(target_place)?
       .insert_detached(source, state, target, position)
     {
-      self.restore_tree(&source_location, source_backup)?;
-      self.restore_tree(&target_location, target_backup)?;
+      *self.tree_mut(source_place)? = source_backup;
+      *self.tree_mut(target_place)? = target_backup;
       return Err(error);
     }
-    self
-      .windows
-      .get_mut(&source)
-      .ok_or(ShingleError::WindowNotFound(source.0))?
-      .location = target_location;
+    self.set_place(source, target_place, true)?;
     Ok(())
   }
 
@@ -639,51 +712,36 @@ impl Shingle {
     if first == second {
       return Err(ShingleError::SameWindow);
     }
-    let first_location = self.location(first)?.clone();
-    let second_location = self.location(second)?.clone();
-    if first_location == second_location {
-      return self.tree_mut(&first_location)?.swap(first, second);
+    let first_place = self.place(first)?;
+    let second_place = self.place(second)?;
+    if first_place == second_place {
+      return self.tree_mut(first_place)?.swap(first, second);
     }
 
-    let first_backup = self
-      .tree(&first_location.output, first_location.workspace)?
-      .clone();
-    let second_backup = self
-      .tree(&second_location.output, second_location.workspace)?
-      .clone();
-    let first_state = self.tree_mut(&first_location)?.leaf_state(first)?;
-    let second_state = self.tree_mut(&second_location)?.leaf_state(second)?;
-    self.tree_mut(&first_location)?.replace_leaf(
-      first,
-      second,
-      second_state,
-    )?;
+    let first_backup = self.tree_at(first_place)?.clone();
+    let second_backup = self.tree_at(second_place)?.clone();
+    let first_state = self.tree_at(first_place)?.leaf_state(first)?;
+    let second_state = self.tree_at(second_place)?.leaf_state(second)?;
+    self
+      .tree_mut(first_place)?
+      .replace_leaf(first, second, second_state)?;
     if let Err(error) =
       self
-        .tree_mut(&second_location)?
+        .tree_mut(second_place)?
         .replace_leaf(second, first, first_state)
     {
-      self.restore_tree(&first_location, first_backup)?;
-      self.restore_tree(&second_location, second_backup)?;
+      *self.tree_mut(first_place)? = first_backup;
+      *self.tree_mut(second_place)? = second_backup;
       return Err(error);
     }
-    self
-      .windows
-      .get_mut(&first)
-      .ok_or(ShingleError::WindowNotFound(first.0))?
-      .location = second_location;
-    self
-      .windows
-      .get_mut(&second)
-      .ok_or(ShingleError::WindowNotFound(second.0))?
-      .location = first_location;
+    self.set_place(first, second_place, true)?;
+    self.set_place(second, first_place, true)?;
     Ok(())
   }
 
   /// Focuses a window in its workspace; see [`TileTree::set_focus`].
   pub fn focus_window(&mut self, window: WindowId) -> Result<()> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.set_focus(window)
+    self.window_tree_mut(window)?.set_focus(window)
   }
 
   /// Sets a window's stacking layer and raises it.
@@ -692,20 +750,17 @@ impl Shingle {
     window: WindowId,
     mode: crate::StackingMode,
   ) -> Result<()> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.set_stacking(window, mode)
+    self.window_tree_mut(window)?.set_stacking(window, mode)
   }
 
   /// Raises a window within its workspace.
   pub fn raise_window(&mut self, window: WindowId) -> Result<()> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.raise(window)
+    self.window_tree_mut(window)?.raise(window)
   }
 
   /// Lowers a window within its workspace.
   pub fn lower_window(&mut self, window: WindowId) -> Result<()> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.lower(window)
+    self.window_tree_mut(window)?.lower(window)
   }
 
   /// Moves focus within the window's workspace; see
@@ -715,8 +770,9 @@ impl Shingle {
     from: WindowId,
     direction: Direction,
   ) -> Result<Option<WindowId>> {
-    let location = self.location(from)?.clone();
-    self.tree_mut(&location)?.focus_directional(from, direction)
+    self
+      .window_tree_mut(from)?
+      .focus_directional(from, direction)
   }
 
   /// Resizes a tiled window; see [`TileTree::resize_adjacent`]. Floating
@@ -728,8 +784,7 @@ impl Shingle {
     delta: i32,
     minimum_extent: u32,
   ) -> Result<bool> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.resize_adjacent(
+    self.window_tree_mut(window)?.resize_adjacent(
       window,
       direction,
       delta,
@@ -743,8 +798,9 @@ impl Shingle {
     window: WindowId,
     maximized: bool,
   ) -> Result<()> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.set_maximized(window, maximized)
+    self
+      .window_tree_mut(window)?
+      .set_maximized(window, maximized)
   }
 
   /// Sets a window's minimized flag; see [`TileTree::set_minimized`].
@@ -753,8 +809,9 @@ impl Shingle {
     window: WindowId,
     minimized: bool,
   ) -> Result<()> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.set_minimized(window, minimized)
+    self
+      .window_tree_mut(window)?
+      .set_minimized(window, minimized)
   }
 
   /// Floats a window or returns it to tiling; see [`TileTree::set_floating`].
@@ -770,8 +827,7 @@ impl Shingle {
     if let Some(geometry) = geometry {
       geometry.validate()?;
     }
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.set_floating(window, geometry)
+    self.window_tree_mut(window)?.set_floating(window, geometry)
   }
 
   /// Snaps a window or ends its snap; see [`TileTree::set_snapped`].
@@ -780,8 +836,7 @@ impl Shingle {
     window: WindowId,
     geometry: Option<Rect>,
   ) -> Result<()> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.set_snapped(window, geometry)
+    self.window_tree_mut(window)?.set_snapped(window, geometry)
   }
 
   /// Sets a window's tiled-edges mask; see [`LeafState::tiled_edges`].
@@ -790,8 +845,7 @@ impl Shingle {
     window: WindowId,
     edges: u32,
   ) -> Result<()> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.set_tiled_edges(window, edges)
+    self.window_tree_mut(window)?.set_tiled_edges(window, edges)
   }
 
   /// Sets a window's fullscreen flag.
@@ -800,28 +854,24 @@ impl Shingle {
     window: WindowId,
     fullscreen: bool,
   ) -> Result<()> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.set_fullscreen(window, fullscreen)
+    self
+      .window_tree_mut(window)?
+      .set_fullscreen(window, fullscreen)
   }
 
   /// Sets a window's sticky flag.
   pub fn set_sticky(&mut self, window: WindowId, sticky: bool) -> Result<()> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.set_sticky(window, sticky)
+    self.window_tree_mut(window)?.set_sticky(window, sticky)
   }
 
   /// Sets a window's gaps.
   pub fn set_gaps(&mut self, window: WindowId, gaps: Gaps) -> Result<()> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.set_gaps(window, gaps)
+    self.window_tree_mut(window)?.set_gaps(window, gaps)
   }
 
   /// Returns a tiled window's placement; see [`TileTree::window_layout`].
   pub fn window_layout(&self, window: WindowId) -> Result<WindowLayout> {
-    let location = self.location(window)?;
-    self
-      .tree(&location.output, location.workspace)?
-      .window_layout(window)
+    self.tree_at(self.place(window)?)?.window_layout(window)
   }
 
   /// Updates a window's app id, as reported by its client.
@@ -830,12 +880,7 @@ impl Shingle {
     window: WindowId,
     app_id: String,
   ) -> Result<()> {
-    self
-      .windows
-      .get_mut(&window)
-      .ok_or(ShingleError::WindowNotFound(window.0))?
-      .identity
-      .app_id = app_id;
+    self.record_mut(window)?.identity.app_id = app_id;
     Ok(())
   }
 
@@ -845,12 +890,7 @@ impl Shingle {
     window: WindowId,
     title: Option<String>,
   ) -> Result<()> {
-    self
-      .windows
-      .get_mut(&window)
-      .ok_or(ShingleError::WindowNotFound(window.0))?
-      .identity
-      .title = title;
+    self.record_mut(window)?.identity.title = title;
     Ok(())
   }
 
@@ -885,11 +925,7 @@ impl Shingle {
         .ok_or(ShingleError::WindowNotFound(id.0))?
         .parent;
     }
-    self
-      .windows
-      .get_mut(&window)
-      .ok_or(ShingleError::WindowNotFound(window.0))?
-      .parent = parent;
+    self.record_mut(window)?.parent = parent;
     Ok(())
   }
 
@@ -899,9 +935,7 @@ impl Shingle {
       .windows
       .get(&window)
       .ok_or(ShingleError::WindowNotFound(window.0))?;
-    let state = self
-      .tree(&record.location.output, record.location.workspace)?
-      .leaf_state(window)?;
+    let state = self.tree_at(record.place)?.leaf_state(window)?;
     Ok(WindowInfo {
       id: window,
       identity: record.identity.clone(),
@@ -910,7 +944,9 @@ impl Shingle {
       } else {
         WindowPresence::Placeholder
       },
-      location: record.location.clone(),
+      location: self.workspace_ref(record.place),
+      wset: record.place.wset,
+      away_from: record.away_from,
       state,
       parent: record.parent,
     })
@@ -922,8 +958,8 @@ impl Shingle {
   }
 
   /// Returns the workspace holding a window.
-  pub fn window_location(&self, window: WindowId) -> Result<&WorkspaceRef> {
-    self.location(window)
+  pub fn window_location(&self, window: WindowId) -> Result<WorkspaceRef> {
+    Ok(self.workspace_ref(self.place(window)?))
   }
 
   /// Returns the placeholder windows in id order.
@@ -937,11 +973,7 @@ impl Shingle {
 
   /// Restores the mapped flag after a validated structural transformation.
   pub fn mark_window_mapped(&mut self, window: WindowId) -> Result<()> {
-    self
-      .windows
-      .get_mut(&window)
-      .ok_or(ShingleError::WindowNotFound(window.0))?
-      .mapped = true;
+    self.record_mut(window)?.mapped = true;
     Ok(())
   }
 
@@ -949,8 +981,7 @@ impl Shingle {
   ///
   /// [`LeafState::held`]: crate::LeafState::held
   pub fn set_held(&mut self, window: WindowId, held: bool) -> Result<()> {
-    let location = self.location(window)?.clone();
-    self.tree_mut(&location)?.set_held(window, held)
+    self.window_tree_mut(window)?.set_held(window, held)
   }
 
   /// Ends a hold and lets the window join its workspace's tiling tree, as
@@ -963,8 +994,7 @@ impl Shingle {
   /// state. Returns whether the window was held; a window that was not is
   /// left untouched.
   pub fn release_held(&mut self, window: WindowId) -> Result<bool> {
-    let location = self.location(window)?.clone();
-    let tree = self.tree_mut(&location)?;
+    let tree = self.window_tree_mut(window)?;
     let mut state = tree.leaf_state(window)?;
     if !state.held {
       return Ok(false);
@@ -993,7 +1023,7 @@ impl Shingle {
         !record.mapped
           && record.identity.app_id == identity.app_id
           && !self
-            .tree(&record.location.output, record.location.workspace)
+            .tree_at(record.place)
             .and_then(|tree| tree.leaf_state(**id))
             .is_ok_and(|state| state.held)
       })
@@ -1021,11 +1051,7 @@ impl Shingle {
   /// Turns a window into a placeholder when its client unmaps. It keeps its
   /// slot until [`Shingle::reconcile_mapped`] claims it again.
   pub fn reconcile_unmapped(&mut self, window: WindowId) -> Result<()> {
-    self
-      .windows
-      .get_mut(&window)
-      .ok_or(ShingleError::WindowNotFound(window.0))?
-      .mapped = false;
+    self.record_mut(window)?.mapped = false;
     Ok(())
   }
 
@@ -1048,50 +1074,125 @@ impl Shingle {
     self.detach_window(window)
   }
 
-  pub(crate) fn tree_mut(
-    &mut self,
-    location: &WorkspaceRef,
-  ) -> Result<&mut TileTree> {
+  /// The tree at `place`.
+  pub(crate) fn tree_at(&self, place: Place) -> Result<&TileTree> {
     self
-      .outputs
-      .get_mut(&location.output)
-      .ok_or_else(|| ShingleError::OutputNotFound(location.output.0.clone()))?
+      .wset_state(place.wset)?
       .workspaces
-      .get_mut(&location.workspace)
+      .get(&place.workspace)
       .ok_or(ShingleError::WorkspaceNotFound)
   }
 
-  fn restore_tree(
+  /// The tree at `place`, for changing.
+  pub(crate) fn tree_mut(&mut self, place: Place) -> Result<&mut TileTree> {
+    self
+      .wset_state_mut(place.wset)?
+      .workspaces
+      .get_mut(&place.workspace)
+      .ok_or(ShingleError::WorkspaceNotFound)
+  }
+
+  /// The set with index `wset`.
+  pub(crate) fn wset_state(&self, wset: WsetId) -> Result<&WsetState> {
+    self
+      .wsets
+      .get(&wset)
+      .ok_or(ShingleError::WsetNotFound(wset.0))
+  }
+
+  /// The set with index `wset`, for changing.
+  pub(crate) fn wset_state_mut(
     &mut self,
-    location: &WorkspaceRef,
-    tree: TileTree,
-  ) -> Result<()> {
-    *self.tree_mut(location)? = tree;
-    Ok(())
+    wset: WsetId,
+  ) -> Result<&mut WsetState> {
+    self
+      .wsets
+      .get_mut(&wset)
+      .ok_or(ShingleError::WsetNotFound(wset.0))
   }
 
-  fn output(&self, output: &OutputId) -> Result<&OutputState> {
+  /// The set shown on `output`.
+  pub(crate) fn wset_for(&self, output: &OutputId) -> Result<WsetId> {
     self
-      .outputs
-      .get(output)
+      .wset_of(output)
       .ok_or_else(|| ShingleError::OutputNotFound(output.0.clone()))
   }
 
-  fn output_mut(&mut self, output: &OutputId) -> Result<&mut OutputState> {
+  /// The window's record.
+  pub(crate) fn record_mut(
+    &mut self,
+    window: WindowId,
+  ) -> Result<&mut WindowRecord> {
     self
-      .outputs
-      .get_mut(output)
-      .ok_or_else(|| ShingleError::OutputNotFound(output.0.clone()))
+      .windows
+      .get_mut(&window)
+      .ok_or(ShingleError::WindowNotFound(window.0))
   }
 
-  fn location(&self, window: WindowId) -> Result<&WorkspaceRef> {
+  /// Where the window's leaf is.
+  pub(crate) fn place(&self, window: WindowId) -> Result<Place> {
     Ok(
-      &self
+      self
         .windows
         .get(&window)
         .ok_or(ShingleError::WindowNotFound(window.0))?
-        .location,
+        .place,
     )
+  }
+
+  /// Records that the window's leaf is now at `place`. A move by the user
+  /// or a client (`moved_by_user`) to another workspace ends the window's
+  /// away record, and so does arriving in the set it is away from.
+  pub(crate) fn set_place(
+    &mut self,
+    window: WindowId,
+    place: Place,
+    moved_by_user: bool,
+  ) -> Result<()> {
+    let record = self.record_mut(window)?;
+    if moved_by_user {
+      record.away_from = None;
+    }
+    record.place = place;
+    if record.away_from == Some(place.wset) {
+      record.away_from = None;
+    }
+    Ok(())
+  }
+
+  /// The output-keyed form of `place`; see [`WorkspaceRef`].
+  pub(crate) fn workspace_ref(&self, place: Place) -> WorkspaceRef {
+    let output = self
+      .wsets
+      .get(&place.wset)
+      .and_then(|state| state.output.clone().or_else(|| state.home.clone()))
+      .unwrap_or_else(|| OutputId::new(""));
+    WorkspaceRef {
+      output,
+      workspace: place.workspace,
+    }
+  }
+
+  fn window_tree_mut(&mut self, window: WindowId) -> Result<&mut TileTree> {
+    let place = self.place(window)?;
+    self.tree_mut(place)
+  }
+
+  fn insert_detached(&mut self, detached: DetachedWindow, place: Place) {
+    self.windows.insert(
+      detached.id,
+      WindowRecord {
+        identity: detached.identity,
+        mapped: detached.presence == WindowPresence::Mapped,
+        place,
+        parent: detached.parent,
+        away_from: None,
+      },
+    );
+  }
+
+  fn output(&self, output: &OutputId) -> Result<&WsetState> {
+    self.wset_state(self.wset_for(output)?)
   }
 
   fn allocate_window_id(&mut self) -> Result<WindowId> {

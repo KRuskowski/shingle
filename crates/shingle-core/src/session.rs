@@ -7,15 +7,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::{OutputState, WindowRecord};
+use crate::core::{Place, WindowRecord, WsetState};
 use crate::tree::{Child, Node, Split};
 use crate::{
-  LaunchIdentity, LeafState, OutputId, Rect, Result, Shingle, ShingleError,
-  SplitDirection, TileTree, WindowId, WorkspaceId, WorkspaceRef,
+  LaunchIdentity, LeafState, OutputId, OutputIdentity, Rect, Result, Shingle,
+  ShingleError, SplitDirection, TileTree, WindowId, WorkspaceId, WsetId,
 };
 
-/// Version written to new snapshots and the only one accepted when restoring.
-pub const SNAPSHOT_VERSION: u32 = 1;
+/// Version written to new snapshots. Version 1, which kept one record per
+/// output instead of per workspace set, is still read.
+pub const SNAPSHOT_VERSION: u32 = 2;
 const MAX_TREE_DEPTH: usize = 64;
 const MAX_WINDOWS: usize = 65_536;
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -25,20 +26,58 @@ static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// A snapshot is valid only if it restores; [`SessionSnapshot::validate`]
 /// checks the same invariants as restoring. Window presence is not stored, so
 /// every window restores as a placeholder.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// Deserializing accepts version 1 files too: each saved output becomes a
+/// workspace set shown on that output, numbered from 1 in file order, and
+/// the snapshot is then at [`SNAPSHOT_VERSION`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SessionSnapshot {
   /// Must be [`SNAPSHOT_VERSION`].
   pub version: u32,
-  /// Outputs with unique, nonempty ids, sorted when produced by
-  /// [`Shingle::snapshot`].
-  pub outputs: Vec<OutputSnapshot>,
+  /// The focused output when the session was saved; nonempty if present.
+  pub active_output: Option<OutputId>,
+  /// Workspace sets with unique, nonzero indices, sorted by index when
+  /// produced by [`Shingle::snapshot`].
+  pub wsets: Vec<WsetSnapshot>,
   /// One record per window, each matching exactly one leaf in one workspace
   /// tree.
   pub windows: Vec<WindowSnapshot>,
 }
 
-/// One output's workarea, workspaces and current workspace.
+/// One workspace set: where it is shown, its workarea, workspaces and
+/// current workspace, and the copy of its trees kept for windows that are
+/// away from it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WsetSnapshot {
+  /// The set's index; nonzero.
+  pub wset: WsetId,
+  /// The output showing the set, or `None` while it is parked. Each output
+  /// shows at most one set, and a shown set's `home` is that output.
+  #[serde(default)]
+  pub output: Option<OutputId>,
+  /// The output the set was last shown on; nonempty if present.
+  #[serde(default)]
+  pub home: Option<OutputId>,
+  /// That output's EDID identity.
+  #[serde(default)]
+  pub identity: Option<OutputIdentity>,
+  /// The set's workarea; must be valid.
+  pub workarea: Rect,
+  /// The current workspace; must be one of `workspaces`.
+  pub current_workspace: WorkspaceId,
+  /// At least one workspace, with unique ids.
+  pub workspaces: Vec<WorkspaceSnapshot>,
+  /// The trees as they were when an unplug moved the set's windows away;
+  /// see [`Shingle::return_windows`]. They follow the rules of
+  /// `workspaces`, except that their windows need not exist: windows that
+  /// were closed or moved since are left out when the copy is used.
+  #[serde(default)]
+  pub away: Option<Vec<WorkspaceSnapshot>>,
+}
+
+/// One output's workarea, workspaces and current workspace: the record of
+/// a version 1 snapshot, read when loading one.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputSnapshot {
@@ -118,28 +157,74 @@ pub struct WindowSnapshot {
   /// Parent window, which must exist and must not form a cycle.
   #[serde(default)]
   pub parent: Option<WindowId>,
+  /// The set the window returns to when its output comes back; it must
+  /// exist and differ from the set holding the window.
+  #[serde(default)]
+  pub away_from: Option<WsetId>,
+}
+
+/// The current layout, as written.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotLayout {
+  version: u32,
+  #[serde(default)]
+  active_output: Option<OutputId>,
+  wsets: Vec<WsetSnapshot>,
+  windows: Vec<WindowSnapshot>,
+}
+
+/// Version 1's layout.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotLayoutV1 {
+  #[allow(dead_code)]
+  version: u32,
+  outputs: Vec<OutputSnapshot>,
+  windows: Vec<WindowSnapshot>,
+}
+
+impl<'de> Deserialize<'de> for SessionSnapshot {
+  fn deserialize<D: serde::Deserializer<'de>>(
+    deserializer: D,
+  ) -> std::result::Result<Self, D::Error> {
+    use serde::de::Error;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.get("version").and_then(serde_json::Value::as_u64) == Some(1) {
+      let old: SnapshotLayoutV1 =
+        serde_json::from_value(value).map_err(D::Error::custom)?;
+      return Ok(Self::from_version_1(old.outputs, old.windows));
+    }
+    let snapshot: SnapshotLayout =
+      serde_json::from_value(value).map_err(D::Error::custom)?;
+    Ok(Self {
+      version: snapshot.version,
+      active_output: snapshot.active_output,
+      wsets: snapshot.wsets,
+      windows: snapshot.windows,
+    })
+  }
 }
 
 impl Shingle {
   /// Captures the whole model. Presence is not captured.
   pub fn snapshot(&self) -> SessionSnapshot {
-    let outputs = self
-      .outputs
+    let wsets = self
+      .wsets
       .iter()
-      .map(|(output, state)| OutputSnapshot {
-        output: output.clone(),
+      .map(|(wset, state)| WsetSnapshot {
+        wset: *wset,
+        output: state.output.clone(),
+        home: state.home.clone(),
+        identity: state.identity.clone(),
         workarea: state.workarea,
         current_workspace: state.current_workspace,
         workspaces: state
           .workspaces
           .iter()
-          .map(|(workspace, tree)| WorkspaceSnapshot {
-            workspace: *workspace,
-            root: split_snapshot(&tree.root),
-            focused: tree.focused(),
-            stack: tree.stack_order().to_vec(),
-          })
+          .map(|(workspace, tree)| workspace_snapshot(*workspace, tree))
           .collect(),
+        away: state.away.clone(),
       })
       .collect();
     let windows = self
@@ -149,11 +234,13 @@ impl Shingle {
         id: *id,
         identity: record.identity.clone(),
         parent: record.parent,
+        away_from: record.away_from,
       })
       .collect();
     SessionSnapshot {
       version: SNAPSHOT_VERSION,
-      outputs,
+      active_output: self.active_output.clone(),
+      wsets,
       windows,
     }
   }
@@ -163,11 +250,12 @@ impl Shingle {
     self.snapshot().to_json()
   }
 
-  /// Restores a model from JSON.
+  /// Restores a model from JSON, of this version or version 1.
   ///
-  /// Tile order, weights, state, focus, stacking and current workspaces come
-  /// back exactly. Every window starts as a placeholder, and new window ids
-  /// continue after the highest restored id.
+  /// Tile order, weights, state, focus, stacking, current workspaces and
+  /// which output shows which set come back exactly. Every window starts as
+  /// a placeholder, and new window ids continue after the highest restored
+  /// id.
   ///
   /// # Errors
   ///
@@ -209,7 +297,8 @@ impl Shingle {
 }
 
 impl SessionSnapshot {
-  /// Parses a snapshot and checks that it restores.
+  /// Parses a snapshot, of this version or version 1, and checks that it
+  /// restores.
   pub fn from_json(json: &str) -> Result<Self> {
     let snapshot: Self = serde_json::from_str(json)?;
     restore_snapshot(snapshot.clone())?;
@@ -234,12 +323,126 @@ impl SessionSnapshot {
     let json = serialize_snapshot(self)?;
     atomic_write(path.as_ref(), json.as_bytes())
   }
+
+  /// Converts version 1's records: each output becomes a set shown on it,
+  /// numbered from 1 in order.
+  fn from_version_1(
+    outputs: Vec<OutputSnapshot>,
+    windows: Vec<WindowSnapshot>,
+  ) -> Self {
+    let wsets = outputs
+      .into_iter()
+      .zip(1u32..)
+      .map(|(output, index)| WsetSnapshot {
+        wset: WsetId(index),
+        output: Some(output.output.clone()),
+        home: Some(output.output),
+        identity: None,
+        workarea: output.workarea,
+        current_workspace: output.current_workspace,
+        workspaces: output.workspaces,
+        away: None,
+      })
+      .collect();
+    Self {
+      version: SNAPSHOT_VERSION,
+      active_output: None,
+      wsets,
+      windows,
+    }
+  }
 }
 
 fn serialize_snapshot(snapshot: &SessionSnapshot) -> Result<String> {
   let mut json = serde_json::to_string_pretty(snapshot)?;
   json.push('\n');
   Ok(json)
+}
+
+/// A workspace's tree as a snapshot.
+pub(crate) fn workspace_snapshot(
+  workspace: WorkspaceId,
+  tree: &TileTree,
+) -> WorkspaceSnapshot {
+  WorkspaceSnapshot {
+    workspace,
+    root: split_snapshot(&tree.root),
+    focused: tree.focused(),
+    stack: tree.stack_order().to_vec(),
+  }
+}
+
+/// A copy of `snapshot` with only the windows `keep` accepts. A nested
+/// split left with one child is replaced by it, in the split's slot and
+/// with its weight, and one left empty is removed; the root stays even
+/// when empty. Focus is kept only on a kept window.
+pub(crate) fn prune_workspace(
+  snapshot: &WorkspaceSnapshot,
+  keep: impl Fn(WindowId) -> bool,
+) -> WorkspaceSnapshot {
+  fn prune_split(
+    split: &SplitSnapshot,
+    keep: &dyn Fn(WindowId) -> bool,
+  ) -> SplitSnapshot {
+    let children = split
+      .children
+      .iter()
+      .filter_map(|child| {
+        let node = match &child.node {
+          NodeSnapshot::Leaf { window, .. } => {
+            keep(*window).then(|| child.node.clone())?
+          }
+          NodeSnapshot::Split(nested) => {
+            let mut pruned = prune_split(nested, keep);
+            match pruned.children.len() {
+              0 => return None,
+              1 => pruned.children.remove(0).node,
+              _ => NodeSnapshot::Split(pruned),
+            }
+          }
+        };
+        Some(ChildSnapshot {
+          weight: child.weight,
+          node,
+        })
+      })
+      .collect();
+    SplitSnapshot {
+      direction: split.direction,
+      children,
+    }
+  }
+  WorkspaceSnapshot {
+    workspace: snapshot.workspace,
+    root: prune_split(&snapshot.root, &keep),
+    focused: snapshot.focused.filter(|window| keep(*window)),
+    stack: snapshot
+      .stack
+      .iter()
+      .copied()
+      .filter(|window| keep(*window))
+      .collect(),
+  }
+}
+
+/// Builds a tree from a workspace snapshot laid out in `workarea`, with the
+/// checks of a restore except those that need the session's window
+/// records.
+pub(crate) fn tree_from_snapshot(
+  snapshot: WorkspaceSnapshot,
+  workarea: Rect,
+) -> Result<TileTree> {
+  let mut seen = BTreeSet::new();
+  build_tree(snapshot, workarea, &mut |window, state| {
+    check_leaf(window, state)?;
+    if !seen.insert(window) {
+      return Err(malformed(format!(
+        "window {} occurs more than once",
+        window.0
+      )));
+    }
+    Ok(())
+  })
 }
 
 fn split_snapshot(split: &Split) -> SplitSnapshot {
@@ -266,6 +469,118 @@ fn node_snapshot(node: &Node) -> NodeSnapshot {
   }
 }
 
+fn malformed(message: impl Into<String>) -> ShingleError {
+  ShingleError::MalformedSnapshot(message.into())
+}
+
+/// A callback for each leaf of a tree being built.
+type LeafSink<'a> = dyn FnMut(WindowId, LeafState) -> Result<()> + 'a;
+
+fn build_split(
+  snapshot: SplitSnapshot,
+  root: bool,
+  depth: usize,
+  leaf: &mut LeafSink<'_>,
+) -> Result<Split> {
+  if depth > MAX_TREE_DEPTH {
+    return Err(malformed("tree exceeds the maximum depth"));
+  }
+  if !root && snapshot.children.len() < 2 {
+    return Err(malformed("non-root splits must have at least two children"));
+  }
+  let mut children = Vec::with_capacity(snapshot.children.len());
+  for child in snapshot.children {
+    if child.weight == 0 {
+      return Err(malformed("split weights must be nonzero"));
+    }
+    let node = match child.node {
+      NodeSnapshot::Split(split) => {
+        Node::Split(build_split(split, false, depth + 1, leaf)?)
+      }
+      NodeSnapshot::Leaf { window, state } => {
+        leaf(window, state)?;
+        Node::Leaf(window, state)
+      }
+    };
+    children.push(Child {
+      weight: child.weight,
+      node,
+    });
+  }
+  Ok(Split {
+    direction: snapshot.direction,
+    children,
+  })
+}
+
+/// Builds one workspace's tree and checks its focus and stacking order.
+fn build_tree(
+  snapshot: WorkspaceSnapshot,
+  workarea: Rect,
+  leaf: &mut LeafSink<'_>,
+) -> Result<TileTree> {
+  let root = build_split(snapshot.root, true, 0, leaf)?;
+  let mut leaf_ids = BTreeSet::new();
+  for child in &root.children {
+    collect_leaf_ids(&child.node, &mut leaf_ids);
+  }
+  if snapshot
+    .focused
+    .is_some_and(|window| !leaf_ids.contains(&window))
+  {
+    return Err(malformed("focused window is not in its workspace"));
+  }
+  if snapshot.stack.len() != leaf_ids.len()
+    || snapshot
+      .stack
+      .iter()
+      .any(|window| !leaf_ids.contains(window))
+    || snapshot.stack.iter().copied().collect::<BTreeSet<_>>() != leaf_ids
+  {
+    return Err(malformed(
+      "stack order must contain every workspace window exactly once",
+    ));
+  }
+  Ok(TileTree {
+    root,
+    workarea,
+    focused: snapshot.focused,
+    stack: snapshot.stack,
+  })
+}
+
+/// The checks of one leaf that need nothing but the leaf.
+fn check_leaf(window: WindowId, state: LeafState) -> Result<()> {
+  if state.tiled_edges > 15 {
+    return Err(malformed("tiled-edges mask exceeds 15"));
+  }
+  if let Some(geometry) = state.floating {
+    geometry.validate().map_err(|_| {
+      malformed("floating geometry must be nonempty and representable")
+    })?;
+  }
+  if let Some(geometry) = state.snapped {
+    geometry.validate().map_err(|_| {
+      malformed("snapped geometry must be nonempty and representable")
+    })?;
+    if state.floating.is_some() {
+      return Err(malformed("window cannot be both floating and snapped"));
+    }
+  }
+  if let Some(geometry) = state.restore_geometry {
+    geometry.validate().map_err(|_| {
+      malformed("restore geometry must be nonempty and representable")
+    })?;
+    if state.snapped.is_none() {
+      return Err(malformed("restore geometry requires a snapped window"));
+    }
+  }
+  if window.0 == 0 {
+    return Err(malformed("window id must be nonzero"));
+  }
+  Ok(())
+}
+
 struct Restore {
   identities: BTreeMap<WindowId, (LaunchIdentity, Option<WindowId>)>,
   windows: BTreeMap<WindowId, WindowRecord>,
@@ -273,148 +588,108 @@ struct Restore {
 }
 
 impl Restore {
-  fn build_split(
-    &mut self,
-    snapshot: SplitSnapshot,
-    root: bool,
-    depth: usize,
-    location: &WorkspaceRef,
-  ) -> Result<Split> {
-    if depth > MAX_TREE_DEPTH {
-      return Err(self.malformed("tree exceeds the maximum depth"));
-    }
-    if !root && snapshot.children.len() < 2 {
-      return Err(
-        self.malformed("non-root splits must have at least two children"),
-      );
-    }
-    let mut children = Vec::with_capacity(snapshot.children.len());
-    for child in snapshot.children {
-      if child.weight == 0 {
-        return Err(self.malformed("split weights must be nonzero"));
-      }
-      let node = match child.node {
-        NodeSnapshot::Split(split) => {
-          Node::Split(self.build_split(split, false, depth + 1, location)?)
-        }
-        NodeSnapshot::Leaf { window, state } => {
-          self.add_leaf(window, state, location)?;
-          Node::Leaf(window, state)
-        }
-      };
-      children.push(Child {
-        weight: child.weight,
-        node,
-      });
-    }
-    Ok(Split {
-      direction: snapshot.direction,
-      children,
-    })
-  }
-
   fn add_leaf(
     &mut self,
     window: WindowId,
     state: LeafState,
-    location: &WorkspaceRef,
+    place: Place,
   ) -> Result<()> {
-    if state.tiled_edges > 15 {
-      return Err(self.malformed("tiled-edges mask exceeds 15"));
-    }
-    if let Some(geometry) = state.floating {
-      geometry.validate().map_err(|_| {
-        self.malformed("floating geometry must be nonempty and representable")
-      })?;
-    }
-    if let Some(geometry) = state.snapped {
-      geometry.validate().map_err(|_| {
-        self.malformed("snapped geometry must be nonempty and representable")
-      })?;
-      if state.floating.is_some() {
-        return Err(
-          self.malformed("window cannot be both floating and snapped"),
-        );
-      }
-    }
-    if let Some(geometry) = state.restore_geometry {
-      geometry.validate().map_err(|_| {
-        self.malformed("restore geometry must be nonempty and representable")
-      })?;
-      if state.snapped.is_none() {
-        return Err(
-          self.malformed("restore geometry requires a snapped window"),
-        );
-      }
-    }
-    if window.0 == 0 {
-      return Err(self.malformed("window id must be nonzero"));
-    }
+    check_leaf(window, state)?;
     if self.windows.contains_key(&window) {
-      return Err(
-        self.malformed(format!("window {} occurs more than once", window.0)),
-      );
+      return Err(malformed(format!(
+        "window {} occurs more than once",
+        window.0
+      )));
     }
     self.leaf_count += 1;
     if self.leaf_count > MAX_WINDOWS {
-      return Err(self.malformed("snapshot contains too many windows"));
+      return Err(malformed("snapshot contains too many windows"));
     }
     let (identity, parent) =
       self.identities.get(&window).cloned().ok_or_else(|| {
-        self.malformed(format!("window {} has no identity record", window.0))
+        malformed(format!("window {} has no identity record", window.0))
       })?;
     self.windows.insert(
       window,
       WindowRecord {
         identity,
         mapped: false,
-        location: location.clone(),
+        place,
         parent,
+        away_from: None,
       },
     );
     Ok(())
   }
+}
 
-  fn malformed(&self, message: impl Into<String>) -> ShingleError {
-    ShingleError::MalformedSnapshot(message.into())
+/// Checks a set's kept tree copy and returns it.
+fn restore_away(
+  away: Option<Vec<WorkspaceSnapshot>>,
+  workarea: Rect,
+) -> Result<Option<Vec<WorkspaceSnapshot>>> {
+  let Some(away) = away else {
+    return Ok(None);
+  };
+  let mut workspaces = BTreeSet::new();
+  let mut seen = BTreeSet::new();
+  for workspace in &away {
+    if !workspaces.insert(workspace.workspace) {
+      return Err(malformed("duplicate workspace in a return copy"));
+    }
+    build_tree(workspace.clone(), workarea, &mut |window, state| {
+      check_leaf(window, state)?;
+      if !seen.insert(window) {
+        return Err(malformed(format!(
+          "window {} occurs more than once in a return copy",
+          window.0
+        )));
+      }
+      Ok(())
+    })?;
   }
+  Ok(Some(away))
 }
 
 fn restore_snapshot(snapshot: SessionSnapshot) -> Result<Shingle> {
   if snapshot.version != SNAPSHOT_VERSION {
     return Err(ShingleError::UnsupportedSnapshotVersion(snapshot.version));
   }
+  if snapshot
+    .active_output
+    .as_ref()
+    .is_some_and(|output| output.0.is_empty())
+  {
+    return Err(malformed("active output identity cannot be empty"));
+  }
   let mut identities = BTreeMap::new();
+  let mut away_records = BTreeMap::new();
   for window in snapshot.windows {
     if window.id.0 == 0 {
-      return Err(ShingleError::MalformedSnapshot(
-        "window id must be nonzero".into(),
-      ));
+      return Err(malformed("window id must be nonzero"));
     }
     if identities
       .insert(window.id, (window.identity, window.parent))
       .is_some()
     {
-      return Err(ShingleError::MalformedSnapshot(format!(
+      return Err(malformed(format!(
         "window {} has duplicate identity records",
         window.id.0
       )));
     }
+    if let Some(wset) = window.away_from {
+      away_records.insert(window.id, wset);
+    }
   }
   for (id, (_, parent)) in &identities {
     if parent.is_some_and(|parent| !identities.contains_key(&parent)) {
-      return Err(ShingleError::MalformedSnapshot(format!(
-        "window {} has a missing parent",
-        id.0
-      )));
+      return Err(malformed(format!("window {} has a missing parent", id.0)));
     }
     let mut visited = BTreeSet::new();
     let mut current = *id;
     loop {
       if !visited.insert(current) {
-        return Err(ShingleError::MalformedSnapshot(
-          "window parent chain contains a cycle".into(),
-        ));
+        return Err(malformed("window parent chain contains a cycle"));
       }
       let Some(parent) =
         identities.get(&current).and_then(|(_, parent)| *parent)
@@ -425,9 +700,7 @@ fn restore_snapshot(snapshot: SessionSnapshot) -> Result<Shingle> {
     }
   }
   if identities.len() > MAX_WINDOWS {
-    return Err(ShingleError::MalformedSnapshot(
-      "snapshot contains too many windows".into(),
-    ));
+    return Err(malformed("snapshot contains too many windows"));
   }
 
   let mut restore = Restore {
@@ -435,93 +708,101 @@ fn restore_snapshot(snapshot: SessionSnapshot) -> Result<Shingle> {
     windows: BTreeMap::new(),
     leaf_count: 0,
   };
-  let mut outputs = BTreeMap::new();
-  for output in snapshot.outputs {
-    if output.output.0.is_empty() {
-      return Err(restore.malformed("output identity cannot be empty"));
+  let mut wsets = BTreeMap::new();
+  let mut shown = BTreeSet::new();
+  for wset in snapshot.wsets {
+    let id = wset.wset;
+    if id.0 == 0 {
+      return Err(malformed("workspace set index must be nonzero"));
     }
-    let workarea = output
+    if wsets.contains_key(&id) {
+      return Err(malformed("duplicate workspace set index"));
+    }
+    if wset.home.as_ref().is_some_and(|home| home.0.is_empty()) {
+      return Err(malformed("output identity cannot be empty"));
+    }
+    if let Some(output) = &wset.output {
+      if output.0.is_empty() {
+        return Err(malformed("output identity cannot be empty"));
+      }
+      if !shown.insert(output.clone()) {
+        return Err(malformed("duplicate output identity"));
+      }
+      if wset.home.as_ref() != Some(output) {
+        return Err(malformed("a shown workspace set's home is its output"));
+      }
+    }
+    let workarea = wset
       .workarea
       .validate()
-      .map_err(|_| restore.malformed("output has invalid workarea"))?;
-    if output.workspaces.is_empty() {
-      return Err(
-        restore.malformed("output must contain at least one workspace"),
-      );
-    }
-    let output_id = output.output;
-    if outputs.contains_key(&output_id) {
-      return Err(restore.malformed("duplicate output identity"));
+      .map_err(|_| malformed("output has invalid workarea"))?;
+    if wset.workspaces.is_empty() {
+      return Err(malformed("output must contain at least one workspace"));
     }
     let mut workspaces = BTreeMap::new();
-    let current_workspace = output.current_workspace;
-    for workspace in output.workspaces {
+    for workspace in wset.workspaces {
       if workspaces.contains_key(&workspace.workspace) {
-        return Err(restore.malformed("duplicate workspace identity"));
+        return Err(malformed("duplicate workspace identity"));
       }
-      let location = WorkspaceRef {
-        output: output_id.clone(),
+      let place = Place {
+        wset: id,
         workspace: workspace.workspace,
       };
-      let root = restore.build_split(workspace.root, true, 0, &location)?;
-      let mut leaf_ids = BTreeSet::new();
-      for child in &root.children {
-        collect_leaf_ids(&child.node, &mut leaf_ids);
-      }
-      if workspace
-        .focused
-        .is_some_and(|window| !leaf_ids.contains(&window))
-      {
-        return Err(
-          restore.malformed("focused window is not in its workspace"),
-        );
-      }
-      if workspace.stack.len() != leaf_ids.len()
-        || workspace
-          .stack
-          .iter()
-          .any(|window| !leaf_ids.contains(window))
-        || workspace.stack.iter().copied().collect::<BTreeSet<_>>() != leaf_ids
-      {
-        return Err(restore.malformed(
-          "stack order must contain every workspace window exactly once",
-        ));
-      }
-      workspaces.insert(
-        workspace.workspace,
-        TileTree {
-          root,
-          workarea,
-          focused: workspace.focused,
-          stack: workspace.stack,
-        },
-      );
+      let key = workspace.workspace;
+      let tree = build_tree(workspace, workarea, &mut |window, state| {
+        restore.add_leaf(window, state, place)
+      })?;
+      workspaces.insert(key, tree);
     }
-    if !workspaces.contains_key(&current_workspace) {
-      return Err(restore.malformed("current workspace does not exist"));
+    if !workspaces.contains_key(&wset.current_workspace) {
+      return Err(malformed("current workspace does not exist"));
     }
-    outputs.insert(
-      output_id,
-      OutputState {
+    wsets.insert(
+      id,
+      WsetState {
         workarea,
-        current_workspace,
+        current_workspace: wset.current_workspace,
         workspaces,
+        output: wset.output,
+        home: wset.home,
+        identity: wset.identity,
+        away: restore_away(wset.away, workarea)?,
       },
     );
   }
   if restore.windows.len() != restore.identities.len() {
-    return Err(restore.malformed(
+    return Err(malformed(
       "every identity record must have exactly one corresponding tree leaf",
     ));
+  }
+  for (window, wset) in away_records {
+    let record = restore
+      .windows
+      .get_mut(&window)
+      .ok_or_else(|| malformed("away record of an unknown window"))?;
+    if !wsets.contains_key(&wset) {
+      return Err(malformed(format!(
+        "window {} is away from a missing workspace set",
+        window.0
+      )));
+    }
+    if record.place.wset == wset {
+      return Err(malformed(format!(
+        "window {} is away from the set holding it",
+        window.0
+      )));
+    }
+    record.away_from = Some(wset);
   }
   let next_window_id = match restore.windows.keys().next_back() {
     Some(id) => id.0.checked_add(1).unwrap_or(0),
     None => 1,
   };
   Ok(Shingle {
-    outputs,
+    wsets,
     windows: restore.windows,
     next_window_id,
+    active_output: snapshot.active_output,
   })
 }
 
@@ -744,7 +1025,7 @@ mod tests {
   }
 
   fn root(snapshot: &mut SessionSnapshot) -> &mut SplitSnapshot {
-    &mut snapshot.outputs[0].workspaces[0].root
+    &mut snapshot.wsets[0].workspaces[0].root
   }
 
   fn leaf_state(snapshot: &mut SessionSnapshot) -> &mut LeafState {
@@ -921,11 +1202,11 @@ mod tests {
     std::fs::write(&path, "{").unwrap();
     assert!(matches!(Shingle::load(&path), Err(ShingleError::Json(_))));
     let mut snapshot = simple_snapshot();
-    snapshot.version = 2;
+    snapshot.version = 3;
     std::fs::write(&path, serialize_snapshot(&snapshot).unwrap()).unwrap();
     assert!(matches!(
       Shingle::load(&path),
-      Err(ShingleError::UnsupportedSnapshotVersion(2))
+      Err(ShingleError::UnsupportedSnapshotVersion(3))
     ));
     std::fs::remove_dir_all(directory).unwrap();
   }
@@ -961,8 +1242,8 @@ mod tests {
   fn optional_leaf_fields_default() {
     let mut snapshot = simple_snapshot();
     let mut value = serde_json::to_value(&snapshot).unwrap();
-    let state = &mut value["outputs"][0]["workspaces"][0]["root"]["children"]
-      [0]["node"]["state"];
+    let state = &mut value["wsets"][0]["workspaces"][0]["root"]["children"][0]
+      ["node"]["state"];
     *state = serde_json::json!({
       "gaps": { "top": 1, "right": 2, "bottom": 3, "left": 4, "inner": 5 },
       "maximized": false,
@@ -1069,6 +1350,7 @@ mod tests {
         id: window,
         identity: LaunchIdentity::new("deep"),
         parent: None,
+        away_from: None,
       });
       split = SplitSnapshot {
         direction: SplitDirection::Vertical,
@@ -1087,7 +1369,7 @@ mod tests {
         ],
       };
     }
-    let workspace = &mut snapshot.outputs[0].workspaces[0];
+    let workspace = &mut snapshot.wsets[0].workspaces[0];
     workspace.root = split.clone();
     workspace.stack = snapshot.windows.iter().map(|window| window.id).collect();
     let error = Shingle::from_snapshot(snapshot.clone()).unwrap_err();
@@ -1106,7 +1388,7 @@ mod tests {
       unreachable!();
     };
     snapshot.windows.retain(|record| record.id != window);
-    let workspace = &mut snapshot.outputs[0].workspaces[0];
+    let workspace = &mut snapshot.wsets[0].workspaces[0];
     workspace.root = inner;
     workspace.stack.retain(|id| *id != window);
     Shingle::from_snapshot(snapshot).unwrap();
@@ -1164,6 +1446,7 @@ mod tests {
           id: WindowId(7),
           identity: LaunchIdentity::new("orphan"),
           parent: None,
+          away_from: None,
         });
       },
       "exactly one corresponding tree leaf",
@@ -1195,25 +1478,25 @@ mod tests {
   #[test]
   fn focus_and_stack_must_match_workspace() {
     assert_malformed(
-      |snapshot| snapshot.outputs[0].workspaces[0].focused = Some(WindowId(9)),
+      |snapshot| snapshot.wsets[0].workspaces[0].focused = Some(WindowId(9)),
       "focused window",
     );
     assert_malformed(
       |snapshot| {
-        snapshot.outputs[0].workspaces[0].stack.pop();
+        snapshot.wsets[0].workspaces[0].stack.pop();
       },
       "stack order",
     );
     assert_malformed(
       |snapshot| {
-        let stack = &mut snapshot.outputs[0].workspaces[0].stack;
+        let stack = &mut snapshot.wsets[0].workspaces[0].stack;
         stack[1] = stack[0];
       },
       "stack order",
     );
     assert_malformed(
       |snapshot| {
-        snapshot.outputs[0].workspaces[0].stack.push(WindowId(1));
+        snapshot.wsets[0].workspaces[0].stack.push(WindowId(1));
       },
       "stack order",
     );
@@ -1222,40 +1505,41 @@ mod tests {
   #[test]
   fn outputs_and_workspaces_must_be_consistent() {
     assert_malformed(
-      |snapshot| snapshot.outputs[0].output = OutputId::new(""),
+      |snapshot| snapshot.wsets[0].home = Some(OutputId::new("")),
       "output identity",
     );
     assert_malformed(
-      |snapshot| snapshot.outputs[0].workarea = Rect::new(0, 0, 0, 0),
+      |snapshot| snapshot.wsets[0].workarea = Rect::new(0, 0, 0, 0),
       "invalid workarea",
     );
     assert_malformed(
-      |snapshot| snapshot.outputs[0].workspaces.clear(),
+      |snapshot| snapshot.wsets[0].workspaces.clear(),
       "at least one workspace",
     );
     assert_malformed(
-      |snapshot| snapshot.outputs[0].current_workspace = WorkspaceId::new(3, 3),
+      |snapshot| snapshot.wsets[0].current_workspace = WorkspaceId::new(3, 3),
       "current workspace",
     );
     assert_malformed(
       |snapshot| {
-        let mut empty = snapshot.outputs[0].workspaces[0].clone();
+        let mut empty = snapshot.wsets[0].workspaces[0].clone();
         empty.root.children.clear();
         empty.focused = None;
         empty.stack.clear();
-        snapshot.outputs[0].workspaces.push(empty);
+        snapshot.wsets[0].workspaces.push(empty);
       },
       "duplicate workspace",
     );
     assert_malformed(
       |snapshot| {
-        let mut copy = snapshot.outputs[0].clone();
+        let mut copy = snapshot.wsets[0].clone();
+        copy.wset = WsetId(2);
         for workspace in &mut copy.workspaces {
           workspace.root.children.clear();
           workspace.focused = None;
           workspace.stack.clear();
         }
-        snapshot.outputs.push(copy);
+        snapshot.wsets.push(copy);
       },
       "duplicate output",
     );
@@ -1265,12 +1549,286 @@ mod tests {
   fn window_in_two_workspaces_is_rejected() {
     assert_malformed(
       |snapshot| {
-        let output = &mut snapshot.outputs[0];
+        let output = &mut snapshot.wsets[0];
         let mut copy = output.workspaces[0].clone();
         copy.workspace = SECOND;
         output.workspaces.push(copy);
       },
       "occurs more than once",
+    );
+  }
+
+  /// A version 1 file as `master` wrote it: two outputs, a nested split
+  /// and a second workspace.
+  const VERSION_1: &str = r#"{
+  "version": 1,
+  "outputs": [
+    {
+      "output": "DP-1",
+      "workarea": { "x": 0, "y": 0, "width": 1000, "height": 800 },
+      "current_workspace": { "x": 1, "y": 0 },
+      "workspaces": [
+        {
+          "workspace": { "x": 0, "y": 0 },
+          "root": {
+            "direction": "vertical",
+            "children": [
+              { "weight": 3, "node": { "kind": "leaf", "window": 1,
+                "state": { "gaps": { "top": 0, "right": 0, "bottom": 0,
+                  "left": 0, "inner": 0 }, "maximized": false,
+                "tiled_edges": 15 } } },
+              { "weight": 1, "node": { "kind": "split",
+                "direction": "horizontal", "children": [
+                  { "weight": 1, "node": { "kind": "leaf", "window": 2,
+                    "state": { "gaps": { "top": 0, "right": 0,
+                    "bottom": 0, "left": 0, "inner": 0 },
+                    "maximized": false } } },
+                  { "weight": 1, "node": { "kind": "leaf", "window": 3,
+                    "state": { "gaps": { "top": 0, "right": 0,
+                    "bottom": 0, "left": 0, "inner": 0 },
+                    "maximized": false } } }
+                ] } }
+            ]
+          },
+          "focused": 2,
+          "stack": [1, 3, 2]
+        },
+        {
+          "workspace": { "x": 1, "y": 0 },
+          "root": { "direction": "vertical", "children": [] },
+          "focused": null,
+          "stack": []
+        }
+      ]
+    },
+    {
+      "output": "HDMI-A-1",
+      "workarea": { "x": 1000, "y": 0, "width": 800, "height": 600 },
+      "current_workspace": { "x": 0, "y": 0 },
+      "workspaces": [
+        {
+          "workspace": { "x": 0, "y": 0 },
+          "root": { "direction": "vertical", "children": [
+            { "weight": 1, "node": { "kind": "leaf", "window": 4,
+              "state": { "gaps": { "top": 0, "right": 0,
+                    "bottom": 0, "left": 0, "inner": 0 },
+                    "maximized": false } } }
+          ] },
+          "focused": 4,
+          "stack": [4]
+        }
+      ]
+    }
+  ],
+  "windows": [
+    { "id": 1, "identity": { "app_id": "a", "launch_id": null } },
+    { "id": 2, "identity": { "app_id": "b", "launch_id": null } },
+    { "id": 3, "identity": { "app_id": "c", "launch_id": null },
+      "parent": 2 },
+    { "id": 4, "identity": { "app_id": "d", "launch_id": null } }
+  ]
+}"#;
+
+  #[test]
+  fn version_1_files_load_as_one_set_per_output() {
+    let snapshot = SessionSnapshot::from_json(VERSION_1).unwrap();
+    assert_eq!(snapshot.version, SNAPSHOT_VERSION);
+    let restored = Shingle::from_json(VERSION_1).unwrap();
+    let wsets = restored.wsets().collect::<Vec<_>>();
+    assert_eq!(wsets.len(), 2);
+    for (info, (index, output)) in
+      wsets.iter().zip([(1, "DP-1"), (2, "HDMI-A-1")])
+    {
+      assert_eq!(info.id, WsetId(index));
+      assert_eq!(info.output, Some(OutputId::from(output)));
+      assert_eq!(info.home, Some(OutputId::from(output)));
+      assert_eq!(info.identity, None);
+      assert!(!info.keeps_return_copy);
+    }
+    assert_eq!(
+      restored.outputs().collect::<Vec<_>>(),
+      [&primary(), &secondary()]
+    );
+    assert_eq!(restored.current_workspace(&primary()).unwrap(), SECOND);
+    let tree = restored.tree(&primary(), WorkspaceId::ORIGIN).unwrap();
+    assert_eq!(tree.windows(), [WindowId(1), WindowId(2), WindowId(3)]);
+    assert_eq!(tree.focused(), Some(WindowId(2)));
+    assert_eq!(tree.stack_order(), [WindowId(1), WindowId(3), WindowId(2)]);
+    let widths = tree
+      .layout()
+      .iter()
+      .map(|layout| layout.node.width)
+      .collect::<Vec<_>>();
+    assert_eq!(widths, [750, 250, 250]);
+    assert_eq!(
+      restored.window_info(WindowId(3)).unwrap().parent,
+      Some(WindowId(2))
+    );
+    assert_eq!(
+      restored.window_location(WindowId(4)).unwrap().output,
+      secondary()
+    );
+    assert_eq!(restored.placeholders().len(), 4);
+    assert_eq!(restored.active_output(), None);
+    // Saving writes the current version.
+    let json = restored.to_json().unwrap();
+    assert!(json.contains("\"version\": 2"), "{json}");
+    assert!(json.contains("\"wsets\""), "{json}");
+    assert!(!json.contains("\"outputs\""), "{json}");
+    assert_eq!(Shingle::from_json(&json).unwrap().snapshot(), snapshot);
+    // A version 1 file keeps version 1's rules.
+    let broken = VERSION_1.replace("\"weight\": 3", "\"weight\": 0");
+    assert!(matches!(
+      Shingle::from_json(&broken),
+      Err(ShingleError::MalformedSnapshot(_))
+    ));
+    let unknown = VERSION_1.replace("\"outputs\"", "\"wsets\"");
+    assert!(matches!(
+      Shingle::from_json(&unknown),
+      Err(ShingleError::Json(_))
+    ));
+  }
+
+  /// The sample with its second output unplugged under `return`: the set
+  /// is parked with a copy of its trees and its window is away from it.
+  fn unplugged_sample() -> (Shingle, WsetId, WsetId) {
+    let mut shingle = sample();
+    let primary_set = shingle.wset_of(&primary()).unwrap();
+    let secondary_set = shingle.wset_of(&secondary()).unwrap();
+    shingle
+      .attach_wset(
+        secondary_set,
+        Some(secondary()),
+        Some(OutputIdentity::new("Dell", "U2720Q", Some("A1".into()))),
+      )
+      .unwrap();
+    shingle.attach_wset(secondary_set, None, None).unwrap();
+    shingle
+      .transfer_wset(secondary_set, primary_set, true)
+      .unwrap();
+    shingle.set_active_output(Some(primary()));
+    (shingle, primary_set, secondary_set)
+  }
+
+  #[test]
+  fn round_trip_preserves_parked_sets_and_away_records() {
+    let (original, primary_set, secondary_set) = unplugged_sample();
+    let json = original.to_json().unwrap();
+    let mut restored = Shingle::from_json(&json).unwrap();
+    assert_eq!(restored.snapshot(), original.snapshot());
+    assert_eq!(restored.to_json().unwrap(), json);
+    assert_eq!(
+      restored.wsets().collect::<Vec<_>>(),
+      original.wsets().collect::<Vec<_>>()
+    );
+    assert_eq!(restored.active_output(), Some(&primary()));
+    let j = WindowId(9);
+    let info = restored.window_info(j).unwrap();
+    assert_eq!(
+      (info.wset, info.away_from),
+      (primary_set, Some(secondary_set))
+    );
+    // The monitor returns after the restart and takes its window back.
+    let identity = OutputIdentity::new("Dell", "U2720Q", Some("A1".into()));
+    assert_eq!(
+      restored.find_parked_wset(&"DP-2".into(), Some(&identity)),
+      Some(secondary_set)
+    );
+    restored
+      .attach_wset(secondary_set, Some(secondary()), Some(identity))
+      .unwrap();
+    assert_eq!(restored.return_windows(secondary_set).unwrap(), [j]);
+    let tree = restored.tree(&secondary(), WorkspaceId::ORIGIN).unwrap();
+    assert_eq!(tree.windows(), [j]);
+    assert_eq!(
+      tree.leaf_state(j).unwrap().stacking,
+      StackingMode::AlwaysOnBottom
+    );
+  }
+
+  #[test]
+  fn workspace_set_invariants_are_checked() {
+    assert_malformed(|snapshot| snapshot.wsets[0].wset = WsetId(0), "nonzero");
+    assert_malformed(
+      |snapshot| {
+        let mut copy = snapshot.wsets[0].clone();
+        copy.output = None;
+        for workspace in &mut copy.workspaces {
+          workspace.root.children.clear();
+          workspace.focused = None;
+          workspace.stack.clear();
+        }
+        snapshot.wsets.push(copy);
+      },
+      "duplicate workspace set index",
+    );
+    assert_malformed(
+      |snapshot| snapshot.wsets[0].home = Some(secondary()),
+      "home is its output",
+    );
+    assert_malformed(
+      |snapshot| snapshot.windows[0].away_from = Some(WsetId(5)),
+      "missing workspace set",
+    );
+    assert_malformed(
+      |snapshot| snapshot.windows[0].away_from = Some(WsetId(1)),
+      "set holding it",
+    );
+    assert_malformed(
+      |snapshot| snapshot.active_output = Some(OutputId::new("")),
+      "active output",
+    );
+    assert_malformed(
+      |snapshot| {
+        let copy = snapshot.wsets[0].workspaces[0].clone();
+        let mut other = copy.clone();
+        other.workspace = SECOND;
+        snapshot.wsets[0].away = Some(vec![copy, other]);
+      },
+      "more than once in a return copy",
+    );
+    assert_malformed(
+      |snapshot| {
+        let mut copy = snapshot.wsets[0].workspaces[0].clone();
+        copy.root.children[0].weight = 0;
+        snapshot.wsets[0].away = Some(vec![copy]);
+      },
+      "weights must be nonzero",
+    );
+    assert_malformed(
+      |snapshot| {
+        let copy = snapshot.wsets[0].workspaces[0].clone();
+        snapshot.wsets[0].away = Some(vec![copy.clone(), copy]);
+      },
+      "duplicate workspace in a return copy",
+    );
+    // A return copy may name windows that are gone.
+    let mut snapshot = simple_snapshot();
+    let mut copy = snapshot.wsets[0].workspaces[0].clone();
+    let NodeSnapshot::Leaf { window, .. } = &mut copy.root.children[0].node
+    else {
+      unreachable!();
+    };
+    *window = WindowId(40);
+    copy.stack = vec![WindowId(40), WindowId(2)];
+    copy.focused = Some(WindowId(40));
+    snapshot.wsets[0].away = Some(vec![copy]);
+    Shingle::from_snapshot(snapshot).unwrap();
+  }
+
+  #[test]
+  fn parked_sets_need_no_output() {
+    let mut snapshot = simple_snapshot();
+    snapshot.wsets[0].output = None;
+    let restored = Shingle::from_snapshot(snapshot.clone()).unwrap();
+    assert_eq!(restored.outputs().count(), 0);
+    assert_eq!(restored.wset(WsetId(1)).unwrap().home, Some(primary()));
+    assert_eq!(restored.snapshot(), snapshot);
+    snapshot.wsets[0].home = None;
+    let restored = Shingle::from_snapshot(snapshot).unwrap();
+    assert_eq!(
+      restored.window_location(WindowId(1)).unwrap().output,
+      OutputId::new("")
     );
   }
 }

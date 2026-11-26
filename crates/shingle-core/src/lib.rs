@@ -1,11 +1,13 @@
 //! Shingle's persistent window model, with no Wayland dependency.
 //!
-//! [`Shingle`] owns outputs, their workspaces and every known window. Each
-//! workspace holds a [`TileTree`]: the source of truth for tile order, split
-//! weights, focus, stacking and per-window flags such as floating, snapped
-//! or minimized. The compositor derives on-screen geometry from the tree with
-//! [`TileTree::layout`]; temporary visual geometry (overviews, animations,
-//! rotation) must never be written back into it.
+//! [`Shingle`] owns workspace sets, their workspaces and every known window,
+//! and knows which output shows which set ([`WsetId`]; a set on no output
+//! is parked and keeps its trees). Each workspace holds a [`TileTree`]: the
+//! source of truth for tile order, split weights, focus, stacking and
+//! per-window flags such as floating, snapped or minimized. The compositor
+//! derives on-screen geometry from the tree with [`TileTree::layout`];
+//! temporary visual geometry (overviews, animations, rotation) must never
+//! be written back into it.
 //!
 //! The model is persisted as a [`SessionSnapshot`]. Restoring a snapshot
 //! reproduces tile order and sizes exactly, with every window as a
@@ -24,6 +26,7 @@ mod error;
 mod geometry;
 mod session;
 mod tree;
+mod wset;
 
 pub use core::{
   DetachedWindow, LaunchIdentity, OutputId, Shingle, WindowInfo,
@@ -34,8 +37,10 @@ pub use geometry::{Direction, Gaps, Rect, SplitDirection};
 pub use session::{
   ChildSnapshot, NodeSnapshot, OutputSnapshot, SNAPSHOT_VERSION,
   SessionSnapshot, SplitSnapshot, WindowSnapshot, WorkspaceSnapshot,
+  WsetSnapshot,
 };
 pub use tree::{LeafState, StackingMode, TileTree, WindowId, WindowLayout};
+pub use wset::{OutputIdentity, WsetId, WsetInfo};
 
 /// Result type for fallible `shingle-core` operations.
 pub type Result<T> = std::result::Result<T, ShingleError>;

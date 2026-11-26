@@ -240,7 +240,7 @@ mod tests {
       assert!(!directory.join(".X0-lock").exists());
       assert!(!directory.join(".X11-unix/X0").exists());
       assert!(!socket.exists());
-      outputs = snapshot.outputs.len();
+      outputs = snapshot.wsets.len();
       Ok::<(), ()>(())
     })
     .unwrap();

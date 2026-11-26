@@ -19,6 +19,12 @@ pub enum ShingleError {
   OutputNotFound(String),
   /// The workspace does not exist on the output.
   WorkspaceNotFound,
+  /// No workspace set has this index.
+  WsetNotFound(u32),
+  /// The workspace set is shown on an output, so it cannot be destroyed.
+  WsetAttached(u32),
+  /// The workspace set still holds windows, so it cannot be destroyed.
+  WsetNotEmpty(u32),
   /// A rectangle was empty or its right or bottom edge exceeds `i32::MAX`. Used
   /// for workareas and for floating and snapped geometry.
   InvalidWorkarea,
@@ -34,11 +40,12 @@ pub enum ShingleError {
   /// The minimum extent was zero, or the tiles on both sides of the edge cannot
   /// both keep it.
   MinimumExtent,
-  /// No window id is left to allocate.
+  /// No window id or workspace set index is left to allocate.
   IdExhausted,
   /// A placeholder operation was given a mapped window.
   WindowStillMapped(u64),
-  /// The snapshot version is not [`SNAPSHOT_VERSION`](crate::SNAPSHOT_VERSION).
+  /// The snapshot version is neither 1 nor
+  /// [`SNAPSHOT_VERSION`](crate::SNAPSHOT_VERSION).
   UnsupportedSnapshotVersion(u32),
   /// The snapshot parsed but breaks a model invariant, which the message names.
   MalformedSnapshot(String),
@@ -66,6 +73,15 @@ impl Display for ShingleError {
         write!(f, "output {id:?} was not found")
       }
       Self::WorkspaceNotFound => write!(f, "workspace was not found"),
+      Self::WsetNotFound(index) => {
+        write!(f, "workspace set {index} was not found")
+      }
+      Self::WsetAttached(index) => {
+        write!(f, "workspace set {index} is shown on an output")
+      }
+      Self::WsetNotEmpty(index) => {
+        write!(f, "workspace set {index} still holds windows")
+      }
       Self::InvalidWorkarea => {
         write!(f, "workarea must have positive, representable geometry")
       }

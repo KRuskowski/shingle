@@ -1050,9 +1050,9 @@ fn get_layout(state: &CompositorState, data: &Value) -> Value {
   let workspace = shingle_core::WorkspaceId::new(x, y);
   let snapshot = state.core.snapshot();
   let Some(output) = snapshot
-    .outputs
+    .wsets
     .iter()
-    .find(|output| output.output == state.output_id)
+    .find(|wset| wset.output.as_ref() == Some(&state.output_id))
   else {
     return json_error("output not found");
   };
@@ -1252,9 +1252,9 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
     .collect::<Vec<_>>();
   let mut snapshot = state.core.snapshot();
   let Some(output) = snapshot
-    .outputs
+    .wsets
     .iter_mut()
-    .find(|output| output.output == state.output_id)
+    .find(|wset| wset.output.as_ref() == Some(&state.output_id))
   else {
     return json_error("output not found");
   };

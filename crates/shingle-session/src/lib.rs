@@ -472,8 +472,8 @@ fn assign_restore_ids(snapshot: &mut SessionSnapshot) {
 
 fn tile_order(snapshot: &SessionSnapshot) -> Vec<WindowId> {
   let mut order = Vec::new();
-  for output in &snapshot.outputs {
-    for workspace in &output.workspaces {
+  for wset in &snapshot.wsets {
+    for workspace in &wset.workspaces {
       for child in &workspace.root.children {
         collect_order(&child.node, &mut order);
       }
