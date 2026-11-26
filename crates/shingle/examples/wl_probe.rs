@@ -13,8 +13,21 @@
 //!
 //! ```text
 //! wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern] [--fifo]
-//!          [--damage] [--animate FRAMES]
+//!          [--damage] [--animate FRAMES] [--report-outputs]
+//!          [--layer OUTPUT]
 //! ```
+//!
+//! With `--report-outputs` the probe binds every `wl_output` and reports
+//! the outputs its surface enters and leaves (`output-enter`,
+//! `output-leave` with the output's name), its preferred fractional scale
+//! in 120ths (`preferred-scale`) and its preferred buffer scale
+//! (`buffer-scale`), as MO-3 checks them (docs/design/multi-output.md).
+//!
+//! With `--layer OUTPUT` the probe maps a wlr-layer-shell panel instead of
+//! a toplevel: anchored to the top edge of the output named OUTPUT, 30
+//! pixels high with an exclusive zone of 30. It reports each configure
+//! (`layer-configure`, width and height) and, when the compositor closes
+//! it, `layer-closed`, and then exits with status 0.
 //!
 //! With `--pattern` the buffer is not white but four quadrants: red top
 //! left, green top right, blue bottom left and white bottom right, so
@@ -53,7 +66,9 @@
 //! Events: `configure` (width, height, activated), `enter`, `leave`,
 //! `key` (key, pressed), `copied`, `send` (mime), `sent`, `cancelled`,
 //! `fifo`, `release` (buffer), `damage` (step), `animated` (frames,
-//! milliseconds), `close` and `error`.
+//! milliseconds), `output-enter` and `output-leave` (output),
+//! `preferred-scale` (scale), `buffer-scale` (factor), `layer-configure`
+//! (width, height), `layer-closed`, `close` and `error`.
 
 use std::{
   io::Write,
@@ -68,12 +83,20 @@ use wayland_client::{
   protocol::{
     wl_buffer, wl_callback, wl_compositor, wl_data_device,
     wl_data_device_manager, wl_data_offer, wl_data_source, wl_keyboard,
-    wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
+    wl_output, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
   },
 };
 use wayland_protocols::{
-  wp::fifo::v1::client::{wp_fifo_manager_v1, wp_fifo_v1},
+  wp::{
+    fifo::v1::client::{wp_fifo_manager_v1, wp_fifo_v1},
+    fractional_scale::v1::client::{
+      wp_fractional_scale_manager_v1, wp_fractional_scale_v1,
+    },
+  },
   xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
+};
+use wayland_protocols_wlr::layer_shell::v1::client::{
+  zwlr_layer_shell_v1, zwlr_layer_surface_v1,
 };
 
 /// The variables the test harnesses set inside their namespaces.
@@ -118,6 +141,11 @@ struct Options {
   damage: bool,
   /// Draws this many full-size frames once mapped.
   animate: Option<u32>,
+  /// Reports the outputs the surface enters and leaves and its scales.
+  report_outputs: bool,
+  /// Maps a layer-shell panel on the output of this name instead of a
+  /// toplevel.
+  layer: Option<String>,
 }
 
 /// The XRGB8888 bytes (B, G, R, X) of pixel (`x`, `y`) of a `width` by
@@ -145,7 +173,8 @@ fn buffer_bytes(width: i32, height: i32, pattern: bool) -> Vec<u8> {
 }
 
 /// Parses `wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern]
-/// [--fifo] [--damage] [--animate FRAMES]`.
+/// [--fifo] [--damage] [--animate FRAMES] [--report-outputs]
+/// [--layer OUTPUT]`.
 fn parse(arguments: &[String]) -> Result<Options, String> {
   let mut options = Options::default();
   let mut arguments = arguments.iter();
@@ -162,6 +191,11 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
           .map_err(|_| format!("bad --delay-ms {value:?}"))?;
       }
       "--pattern" => options.pattern = true,
+      "--report-outputs" => options.report_outputs = true,
+      "--layer" => {
+        options.layer =
+          Some(arguments.next().ok_or("--layer needs an output")?.clone());
+      }
       "--fifo" => options.fifo = true,
       "--damage" => options.damage = true,
       "--animate" => {
@@ -206,6 +240,13 @@ struct Probe {
   seat: Option<wl_seat::WlSeat>,
   data_device_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
   fifo_manager: Option<wp_fifo_manager_v1::WpFifoManagerV1>,
+  fractional_manager:
+    Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
+  layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
+  /// Every `wl_output` bound, with its name once it was told.
+  outputs: Vec<(wl_output::WlOutput, Option<String>)>,
+  /// Whether the toplevel's surface reports outputs and scales.
+  report_outputs: bool,
   keyboard: Option<wl_keyboard::WlKeyboard>,
   /// The text the selection offers and how long each send waits.
   copy: Option<(String, u64)>,
@@ -353,14 +394,33 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
     handle: &QueueHandle<Self>,
   ) {
     let wl_registry::Event::Global {
-      name, interface, ..
+      name,
+      interface,
+      version,
     } = event
     else {
       return;
     };
     match interface.as_str() {
       "wl_compositor" => {
-        probe.compositor = Some(registry.bind(name, 4, handle, ()));
+        // Version 6 has `preferred_buffer_scale`.
+        let version = if probe.report_outputs {
+          version.min(6)
+        } else {
+          4
+        };
+        probe.compositor = Some(registry.bind(name, version, handle, ()));
+      }
+      "wl_output" if probe.report_outputs => {
+        let output = registry.bind(name, version.min(4), handle, ());
+        probe.outputs.push((output, None));
+      }
+      "wp_fractional_scale_manager_v1" => {
+        probe.fractional_manager = Some(registry.bind(name, 1, handle, ()));
+      }
+      "zwlr_layer_shell_v1" => {
+        probe.layer_shell =
+          Some(registry.bind(name, version.min(4), handle, ()));
       }
       "wl_shm" => probe.shm = Some(registry.bind(name, 1, handle, ())),
       "xdg_wm_base" => probe.wm_base = Some(registry.bind(name, 1, handle, ())),
@@ -577,6 +637,161 @@ impl Dispatch<wl_callback::WlCallback, ()> for Probe {
   }
 }
 
+impl Probe {
+  /// The name of `output`, if it was told.
+  fn output_name(&self, output: &wl_output::WlOutput) -> String {
+    self
+      .outputs
+      .iter()
+      .find(|(candidate, _)| candidate == output)
+      .and_then(|(_, name)| name.clone())
+      .unwrap_or_else(|| "?".into())
+  }
+}
+
+impl Dispatch<wl_output::WlOutput, ()> for Probe {
+  fn event(
+    probe: &mut Self,
+    output: &wl_output::WlOutput,
+    event: wl_output::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wl_output::Event::Name { name } = event
+      && let Some((_, known)) = probe
+        .outputs
+        .iter_mut()
+        .find(|(candidate, _)| candidate == output)
+    {
+      *known = Some(name);
+    }
+  }
+}
+
+impl Dispatch<wl_surface::WlSurface, ()> for Probe {
+  fn event(
+    probe: &mut Self,
+    _: &wl_surface::WlSurface,
+    event: wl_surface::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if !probe.report_outputs {
+      return;
+    }
+    match event {
+      wl_surface::Event::Enter { output } => report(
+        "output-enter",
+        &[("output", format!("{:?}", probe.output_name(&output)))],
+      ),
+      wl_surface::Event::Leave { output } => report(
+        "output-leave",
+        &[("output", format!("{:?}", probe.output_name(&output)))],
+      ),
+      wl_surface::Event::PreferredBufferScale { factor } => {
+        report("buffer-scale", &[("factor", factor.to_string())]);
+      }
+      _ => {}
+    }
+  }
+}
+
+impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ()> for Probe {
+  fn event(
+    _: &mut Self,
+    _: &wp_fractional_scale_v1::WpFractionalScaleV1,
+    event: wp_fractional_scale_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+      report("preferred-scale", &[("scale", scale.to_string())]);
+    }
+  }
+}
+
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for Probe {
+  fn event(
+    probe: &mut Self,
+    layer: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+    event: zwlr_layer_surface_v1::Event,
+    _: &(),
+    _: &Connection,
+    handle: &QueueHandle<Self>,
+  ) {
+    match event {
+      zwlr_layer_surface_v1::Event::Configure {
+        serial,
+        width,
+        height,
+      } => {
+        layer.ack_configure(serial);
+        report(
+          "layer-configure",
+          &[("width", width.to_string()), ("height", height.to_string())],
+        );
+        probe.draw(handle, width.max(1) as i32, height.max(1) as i32);
+      }
+      zwlr_layer_surface_v1::Event::Closed => {
+        report("layer-closed", &[]);
+        probe.closed = true;
+      }
+      _ => {}
+    }
+  }
+}
+
+/// `--layer OUTPUT`: a panel on the output called OUTPUT, served until the
+/// compositor closes it.
+fn run_layer(
+  queue: &mut wayland_client::EventQueue<Probe>,
+  probe: &mut Probe,
+  output: &str,
+) -> Result<(), String> {
+  let handle = queue.handle();
+  let (Some(compositor), Some(shell)) = (&probe.compositor, &probe.layer_shell)
+  else {
+    return Err("wl_compositor or zwlr_layer_shell_v1 is missing".into());
+  };
+  let Some((target, _)) = probe
+    .outputs
+    .iter()
+    .find(|(_, name)| name.as_deref() == Some(output))
+  else {
+    return Err(format!("no output called {output}"));
+  };
+  let surface = compositor.create_surface(&handle, ());
+  let layer = shell.get_layer_surface(
+    &surface,
+    Some(target),
+    zwlr_layer_shell_v1::Layer::Top,
+    "wl-probe".into(),
+    &handle,
+    (),
+  );
+  layer.set_anchor(
+    zwlr_layer_surface_v1::Anchor::Top
+      | zwlr_layer_surface_v1::Anchor::Left
+      | zwlr_layer_surface_v1::Anchor::Right,
+  );
+  layer.set_size(0, 30);
+  layer.set_exclusive_zone(30);
+  probe.surface = Some(surface.clone());
+  surface.commit();
+  while !probe.closed {
+    queue
+      .blocking_dispatch(probe)
+      .map_err(|error| error.to_string())?;
+  }
+  layer.destroy();
+  surface.destroy();
+  queue.roundtrip(probe).map_err(|error| error.to_string())?;
+  Ok(())
+}
+
 /// Dispatches until `done(probe)` holds or the toplevel is closed.
 fn dispatch_until(
   queue: &mut wayland_client::EventQueue<Probe>,
@@ -740,7 +955,8 @@ ignore_events!(
   wl_shm::WlShm,
   wl_shm_pool::WlShmPool,
   wl_buffer::WlBuffer,
-  wl_surface::WlSurface,
+  wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+  zwlr_layer_shell_v1::ZwlrLayerShellV1,
   wl_data_device_manager::WlDataDeviceManager,
   wl_data_offer::WlDataOffer,
   wp_fifo_manager_v1::WpFifoManagerV1,
@@ -759,16 +975,32 @@ fn run(options: &Options) -> Result<(), String> {
   let mut probe = Probe {
     copy: options.copy.clone().map(|text| (text, options.delay_ms)),
     pattern: options.pattern,
+    report_outputs: options.report_outputs || options.layer.is_some(),
     ..Probe::default()
   };
   queue
     .roundtrip(&mut probe)
     .map_err(|error| error.to_string())?;
+  if probe.report_outputs {
+    // The outputs' names.
+    queue
+      .roundtrip(&mut probe)
+      .map_err(|error| error.to_string())?;
+  }
+  if let Some(output) = &options.layer {
+    return run_layer(&mut queue, &mut probe, output);
+  }
   let (Some(compositor), Some(wm_base)) = (&probe.compositor, &probe.wm_base)
   else {
     return Err("wl_compositor or xdg_wm_base is missing".into());
   };
   let surface = compositor.create_surface(&handle, ());
+  // Kept alive for as long as the probe runs.
+  let _fractional = probe
+    .fractional_manager
+    .as_ref()
+    .filter(|_| options.report_outputs)
+    .map(|manager| manager.get_fractional_scale(&surface, &handle, ()));
   let xdg_surface = wm_base.get_xdg_surface(&surface, &handle, ());
   let toplevel = xdg_surface.get_toplevel(&handle, ());
   toplevel.set_app_id(app_id.into());
@@ -872,8 +1104,20 @@ mod tests {
         fifo: false,
         damage: false,
         animate: None,
+        report_outputs: false,
+        layer: None,
       }
     );
+    assert!(
+      parse(&arguments(&["--report-outputs"]))
+        .unwrap()
+        .report_outputs
+    );
+    assert_eq!(
+      parse(&arguments(&["--layer", "HEADLESS-2"])).unwrap().layer,
+      Some("HEADLESS-2".into())
+    );
+    assert!(parse(&arguments(&["--layer"])).is_err());
     assert!(parse(&arguments(&["--copy"])).is_err());
     assert!(parse(&arguments(&["--delay-ms", "soon"])).is_err());
     assert!(parse(&arguments(&["--paste"])).is_err());
