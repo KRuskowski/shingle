@@ -297,6 +297,7 @@ impl Frontend {
     target: &mut dyn RenderTarget,
   ) -> Result<(), Box<dyn Error>> {
     self.update_expo_layout();
+    self.retire_frames();
     let now = Instant::now();
     if let Some((started, start)) = self.zoom_animation {
       let progress = animation_progress(
@@ -311,16 +312,24 @@ impl Frontend {
         self.zoom_animation = None;
       }
     }
-    let mut tiles = {
+    let (mut tiles, mut locks) = {
       let renderer = &mut *target;
       renderer.set_scale_factor(self.compositor.output_scale());
       renderer.set_output_transform(render_output_transform(
         self.compositor.output_transform(),
       ));
-      if renderer.set_nearest_filter(self.zoom.interpolation == "nearest") {
+      let nearest = self.zoom.interpolation == "nearest";
+      if renderer.set_nearest_filter(nearest) {
         self.textures.clear();
         self.previous_surfaces.clear();
         self.animations.clear();
+      }
+      if let Some(cache) = &self.dmabuf {
+        cache.borrow_mut().set_filter(if nearest {
+          shingle_render::TextureFilter::Nearest
+        } else {
+          shingle_render::TextureFilter::Linear
+        });
       }
       renderer.set_zoom(
         self.zoom_factor,
@@ -367,12 +376,34 @@ impl Frontend {
         let Some(buffer) = &snapshot.buffer else {
           continue;
         };
-        // DB-4 draws content without CPU pixels from imported textures.
+        if let Some(content) = buffer.dmabuf() {
+          // Imported when the client created it: a commit only picks the
+          // cached texture.
+          let texture = self
+            .dmabuf
+            .as_ref()
+            .and_then(|cache| cache.borrow_mut().texture(&content.buffer));
+          if let Some(texture) = texture {
+            if self.dirty.contains(&snapshot.id) {
+              shingle::trace::buffer(format_args!(
+                "dmabuf cached dmabuf={} surface={}",
+                content.buffer.serial,
+                snapshot.id.get()
+              ));
+            }
+            self.textures.insert(snapshot.id, texture);
+          } else {
+            self.textures.remove(&snapshot.id);
+          }
+          continue;
+        }
         let Some(rgba) = buffer.rgba() else {
           continue;
         };
         let recreate = self.textures.get(&snapshot.id).is_none_or(|texture| {
-          texture.width() != buffer.width || texture.height() != buffer.height
+          texture.is_imported()
+            || texture.width() != buffer.width
+            || texture.height() != buffer.height
         });
         if recreate {
           let texture =
@@ -380,7 +411,14 @@ impl Frontend {
           self.textures.insert(snapshot.id, texture);
         } else if self.dirty.contains(&snapshot.id) {
           renderer.update_texture(&self.textures[&snapshot.id], &rgba)?;
+        } else {
+          continue;
         }
+        shingle::trace::buffer(format_args!(
+          "shm upload {} bytes surface={}",
+          rgba.len(),
+          snapshot.id.get()
+        ));
       }
       for snapshot in &snapshots {
         if snapshot.buffer.is_none() {
@@ -634,7 +672,12 @@ impl Frontend {
           ))
         })
         .collect();
-      tiles
+      let locks = snapshots
+        .iter()
+        .filter_map(|snapshot| snapshot.buffer.as_ref()?.dmabuf())
+        .map(|content| content.lock.clone())
+        .collect::<Vec<_>>();
+      (tiles, locks)
     };
     if let Some(state) = self.expo.as_ref().or(self.expo_exit.as_ref()) {
       let duration = Duration::from_millis(self.expo_config.duration_ms);
@@ -730,7 +773,20 @@ impl Frontend {
     } else {
       self.background_color
     };
-    if renderer.render(&tiles, background)? {
+    let presented = renderer.render(&tiles, background)?;
+    // The buffers this frame samples stay locked until the GPU is done.
+    if let Some(cache) = &self.dmabuf {
+      locks.extend(
+        self
+          .closing_animations
+          .values()
+          .chain(self.minimize_animations.values())
+          .filter_map(|animation| animation.buffer.dmabuf())
+          .map(|content| content.lock.clone()),
+      );
+      cache.borrow_mut().frame_submitted(locks);
+    }
+    if presented {
       self.compositor.frame();
     }
     // The tiles borrow textures from `self`, so only these two fields.

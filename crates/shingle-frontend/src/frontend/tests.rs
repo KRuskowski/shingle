@@ -21,6 +21,7 @@ use shingle_render::{
   TextureTransform,
 };
 use shingle_session::SessionStore;
+use wayland_client::Proxy;
 
 use super::{Frontend, drag::DragState, switcher::SwitcherKind};
 use crate::{
@@ -1051,4 +1052,143 @@ fn screencopy_captures_the_frame_as_drawn_including_inversion() {
   // 0.9 linear is 243 in sRGB.
   let (r, g, b) = first_pixel(&inverted.bytes());
   assert!(r.abs_diff(243) <= 2 && r == g && g == b, "{:?}", (r, g, b));
+}
+
+/// A frontend offering linux-dmabuf through a fake importer whose texture
+/// lives on `target`'s device, and a mapped toplevel, with animations off.
+fn dmabuf_fixture(
+  target: &RecordingTarget,
+) -> (Fixture, crate::dmabuf::tests::FakeImport, Toplevel) {
+  let mut config = ShingleConfig::default();
+  config.animate.open_animation = "none".into();
+  config.animate.close_animation = "none".into();
+  config.tiling.animation_duration = 0;
+  let mut fixture = Fixture::new(config);
+  let texture = target
+    .create_texture(1, 1, &[255; 4])
+    .expect("the fake texture uploads");
+  let fake = crate::dmabuf::tests::FakeImport::new(texture);
+  fixture
+    .frontend
+    .set_dmabuf_importer(
+      crate::dmabuf::tests::test_feedback(),
+      Box::new(fake.clone()),
+    )
+    .expect("linux-dmabuf is offered");
+  fixture.process();
+  let toplevel = fixture.window("dmabuf");
+  (fixture, fake, toplevel)
+}
+
+#[test]
+fn dmabuf_surfaces_draw_cached_imports_and_release_after_the_gpu() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let (mut fixture, fake, toplevel) = dmabuf_fixture(&target);
+  let compositor = fixture.frontend.compositor_mut();
+  let first = fixture.client.dmabuf_buffer(compositor, 64, 32);
+  let second = fixture.client.dmabuf_buffer(compositor, 64, 32);
+  assert_eq!(fake.imports.get(), 2, "each buffer is imported at create");
+  let surface = toplevel.surface.clone();
+  let show = |fixture: &mut Fixture, buffer, target: &mut RecordingTarget| {
+    fixture.client.commit_buffer(
+      fixture.frontend.compositor_mut(),
+      &surface,
+      buffer,
+    );
+    fixture.frontend.process(&mut fixture.host);
+    fixture
+      .frontend
+      .render(&mut fixture.host, target)
+      .expect("the frame renders");
+  };
+  show(&mut fixture, &first, &mut target);
+  assert!(
+    target
+      .frames
+      .last()
+      .is_some_and(|frame| frame.iter().any(|tile| tile.1)),
+    "the surface is drawn from its texture"
+  );
+  show(&mut fixture, &second, &mut target);
+  show(&mut fixture, &first, &mut target);
+  assert_eq!(fake.imports.get(), 2, "commits use the cache");
+  // `second` was replaced, but the frame that drew it may still run.
+  fixture.process();
+  fixture.process();
+  assert!(!fixture.client.releases().contains(&second.id()));
+  fake.finish_work();
+  fixture.process();
+  fixture.process();
+  assert!(fixture.client.releases().contains(&second.id()));
+  assert!(
+    !fixture.client.releases().contains(&first.id()),
+    "first is shown"
+  );
+}
+
+#[test]
+fn dmabuf_textures_are_imported_again_after_a_gpu_loss() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let (mut fixture, fake, toplevel) = dmabuf_fixture(&target);
+  let compositor = fixture.frontend.compositor_mut();
+  let buffer = fixture.client.dmabuf_buffer(compositor, 64, 32);
+  fixture.client.commit_buffer(
+    fixture.frontend.compositor_mut(),
+    &toplevel.surface,
+    &buffer,
+  );
+  fixture.frontend.process(&mut fixture.host);
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  assert_eq!(fake.imports.get(), 1);
+  fixture.frontend.drop_gpu_resources();
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  assert_eq!(fake.imports.get(), 2, "imported again from the kept fds");
+  assert!(
+    target
+      .frames
+      .last()
+      .is_some_and(|frame| frame.iter().any(|tile| tile.1))
+  );
+}
+
+#[test]
+fn a_surface_that_goes_from_dmabuf_to_shm_gets_an_uploaded_texture() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let (mut fixture, _fake, toplevel) = dmabuf_fixture(&target);
+  let compositor = fixture.frontend.compositor_mut();
+  let buffer = fixture.client.dmabuf_buffer(compositor, 200, 150);
+  fixture.client.commit_buffer(
+    fixture.frontend.compositor_mut(),
+    &toplevel.surface,
+    &buffer,
+  );
+  fixture.frontend.process(&mut fixture.host);
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  fixture.client.attach_buffer(
+    fixture.frontend.compositor_mut(),
+    &toplevel.surface,
+    200,
+    150,
+  );
+  fixture.frontend.process(&mut fixture.host);
+  // Writing shm pixels into the imported texture would fail validation.
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
 }

@@ -15,8 +15,11 @@ use wayland_client::{
     wl_shm_pool, wl_surface,
   },
 };
-use wayland_protocols::xdg::shell::client::{
-  xdg_surface, xdg_toplevel, xdg_wm_base,
+use wayland_protocols::{
+  wp::linux_dmabuf::zv1::client::{
+    zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1,
+  },
+  xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
 };
 use wayland_protocols_wlr::screencopy::v1::client::{
   zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
@@ -31,6 +34,8 @@ pub(crate) struct Events {
   configures: Vec<(wayland_client::backend::ObjectId, i32, i32)>,
   /// Screencopy outcomes, `ready` or `failed`, in order.
   pub(crate) captures: Vec<&'static str>,
+  /// The `wl_buffer`s that received `release`, in order.
+  pub(crate) releases: Vec<wayland_client::backend::ObjectId>,
   synced: bool,
 }
 
@@ -54,7 +59,7 @@ impl Capture {
 
 /// A mapped toplevel; dropping it leaves the window in place.
 pub(crate) struct Toplevel {
-  _surface: wl_surface::WlSurface,
+  pub(crate) surface: wl_surface::WlSurface,
   _xdg_surface: xdg_surface::XdgSurface,
   _toplevel: xdg_toplevel::XdgToplevel,
 }
@@ -156,7 +161,7 @@ impl TestClient {
       .unwrap_or((200, 150));
     self.attach_buffer(compositor, &surface, width, height);
     Toplevel {
-      _surface: surface,
+      surface,
       _xdg_surface: xdg_surface,
       _toplevel: toplevel,
     }
@@ -208,6 +213,55 @@ impl TestClient {
       fd,
       size: size as usize,
     }
+  }
+
+  /// A `width` by `height` XRGB8888 linear DMA-BUF made with
+  /// `create_immed`, from a memfd: what a fake importer accepts.
+  pub(crate) fn dmabuf_buffer(
+    &mut self,
+    compositor: &mut Compositor,
+    width: i32,
+    height: i32,
+  ) -> wl_buffer::WlBuffer {
+    let dmabuf = self.bind::<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1>(5);
+    let fd = rustix::fs::memfd_create(
+      "shingle-frontend-test-dmabuf",
+      rustix::fs::MemfdFlags::CLOEXEC,
+    )
+    .expect("memfd_create succeeds");
+    rustix::fs::ftruncate(&fd, (width * height * 4) as u64)
+      .expect("ftruncate succeeds");
+    let params = dmabuf.create_params(&self.handle, ());
+    params.add(rustix::fd::AsFd::as_fd(&fd), 0, 0, (width * 4) as u32, 0, 0);
+    let buffer = params.create_immed(
+      width,
+      height,
+      u32::from_le_bytes(*b"XR24"),
+      zwp_linux_buffer_params_v1::Flags::empty(),
+      &self.handle,
+      (),
+    );
+    params.destroy();
+    self.roundtrip(compositor);
+    buffer
+  }
+
+  /// Attaches `buffer` to `surface`, damages it all and commits.
+  pub(crate) fn commit_buffer(
+    &mut self,
+    compositor: &mut Compositor,
+    surface: &wl_surface::WlSurface,
+    buffer: &wl_buffer::WlBuffer,
+  ) {
+    surface.attach(Some(buffer), 0, 0);
+    surface.damage(0, 0, i32::MAX, i32::MAX);
+    surface.commit();
+    self.roundtrip(compositor);
+  }
+
+  /// The buffers released so far.
+  pub(crate) fn releases(&self) -> &[wayland_client::backend::ObjectId] {
+    &self.events.releases
   }
 
   /// The screencopy outcomes so far.
@@ -265,6 +319,21 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Events {
     } = event
     {
       events.globals.push((name, interface, version));
+    }
+  }
+}
+
+impl Dispatch<wl_buffer::WlBuffer, ()> for Events {
+  fn event(
+    events: &mut Self,
+    buffer: &wl_buffer::WlBuffer,
+    event: wl_buffer::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wl_buffer::Event::Release = event {
+      events.releases.push(buffer.id());
     }
   }
 }
@@ -371,7 +440,8 @@ ignore_events!(
   wl_surface::WlSurface,
   wl_shm::WlShm,
   wl_shm_pool::WlShmPool,
-  wl_buffer::WlBuffer,
   wl_output::WlOutput,
   ZwlrScreencopyManagerV1,
+  zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+  zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
 );

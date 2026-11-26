@@ -3215,6 +3215,7 @@ dependencies = [
  "wayland-protocols 0.32.13",
  "wayland-protocols-wlr 0.3.12",
  "wayland-server",
+ "wgpu 30.0.2",
  "xkbcommon",
 ]
 

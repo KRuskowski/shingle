@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 pub mod bindings;
+mod dmabuf;
 pub mod expo;
 pub mod extra_gestures;
 mod frontend;

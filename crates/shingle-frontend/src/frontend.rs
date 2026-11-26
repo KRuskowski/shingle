@@ -18,9 +18,11 @@ mod switcher;
 mod tests;
 
 use std::{
+  cell::RefCell,
   collections::{HashMap, HashSet},
   error::Error,
   process::Child,
+  rc::Rc,
   time::{Duration, Instant},
 };
 
@@ -32,7 +34,7 @@ use shingle_config::{
   CommandBinding, ConfigWatcher, Keybindings, PointerBindings, ShingleConfig,
 };
 use shingle_core::WindowId as TileWindowId;
-use shingle_render::{GpuTexture, RenderRect};
+use shingle_render::{GpuContext, GpuTexture, RenderRect};
 use shingle_session::{
   SessionStore, launch_autostart, launch_program, launch_saved,
 };
@@ -153,15 +155,38 @@ pub struct Frontend {
   redraw_requested: bool,
   /// Screencopy captures the next frame answers, with their regions.
   captures: Vec<(CaptureId, shingle_core::Rect)>,
+  /// Imported DMA-BUF textures and the locks of frames in flight, once
+  /// linux-dmabuf is offered.
+  dmabuf: Option<Rc<RefCell<crate::dmabuf::DmabufTextures>>>,
+  /// The clients [`Frontend::start_clients`] starts.
+  startup: Option<Startup>,
+}
+
+/// What [`Frontend::new`] leaves for [`Frontend::start_clients`].
+struct Startup {
+  restored: Option<shingle_core::SessionSnapshot>,
+  autostart: Vec<String>,
+  spawn: Vec<std::ffi::OsString>,
+}
+
+/// The major number of a Linux `dev_t`, as `major(3)`.
+fn dev_major(device: u64) -> u64 {
+  ((device >> 32) & 0xffff_f000) | ((device >> 8) & 0xfff)
+}
+
+/// The minor number of a Linux `dev_t`, as `minor(3)`.
+fn dev_minor(device: u64) -> u64 {
+  ((device >> 12) & 0xffff_ff00) | (device & 0xff)
 }
 
 impl Frontend {
-  /// Starts the frontend: restores the saved session or creates a new
-  /// compositor, serves Wayfire IPC at `ipc` if given, launches restored
-  /// and autostart clients, prints `WAYLAND_DISPLAY` and starts `spawn`, if
-  /// given, as a client. Every client is started in
-  /// [`Compositor::client_environment`], so IPC is enabled first for them
-  /// to find it as `WAYFIRE_SOCKET`.
+  /// Creates the frontend: restores the saved session's window model or
+  /// creates a new compositor, and serves Wayfire IPC at `ipc` if given.
+  /// No client is started yet: the host first enables linux-dmabuf once
+  /// its renderer exists ([`Frontend::enable_dmabuf`]), since most
+  /// clients look for the global only once, and then calls
+  /// [`Frontend::start_clients`], which launches the restored session's
+  /// clients, autostart and `spawn`.
   ///
   /// The host registers its seat devices afterwards with
   /// [`Frontend::compositor_mut`].
@@ -176,70 +201,142 @@ impl Frontend {
     } else {
       SessionStore::default_location()?
     };
-    let discard_output = config.behavior.discard_command_output;
     let restored = if config.session.restore {
       store.load()?
     } else {
       None
     };
-    let (compositor, mut session_children, restored_snapshot) =
-      if let Some((core, snapshot)) = restored {
-        let mut compositor =
-          Compositor::with_core(Config::from(config.clone()), core)?;
-        if let Some(path) = ipc {
-          compositor.enable_ipc(path)?;
-        }
-        let report = launch_saved(
-          &snapshot,
-          &compositor.client_environment(),
-          discard_output,
-        );
-        for error in &report.failed {
-          eprintln!("shingle: session restore launch failed: {error}");
-        }
-        let children = report
-          .launched
-          .into_iter()
-          .map(|launched| launched.child)
-          .collect();
-        (compositor, children, Some(snapshot))
-      } else {
-        let mut compositor = Compositor::new(Config::from(config.clone()))?;
-        if let Some(path) = ipc {
-          compositor.enable_ipc(path)?;
-        }
-        (compositor, Vec::new(), None)
-      };
-    let autostart = launch_autostart(
-      &config.autostart,
-      restored_snapshot.as_ref(),
-      &compositor.client_environment(),
-      discard_output,
-    );
-    for error in &autostart.failed {
-      eprintln!("shingle: {error}");
+    let (mut compositor, restored) = match restored {
+      Some((core, snapshot)) => (
+        Compositor::with_core(Config::from(config.clone()), core)?,
+        Some(snapshot),
+      ),
+      None => (Compositor::new(Config::from(config.clone()))?, None),
+    };
+    if let Some(path) = ipc {
+      compositor.enable_ipc(path)?;
     }
-    session_children.extend(autostart.children);
+    let startup = Startup {
+      restored,
+      autostart: config.autostart.clone(),
+      spawn,
+    };
     let mut frontend = Self::with_compositor(
       config,
       compositor,
       store,
-      session_children,
+      Vec::new(),
       config_path,
     )?;
+    frontend.startup = Some(startup);
+    Ok(frontend)
+  }
+
+  /// Starts the clients [`Frontend::new`] left for later: the restored
+  /// session's, autostart and the `spawn` program, all in
+  /// [`Compositor::client_environment`], and prints `WAYLAND_DISPLAY` and
+  /// `DISPLAY`. Only the first call does anything.
+  ///
+  /// # Errors
+  ///
+  /// When the `spawn` program cannot be started. Failed session and
+  /// autostart launches are logged instead.
+  pub fn start_clients(&mut self) -> Result<(), Box<dyn Error>> {
+    let Some(startup) = self.startup.take() else {
+      return Ok(());
+    };
+    let environment = self.compositor.client_environment();
+    if let Some(snapshot) = &startup.restored {
+      let report =
+        launch_saved(snapshot, &environment, self.discard_command_output);
+      for error in &report.failed {
+        eprintln!("shingle: session restore launch failed: {error}");
+      }
+      self
+        .session_children
+        .extend(report.launched.into_iter().map(|launched| launched.child));
+    }
+    let autostart = launch_autostart(
+      &startup.autostart,
+      startup.restored.as_ref(),
+      &environment,
+      self.discard_command_output,
+    );
+    for error in &autostart.failed {
+      eprintln!("shingle: {error}");
+    }
+    self.session_children.extend(autostart.children);
     println!(
       "WAYLAND_DISPLAY={}",
-      frontend.compositor.socket_name().to_string_lossy()
+      self.compositor.socket_name().to_string_lossy()
     );
-    if let Some(display) = frontend.compositor.x_display() {
+    if let Some(display) = self.compositor.x_display() {
       println!("DISPLAY={display}");
     }
-    if let Some((program, args)) = spawn.split_first() {
-      let environment = frontend.compositor.client_environment();
+    if let Some((program, args)) = startup.spawn.split_first() {
       let child = launch_program(program, args, &environment)?;
-      frontend.session_children.push(child);
+      self.session_children.push(child);
     }
-    Ok(frontend)
+    Ok(())
+  }
+
+  /// Offers linux-dmabuf to clients if `gpu` can import DMA-BUFs, has a
+  /// render node to advertise and `SHINGLE_DMABUF` is not `0`, and logs
+  /// one line saying which (docs/design/dmabuf.md, section 9). Returns
+  /// whether the global is offered. Hosts call it once their renderer
+  /// exists and before [`Frontend::start_clients`], and again with the
+  /// new context after a GPU loss.
+  pub fn enable_dmabuf(&mut self, gpu: &GpuContext) -> bool {
+    let decision = crate::dmabuf::feedback(
+      std::env::var_os("SHINGLE_DMABUF").as_deref(),
+      gpu.dmabuf(),
+    );
+    let (feedback, importer) = match (decision, gpu.texture_importer()) {
+      (Ok(feedback), Some(importer)) => (feedback, importer),
+      (Err(reason), _) => {
+        eprintln!("shingle: {reason}");
+        return false;
+      }
+      (Ok(_), None) => {
+        eprintln!("shingle: no linux-dmabuf: the device cannot import");
+        return false;
+      }
+    };
+    let pairs = feedback.formats.len();
+    let device = feedback.main_device;
+    match self.set_dmabuf_importer(feedback, Box::new(importer)) {
+      Ok(()) => {
+        eprintln!(
+          "shingle: linux-dmabuf version 5 on render node {}:{}, {pairs} \
+           format and modifier pairs",
+          dev_major(device),
+          dev_minor(device)
+        );
+        true
+      }
+      Err(error) => {
+        eprintln!("shingle: no linux-dmabuf: {error}");
+        false
+      }
+    }
+  }
+
+  /// Offers linux-dmabuf with `feedback`, importing through `importer`
+  /// into a texture cache the scene draws from.
+  pub(crate) fn set_dmabuf_importer(
+    &mut self,
+    feedback: shingle::DmabufFeedback,
+    importer: Box<dyn crate::dmabuf::Import>,
+  ) -> Result<(), shingle::Error> {
+    let cache =
+      Rc::new(RefCell::new(crate::dmabuf::DmabufTextures::new(importer)));
+    self.compositor.enable_dmabuf(
+      feedback,
+      Box::new(crate::dmabuf::CacheImporter(Rc::clone(&cache))),
+    )?;
+    self.dmabuf = Some(cache);
+    self.request_redraw();
+    Ok(())
   }
 
   /// Builds the frontend around an existing compositor, which gets the
@@ -365,6 +462,8 @@ impl Frontend {
       quit: false,
       redraw_requested: false,
       captures: Vec::new(),
+      dmabuf: None,
+      startup: None,
     })
   }
 
@@ -709,6 +808,8 @@ impl Frontend {
       host.exit();
       return;
     }
+    // Buffers of finished frames are released by this turn's dispatch.
+    self.retire_frames();
     if let Err(error) = self.compositor.dispatch_pending() {
       eprintln!("shingle: dispatch failed: {error}");
       host.exit();
@@ -814,9 +915,14 @@ impl Frontend {
   /// old frames, Scale titles, icons and the filter text. The native host
   /// calls it before drawing with a new GPU context after the old device
   /// was lost; the next frame uploads everything again from the
-  /// compositor's surface snapshots, which keep their pixels. Closing
+  /// compositor's surface snapshots, which keep their pixels, and
+  /// imports DMA-BUFs again from their kept fds. The locks of frames in
+  /// flight are dropped, since a lost device runs nothing more. Closing
   /// animations whose texture is gone are not drawn.
   pub fn drop_gpu_resources(&mut self) {
+    if let Some(cache) = &self.dmabuf {
+      cache.borrow_mut().clear();
+    }
     self.textures.clear();
     self.previous_surfaces.clear();
     self.animations.clear();
@@ -844,6 +950,16 @@ impl Frontend {
 
   fn request_redraw(&mut self) {
     self.redraw_requested = true;
+  }
+
+  /// Drops the buffer locks of frames the GPU has finished and the
+  /// textures of buffers that are gone.
+  fn retire_frames(&mut self) {
+    if let Some(cache) = &self.dmabuf {
+      let mut cache = cache.borrow_mut();
+      cache.retire();
+      cache.prune();
+    }
   }
 
   /// Passes a pending redraw request on to the host.

@@ -201,6 +201,9 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     compositor.set_default_cursor(true);
     compositor.set_device_natural_scroll(true);
     frontend.set_output_size(output_size.0, output_size.1)?;
+    if let Some(gpu) = rendering.renderer.gpu() {
+      frontend.enable_dmabuf(gpu);
+    }
     display.start()?;
     let output = frontend.compositor().output();
     let mut translator = Translator::default();
@@ -821,7 +824,14 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     self.renderer = None;
     self.frontend.drop_gpu_resources();
     match (self.factory)(self.output_size) {
-      Ok(renderer) => self.renderer = Some(renderer),
+      Ok(renderer) => {
+        // The same feedback if the render node is the same; the importer
+        // and cache are the new device's.
+        if let Some(gpu) = renderer.gpu() {
+          self.frontend.enable_dmabuf(gpu);
+        }
+        self.renderer = Some(renderer);
+      }
       Err(error) => {
         diagnostics::log(&format!("creating a GPU context failed: {error}"))
       }

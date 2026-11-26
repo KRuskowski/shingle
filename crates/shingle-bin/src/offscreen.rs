@@ -59,6 +59,8 @@ pub fn run(
   eprintln!("shingle: {}", gpu.dmabuf_summary());
   let mut frontend = Frontend::new(config, spawn, config_path, ipc_path)?;
   register_stipc_devices(frontend.compositor_mut());
+  frontend.enable_dmabuf(&gpu);
+  frontend.start_clients()?;
   let mut output = OffscreenOutput::new(gpu);
   let mut host = OffscreenHost {
     redraw: true,

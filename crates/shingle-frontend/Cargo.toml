@@ -15,6 +15,7 @@ shingle-core = { path = "../shingle-core" }
 shingle-render = { path = "../shingle-render" }
 shingle-session = { path = "../shingle-session" }
 wayland-server.workspace = true
+wgpu.workspace = true
 xkbcommon.workspace = true
 
 [dev-dependencies]
