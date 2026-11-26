@@ -118,5 +118,21 @@ class PrivateEnvironmentTest(unittest.TestCase):
     self.assertEqual(environment['XDG_RUNTIME_DIR'], '/tmp/x/runtime')
     self.assertEqual(environment['HOME'], '/tmp/x/home')
 
+class GrimTest(unittest.TestCase):
+  """grim_scale, red, white and grey."""
+
+  def test_grim_takes_the_highest_scale_of_the_outputs_it_overlaps(self):
+    outputs = [(0, 0, 1280, 720, 1), (1280, 0, 1280, 720, 2)]
+    self.assertEqual(run.grim_scale(outputs, (1270, 0, 20, 40)), 2)
+    self.assertEqual(run.grim_scale(outputs, (0, 0, 1280, 720)), 1)
+    self.assertEqual(run.grim_scale(outputs, (5000, 0, 1, 1)), 1)
+
+  def test_colours(self):
+    self.assertTrue(run.grey((89, 90, 88)))
+    self.assertFalse(run.grey((255, 255, 255)))
+    self.assertTrue(run.white((255, 255, 255)))
+    self.assertTrue(run.red((255, 0, 0)))
+    self.assertFalse(run.red((89, 89, 89)))
+
 if __name__ == '__main__':
   unittest.main()

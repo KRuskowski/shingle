@@ -14,10 +14,11 @@ off.
 Usage, from the repository root and outside any sandbox that forbids
 user namespaces:
 
-  cargo build -p shingle-bin
+  cargo build -p shingle-bin -p shingle-lock
   cargo build -p shingle --example wl_probe
   tools/output_test/run.py [--binary target/debug/shingle]
-      [--wl-probe target/debug/examples/wl_probe] [--keep]
+      [--wl-probe target/debug/examples/wl_probe]
+      [--lock target/debug/shingle-lock] [--keep]
 
 It prints one line per check and exits 0 when all pass. The checks are
 the parts of NB-9 (docs/design/native-backend.md) that are not
@@ -40,9 +41,22 @@ whose set belongs to `HEADLESS-3` waits on the active output, moves to
 `HEADLESS-3` when IPC creates it and back when IPC destroys it. That
 needs `cargo build -p shingle --example wl_probe`.
 
-Signals go only to Shingle and wl_probe, through `signal_checked`. The
-pure helpers are tested by `python3 -m unittest` in this directory
-(test_run.py).
+The MO-3 checks (docs/design/multi-output.md) run client protocols
+against two outputs, `HEADLESS-2` at scale 2: `grim -o` of each output
+in its own physical pixels and `grim -g` across both; a `wl_probe
+--layer HEADLESS-2` panel on that output, closed when `wlr-randr
+--output HEADLESS-2 --off` turns the output off, and another on an
+output IPC created, closed when IPC destroys it; `--on` and `--pos`;
+`wl_probe --report-outputs` entering and leaving outputs with their
+preferred scales as its output goes and comes back; and `shingle-lock`
+(`cargo build -p shingle-lock`) locking both outputs and unlocking
+again. For the unlock a private `/etc/pam.d` with a permit-all `shingle`
+service is bind-mounted in the namespace, so any typed password passes;
+the host's PAM files are not touched.
+
+Signals go only to Shingle, wl_probe and shingle-lock, through
+`signal_checked`. The pure helpers are tested by `python3 -m unittest`
+in this directory (test_run.py).
 """
 
 import argparse
@@ -54,6 +68,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 
 def _load_xwayland_harness():
   """tools/xwayland_test/run.py, for its IPC client, results and the
@@ -69,6 +84,7 @@ _HARNESS = _load_xwayland_harness()
 Ipc = _HARNESS.Ipc
 Results = _HARNESS.Results
 device_fds = _HARNESS.device_fds
+parse_ppm = _HARNESS.parse_ppm
 signal_checked = _HARNESS.signal_checked
 wait_for = _HARNESS.wait_for
 
@@ -154,6 +170,16 @@ def swap_outputs(session, first, second):
     for key in ('output', 'home'):
       wset[key] = swap.get(wset[key], wset[key])
   return session
+
+def grim_scale(outputs, region):
+  """The scale `grim -g` renders `region` (x, y, width, height) at: the
+  highest scale of the outputs, (x, y, width, height, scale), it
+  overlaps, as grim 1.4 chooses it."""
+  x, y, width, height = region
+  scales = [scale for ox, oy, ow, oh, scale in outputs
+            if ox < x + width and x < ox + ow and oy < y + height
+            and y < oy + oh]
+  return max(scales, default=1)
 
 def current_mode(head):
   """The (width, height, refresh_hz) of the head's current mode, or None."""
@@ -250,6 +276,24 @@ class Headless:
         NAMESPACE_VARIABLE: '1',
     }
 
+  def grim(self, *arguments):
+    """A capture through `grim -t ppm`, as a `Shot`, or None."""
+    try:
+      done = subprocess.run(['grim', '-t', 'ppm', *arguments, '-'],
+                            env=self.client_environment(),
+                            capture_output=True, timeout=30,
+                            stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+      return None
+    parsed = parse_ppm(done.stdout) if done.returncode == 0 else None
+    return Shot(*parsed) if parsed else None
+
+  def client(self, arguments, program, extra_environment=None):
+    """Starts a client of this Shingle."""
+    environment = self.client_environment()
+    environment.update(extra_environment or {})
+    return Client(arguments, environment, program)
+
   def heads(self):
     """What `wlr-randr` lists."""
     status, output = self.randr()
@@ -287,6 +331,100 @@ class Headless:
       return 'timeout'
     finally:
       self.log.close()
+
+PAM_PERMIT = ('auth sufficient pam_permit.so\n'
+              'account sufficient pam_permit.so\n')
+
+def grey(pixel):
+  """Whether an (r, g, b) pixel is the default background, 0.1 linear or
+  89 in sRGB."""
+  return all(abs(channel - 89) <= 3 for channel in pixel)
+
+def white(pixel):
+  """Whether an (r, g, b) pixel is white."""
+  return all(channel >= 250 for channel in pixel)
+
+def red(pixel):
+  """Whether an (r, g, b) pixel is clearly red."""
+  return pixel[0] > 200 and pixel[1] < 60 and pixel[2] < 60
+
+class Shot:
+  """A grim capture as RGB pixels."""
+
+  def __init__(self, width, height, pixels):
+    self.size = (width, height)
+    self.pixels = pixels
+
+  def pixel(self, x, y):
+    """The (r, g, b) at (x, y)."""
+    offset = (y * self.size[0] + x) * 3
+    return tuple(self.pixels[offset:offset + 3])
+
+class Client:
+  """A long-running client of a Shingle, with its stdout and stderr read
+  in the background as lines."""
+
+  def __init__(self, arguments, environment, program):
+    self.program = program
+    self.process = subprocess.Popen(
+        arguments, env=environment, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    self.lines = []
+    self.lock = threading.Lock()
+    self.reader = threading.Thread(target=self._read, daemon=True)
+    self.reader.start()
+
+  def _read(self):
+    for line in self.process.stdout:
+      with self.lock:
+        self.lines.append(line.rstrip('\n'))
+
+  def text(self):
+    """Everything the client printed so far."""
+    with self.lock:
+      return '\n'.join(self.lines)
+
+  def events(self):
+    """The JSON lines the client printed, parsed; other lines skipped."""
+    with self.lock:
+      lines = list(self.lines)
+    events = []
+    for line in lines:
+      try:
+        events.append(json.loads(line))
+      except ValueError:
+        pass
+    return events
+
+  def wait_event(self, name, timeout=10.0, after=0, **fields):
+    """The first `name` event at index `after` or later whose fields
+    include `fields`, waiting up to `timeout` seconds."""
+
+    def find():
+      return next((event for event in self.events()[after:]
+                   if event.get('event') == name
+                   and all(event.get(key) == value
+                           for key, value in fields.items())), None)
+    return wait_for(find, timeout)
+
+  def wait_line(self, text, timeout=10.0):
+    """Whether a line containing `text` was printed within `timeout`."""
+    return wait_for(lambda: text in self.text(), timeout) or False
+
+  def exited(self, timeout=10.0):
+    """Waits for the client to exit; returns its status or None."""
+    try:
+      return self.process.wait(timeout)
+    except subprocess.TimeoutExpired:
+      return None
+
+  def stop(self):
+    """SIGTERM, then SIGKILL, each through `signal_checked`."""
+    if self.process.poll() is None:
+      signal_checked(self.process.pid, signal.SIGTERM, self.program)
+      if self.exited(5) is None:
+        signal_checked(self.process.pid, signal.SIGKILL, self.program)
+        self.exited(5)
 
 def yaml_config(output):
   """A YAML config (as JSON) with Xwayland off and `output` as its output
@@ -679,6 +817,205 @@ def session_checks(results, binary, wl_probe):
                 status == 0, str(status))
   return second.log_text()
 
+def mo3_config():
+  """Two outputs, HEADLESS-2 at scale 2, with Xwayland off."""
+  return multi_config([{'name': 'HEADLESS-2', 'scale': 2}])
+
+def enabled_heads(shingle):
+  """{name: enabled} of the heads `wlr-randr` lists."""
+  return {name: head.get('enabled') for name, head in shingle.heads().items()}
+
+def capture_checks(results, shingle, wl_probe):
+  """grim per output and across both, with a layer panel on HEADLESS-2;
+  the panel is closed when wlr-randr turns HEADLESS-2 off."""
+  first = shingle.grim('-o', 'HEADLESS-1')
+  second = shingle.grim('-o', 'HEADLESS-2')
+  results.check('MO-3: grim -o HEADLESS-1 captures 1280x720',
+                first is not None and first.size == (1280, 720)
+                and grey(first.pixel(640, 360)),
+                str(first and first.size))
+  results.check('MO-3: grim -o HEADLESS-2 captures 2560x1440 at scale 2',
+                second is not None and second.size == (2560, 1440)
+                and grey(second.pixel(1280, 720)),
+                str(second and second.size))
+  panel = shingle.client([wl_probe, '--layer', 'HEADLESS-2'], 'wl_probe')
+  try:
+    configure = panel.wait_event('layer-configure')
+    results.check('MO-3: a layer panel on HEADLESS-2 gets its width',
+                  configure is not None and configure['width'] == 1280
+                  and configure['height'] == 30, str(configure))
+    drawn = wait_for(lambda: (lambda shot: shot if shot and white(
+        shot.pixel(1280, 10)) else None)(shingle.grim('-o', 'HEADLESS-2')))
+    results.check('MO-3: grim -o HEADLESS-2 shows the panel in its pixels',
+                  drawn is not None and white(drawn.pixel(2559, 59))
+                  and grey(drawn.pixel(1280, 60)),
+                  str(drawn and [drawn.pixel(1280, 10),
+                                 drawn.pixel(1280, 60)]))
+    region = (1270, 0, 20, 40)
+    scale = grim_scale([(0, 0, 1280, 720, 1), (1280, 0, 1280, 720, 2)],
+                       region)
+    across = shingle.grim('-g', '1270,0 20x40')
+    results.check('MO-3: grim -g across both outputs joins them',
+                  across is not None
+                  and across.size == (20 * scale, 40 * scale)
+                  and grey(across.pixel(5, 10))
+                  and white(across.pixel(30, 10))
+                  and grey(across.pixel(30, 70)),
+                  str(across and (across.size, across.pixel(5, 10),
+                                  across.pixel(30, 10),
+                                  across.pixel(30, 70))))
+    status, output = shingle.randr('--output', 'HEADLESS-2', '--off')
+    closed = panel.wait_event('layer-closed')
+    results.check('MO-3: wlr-randr --off turns HEADLESS-2 off',
+                  status == 0 and enabled_heads(shingle)
+                  == {'HEADLESS-1': True, 'HEADLESS-2': False}
+                  and 'HEADLESS-2' not in shingle.xdg_outputs(),
+                  f'{output.strip()} {enabled_heads(shingle)}')
+    results.check('MO-3: the panel on it is closed, and the probe exits 0',
+                  closed is not None and panel.exited() == 0,
+                  panel.text()[-300:])
+  finally:
+    panel.stop()
+  status, output = shingle.randr('--output', 'HEADLESS-2', '--on')
+  heads = shingle.heads()
+  results.check('MO-3: wlr-randr --on turns it on again where it was',
+                status == 0 and heads.get('HEADLESS-2', {}).get('enabled')
+                and heads['HEADLESS-2'].get('position') == (1280, 0)
+                and heads['HEADLESS-2'].get('scale') == 2.0
+                and shingle.xdg_outputs().get('HEADLESS-2')
+                == (1280, 0, 1280, 720),
+                f'{output.strip()} {heads.get("HEADLESS-2")}')
+
+def report_checks(results, shingle, wl_probe):
+  """wl_probe --report-outputs enters and leaves outputs, with their
+  scales, as its output goes and comes back."""
+  probe = shingle.client([wl_probe, 'mo3-probe', '--report-outputs'],
+                         'wl_probe')
+  try:
+    entered = probe.wait_event('output-enter')
+    scale = probe.wait_event('preferred-scale')
+    results.check('MO-3: the probe enters HEADLESS-1 at scale 1',
+                  entered == {'event': 'output-enter',
+                              'output': 'HEADLESS-1'}
+                  and scale is not None and scale['scale'] == 120,
+                  f'{entered} {scale}')
+    mark = len(probe.events())
+    status, output = shingle.randr('--output', 'HEADLESS-1', '--off')
+    left = probe.wait_event('output-leave', after=mark)
+    entered = probe.wait_event('output-enter', after=mark)
+    scale = probe.wait_event('preferred-scale', after=mark, scale=240)
+    buffer_scale = probe.wait_event('buffer-scale', after=mark, factor=2)
+    results.check('MO-3: turned off, HEADLESS-1 is left for HEADLESS-2',
+                  status == 0 and left is not None
+                  and left['output'] == 'HEADLESS-1'
+                  and entered is not None
+                  and entered['output'] == 'HEADLESS-2',
+                  f'{output.strip()} {probe.events()[mark:]}')
+    results.check('MO-3: and the probe is told HEADLESS-2\'s scale 2',
+                  scale is not None and buffer_scale is not None,
+                  str(probe.events()[mark:]))
+    mark = len(probe.events())
+    status, output = shingle.randr('--output', 'HEADLESS-1', '--on')
+    left = probe.wait_event('output-leave', after=mark)
+    entered = probe.wait_event('output-enter', after=mark)
+    scale = probe.wait_event('preferred-scale', after=mark, scale=120)
+    results.check('MO-3: back on, the window returns to HEADLESS-1',
+                  status == 0 and left is not None
+                  and left['output'] == 'HEADLESS-2'
+                  and entered is not None
+                  and entered['output'] == 'HEADLESS-1'
+                  and scale is not None,
+                  f'{output.strip()} {probe.events()[mark:]}')
+  finally:
+    probe.stop()
+
+def type_text(ipc, text):
+  """Types lowercase letters, digits and newlines through STIPC."""
+  for character in text:
+    key = _HARNESS.KEY_NAMES.get(character, f'KEY_{character.upper()}')
+    for pressed in (True, False):
+      ipc.call('stipc/feed_key', {'key': key, 'state': pressed})
+
+def lock_checks(results, shingle, lock_binary):
+  """shingle-lock covers both outputs, and a typed password unlocks."""
+  lock = shingle.client([lock_binary, '--color', 'ff0000'], 'shingle-lock',
+                        {'VK_ICD_FILENAMES': _HARNESS.LAVAPIPE})
+  try:
+    ready = lock.wait_line('opaque lock surfaces committed on 2 output(s)',
+                           timeout=30)
+    locked = lock.wait_line('compositor reported the session locked')
+    results.check('MO-3: shingle-lock covers both outputs and is locked',
+                  ready and locked, lock.text()[-400:])
+    shots = {name: shingle.grim('-o', name)
+             for name in ('HEADLESS-1', 'HEADLESS-2')}
+    results.check('MO-3: both outputs show the lock colour',
+                  all(shot is not None and red(shot.pixel(10, 10))
+                      and red(shot.pixel(shot.size[0] - 10,
+                                         shot.size[1] - 10))
+                      for shot in shots.values()),
+                  str({name: shot and shot.pixel(10, 10)
+                       for name, shot in shots.items()}))
+    type_text(shingle.ipc, 'secret\n')
+    unlocked = lock.wait_line('session unlocked', timeout=20)
+    status = lock.exited(10)
+    shot = shingle.grim('-o', 'HEADLESS-2')
+    results.check('MO-3: a typed password unlocks, and shingle-lock exits 0',
+                  unlocked and status == 0 and shot is not None
+                  and not red(shot.pixel(10, 10)),
+                  f'{status} {lock.text()[-400:]}')
+  finally:
+    lock.stop()
+
+def created_layer_checks(results, shingle, wl_probe):
+  """A panel on an output IPC created is closed when IPC destroys it."""
+  created = shingle.ipc.call('wayfire/create-headless-output',
+                             {'width': 640, 'height': 480})
+  name = created.get('output', {}).get('name')
+  panel = shingle.client([wl_probe, '--layer', name or '?'], 'wl_probe')
+  try:
+    configure = panel.wait_event('layer-configure')
+    results.check(f'MO-3: a panel on the created {name} gets its width',
+                  configure is not None and configure['width'] == 640,
+                  f'{created} {configure} {panel.text()[-200:]}')
+    destroyed = shingle.ipc.call('wayfire/destroy-headless-output',
+                                 {'output': name})
+    closed = panel.wait_event('layer-closed')
+    results.check(f'MO-3: destroying {name} closes the panel',
+                  destroyed == {'result': 'ok'} and closed is not None
+                  and panel.exited() == 0, f'{destroyed} {panel.text()}')
+  finally:
+    panel.stop()
+
+def protocol_checks(results, binary, wl_probe, lock_binary):
+  """MO-3's client protocols against two outputs."""
+  shingle = Headless(binary, 'protocols', mo3_config(), 'yaml',
+                     backend=('--headless', '--outputs', '2'),
+                     extra_environment={NAMESPACE_VARIABLE: '1'})
+  try:
+    for checks in (capture_checks, report_checks, created_layer_checks):
+      checks(results, shingle, wl_probe)
+    if lock_binary:
+      lock_checks(results, shingle, lock_binary)
+    status, output = shingle.randr('--output', 'HEADLESS-2', '--pos', '0,720')
+    positions = shingle.positions()
+    results.check('MO-3: wlr-randr --pos places HEADLESS-2',
+                  status == 0 and positions.get('HEADLESS-2') == (0, 720),
+                  f'{output.strip()} {positions}')
+  finally:
+    status = shingle.stop()
+  results.check('MO-3: SIGTERM exits with status 0 (protocols)',
+                status == 0, str(status))
+  return shingle.log_text()
+
+def private_pam(work):
+  """Bind-mounts a private /etc/pam.d whose `shingle` service permits
+  everything, for shingle-lock's unlock; only this namespace sees it."""
+  directory = os.path.join(work, 'pam.d')
+  os.makedirs(directory)
+  with open(os.path.join(directory, 'shingle'), 'w') as file:
+    file.write(PAM_PERMIT)
+  subprocess.run(['mount', '--bind', directory, '/etc/pam.d'], check=True)
+
 def inner(binary):
   """Runs the checks inside the namespace; returns the exit status."""
   work = os.environ['OUTPUT_TEST_WORK']
@@ -694,11 +1031,17 @@ def inner(binary):
   results.check('no host display variable is set',
                 not any(name in os.environ for name in HOST_VARIABLES))
   wl_probe = os.environ.get('OUTPUT_TEST_WL_PROBE')
+  lock_binary = os.environ.get('OUTPUT_TEST_LOCK')
+  if lock_binary:
+    private_pam(work)
   multi = [auto_layout_checks, fixed_layout_checks]
   if wl_probe:
     def restored_session_checks(results, binary):
       return session_checks(results, binary, wl_probe)
-    multi.append(restored_session_checks)
+
+    def mo3_protocol_checks(results, binary):
+      return protocol_checks(results, binary, wl_probe, lock_binary)
+    multi += [restored_session_checks, mo3_protocol_checks]
   for checks in (randr_checks, configured_checks, wayfire_checks,
                  nested_checks, *multi):
     try:
@@ -719,6 +1062,7 @@ def main():
   parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   parser.add_argument('--binary', default='target/debug/shingle')
   parser.add_argument('--wl-probe', default='target/debug/examples/wl_probe')
+  parser.add_argument('--lock', default='target/debug/shingle-lock')
   parser.add_argument('--keep', action='store_true')
   parser.add_argument(INNER_FLAG, action='store_true')
   options = parser.parse_args()
@@ -736,7 +1080,12 @@ def main():
   if os.path.exists(options.wl_probe):
     environment['OUTPUT_TEST_WL_PROBE'] = os.path.abspath(options.wl_probe)
   else:
-    print(f'{options.wl_probe} is missing; skipping the session checks',
+    print(f'{options.wl_probe} is missing; skipping the session and MO-3 '
+          'checks', file=sys.stderr)
+  if os.path.exists(options.lock):
+    environment['OUTPUT_TEST_LOCK'] = os.path.abspath(options.lock)
+  else:
+    print(f'{options.lock} is missing; skipping the lock checks',
           file=sys.stderr)
   try:
     # The PID namespace confines every signal to processes started in it.
