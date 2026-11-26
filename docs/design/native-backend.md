@@ -204,7 +204,7 @@ The native crate first tries zero-copy. It falls back to copy if the feature is 
 
 **GPU selection.** udev enumerates `drm` `card*` devices and picks the one with `boot_vga=1`, or the first one, unless `SHINGLE_DRM_DEVICE=/dev/dri/cardN` is set (like `WLR_DRM_DEVICES`). The wgpu adapter is the one whose `AdapterInfo::device_pci_bus_id` matches the card's PCI slot. The copy path may use any adapter, so a card without a matching Vulkan adapter (a display-only card, or lavapipe as the only Vulkan driver) still works.
 
-**Synchronisation.** After `queue.submit`, wait for completion with `device.poll(PollType::Wait { submission_index, timeout: Some(100 ms) })`, then commit. wgpu cannot export a sync_file for `IN_FENCE_FD`, and Vulkan does not attach implicit fences to non-WSI dma-bufs, so an explicit wait is the only correct option today. With Shingle's simple composition the wait is short. Exporting a semaphore as a sync_file through raw Vulkan is left as a later optimisation (NB-10).
+**Synchronisation.** After `queue.submit`, wait for completion with `device.poll(PollType::Wait { submission_index, timeout: Some(100 ms) })`, then commit. wgpu cannot export a sync_file for `IN_FENCE_FD`, and Vulkan does not attach implicit fences to non-WSI dma-bufs, so an explicit wait is the only correct option today. With Shingle's simple composition the wait is short. Exporting a semaphore as a sync_file through raw Vulkan is left as a later optimisation (NB-10). (As built, zero-copy frames hand the plane such a sync_file as `IN_FENCE_FD` and the wait remains as the fallback; see [NB-10 as built](#nb-10-as-built).)
 
 **Page-flip pacing.** A `FrameScheduler` state machine in `pacing.rs` has the states `Idle`, `Rendering`, `FlipPending` and `Paused`, with at most one commit in flight.
 
@@ -214,15 +214,15 @@ The native crate first tries zero-copy. It falls back to copy if the feature is 
 
 This replaces the fixed 16 ms `WaitUntil` (main.rs:4540) and the hard-coded `16_666_667` refresh and "now" timestamp in `presentation::frame` (crates/shingle/src/presentation.rs:35-64). Feedback carries `VSYNC | HW_CLOCK | HW_COMPLETION`, plus `ZERO_COPY` on the GBM path.
 
-**VRR.** Off by default. Wayfire's `[output:NAME] vrr` option sets `VRR_ENABLED` on the CRTC when the connector's `vrr_capable` is 1. Pacing does not change: Shingle already renders only when there is damage. NB-10.
+**VRR.** Off by default. Wayfire's `[output:NAME] vrr` option sets `VRR_ENABLED` on the CRTC when the connector's `vrr_capable` is 1. Pacing does not change: Shingle already renders only when there is damage. NB-10. (As built, frames of a VRR output are presented with a refresh of 0, as `wp_presentation` asks; see [NB-10 as built](#nb-10-as-built).)
 
-**Tearing.** When `Compositor::allows_tearing()` is true and the driver reports `DriverCapability::AtomicASyncPageFlip`, primary-plane-only flips use `PAGE_FLIP_ASYNC`. This is the native counterpart of `Renderer::set_tearing`. NB-10.
+**Tearing.** When `Compositor::allows_tearing()` is true and the driver reports `DriverCapability::AtomicASyncPageFlip`, primary-plane-only flips use `PAGE_FLIP_ASYNC`. This is the native counterpart of `Renderer::set_tearing`. NB-10. (As built, per output with `Compositor::allows_tearing_on`, and a refused async flip is made again in sync; see [NB-10 as built](#nb-10-as-built).)
 
 **Gamma, DPMS and cursor.**
 
 - wlr-gamma-control stays in the shader LUT (`Renderer::set_gamma_ramp`), so both scanout paths and nested behave the same. Moving it to the KMS `GAMMA_LUT` is optional later.
 - `Event::DpmsChanged` commits `ACTIVE=0` or `ACTIVE=1` on the CRTC.
-- The cursor is already composited as a `SurfaceRole::Cursor` snapshot (crates/shingle/src/state.rs:718). Native keeps it that way first and turns on `Compositor::set_default_cursor(true)` (NB-2), which draws the theme's `default` arrow (falling back to `left_ptr`) when no client cursor applies. A hardware cursor plane is NB-10.
+- The cursor is already composited as a `SurfaceRole::Cursor` snapshot (crates/shingle/src/state.rs:718). Native keeps it that way first and turns on `Compositor::set_default_cursor(true)` (NB-2), which draws the theme's `default` arrow (falling back to `left_ptr`) when no client cursor applies. A hardware cursor plane is NB-10. (As built, each CRTC's cursor plane shows the cursor from ARGB8888 dumb buffers whenever the frontend can hand it over; see [NB-10 as built](#nb-10-as-built).)
 
 ### `shingle-render` without winit
 
@@ -918,7 +918,7 @@ Where the code differs from the plan, and why:
 - **Cards come from sysfs, not udev.** `gpu::enumerate_cards` reads `cardN` entries, `device/boot_vga` and `PCI_SLOT_NAME` from `device/uevent` under `/sys/class/drm`. That is the data udev's enumeration would return, without a libudev context, and the reader is unit-tested on a temporary directory tree. The DRM hotplug monitor of NB-9 still uses udev. When the seat refuses a card, the next one in order is tried; `SHINGLE_DRM_DEVICE` names the only card tried.
 - **No `acquire_master_lock`.** libseat hands out the card already as DRM master. "No DRM master" is detected where it would show: `EACCES` or `EBUSY` from the first `TEST_ONLY` commit stops the mode search at once with "cannot become DRM master". After startup, a flip refused with `EACCES` or `EPERM` pauses the display until the seat's next resume.
 - **Mode choice.** NB-7 always uses `ModeChoice::Auto`. `OutputConfig`'s `width` and `height` are nested's window size and default to 1280x720, so taking them as a mode would be wrong; reading `[output:NAME] mode` is NB-9's. `kms/modes.rs` already implements `highres`, `highrr` and `WxH@R` as Wayfire does and is tested with mode lists. The fallback order is the chosen mode, the preferred mode, every mode by area (faster first at equal size), then the CRTC's current mode.
-- **The modeset turns off the rest.** Other connectors on a CRTC get `CRTC_ID=0`, other active CRTCs `ACTIVE=0` and `MODE_ID=0`, and every plane on a CRTC other than ours, including our CRTC's cursor and overlay planes, `FB_ID=0` and `CRTC_ID=0`. `VRR_ENABLED` is set to 0 where the CRTC has it, so a VRR left on by another session does not stay on; NB-10 sets it from the configuration.
+- **The modeset turns off the rest.** Other connectors on a CRTC get `CRTC_ID=0`, other active CRTCs `ACTIVE=0` and `MODE_ID=0`, and every plane on a CRTC other than ours, including our CRTC's cursor and overlay planes, `FB_ID=0` and `CRTC_ID=0`. `VRR_ENABLED` is set to 0 where the CRTC has it, so a VRR left on by another session does not stay on; NB-10 sets it from the configuration. (Since NB-10 our CRTC's cursor plane is set by the modeset itself, shown or off, rather than torn down.)
 - **Copy path details.** The renderer draws into the existing RGBA `OffscreenTarget` and reads it back with `read_rgba_within(100 ms)`; the copy into the XRGB8888 dumb buffer swaps red and blue, so no BGRA target was added. Dumb buffers are mapped for each copy instead of staying mapped, since `drm`'s mapping borrows the buffer. `Scanout::prepare` takes a CPU `Frame`; NB-8's zero-copy path renders into the buffer itself and will change that method (it did: [NB-8 as built](#nb-8-as-built)).
 - **Frames.** A frame starts when the frontend asked for one and the scheduler is idle, so there is no fixed interval any more: the next frame waits for the flip. A commit is a flip that sets only the primary plane's `FB_ID`, with `NONBLOCK | PAGE_FLIP_EVENT`. The frontend's `RenderTarget::render` returns false for the KMS target, so the frontend does not call `Compositor::frame`; the page-flip event calls `frame_presented` with the flip's time, its vblank counter extended to 64 bits, the mode's refresh and `VSYNC | HW_CLOCK | HW_COMPLETION`. The compositor sends every pending callback of a visible surface on a flip, also for content committed after the frame was drawn; it waits only for the flip. If the driver's timestamps are not `CLOCK_MONOTONIC`, the compositor's clock is used and `HW_CLOCK` dropped.
 - **DPMS.** The backend follows `Compositor::dpms_state` (new; it covers wlr-output-power-management, the idle timeouts and activity) rather than `Event::DpmsChanged`, which the frontend consumes and which is reported twice. Off is a commit of only `ACTIVE=0`, keeping mode and planes; on is a full modeset with `ACTIVE=1`. Both are tested with `TEST_ONLY` first and wait until a pending flip completed; a change while paused is applied by the resume's modeset.
@@ -1110,6 +1110,82 @@ Acceptance:
 - Unit tests for the atomic requests.
 - On the test machine: the cursor moves without full-frame renders (frame counter); VRR toggles `VRR_ENABLED` and the monitor reports it; a tearing client gets async flips.
 - Each feature falls back cleanly where unsupported, verified by forcing each fallback on the test machine.
+
+#### NB-10 as built
+
+Done on branch `shingle-native-planes`: built, clippy-checked and unit-tested on this host through the fake card (now with cursor planes, `vrr_capable`, `IN_FENCE_FD`, async flips and ARGB8888 buffers) and a fake renderer; nothing in it has touched a cursor plane, `VRR_ENABLED`, an async flip or a fence on a card. The renderer's fence export ran on this host's render node, NVIDIA and lavapipe, in tools/gpu_test/run.py's namespace. The hardware acceptance items are steps 44 to 51 of [native-testing.md](../native-testing.md). Every feature is per lit output, so MO-7's several CRTCs and NB-8's zero-copy path get them as copy scanout does. The API:
+
+```rust
+// shingle: lib.rs
+Compositor::cursor_on(&self, &OutputHandle) -> Option<SurfaceSnapshot>;
+Compositor::pointer_output(&self) -> OutputHandle;
+Compositor::gamma_set_on(&self, &OutputHandle) -> bool;
+OutputInfo::adaptive_sync: bool; // wlr-output-management heads report it
+
+// shingle-frontend: frontend/cursor.rs
+pub struct CursorImage { pub width, pub height, pub rgba: Arc<[u8]>,
+  pub position: (i32, i32) }  // in the output's physical pixels
+pub enum CursorPlane { Hidden, Image(CursorImage), Software(String) }
+Frontend::cursor_plane(&self, &OutputHandle, max: (u32, u32))
+  -> CursorPlane;
+Frontend::set_hardware_cursor(&mut self, &OutputHandle, on: bool);
+Frontend::hardware_cursor(&self, &OutputHandle) -> bool;
+
+// shingle-render: fence.rs
+pub struct FenceExporter; // new(gpu), arm(gpu) -> ArmedFence,
+                          // export(gpu, armed) -> Option<OwnedFd>, disarm
+
+// shingle-native
+// kms.rs: CommitFlags::PAGE_FLIP_ASYNC, FORMAT_ARGB8888, and KmsDevice
+fn create_argb_framebuffer(&mut self, width, height)
+  -> io::Result<DumbFramebuffer>;
+fn cursor_size(&mut self) -> (u32, u32);     // DRM_CAP_CURSOR_*
+fn async_page_flips(&mut self) -> bool;      // ..._ATOMIC_ASYNC_PAGE_FLIP
+// kms/atomic.rs
+OutputProps::cursor: Option<PlaneProps>; PlaneProps::in_fence_fd;
+pub struct CursorState { framebuffer, size, x: i32, y: i32 }
+ModesetState::cursor: Option<CursorState>;
+pub struct Flip { framebuffer: Option<FramebufferId>, fence: Option<i32>,
+  cursor: Option<Option<CursorState>> }
+pub fn page_flip(&OutputProps, &Flip) -> AtomicRequest;
+// kms/output.rs
+Card::cursor_plane(&self, CrtcId) -> Option<PlaneId>;
+Output::vrr_capable: bool;
+// cursor.rs
+pub struct CursorBuffers; // two ARGB8888 dumb buffers
+// features.rs
+pub struct PlaneFeatures { no_cursor_plane, no_async_flips, no_in_fence }
+// scanout.rs
+Drawn::Fenced(RenderFence);
+// outputs.rs
+OutputPolicy::default_vrr, named_vrr, vrr(name);
+// display.rs
+Display::cursor_plane_size(&self, name) -> Result<(u32, u32), String>;
+Display::set_cursor(&mut self, name, Option<CursorImage>);
+Display::cursor_pending(&self, name) -> bool;
+Display::commit_cursor(&mut self, name, now) -> bool;
+Display::set_tearing(&mut self, name, bool);
+Display::set_features(&mut self, PlaneFeatures);
+Display::fences_allowed(&self) -> Result<(), String>;
+// gpu.rs
+FrameRenderer::set_fences(&mut self, enabled: bool);
+```
+
+Where the code differs from the plan, and why:
+
+- **The cursor plane's image comes from the CPU.** wlroots renders the cursor texture into a GBM buffer with its renderer. Shingle writes the cursor's pixels into one of two ARGB8888 dumb buffers of the driver's cursor size (`DRM_CAP_CURSOR_WIDTH` and `_HEIGHT`, 64 by 64 without them), top-left, the rest transparent, and the plane always shows the whole buffer, since many drivers take no other size. Cursor images are small and change rarely, theme cursors are already CPU pixels, and dumb buffers need neither GBM nor an import, so the copy path gets the plane too. The compositor therefore keeps a CPU copy of cursor surfaces' shm buffers even with DB-6's uploads on. The image is written only when it is another image (the same `Arc` of pixels is the same image), into the buffer off screen, and only when no flip of that output is pending.
+- **The frontend decides what the plane can show.** `Frontend::cursor_plane` hands the cursor over only when the plane would show the same pixels the frontend draws: not on a zoomed output, with inverted colours or a gamma ramp (both are the renderer's, which a plane does not get; KMS `GAMMA_LUT` is still left for later), on a rotated or flipped output, for a cursor buffer with a viewport, a transform or a buffer scale other than the output's scale, for a DMA-BUF cursor, or one larger than the plane. Each of those keeps the cursor in the frame, with the reason logged once per change (`output CONN: the cursor is drawn, because ...` and `... is on the cursor plane`). Captures (screencopy) no longer show a cursor that is on the plane, as with a hardware cursor in Wayfire.
+- **Cursor moves are flips of the cursor plane alone.** When the cursor changed and the output wants no frame, the host commits the cursor plane's properties alone with `NONBLOCK | PAGE_FLIP_EVENT`; it takes the output's one commit in flight like a frame, and its page flip presents nothing to clients (no frame callbacks or feedback). Otherwise the change rides on the next frame's flip. Switching between plane and frame draws a frame that adds or removes the drawn cursor in the same flip that shows or hides the plane, so there is never a moment with two cursors or none.
+- **Which plane.** Each CRTC's cursor plane is a plane of type cursor that can be on it and scans out ARGB8888, preferring the one attached to it, then one only it can use; on a card whose CRTCs share one, the first output lit takes it and the others draw their cursor. Full modesets set every lit output's cursor plane, shown or off, and spare it in the teardown; an output dropped or turned off has its cursor plane turned off with its CRTC, since the kernel refuses a CRTC turned off under a plane that is still on.
+- **Tested once, refused for good.** The first commit that shows the cursor with new buffers is preceded by a `TEST_ONLY` commit (without the page-flip event, which the kernel refuses in a test). A refused commit is made again without the cursor and, if the plane showed an older one, with the plane turned off; the cursor is then drawn into that output's frames until Shingle restarts.
+- **VRR is applied by modesets, and presentation says so.** `VRR_ENABLED` is set in every modeset, from the output's `vrr` (`OutputPolicy::vrr`) where the connector's `vrr_capable` is 1 and the CRTC has the property; a reload or a replugged monitor that changes it makes a full modeset. As `wp_presentation` asks for outputs without a constant refresh rate, frames of a VRR output are presented with a refresh of 0, and wlr-output-management heads report `adaptive_sync` enabled; asking for adaptive sync through output management still fails, as the `vrr` option sets it. The log says why a configured `vrr` stays off.
+- **Async flips per output, and only of the primary plane.** The host tells the display per frame whether a visible surface on the output asks for tearing (`Compositor::allows_tearing_on`). The flip then gets `PAGE_FLIP_ASYNC` if the driver reports `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP` and the commit changes nothing but the primary plane's `FB_ID` (and its fence): a frame that also moves the cursor flips in sync. The one-commit-in-flight rule stays, so an async flip still waits for its event before the next frame, but the event comes without waiting for the vblank. Feedback of an async flip has no `vsync` flag, and `SHINGLE_TRACE_FLIPS` ends its line with ` async`. A refused async flip is made again in sync, and that output's flips stay in sync from then on.
+- **`IN_FENCE_FD` is the renderer's own fence, not DB-5's.** The NB-10 entry and dmabuf.md's DB-1 plan the fence from an exported Vulkan semaphore; DB-5's syncobj timelines carry clients' acquire points, which matter when a client buffer is scanned out (DB-7), not when Shingle scans out its own frame. `shingle_render::FenceExporter` arms the queue's next submission with a binary semaphore exportable as a sync_file (wgpu-hal's `Queue::add_signal_semaphore`, `VK_KHR_external_semaphore_fd` with `SYNC_FD`, which DB-1 already enables), exports it after the frame's submission and keeps the semaphore until wgpu reports the work done. The frame then comes back as `Drawn::Fenced` and the flip sets the primary plane's `IN_FENCE_FD`, instead of the renderer waiting up to 100 ms. Without an exporter, with `SHINGLE_IN_FENCE=0`, when the export fails or after the card refused a fence once (the fence is then waited for on the CPU and the flip made again), the renderer waits as before. A hung GPU is then no longer seen as a missed 100 ms wait but as a flip that does not complete within a second, which NB-7's timeout handles.
+- **Overrides.** `SHINGLE_CURSOR_PLANE=0`, also wlroots' `WLR_NO_HARDWARE_CURSORS=1`, `SHINGLE_ASYNC_FLIPS=0` and `SHINGLE_IN_FENCE=0` turn each feature off from the start (crates/shingle-native/src/features.rs), so that the test plan can force every fallback.
+
+Found while building it: on native the default arrow did not move when only the pointer moved, because nothing asked for a frame then; the frontend draws the cursor into the frame, and only other changes on the output redrew it. The frontend now asks for a frame of the outputs the drawn cursor left and entered whenever it moves or becomes another surface (`Frontend::track_cursor`, regression test `pointer_motion_redraws_the_drawn_cursor` in crates/shingle-native/src/host/tests.rs). Nested and offscreen were affected only for client cursor surfaces, which they draw too.
+
+Unit tests cover: the atomic requests (crates/shingle-native/src/kms/atomic.rs: a modeset showing the cursor plane or turning it off, the teardown sparing the outputs' cursor planes, a flip moving the cursor with the fence and signed positions, a flip of the cursor plane alone, and fences and cursors ignored without their properties); the cursor buffers (cursor.rs: byte order and transparency, a new image into the buffer off screen, a refused commit keeping the one on screen); the overrides (features.rs); `vrr` from the configuration (outputs.rs); the display on the fake card (display/planes_tests.rs: the cursor plane found and turned off by the start, no plane and the override, flips of the cursor plane alone with the first one tested and their events presenting nothing, a frame carrying the cursor and DPMS and resume modesets keeping it, a refused plane in a test and in a frame's flip, two CRTCs sharing a plane, an output turned off turning its cursor plane off, VRR on where configured and capable with a refresh of 0 and off otherwise, a reloaded `vrr`, async flips without `vsync`, no async without the capability or with the override, a refused async flip made again in sync, a cursor change keeping the frame in sync, a fenced zero-copy frame's `IN_FENCE_FD`, a refused fence and the fence override); the host with a real frontend, compositor and client (host/tests.rs: the drawn cursor redrawn on pointer motion, a cursor on the plane moving without frames, the override drawing it, inverted colours taking it back into the frames in the same flip that turns the plane off, a tearing client's async flips without `vsync`, VRR from the config reaching the CRTC and presentation, and fenced frames until the card refuses a fence); the frontend (crates/shingle-frontend/src/frontend/tests/cursor.rs: frames where the drawn cursor moves and none for a cursor on a plane, the plane's image and place, what it cannot show, and frames leaving it out on the GPU); the compositor (the cursor of the pointer output only, cursor pixels kept with shm uploads, heads reporting adaptive sync); and the fence export on a device (crates/shingle-render/src/fence.rs, skipped without one). What only hardware can show is listed in [status.md](../status.md#native-backend-planes-vrr-tearing-and-fences).
 
 NB-1, NB-2 and NB-5 do not depend on each other and can run in parallel. NB-3 needs NB-1 (render types in the scene), and NB-4 needs NB-2 and NB-3. NB-6 needs NB-4 and NB-5, and NB-7 needs NB-6. NB-8 and NB-9 both need NB-7 but not each other. NB-10 comes last. The DMA-BUF roadmap item (client buffer import) was first planned to start after NB-8, reusing its Vulkan feature setup; its design ([dmabuf.md](dmabuf.md#11-implementation-plan)) turns that round, so the shared setup is its DB-1 and NB-8 builds on it. Multi-output can start after NB-9.
 

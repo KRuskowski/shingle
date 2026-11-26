@@ -665,6 +665,108 @@ Nested Shingle gets no touchpad swipes from its host (winit reports none on Wayl
 6. Swipe three fingers. Expected: the wall does not move, and a client that uses swipes (for example Firefox's history swipe, if it takes three fingers) gets it.
 7. Record the touchpad, libinput's version and whether the motion felt like Wayfire's on the same machine, if Wayfire is installed there.
 
+## NB-10: cursor plane, VRR, tearing and fences
+
+From NB-10 on, each lit monitor shows the cursor on its CRTC's cursor plane where it has one, so moving the pointer commits only the cursor plane and draws no frame; sets `VRR_ENABLED` where the output's `vrr` asks for it and the monitor is VRR-capable; flips frames of clients that ask for tearing (`wp_tearing_control_v1`) with `PAGE_FLIP_ASYNC` where the driver takes it; and hands each zero-copy frame's render fence to the primary plane as `IN_FENCE_FD` instead of waiting for the GPU. Each falls back where the card lacks or refuses it, with a logged reason, and `SHINGLE_CURSOR_PLANE=0` (or `WLR_NO_HARDWARE_CURSORS=1`), `SHINGLE_ASYNC_FLIPS=0` and `SHINGLE_IN_FENCE=0` force each fallback. Unit tests through the fake card cover every atomic request and fallback ([design, NB-10 as built](design/native-backend.md#nb-10-as-built)); these steps check the acceptance items "the cursor moves without full-frame renders (frame counter); VRR toggles `VRR_ENABLED` and the monitor reports it; a tearing client gets async flips" and "each feature falls back cleanly where unsupported, verified by forcing each fallback on the test machine".
+
+### Step 44: prepare the test machine for NB-10
+
+1. In addition to steps 0, 9 and 36, install `drm-info`, `vulkan-tools` and `wlr-randr`. Have a VRR-capable monitor at hand (FreeSync or G-Sync Compatible, with adaptive sync turned on in its own menu) and note whether its menu or on-screen display shows the current refresh rate. `drm_info | grep -E 'vrr_capable|VRR_ENABLED|"type": (Cursor|Primary)|IN_FENCE_FD'` and `drm_info | grep -i -A1 'ASYNC_PAGE_FLIP\|CURSOR_WIDTH'` list what the card offers; record whether each CRTC has a cursor plane, the cursor size, `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP` and whether the monitor's connector says `vrr_capable` 1.
+2. Rebuild `present_probe` (step 9) at the commit under test; `present_probe --tearing` asks for tearing.
+3. Write the NB-10 configs:
+
+   ```sh
+   cd ~/.config/shingle
+   printf 'session: {restore: false}\nxwayland: {mode: false}\n' \
+     > nb10.yaml
+   cp nb10.yaml nb10-vrr.yaml
+   printf 'output: {vrr: true}\n' >> nb10-vrr.yaml
+   ```
+
+4. "Start Shingle on tty1 with CONFIG and CLIENT" means step 9's command with `SHINGLE_TRACE_FLIPS=1`, `--config ~/.config/shingle/CONFIG` and `--spawn CLIENT`. With `SHINGLE_TRACE_FLIPS=1` the log has `CONN: page flip seq=S at T s` for every frame shown, ending in ` async` for an async flip, and `CONN: cursor plane flip` for every flip of the cursor plane alone.
+
+### Step 45: the cursor moves on its plane without drawing frames
+
+1. Start Shingle on tty1 with `nb10.yaml` and `foot`, and leave foot idle (no cursor blink: `printf '\e[?12l'` in it, or `cursor.blink: no` in foot's config).
+2. Over SSH: `grep -E 'cursor (is|plane)' ~/.local/state/shingle/native.log`. Expected: `output CONN: the cursor is on the cursor plane`.
+3. Count frames while the pointer moves, with the physical mouse moved in circles for 5 s between the two counts, or with ten motions from uinput:
+
+   ```sh
+   log=~/.local/state/shingle/native.log
+   frames() { grep -c 'page flip seq' "$log"; }
+   cursor() { grep -c 'cursor plane flip' "$log"; }
+   before=$(frames); moves=$(cursor)
+   for i in $(seq 10); do uinput motion 20 10; done
+   echo "frames $(( $(frames) - before )) cursor $(( $(cursor) - moves ))"
+   ```
+
+   Expected: `frames 0` (or 1 or 2 where moving onto foot changed its cursor shape), and `cursor` about one per motion. On the screen the pointer follows the mouse smoothly, with no trail and no second pointer, and over foot it becomes foot's text cursor.
+4. The forced fallback: restart with `SHINGLE_CURSOR_PLANE=0` in Shingle's environment and repeat 2 and 3. Expected: the log starts with `SHINGLE_CURSOR_PLANE=0 turns cursor planes off` and says `output CONN: the cursor is drawn, because SHINGLE_CURSOR_PLANE=0 turns cursor planes off`; `frames` now grows by about one per motion and `cursor` by none; the pointer looks and moves the same. Repeat with `WLR_NO_HARDWARE_CURSORS=1` instead: the same, with that variable named.
+5. Record the driver, the cursor size from step 44.1 and whether the pointer's hotspot is right: the tip of the arrow, not its middle, clicks foot's scroll bar edge.
+
+### Step 46: what the cursor plane cannot show is drawn into the frame
+
+1. Start Shingle on tty1 with `nb10.yaml` and `foot`, as in step 45, and check the plane line of step 45.2.
+2. `ipc invert/toggle`. Expected: `output CONN: the cursor is drawn, because colours are inverted`, the picture inverted with an inverted pointer, and no moment with two pointers or none. `ipc invert/toggle` again: `the cursor is on the cursor plane` and the normal picture.
+3. `wlr-randr --output CONN --scale 2`. Expected: `the cursor is drawn, because the cursor's buffer scale 1 is not the output's scale 2`, and the pointer at twice its size; `--scale 1` brings the plane back.
+4. With two monitors (step 25), start with `nb10.yaml`, move the pointer across the shared edge in both directions: each output logs its own plane line, the pointer appears on one monitor at a time without lingering on the other, and `cursor plane flip` lines name the monitor the pointer is on.
+5. A refused plane, if a driver produces one: the log has `output CONN: the cursor is drawn into the frame, because the cursor plane refused the cursor: ...` and the pointer keeps moving, drawn into the frames. Record the error; it cannot be forced from outside.
+
+### Step 47: VRR follows the output's `vrr`, and the monitor reports it
+
+1. With the VRR-capable monitor connected, start Shingle on tty1 with `nb10-vrr.yaml` and `sh -c 'exec present_probe 600 > /tmp/probe.out'`.
+2. Over SSH:
+
+   ```sh
+   grep 'variable refresh' ~/.local/state/shingle/native.log
+   drm_info | grep VRR_ENABLED
+   wlr-randr | grep -i 'adaptive'
+   python3 ~/shingle/tools/native_test/present_check.py --vrr \
+     ~/.local/state/shingle/native.log /tmp/probe.out; echo "status=$?"
+   ```
+
+   Expected: `output CONN: variable refresh rate on`, `VRR_ENABLED` 1 on Shingle's CRTC, `Adaptive Sync: enabled`, `status=0` with `"variable_refresh": 600` (every frame has a refresh of 0). The monitor's display reports adaptive sync active (FreeSync or G-Sync Compatible in its on-screen display); record what it shows.
+3. Toggle it with a config reload: remove the `output: {vrr: true}` line from nb10-vrr.yaml (Shingle reloads it within its reload delay). Expected: one modeset (the picture may blink), `VRR_ENABLED` 0, `Adaptive Sync: disabled`, the monitor reports a fixed rate, and a new probe run passes `present_check.py` without `--vrr` with the mode's `refresh`. Add the line back: on again.
+4. With a monitor that is not VRR-capable (or with adaptive sync turned off in the monitor's menu, which some monitors report as `vrr_capable` 0), the log says `output CONN: variable refresh rate stays off, because the monitor or the driver is not VRR-capable (vrr_capable is not 1)` and `VRR_ENABLED` stays 0. Record which.
+5. Optionally, with VRR on, run a client whose frame rate is below the refresh (for example `vkcube` limited by a CPU load) and record whether the monitor's reported rate follows it.
+
+### Step 48: a tearing client gets async flips
+
+1. Start Shingle on tty1 with `nb10.yaml` and `sh -c 'exec present_probe --tearing 600 > /tmp/probe.out'`.
+2. After 20 s, over SSH:
+
+   ```sh
+   log=~/.local/state/shingle/native.log
+   grep -c 'page flip.* async' "$log"
+   python3 ~/shingle/tools/native_test/present_check.py --tearing \
+     "$log" /tmp/probe.out; echo "status=$?"
+   ```
+
+   Expected on a driver with `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP` (step 44.1): about 600 async lines, `status=0` with `"tearing": 600` and flags 6 (hardware clock and completion, no vsync) in every `presented` line, and a `median_frame_interval_ms` below one refresh period when the copy path or the GPU allows it. With copy scanout (`SHINGLE_SCANOUT=copy`) the same; record both medians.
+3. Real clients: `ipc stipc/run '{"cmd": "vkcube --wsi wayland --present_mode 0"}'` (immediate mode, which Mesa's and NVIDIA's Vulkan WSI present through `wp_tearing_control_v1` when offered): the trace shows async flips while it runs, and vkcube's frame rate is not capped at the refresh rate. Record the frame rate and whether tearing is visible.
+4. Forced fallback: restart with `SHINGLE_ASYNC_FLIPS=0`: the log starts with `SHINGLE_ASYNC_FLIPS=0 keeps every page flip synchronized`, no async lines, and `present_check.py` passes without `--tearing` (flags 7).
+5. On a driver without the capability the log says once `a client asks for tearing, but the driver has no atomic async page flips; its frames wait for the vblank` and the run passes without `--tearing`. A driver that advertises the capability but refuses a flip logs `output CONN: frames wait for the vblank again, because the card refused an async page flip: ...`, and the frame and later ones flip in sync; record the error.
+
+### Step 49: zero-copy frames hand the plane their render fence
+
+1. On a card that reached zero-copy in step 37, start Shingle on tty1 with `nb10.yaml` and `sh -c 'exec present_probe 600 > /tmp/probe.out'`.
+2. Over SSH: `grep -E 'wait for the GPU|IN_FENCE_FD' ~/.local/state/shingle/native.log` prints nothing (no fallback), and step 38's check passes: `present_check.py --scanout zero-copy` with `status=0` and a median of one refresh period. On the screen: no tearing, stripes or half-drawn frames, which would mean the plane did not wait for the fence.
+3. Forced fallback: restart with `SHINGLE_IN_FENCE=0`: the log starts with `SHINGLE_IN_FENCE=0 makes the renderer wait for the GPU before each flip`, and the same check passes. In both runs record Shingle's CPU time for the 600 frames (`ps -o times=`, as in step 38) and the median interval; the fence should leave the frames' timing unchanged while the render loop no longer blocks on the GPU.
+4. If a driver refuses the fence, the log says `frames wait for the GPU before their flip again, because the card refused IN_FENCE_FD: ...` and the frames keep coming. Record it. If the renderer cannot export fences, the log says `zero-copy frames wait for the GPU before their flip, because ...` at the start; record the reason.
+
+### Step 50: the cursor plane and VRR across VT switches, DPMS and hotplug
+
+1. Start Shingle on tty1 with `nb10-vrr.yaml` and `foot` on the VRR-capable monitor, with the pointer over foot.
+2. `sudo chvt 2; sleep 2; sudo chvt 1`. Expected: the pointer is back where it was, on the plane (moving it adds `cursor plane flip` lines and no frames), and `VRR_ENABLED` is still 1.
+3. `wlopm --off CONN; sleep 3; wlopm --on CONN`: the same.
+4. Unplug and replug the monitor: after `output CONN: ...` the log has `variable refresh rate on` again and the pointer is on the plane.
+5. With two monitors, `wlr-randr --output CONN_B --off` while the pointer is on B: the pointer appears on A, and `drm_info` shows B's cursor plane with no framebuffer (`FB_ID` 0).
+
+### Step 51: end and record
+
+1. End Shingle with `kill -TERM`: `exit=0` and the text console back, with no cursor left on the console (the kernel's console turns the planes off) and no `drm` errors in `sudo dmesg | tail`.
+2. Record for each GPU family: the cursor plane's use and size, async flips, VRR and the monitor's report, fences, and every fallback line seen.
+
 ## Results
 
 Record results in [status.md](status.md#with-real-clients). None of the steps above has been run yet: the test machine does not exist so far.

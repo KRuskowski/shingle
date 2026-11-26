@@ -98,6 +98,9 @@
 | Scanout trait, draw targets, `SHINGLE_SCANOUT`; copy scanout into dumb buffers | `crates/shingle-native/src/scanout.rs`, `scanout/copy.rs` |
 | Zero-copy scanout: modifier negotiation and GBM buffers; the GBM allocator trait and real allocator | `crates/shingle-native/src/scanout/gbm.rs`, `scanout/allocator.rs`; moving outputs between scanouts `Display::upgrade_scanout` in `display.rs`, tests in `display/zero_copy_tests.rs` |
 | Page-flip state machine | `crates/shingle-native/src/pacing.rs` |
+| NB-10 on the display: cursor planes, `VRR_ENABLED`, async flips and `IN_FENCE_FD` per output, with their fallbacks | `Display::cursor_plane_size`, `set_cursor`, `commit_cursor`, `set_tearing`, `flip` in `crates/shingle-native/src/display.rs`; atomic requests `page_flip` and `CursorState` in `kms/atomic.rs`; cursor buffers `crates/shingle-native/src/cursor.rs`; the overrides `features.rs`; tests in `display/planes_tests.rs` |
+| What a cursor plane shows, and the drawn cursor redrawn where it moves | `crates/shingle-frontend/src/frontend/cursor.rs` (`Frontend::cursor_plane`, `set_hardware_cursor`, `track_cursor`); `Compositor::cursor_on` in `crates/shingle/src/state.rs` |
+| Render fences as sync_files | `crates/shingle-render/src/fence.rs` (`FenceExporter`); used by `draw_into` in `crates/shingle-native/src/gpu.rs` |
 | Card selection, adapter matching, GPU renderer and its failure rules | `crates/shingle-native/src/gpu.rs` |
 | Native event loop, pause and resume, `Host` | `crates/shingle-native/src/host.rs`; tests in `host/tests.rs` |
 | Native test plan and tools (test machine only) | `docs/native-testing.md`, `tools/native_test/` |
