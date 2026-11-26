@@ -61,6 +61,19 @@ fn plan(
         Err(error) => Plan::Fail(no_seat(&error, &selection.reason), 1),
       }
     }
+    // Offscreen and nested get several outputs with MO-5 and MO-6.
+    Ok(selection)
+      if options.outputs.is_some()
+        && selection.backend != Backend::Headless =>
+    {
+      Plan::Fail(
+        format!(
+          "shingle: --outputs needs the headless backend, not {}\n",
+          selection.backend
+        ),
+        USAGE_STATUS,
+      )
+    }
     Ok(selection) => Plan::Start(selection, options),
     Err(error) => Plan::Fail(format!("shingle: {error}\n"), USAGE_STATUS),
   }
@@ -123,7 +136,11 @@ fn start(
       options.spawn,
     ),
     Backend::Headless => {
-      headless::run(config, options.ipc.as_deref(), options.spawn)
+      let outputs = headless::output_count(
+        options.outputs,
+        std::env::var("WLR_HEADLESS_OUTPUTS").ok().as_deref(),
+      )?;
+      headless::run(config, options.ipc.as_deref(), options.spawn, outputs)
     }
     Backend::Offscreen => offscreen::run(
       config,
@@ -271,6 +288,23 @@ mod tests {
   }
 
   // These tests only plan: no seat, device or VT is touched.
+
+  #[test]
+  fn outputs_need_the_headless_backend() {
+    let (backend, options) =
+      started(planned(&["--headless", "--outputs", "2"], &[]));
+    assert_eq!((backend, options.outputs), (Backend::Headless, Some(2)));
+    let session = [("WAYLAND_DISPLAY", "wayland-1")];
+    for arguments in [
+      &["--outputs", "2"][..],
+      &["--backend", "offscreen", "--outputs", "2"],
+    ] {
+      assert!(matches!(
+        planned(arguments, &session),
+        Plan::Fail(text, USAGE_STATUS) if text.contains("--outputs")
+      ));
+    }
+  }
 
   #[test]
   fn tty_login_selects_native() {

@@ -18,6 +18,9 @@ Options:
                      $XDG_CONFIG_HOME/shingle/shingle.yaml
   --ipc PATH         serve Wayfire IPC on PATH and export it to
                      clients as WAYFIRE_SOCKET
+  --outputs N        start with N outputs, HEADLESS-1 to HEADLESS-N
+                     (headless only; default WLR_HEADLESS_OUTPUTS,
+                     else 1)
   --spawn PROGRAM [ARG]...
                      start PROGRAM as a client; every later argument
                      is passed to it
@@ -61,6 +64,8 @@ pub struct Options {
   /// `--allow-builtin-seat`: let the native backend use a libseat backend
   /// that cannot switch VT.
   pub allow_builtin_seat: bool,
+  /// `--outputs`: how many outputs to start with; `None` without it.
+  pub outputs: Option<u32>,
 }
 
 /// A command line that cannot be parsed.
@@ -80,6 +85,8 @@ pub enum UsageError {
   UnknownOption(String),
   /// An argument that is not an option.
   UnexpectedArgument(String),
+  /// `--outputs` came with something other than a positive number.
+  InvalidOutputs(String),
 }
 
 impl fmt::Display for UsageError {
@@ -98,6 +105,9 @@ impl fmt::Display for UsageError {
       }
       Self::UnexpectedArgument(argument) => {
         write!(formatter, "unexpected argument '{argument}'")
+      }
+      Self::InvalidOutputs(value) => {
+        write!(formatter, "--outputs: '{value}' is not a positive number")
       }
     }
   }
@@ -155,6 +165,13 @@ pub fn parse(
       }
       "--config" => set_once(&mut options.config, "--config", value)?,
       "--ipc" => set_once(&mut options.ipc, "--ipc", value)?,
+      "--outputs" => {
+        if options.outputs.is_some() {
+          return Err(UsageError::Repeated("--outputs"));
+        }
+        let text = value("--outputs")?.to_string_lossy().into_owned();
+        options.outputs = Some(output_count(&text)?);
+      }
       "--spawn" if inline.is_none() => {
         options.spawn.extend(arguments);
         if options.spawn.is_empty() {
@@ -169,6 +186,15 @@ pub fn parse(
     }
   }
   Ok(Command::Run(options))
+}
+
+/// Parses a number of outputs: a positive integer.
+pub fn output_count(text: &str) -> Result<u32, UsageError> {
+  text
+    .parse()
+    .ok()
+    .filter(|count| *count > 0)
+    .ok_or_else(|| UsageError::InvalidOutputs(text.to_owned()))
 }
 
 /// Records `backend`, which must agree with any backend already requested.
@@ -241,7 +267,24 @@ mod tests {
         ipc: Some("/run/ipc".into()),
         spawn: ["foot", "-e", "--config"].map(OsString::from).to_vec(),
         allow_builtin_seat: false,
+        outputs: None,
       }
+    );
+  }
+
+  #[test]
+  fn outputs_take_a_positive_count() {
+    assert_eq!(options(&["--outputs", "2"]).outputs, Some(2));
+    assert_eq!(options(&["--outputs=3"]).outputs, Some(3));
+    for bad in ["0", "-1", "two"] {
+      assert_eq!(
+        parsed(&["--outputs", bad]),
+        Err(UsageError::InvalidOutputs(bad.into()))
+      );
+    }
+    assert_eq!(
+      parsed(&["--outputs", "1", "--outputs", "2"]),
+      Err(UsageError::Repeated("--outputs"))
     );
   }
 
@@ -255,6 +298,7 @@ mod tests {
         ipc: Some("/x".into()),
         spawn: Vec::new(),
         allow_builtin_seat: false,
+        outputs: None,
       }
     );
   }

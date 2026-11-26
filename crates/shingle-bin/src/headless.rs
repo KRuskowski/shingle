@@ -2,6 +2,7 @@
 //! serving clients and IPC until SIGINT, SIGTERM or a quit request.
 
 use std::{
+  collections::BTreeMap,
   error::Error,
   ffi::OsString,
   path::Path,
@@ -11,14 +12,33 @@ use std::{
 
 use shingle::{
   ClientEnvironment, Compositor, Config, InputDeviceId, InputDeviceInfo,
-  InputDeviceKind,
+  InputDeviceKind, OutputInfo,
 };
 use shingle_config::ShingleConfig;
 use shingle_session::{
   SessionSnapshot, SessionStore, launch_autostart, launch_program, launch_saved,
 };
 
-/// Runs Shingle headless with `config` and saves the session when it ends.
+/// How many outputs headless Shingle starts with: `--outputs`, else
+/// `WLR_HEADLESS_OUTPUTS` as wlroots' headless backend reads it, else 1.
+///
+/// # Errors
+///
+/// When `WLR_HEADLESS_OUTPUTS` is set but is not a positive number.
+pub fn output_count(
+  option: Option<u32>,
+  variable: Option<&str>,
+) -> Result<u32, crate::cli::UsageError> {
+  match (option, variable) {
+    (Some(count), _) => Ok(count),
+    (None, Some(text)) => crate::cli::output_count(text),
+    (None, None) => Ok(1),
+  }
+}
+
+/// Runs Shingle headless with `config` and `outputs` outputs, named
+/// `HEADLESS-1` to `HEADLESS-N` and each sized and placed by its
+/// `[output:HEADLESS-N]` entry, and saves the session when it ends.
 ///
 /// With `ipc_path`, Wayfire IPC is served there, and every client finds it
 /// as `WAYFIRE_SOCKET`. `spawn`, if not empty, is a program and its
@@ -27,6 +47,7 @@ pub fn run(
   yaml: ShingleConfig,
   ipc_path: Option<&Path>,
   spawn: Vec<OsString>,
+  outputs: u32,
 ) -> Result<(), Box<dyn Error>> {
   let store = if let Some(path) = &yaml.session.path {
     SessionStore::new(path)
@@ -46,6 +67,10 @@ pub fn run(
     (Compositor::new(config)?, None)
   };
   compositor.set_keymap(&keymap)?;
+  add_outputs(&mut compositor, outputs)?;
+  // Every output is there, so a restored session's sets are settled
+  // before any client connects.
+  compositor.restore_outputs();
   register_stipc_devices(&mut compositor);
   if let Some(path) = ipc_path {
     compositor.enable_ipc(path)?;
@@ -109,22 +134,84 @@ fn shut_down<E>(
   save(&snapshot)
 }
 
-/// Serves clients until shutdown, reporting a frame at the output's
-/// refresh rate as wlroots' headless backend does for Wayfire, so that
-/// clients waiting for frame callbacks or FIFO barriers keep drawing.
-/// Without it, a nested Shingle in a headless one drew one frame only.
-fn run_with_frames(compositor: &mut Compositor) -> Result<(), shingle::Error> {
-  let interval = frame_interval(compositor.output_info().refresh_mhz);
-  let mut next = Instant::now() + interval;
-  while !compositor.shutdown_requested() {
-    let now = Instant::now();
-    if now >= next {
-      compositor.frame();
-      next = (next + interval).max(now);
-    }
-    compositor.poll(Some(next.saturating_duration_since(Instant::now())))?;
+/// Adds `HEADLESS-2` to `HEADLESS-count` beside the compositor's first
+/// output, each at the size its configuration entry gives.
+fn add_outputs(
+  compositor: &mut Compositor,
+  count: u32,
+) -> Result<(), shingle::Error> {
+  for number in 2..=count {
+    let name = format!("HEADLESS-{number}");
+    let physical = compositor.configured_physical_size(&name);
+    compositor.add_output(
+      OutputInfo {
+        name,
+        ..OutputInfo::default()
+      },
+      physical,
+    )?;
   }
   Ok(())
+}
+
+/// Serves clients until shutdown, reporting a frame for each output at
+/// its refresh rate as wlroots' headless backend does for Wayfire, so that
+/// clients waiting for frame callbacks or FIFO barriers keep drawing.
+/// Without it, a nested Shingle in a headless one drew one frame only.
+/// Outputs created over IPC are paced as soon as they appear. Events are
+/// drained each turn, which is when IPC watchers get them.
+fn run_with_frames(compositor: &mut Compositor) -> Result<(), shingle::Error> {
+  let mut pacer = FramePacer::default();
+  while !compositor.shutdown_requested() {
+    let now = Instant::now();
+    let outputs = compositor
+      .outputs()
+      .into_iter()
+      .filter(|output| !output.dark)
+      .map(|output| (output.handle.name().to_owned(), output.info.refresh_mhz))
+      .collect::<Vec<_>>();
+    for name in pacer.due(now, &outputs) {
+      compositor.frame_now(&shingle::OutputHandle::new(name));
+    }
+    let wake = pacer.next_wake().unwrap_or(now + frame_interval(0));
+    compositor.poll(Some(wake.saturating_duration_since(Instant::now())))?;
+    compositor.drain_events();
+  }
+  Ok(())
+}
+
+/// When each output's next frame is due.
+#[derive(Debug, Default)]
+struct FramePacer {
+  next: BTreeMap<String, Instant>,
+}
+
+impl FramePacer {
+  /// The outputs, given by name and refresh rate in millihertz, whose
+  /// frame is due at `now`; each gets its next deadline one interval
+  /// later, or one interval after `now` if it fell behind. A new output's
+  /// first frame is one interval away, and outputs that are gone are
+  /// forgotten.
+  fn due(&mut self, now: Instant, outputs: &[(String, u32)]) -> Vec<String> {
+    self
+      .next
+      .retain(|name, _| outputs.iter().any(|(output, _)| output == name));
+    let mut due = Vec::new();
+    for (name, refresh_mhz) in outputs {
+      let interval = frame_interval(*refresh_mhz);
+      let next = self.next.entry(name.clone()).or_insert(now + interval);
+      if now >= *next {
+        due.push(name.clone());
+        *next = (*next + interval).max(now);
+      }
+    }
+    due
+  }
+
+  /// The earliest deadline, if any output is paced.
+  fn next_wake(&self) -> Option<Instant> {
+    self.next.values().min().copied()
+  }
 }
 
 /// The time between frames at `refresh_mhz` (millihertz); 60 Hz when it
@@ -190,6 +277,73 @@ mod tests {
     assert_eq!(frame_interval(60_000), Duration::from_nanos(16_666_666));
     assert_eq!(frame_interval(0), frame_interval(60_000));
     assert_eq!(frame_interval(144_000), Duration::from_nanos(6_944_444));
+  }
+
+  #[test]
+  fn the_output_count_prefers_the_option() {
+    assert_eq!(output_count(Some(3), Some("2")).unwrap(), 3);
+    assert_eq!(output_count(None, Some("2")).unwrap(), 2);
+    assert_eq!(output_count(None, None).unwrap(), 1);
+    assert!(output_count(None, Some("0")).is_err());
+  }
+
+  #[test]
+  fn each_output_is_paced_at_its_own_rate() {
+    let start = Instant::now();
+    let outputs = [("A".to_owned(), 60_000), ("B".to_owned(), 30_000)];
+    let mut pacer = FramePacer::default();
+    assert!(pacer.due(start, &outputs).is_empty());
+    let count = |pacer: &mut FramePacer, name: &str| {
+      let mut frames = 0;
+      for step in 1..=1000 {
+        let now = start + Duration::from_millis(step);
+        frames += pacer
+          .due(now, &outputs)
+          .iter()
+          .filter(|due| due.as_str() == name)
+          .count();
+      }
+      frames
+    };
+    let mut first = FramePacer::default();
+    first.due(start, &outputs);
+    assert_eq!(count(&mut first, "A"), 60);
+    let mut second = FramePacer::default();
+    second.due(start, &outputs);
+    assert_eq!(count(&mut second, "B"), 30);
+    // An output that is gone is forgotten; a new one starts one frame on.
+    let later = start + Duration::from_secs(2);
+    let replaced = [("C".to_owned(), 60_000)];
+    assert!(pacer.due(later, &replaced).is_empty());
+    assert_eq!(
+      pacer.next_wake(),
+      Some(later + frame_interval(60_000)),
+      "only C is paced"
+    );
+  }
+
+  #[test]
+  fn extra_outputs_are_headless_2_onwards_side_by_side() {
+    let path = std::env::temp_dir()
+      .join(format!("shingle-headless-outputs-{}", std::process::id()));
+    let mut compositor =
+      Compositor::with_socket_path(Config::default(), &path).unwrap();
+    add_outputs(&mut compositor, 3).unwrap();
+    let outputs = compositor
+      .outputs()
+      .into_iter()
+      .map(|output| (output.handle.name().to_owned(), output.rect.x))
+      .collect::<Vec<_>>();
+    assert_eq!(
+      outputs,
+      [
+        ("HEADLESS-1".to_owned(), 0),
+        ("HEADLESS-2".to_owned(), 1280),
+        ("HEADLESS-3".to_owned(), 2560),
+      ]
+    );
+    drop(compositor);
+    let _ = std::fs::remove_file(path);
   }
 
   #[test]
