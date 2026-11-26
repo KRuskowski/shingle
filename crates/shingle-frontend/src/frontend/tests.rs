@@ -1453,6 +1453,41 @@ fn layout_changes_are_saved_in_the_background() {
 }
 
 #[test]
+fn a_new_rectangle_for_a_floating_window_is_saved() {
+  let mut fixture = Fixture::new(ShingleConfig::default());
+  fixture.window("alpha");
+  let window = fixture.tiles()[0];
+  let session = fixture.base.with_extension("session.json");
+  let saved_floating = |fixture: &Fixture| {
+    fixture.frontend.flush_session();
+    let (core, _) = SessionStore::new(&session).load().unwrap().unwrap();
+    core.window_info(window).unwrap().state.floating
+  };
+  let configure = |fixture: &mut Fixture, x: i32| {
+    let request = format!(
+      concat!(
+        r#"{{"method":"window-rules/configure-view","data":{{"id":{},"#,
+        r#""geometry":{{"x":{},"y":20,"width":300,"height":200}}}}}}"#
+      ),
+      window.0, x
+    );
+    assert_eq!(fixture.ipc(&request), r#"{"result":"ok"}"#);
+  };
+  // The first rectangle floats the window, which was saved before; the
+  // second only moves it.
+  configure(&mut fixture, 10);
+  assert_eq!(
+    saved_floating(&fixture),
+    Some(shingle_core::Rect::new(10, 20, 300, 200))
+  );
+  configure(&mut fixture, 50);
+  assert_eq!(
+    saved_floating(&fixture),
+    Some(shingle_core::Rect::new(50, 20, 300, 200))
+  );
+}
+
+#[test]
 fn a_layout_that_changes_only_weights_is_saved() {
   let (mut fixture, [left, right, _]) = three_windows();
   let session = fixture.base.with_extension("session.json");

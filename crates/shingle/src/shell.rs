@@ -1651,7 +1651,8 @@ pub(crate) fn set_floating_geometry(
   window: WindowId,
   geometry: Rect,
 ) -> Result<(), crate::Error> {
-  let old_edges = state.core.window_info(window)?.state.tiled_edges;
+  let old = state.core.window_info(window)?.state;
+  let old_edges = old.tiled_edges;
   state.core.set_floating(window, Some(geometry))?;
   let mut detached = None;
   for surface in state.surfaces.values_mut() {
@@ -1673,6 +1674,10 @@ pub(crate) fn set_floating_geometry(
       old_edges,
       new_edges: 0,
     });
+  } else if old.floating != Some(geometry) {
+    // A floating window that only moved or resized has no other event
+    // that would get the new rectangle saved.
+    state.events.push(Event::LayoutChanged);
   }
   reconfigure_all(state);
   Ok(())
