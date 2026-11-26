@@ -26,6 +26,11 @@ pub(super) struct ClosingAnimation {
 
 impl Frontend {
   pub(super) fn animation_matches(&self, snapshot: &SurfaceSnapshot) -> bool {
+    // A Wayland client's drag icon, which has no X class, is no view in
+    // Wayfire and never animates.
+    if snapshot.role == SurfaceRole::DragIcon && snapshot.app_id.is_none() {
+      return false;
+    }
     let view_type = match snapshot.role {
       SurfaceRole::Toplevel => "toplevel",
       SurfaceRole::Popup => "popup",

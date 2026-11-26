@@ -990,6 +990,11 @@ impl CompositorState {
     if crate::surface_outputs::pointer_output(self) != *id {
       return snapshots;
     }
+    // A Wayland client's drag icon follows the pointer, just below it, as
+    // Wayfire's drag_icon_t root node is in front of the scene.
+    if let Some(object) = crate::data_device::drag_icon(self) {
+      self.append_surface_and_popups(&object, &mut snapshots);
+    }
     snapshots.extend(self.cursor_snapshot());
     snapshots
   }
@@ -1857,6 +1862,12 @@ impl CompositorState {
     }
 
     let callbacks = if let Some(surface) = self.surfaces.get_mut(object) {
+      // A drag icon moves by each commit's offset, as wlroots' scene drag
+      // icon does.
+      if let Role::DragIcon { offset } = &mut surface.role {
+        offset.0 = offset.0.saturating_add(surface.pending.offset_x);
+        offset.1 = offset.1.saturating_add(surface.pending.offset_y);
+      }
       surface.pending.offset_x = 0;
       surface.pending.offset_y = 0;
       surface.committed_once = true;

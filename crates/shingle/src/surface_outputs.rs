@@ -27,7 +27,7 @@ use crate::{
 };
 
 /// How deep popups and subsurfaces are followed to their root.
-const MAX_DEPTH: usize = 32;
+pub(crate) const MAX_DEPTH: usize = 32;
 
 /// What one surface was last told.
 struct Tracked {
@@ -234,6 +234,13 @@ fn outputs_at_depth(
         Vec::new()
       }
     }
+    Role::DragIcon { .. } => {
+      if crate::data_device::drag_icon(state).as_ref() == Some(object) {
+        vec![pointer_output(state)]
+      } else {
+        Vec::new()
+      }
+    }
     Role::Xwayland(_) => shell::surface_geometry(state, object)
       .map(|rect| {
         state
@@ -275,7 +282,9 @@ pub(crate) fn scale_output(
     match &surface.role {
       Role::Layer(layer) => return Some(layer.output.clone()),
       Role::SessionLock { output, .. } => return Some(output.clone()),
-      Role::Cursor => return Some(pointer_output(state)),
+      Role::Cursor | Role::DragIcon { .. } => {
+        return Some(pointer_output(state));
+      }
       _ => {}
     }
     match parent(state, &current) {

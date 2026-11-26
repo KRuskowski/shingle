@@ -33,11 +33,20 @@ use wayland_server::{
     wl_data_device_manager::{self, WlDataDeviceManager},
     wl_data_offer::{self, WlDataOffer},
     wl_data_source::{self, WlDataSource},
+    wl_surface::WlSurface,
   },
 };
 use wlr_data_control::zwlr_data_control_source_v1::ZwlrDataControlSourceV1;
 
-use crate::{shell::Role, state::CompositorState};
+use shingle_core::Rect;
+
+use crate::{
+  shell::{self, Role},
+  state::CompositorState,
+};
+
+#[cfg(test)]
+mod icon_tests;
 
 pub(crate) struct SourceData;
 struct DeviceData;
@@ -125,6 +134,8 @@ struct Drag {
   grab: Option<ObjectId>,
   /// An X client's drag: when the button was released.
   released: Option<Instant>,
+  /// A Wayland client's drag icon, the surface `start_drag` named.
+  icon: Option<ObjectId>,
 }
 
 impl Drag {
@@ -141,6 +152,7 @@ impl Drag {
       position: (f64::NAN, f64::NAN),
       grab,
       released: None,
+      icon: None,
     }
   }
 
@@ -193,6 +205,9 @@ pub(crate) struct DataDevices {
   /// An X client's drag ended: performed with this action, or not
   /// (`None`). The XWayland bridge tells the X source.
   pub(crate) x11_drag_ended: Option<Option<wl_data_device_manager::DndAction>>,
+  /// The drag icon drawn at the end of the last turn, and where, so that
+  /// the frontend redraws where it moves to and where it was.
+  icon_drawn: Option<(ObjectId, Rect)>,
 }
 
 impl DataDevices {
@@ -601,6 +616,84 @@ pub(crate) fn drop_drag(state: &mut CompositorState) {
     source.dnd_drop_performed();
   } else {
     source.cancelled();
+  }
+}
+
+/// Gives `icon` the drag icon role, which a surface without a role or one
+/// that was an icon before may take, and moves it back to the pointer.
+/// Returns whether it took the role.
+fn take_icon_role(state: &mut CompositorState, icon: &WlSurface) -> bool {
+  let Some(surface) = state.surfaces.get_mut(&icon.id()) else {
+    return true;
+  };
+  match surface.role {
+    Role::None | Role::DragIcon { .. } => {
+      surface.role = Role::DragIcon { offset: (0, 0) };
+      true
+    }
+    _ => false,
+  }
+}
+
+/// The drag icon to draw: the icon surface of the current drag while it
+/// is not dropped and the surface has a buffer. wlroots ends the drag and
+/// its icon on the drop.
+pub(crate) fn drag_icon(state: &CompositorState) -> Option<ObjectId> {
+  let drag = state.data_devices.drag.as_ref()?;
+  if drag.dropped {
+    return None;
+  }
+  let icon = drag.icon.as_ref()?;
+  state
+    .surfaces
+    .get(icon)
+    .is_some_and(|surface| {
+      surface.buffer.is_some() && matches!(surface.role, Role::DragIcon { .. })
+    })
+    .then(|| icon.clone())
+}
+
+/// Whether `object` is the drag icon or one of its subsurfaces, which take
+/// no input, so that the drag sees the surface under it.
+pub(crate) fn in_drag_icon(state: &CompositorState, object: &ObjectId) -> bool {
+  let mut current = object.clone();
+  for _ in 0..crate::surface_outputs::MAX_DEPTH {
+    match state.surfaces.get(&current).map(|surface| &surface.role) {
+      Some(Role::DragIcon { .. }) => return true,
+      Some(Role::Subsurface { parent, .. }) => current = parent.clone(),
+      _ => return false,
+    }
+  }
+  false
+}
+
+/// Asks the frontend to redraw where the drag icon moved to, and where it
+/// was when it moved or went, with a commit event: the icon follows the
+/// pointer without committing, and a cursor on a cursor plane draws no
+/// frame for the motion.
+pub(crate) fn sync_icon(state: &mut CompositorState) {
+  let now = drag_icon(state).and_then(|object| {
+    let rect = shell::surface_geometry(state, &object)?;
+    Some((object, rect))
+  });
+  if now == state.data_devices.icon_drawn {
+    return;
+  }
+  let before = std::mem::replace(&mut state.data_devices.icon_drawn, now);
+  let mut damaged = Vec::new();
+  if let Some((object, _)) = &state.data_devices.icon_drawn {
+    damaged.extend(state.snapshot(object));
+  }
+  if let Some((object, rect)) = before
+    && let Some(mut snapshot) = state.snapshot(&object)
+  {
+    snapshot.geometry = rect;
+    damaged.push(snapshot);
+  }
+  for snapshot in damaged {
+    state
+      .events
+      .push(crate::Event::SurfaceCommitted(Box::new(snapshot)));
   }
 }
 
@@ -1026,7 +1119,7 @@ impl Dispatch<WlDataDevice, DeviceData> for CompositorState {
   fn request(
     state: &mut Self,
     _client: &Client,
-    _resource: &WlDataDevice,
+    resource: &WlDataDevice,
     request: wl_data_device::Request,
     _data: &DeviceData,
     _dhandle: &DisplayHandle,
@@ -1034,9 +1127,19 @@ impl Dispatch<WlDataDevice, DeviceData> for CompositorState {
   ) {
     if let wl_data_device::Request::StartDrag {
       source: Some(source),
+      icon,
       ..
     } = request
     {
+      if let Some(icon) = &icon
+        && !take_icon_role(state, icon)
+      {
+        resource.post_error(
+          wl_data_device::Error::Role,
+          "the drag icon surface has another role",
+        );
+        return;
+      }
       let source_id = SourceKey::Object(source.id());
       let Some(source) = state.data_devices.sources.get_mut(&source_id) else {
         return;
@@ -1053,7 +1156,9 @@ impl Dispatch<WlDataDevice, DeviceData> for CompositorState {
       }
       source.used = true;
       forget_x11_drag(state);
-      state.data_devices.drag = Some(Drag::new(source_id, None));
+      let mut drag = Drag::new(source_id, None);
+      drag.icon = icon.map(|icon| icon.id());
+      state.data_devices.drag = Some(drag);
       return;
     }
     if let wl_data_device::Request::SetSelection { source, .. } = request {

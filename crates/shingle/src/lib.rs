@@ -1611,6 +1611,7 @@ impl Compositor {
     ext_workspace::sync(&mut self.state, &self.display.handle());
     data_device::sync_selection(&mut self.state, &self.display.handle());
     data_device::sync_drag(&mut self.state, &self.display.handle());
+    data_device::sync_icon(&mut self.state);
     data_control::sync(&mut self.state, &self.display.handle());
     primary_selection::sync_selection(&mut self.state, &self.display.handle());
     wayfire_shell::sync(&mut self.state, std::time::Instant::now());

@@ -38,6 +38,11 @@ pub(crate) enum Role {
   None,
   Dead,
   Cursor,
+  /// A Wayland client's drag icon (`wl_data_device.start_drag`), drawn at
+  /// the pointer moved by every `wl_surface` offset since the drag began.
+  DragIcon {
+    offset: (i32, i32),
+  },
   Xdg {
     resource: XdgSurface,
     kind: Option<XdgKind>,
@@ -237,7 +242,7 @@ pub(crate) fn create_globals(handle: &DisplayHandle, session_lock: bool) {
 
 pub(crate) fn has_live_role(surface: &Surface) -> bool {
   match &surface.role {
-    Role::None | Role::Dead | Role::Cursor => false,
+    Role::None | Role::Dead | Role::Cursor | Role::DragIcon { .. } => false,
     Role::Xwayland(role) => role.is_live(),
     _ => true,
   }
@@ -295,6 +300,7 @@ pub(crate) fn snapshot_metadata(
       (SurfaceRole::LayerShell, None, None, None, None)
     }
     Role::Cursor => (SurfaceRole::Cursor, None, None, None, None),
+    Role::DragIcon { .. } => (SurfaceRole::DragIcon, None, None, None, None),
     Role::SessionLock { .. } => {
       (SurfaceRole::SessionLock, None, None, None, None)
     }
@@ -430,6 +436,16 @@ pub(crate) fn surface_geometry(
       Some(Rect::new(
         state.input.pointer_x as i32 - state.input.cursor_hotspot.0,
         state.input.pointer_y as i32 - state.input.cursor_hotspot.1,
+        width,
+        height,
+      ))
+    }
+    Role::DragIcon { offset } => {
+      let (width, height) = crate::viewport::dimensions(state, object)
+        .unwrap_or_else(|| logical_buffer_dimensions(surface));
+      Some(Rect::new(
+        (state.input.pointer_x as i32).saturating_add(offset.0),
+        (state.input.pointer_y as i32).saturating_add(offset.1),
         width,
         height,
       ))

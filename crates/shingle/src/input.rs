@@ -1734,6 +1734,9 @@ fn hit_at(state: &CompositorState, x: f64, y: f64) -> Option<Hit> {
     })
     .find_map(|snapshot| {
       let object = state.surface_ids.get(&snapshot.id)?;
+      if crate::data_device::in_drag_icon(state, object) {
+        return None;
+      }
       let surface = state.surfaces.get(object)?;
       if contains(snapshot.geometry, x, y)
         && crate::region::contains(

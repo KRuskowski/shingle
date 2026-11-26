@@ -2001,3 +2001,28 @@ fn a_move_drag_onto_another_output_moves_the_window_there() {
     .geometry;
   assert_eq!(geometry, shingle_core::Rect::new(1000, 0, 800, 600));
 }
+
+#[test]
+fn only_x_drag_icons_may_animate() {
+  let mut config = ShingleConfig::default();
+  config.animate.enabled_for =
+    shingle_config::ViewMatcher::try_from("type is \"x-or\"".to_owned())
+      .unwrap();
+  let fixture = Fixture::new(config);
+  let icon = |app_id: Option<&str>| shingle::SurfaceSnapshot {
+    id: shingle::SurfaceId(1),
+    window: None,
+    parent: None,
+    role: shingle::SurfaceRole::DragIcon,
+    app_id: app_id.map(str::to_owned),
+    title: None,
+    icon: None,
+    geometry: shingle_core::Rect::new(0, 0, 32, 32),
+    opacity: 1.0,
+    buffer: None,
+  };
+  // An X client's icon is an `x-or` view, as in Wayfire; a Wayland
+  // client's is no view at all.
+  assert!(fixture.frontend.animation_matches(&icon(Some("XTerm"))));
+  assert!(!fixture.frontend.animation_matches(&icon(None)));
+}
