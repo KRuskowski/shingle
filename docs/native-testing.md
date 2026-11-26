@@ -767,6 +767,20 @@ From NB-10 on, each lit monitor shows the cursor on its CRTC's cursor plane wher
 1. End Shingle with `kill -TERM`: `exit=0` and the text console back, with no cursor left on the console (the kernel's console turns the planes off) and no `drm` errors in `sudo dmesg | tail`.
 2. Record for each GPU family: the cursor plane's use and size, async flips, VRR and the monitor's report, fences, and every fallback line seen.
 
+## WG-9: per-device input options
+
+Since WG-9 a device takes the libinput options of the `[input:NAME]` section (YAML `input_devices.NAME`) that names it by its udev `ID_PATH`, `ID_SERIAL`, `LIBINPUT_DEVICE_GROUP` or `DEVPATH`, or else by its name, in place of `[input]`'s, and a touch screen the `calibration` of its `[input-device:NAME]` section, as Wayfire does ([design, WG-9 as built](design/wayfire-gaps.md#wg-9-as-built)). Unit tests through the fake libinput device cover the matching and the settings; this step checks them on real devices. It needs a mouse and a touchpad, ideally two mice, and a touch screen for the calibration if there is one.
+
+### Step 52: each device gets its own section's options
+
+1. Start Shingle once with the test config and read the names and properties: `tools/native_test/ipc.py /tmp/shingle-ipc input/list-devices` lists each device's `name` with `input-section` `input`, and `udevadm info /dev/input/eventN | grep -E 'ID_PATH|ID_SERIAL|LIBINPUT_DEVICE_GROUP'` gives the properties. Stop Shingle.
+2. Write `~/.config/shingle/devices.ini` with `[core]` `plugins = simple-tile` and `xwayland = false`, `[input]` `mouse_cursor_speed = -0.8` and `tap_to_click = true`, `[input:MOUSE]` `mouse_cursor_speed = 0.8` and `mouse_accel_profile = flat`, where MOUSE is the first mouse's name, `[input:PATH]` `tap_to_click = false`, where PATH is the touchpad's `ID_PATH`, and, with a touch screen, `[input-device:SCREEN]` `calibration = -1 0 1 0 1 0`, which mirrors it left to right. Start Shingle on tty1 with `--config ~/.config/shingle/devices.ini --ipc /tmp/shingle-ipc --spawn foot`.
+3. Over SSH: `grep 'options from' ~/.local/state/shingle/native.log` shows `options from [input:MOUSE]` for the first mouse, `[input:PATH]` for the touchpad and `[input]` for everything else; `input/list-devices` reports the same as `input-section`, and `input-device:SCREEN` as the touch screen's `input-device-section`.
+4. `sudo libinput list-devices` while Shingle runs is not reliable (it opens its own context), so check by hand: the first mouse moves the pointer fast and without acceleration, a second mouse slowly; tapping the touchpad does not click, while its physical button does.
+5. Touch the left edge of the touch screen: the pointer or touch point appears at the right edge.
+6. Unplug and replug the first mouse: the log shows `options from [input:MOUSE]` again and it is fast again.
+7. Record the devices, their properties and whether each behaved as configured.
+
 ## Results
 
 Record results in [status.md](status.md#with-real-clients). None of the steps above has been run yet: the test machine does not exist so far.

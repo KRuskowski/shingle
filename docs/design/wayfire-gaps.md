@@ -12,6 +12,7 @@ Wayfire's behaviour is taken from its GitHub mirror at pinned commits:
 | WayfireWM/wf-config (INI parser) | `1a48992a483d3ae3de800b806f87abdaba994148` | 2026-10-18 |
 | WayfireWM/wf-shell (panel, dock, background) | `4789c5bc890b0b28bb4ffde4b97427882267cd48` | 2026-11-21 |
 | WayfireWM/wayfire tag `v0.9.0`, for comparison | `15065ca1a2e3a596db3dbcba64823c5dee90f191` | 2024-08-24 |
+| wlroots, as the pinned Wayfire's `subprojects/wlroots` (WG-8 to WG-10) | `d783533489e1f75d6886c2ab5c5960090ef268f8` | 2026-07-07 |
 
 This host runs Debian's Wayfire 0.9.0, so items new since `v0.9.0` are marked where it matters. In what follows `wayfire:PATH:LINE` is a file of the pinned Wayfire commit, `wf-config:` and `wf-shell:` likewise. Shingle paths are relative to the repository; `wayfire.rs` alone means crates/shingle-config/src/wayfire.rs (the INI importer) and `config/lib.rs` means crates/shingle-config/src/lib.rs.
 
@@ -60,10 +61,10 @@ Ranked by how much a daily Wayfire user with the tiling plugin would notice them
 | Animations: `fire`, `zap`, `spin`, `squeezimize`, per-type `fade_enabled_for`, `zoom_enabled_for`, `fire_enabled_for` and their durations, `startup_duration`, `spin_rotations`, `fire_*`; only `fade` and `zoom` exist | everyone, cosmetically | config/lib.rs:1267, crates/shingle-frontend/src/frontend/animation.rs:154 |
 | `blur` (18 options) | users of translucent terminals | no `blur` in crates/ |
 | `wobbly`, `cube` (with `idle`'s cube screensaver and `cube/*` IPC) and wrot's 3D mode | users of the effects | no `wobbly` or `cube` in crates/ except crates/shingle-idle/src/lib.rs:16 |
-| `zwp_text_input_manager_v1` (`input-method-v1/enable_text_input_v1`), which Chromium and Electron use for IME by default | IME users | wayfire:plugins/protocols/input-method-v1.cpp:526; crates/shingle/src/text_input.rs:44 is v3 only |
+| `zwp_text_input_manager_v1` (`input-method-v1/enable_text_input_v1`), which Chromium and Electron use for IME by default (done since WG-8, see [WG-8 as built](#wg-8-as-built)) | IME users | wayfire:plugins/protocols/input-method-v1.cpp:526; crates/shingle/src/text_input/v1.rs |
 | Touch-screen gesture and hotspot activators (`swipe`, `edge-swipe`, `pinch`, `hotspot`) | touch-screen and hot-corner users | B2; no gesture recogniser in crates/shingle-frontend |
 | `zwp_tablet_manager_v2`; tablets are ignored at the libinput level | tablet users (for them, blocking) | crates/shingle-native/src/udev.rs:358 |
-| Per-device input sections `[input:NAME]`, matched by udev `ID_PATH`, `ID_SERIAL`, `LIBINPUT_DEVICE_GROUP` or name, for pointer and keyboard options | users with several mice or keyboards | wayfire:src/core/plugin.cpp:47, :157 of src/core/seat/keyboard.cpp; only `[input-device:NAME] output` is read (wayfire.rs:702) |
+| Per-device input sections `[input:NAME]`, matched by udev `ID_PATH`, `ID_SERIAL`, `LIBINPUT_DEVICE_GROUP` or name, for pointer and keyboard options (libinput options and `[input-device:NAME] calibration` since WG-9, see [WG-9 as built](#wg-9-as-built); keyboard options per device are still missing) | users with several mice or keyboards | wayfire:src/core/plugin.cpp:47, :157 of src/core/seat/keyboard.cpp; crates/shingle-config/src/input_devices.rs |
 | Input options `touchpad_scroll_speed`, `3fg_drag`, `gesture_sensitivity`, `gesture_finger_count`, `tablet_motion_mode`, `[input-device] calibration` | laptop and touch-screen users | no arm in wayfire.rs:194-261 |
 | `ext_data_control_manager_v1`, `ext_image_copy_capture_manager_v1` and `ext_output_image_capture_source_manager_v1` (new since 0.9.0); clients fall back to the wlr protocols Shingle has | clipboard managers, xdg-desktop-portal-wlr, wf-shell's window-list previews | wayfire:src/core/core.cpp:149, :160, :161 |
 | Screencopy has no DMA-BUF frames or damage (`copy_with_damage` copies everything) | screen recording and casting cost | crates/shingle/src/screencopy.rs:580 |
@@ -199,20 +200,21 @@ Every plugin and object in wayfire:metadata/ and every plugin in wayfire:plugins
 | `cursor_theme`, `cursor_size` | implemented: Shingle's own cursor, and since WG-3 exported as `XCURSOR_THEME` and `XCURSOR_SIZE` to every child (A6 before) | 258-261; crates/shingle/src/cursor_shape.rs:49, crates/shingle-session/src/environment.rs (`with_desktop`) |
 | `modifier_binding_timeout` | implemented since WG-4, for `wayfire-shell/toggle_menu` and commands | crates/shingle/src/modifier_binding.rs |
 | `3fg_drag`, `touchpad_scroll_speed`, `gesture_sensitivity`, `gesture_finger_count`, `tablet_motion_mode` | missing | no arm |
+| the libinput options above in `[input:NAME]` | implemented since WG-9 in the native backend, matched as Wayfire matches them ([WG-9 as built](#wg-9-as-built)); the keyboard, scroll speed and cursor options warn per device | crates/shingle-config/src/input_devices.rs, crates/shingle-native/src/input.rs (`DeviceOptions`) |
 
 ### input-device (object)
 
 | Option | Status | Evidence |
 | --- | --- | --- |
-| `output` | implemented | 702-711; crates/shingle-config/src/multi_output.rs:156 |
-| `calibration` | missing | no arm |
+| `output` | implemented; since WG-9 also found by udev property | crates/shingle-config/src/input_devices.rs |
+| `calibration` | implemented since WG-9 for touch devices in the native backend | crates/shingle-config/src/input_devices.rs (`parse_calibration`) |
 
 ### input-method-v1
 
 | Option | Status | Evidence |
 | --- | --- | --- |
-| `enable_text_input_v3` | implemented (also gates input-method v1 and v2 and the input panel) | 321; crates/shingle/src/state.rs:687 |
-| `enable_text_input_v1` | missing: no `zwp_text_input_manager_v1` | no arm |
+| `enable_text_input_v3` | implemented; since WG-8 input-method v1 and v2 and the input panel exist while it or `enable_text_input_v1` is on | crates/shingle/src/state.rs (`create_globals`) |
+| `enable_text_input_v1` | implemented since WG-8 ([WG-8 as built](#wg-8-as-built)) | crates/shingle/src/text_input/v1.rs |
 
 ### invert
 
@@ -394,7 +396,7 @@ What the pinned Wayfire advertises and Shingle does not. Globals that only wlroo
 | Global | Wayfire | Shingle | Rank |
 | --- | --- | --- | --- |
 | `zwf_shell_manager_v2` (version 3) | wayfire:plugins/protocols/wayfire-shell.cpp:586 | version 3 since WG-4 (crates/shingle/src/wayfire_shell.rs) | annoying (A3) |
-| `zwp_text_input_manager_v1` | wayfire:plugins/protocols/input-method-v1.cpp:528, with `enable_text_input_v1` | missing | rare |
+| `zwp_text_input_manager_v1` | wayfire:plugins/protocols/input-method-v1.cpp:528, with `enable_text_input_v1` | version 1 since WG-8 (crates/shingle/src/text_input/v1.rs) | rare |
 | `zwp_tablet_manager_v2` | wayfire:src/core/core.cpp:155 | missing | rare |
 | `ext_data_control_manager_v1` | wayfire:src/core/core.cpp:149 (new since 0.9.0) | missing; `zwlr_data_control_manager_v1` v2 (crates/shingle/src/data_control.rs:87) | rare |
 | `ext_image_copy_capture_manager_v1`, `ext_output_image_capture_source_manager_v1` | wayfire:src/core/core.cpp:160-161 (new since 0.9.0) | missing; `zwlr_screencopy_manager_v1` v3, shm only (crates/shingle/src/screencopy.rs:250) | rare |
@@ -658,9 +660,52 @@ Where Shingle still differs: translucent colours blend in linear light, where Wa
 
 **Focus after a minimize.** WG-7's switcher test focused the next view by hand after minimizing the focused one, on the belief that Wayfire records the view it refocuses as recently focused, which would change the switchers' order. It does not: `seat_t::refocus` (wayfire:src/core/seat/seat.cpp) picks the visible view with the latest `last_focus_timestamp` and gives it the keyboard focus without stamping it; only `set_active_node`, through `focus_view`, stamps. So after minimizing the focused charlie of alpha, bravo and charlie, bravo has the focus, charlie is still the most recently focused, and one Alt+Tab selects bravo again. Headless Wayfire 0.9 does exactly that, and so does Shingle, whose `sync_focus` leaves `focus_recency` alone. The task's premise was wrong; following the code, nothing changed in Shingle's focus handling, WG-7's workaround was removed, its test now expects Wayfire's order (bravo, alpha, then the minimized charlie), a new test pins the order after a minimize, and tools/gpu_test/focus_checks.py compares Shingle with headless Wayfire.
 
+### WG-8 to WG-10 `shingle-input-gaps`: text-input-v1, per-device input options and drag icons
+
+Three daily-use gaps, one commit series each: `zwp_text_input_manager_v1` from the [Later](#later) list, per-device input options (the Rare row above), and a Wayland client's own drag icon, which XW-6 noted Shingle had never drawn ([docs/design/xwayland.md](xwayland.md#xw-6-shingle-xwayland-dnd-drag-and-drop)). Each was checked against the pinned Wayfire and the wlroots its `subprojects/wlroots` pins (`d783533`, [Sources](#sources-and-method)).
+
+#### WG-8 as built
+
+crates/shingle/src/text_input.rs keeps text-input v3 and v1 in one model, `TextInputs`, which input-method v1 (crates/shingle/src/input_method.rs) and v2 (input_method_v2.rs) read as before; crates/shingle/src/text_input/v1.rs is `zwp_text_input_manager_v1` version 1, as Wayfire's input-method-v1 plugin offers it (wayfire:plugins/protocols/input-method-v1.cpp, text-input-v1-v3.hpp).
+
+- A v1 text input follows its client's keyboard focus without events. `activate` on the surface that has that focus enables it and sends `enter`; `activate` on any other surface is ignored, as Wayfire ignores it. Activating one disables the seat's other v1 text inputs with `leave`, since Wayfire serves one context at a time; between v1 and v3 the one enabled last is served. `deactivate` and a focus change send `leave`.
+- Its state is not double-buffered: `set_surrounding_text`, `set_content_type` and `commit_state` reach input-method v1's context at the end of the turn as `surrounding_text`, `content_type` and `commit_state` with the client's serial; `reset`, `set_preferred_language` and `invoke_action` reach it as `reset`, `preferred_language` and `invoke_action`. `set_cursor_rectangle` takes effect with the next `commit_state` and places input panels, which Wayfire ignores. `show_input_panel` and `hide_input_panel` do nothing, as in Wayfire.
+- Every event of an input-method-v1 context goes to a v1 text input as it is, with the serial the input method gave: `commit_string`, `preedit_string`, `preedit_styling`, `preedit_cursor`, `delete_surrounding_text`, `cursor_position`, `modifiers_map`, `keysym`, `language` and `text_direction`.
+- `[input-method-v1] enable_text_input_v1` (YAML and i3 `input.enable_text_input_v1`, a WCM checkbox, default true) and `core/plugins` gate the global, which is read at start only, like v3's. Input-method v1 and v2 and the input panel exist while either text-input version is on.
+
+Where the code differs from the task and from Wayfire, and why:
+
+- The task asked for text-input v1 bridged to the input-method-v2 path "the way Wayfire's input-method-v1 plugin does". Wayfire bridges text-input v1 only to input-method v1; its input-method v2 relay (wayfire:src/core/seat/input-method-relay.cpp) serves text-input v3 alone. Shingle's input methods share one model, so v1 text inputs reach both: an input-method-v2 commit arrives as v1's `delete_surrounding_text` (index minus the bytes before the cursor, length both counts) followed by the `commit_string` it applies with, an empty one for a deletion alone, then `preedit_cursor` and `preedit_string`; a commit with neither a string nor a preedit clears a preedit shown. Wayfire's own input-method v1 path is the one Wayfire users run (Fcitx5), and it behaves as Wayfire's.
+- Wayfire never sends `enter` or `leave` to a v1 text input (its `activate` and `deactivate` adapters are never called); Shingle sends them as the protocol describes, `enter` on an accepted `activate`.
+- Input-method v1's `content_type` numbers purposes as text-input v1 does, and v3 has `pin` at 9, one before v1's `date` to `terminal`. The model keeps v3's numbers and hands input-method v1 v1's: `pin` becomes `digits`. Found on the way: Shingle, like Wayfire, used to pass v3's purpose from 9 on to input-method v1 one too high.
+
+Tested by crates/shingle/src/text_input/tests.rs (through the in-process test client: the global and its option, `activate` needing the focused surface, every state request reaching an input-method-v1 context, every context event arriving unchanged, `deactivate` and focus loss, a second text input taking over, input-method-v2 edits in v1's terms), text_input/v1.rs (purpose mapping and deletion arguments) and crates/shingle-config (the option in Wayfire, i3 and YAML, and `core/plugins`). The real run is tools/output_test/run.py's `wg8_text_input_checks` (tools/output_test/text_input_checks.py), raw-protocol clients against headless Shingle, recorded in docs/status.md. Chromium was not run.
+
+#### WG-9 as built
+
+The task named `[input-device:NAME]` sections for libinput options. In Wayfire those hold only `output` and `calibration` (wayfire:metadata/input-device.xml, src/core/seat/input-manager.cpp, seat.cpp `touchscreen_device_t`); a device's libinput options come from `[input:NAME]`, which wf-config clones from `[input]` when the section starts (wf-config:src/file.cpp `check_section`), and which `pointing_device_t::load_options` reads in place of `[input]` (wayfire:src/core/seat/pointing-device.cpp, src/core/plugin.cpp `get_input_device_section`). Shingle follows Wayfire's code:
+
+- `input_devices.NAME` (crates/shingle-config/src/input_devices.rs, YAML) holds both halves: the 15 libinput options of `[input]` that the native backend applies (`DEVICE_OPTIONS`), each unset unless the entry sets it, and `output` and `calibration` (six numbers, as Wayfire's `sscanf`). The importer reads `[input:NAME]` into the first and `[input-device:NAME]` into the second. An option of `[input:NAME]` Shingle cannot set per device (the XKB and repeat options, `mouse_scroll_speed`, the cursor and the missing ones) warns and follows `[input]`; the section no longer counts as a missing plugin's.
+- A device takes the first entry named by its udev `ID_PATH`, `ID_SERIAL`, `LIBINPUT_DEVICE_GROUP` or `DEVPATH` and then by its name, as Wayfire looks sections up (`matching_device`); the two halves are looked up on their own, as Wayfire looks up `[input:...]` and `[input-device:...]` on their own. The native backend reads the four properties from libinput's udev device, gives a device `[input]` with its entry's options in their place, calibrates touch devices with their entry's matrix where libinput can, and maps an absolute device to the output its entry found that way names (crates/shingle-native/src/input.rs, `DeviceOptions`).
+- `input/list-devices` reports the sections the native backend applied as two fields of Shingle's own, `input-section` (`input` or `input:NAME`) and `input-device-section` (`input-device:NAME` or null). Nested and headless, whose devices take no libinput options, leave them out, so that their replies stay exactly Wayfire's, as the pinned replies of crates/shingle-nested's tests require. Nested keeps its fixed devices.
+
+Where it differs from Wayfire: wf-config copies `[input]`'s values into `[input:NAME]` only from the lines above the section, so an `[input]` written after it does not reach the device in Wayfire; in Shingle every `[input]` option applies wherever it is written. Options apply when a device is added, as before WG-9; a config reload does not reconfigure devices, where Wayfire's options reload.
+
+Tested by crates/shingle-config/src/input_devices.rs (matching order, the halves on their own, overriding only what is set, every option from Wayfire text, calibration, YAML round trip and validation, a Wayfire file with both sections), crates/shingle/src/ipc.rs (the reported sections) and crates/shingle-native/src/host/tests.rs (through the fake libinput device: options by name and by `ID_PATH`, calibration of a touch device, the send-events mode per device, the sections in `input/list-devices`, an output mapping found by `ID_SERIAL`). Step 52 of [native-testing.md](../native-testing.md#wg-9-per-device-input-options) checks real devices on the test machine; it has not run.
+
+#### WG-10 as built
+
+A `wl_data_device.start_drag` icon surface takes `Role::DragIcon` (crates/shingle/src/shell.rs), as wlroots gives it the `wl_data_device-icon` role (wlroots:types/data_device/wlr_drag.c); a surface with another role is refused with the `role` error. `data_device::drag_icon` is the icon of the current drag while it is not dropped and has a buffer, and `visible_surfaces_on` draws it with its subsurfaces just below the cursor on the pointer's output, above the X drag icons, as Wayfire adds its `drag_icon_t` node at the front of the scene (wayfire:src/core/seat/drag-icon.cpp). Its snapshot has `SurfaceRole::DragIcon`; it and its subsurfaces take no input, so the drag sees the surface under them, it never animates, and it goes with the drop, when wlroots destroys the drag and its icon.
+
+- It is drawn at the pointer moved by the sum of the offsets of its commits since the drag began (`wl_surface.attach`'s and `wl_surface.offset`), as wlroots' scene drag icon accumulates them (wlroots:types/scene/drag_icon.c); a surface reused for another drag starts at the pointer again. Wayfire adds only the last commit's offset (`drag_icon_t::get_position`), so its icon jumps back to the pointer after a commit without one; Shingle follows wlroots there.
+- `data_device::sync_icon` pushes a commit event for the icon where it moved to and where it was, and when it goes, so that the frontend redraws both even when a cursor plane shows the cursor and pointer motion alone draws no frame.
+- Touch drags, which Wayfire's icon also follows, still do not exist in Shingle, and neither do drags without a source.
+
+Tested by crates/shingle/src/data_device/icon_tests.rs (through the in-process test client: the icon drawn at the pointer by its offsets, below the cursor and above the window, redraw events for both places, offsets adding up, no input, gone with the drop, reused from the pointer, the role error) and crates/shingle-frontend (no animation for a Wayland icon). The real run is tools/gpu_test/run.py's group `drag-icon` (tools/gpu_test/drag_icon_checks.py) with `wl_probe --drag --drag-icon`, recorded in docs/status.md.
+
 ### Later
 
-Not planned in detail, in rank order: the remaining animations and per-type animation options; `zwp_text_input_manager_v1`; `blur`; per-device `[input:NAME]` sections and the missing input options; `ext_data_control_manager_v1` and the ext image-capture protocols with DMA-BUF and damage in screencopy; `zwp_tablet_manager_v2` with libinput tablets in the native backend; `wobbly`; `cube` with the idle screensaver and wrot's 3D mode; the remaining IPC methods; the rare protocols. Each needs its own design when it comes up.
+Not planned in detail, in rank order: the remaining animations and per-type animation options; `blur`; keyboard options per device and the missing input options; `ext_data_control_manager_v1` and the ext image-capture protocols with DMA-BUF and damage in screencopy; `zwp_tablet_manager_v2` with libinput tablets in the native backend; `wobbly`; `cube` with the idle screensaver and wrot's 3D mode; the remaining IPC methods; the rare protocols. Each needs its own design when it comes up.
 
 ## Decisions
 
