@@ -23,12 +23,16 @@
 //!
 //! Client `wl_shm` buffers are uploaded from their pools in their own
 //! byte order, damaged rectangles only ([`upload`]).
+//!
+//! A frame's submission can end with a sync_file that signals when the GPU
+//! has finished it ([`fence`]), for a KMS plane to wait for.
 
 #![warn(missing_docs)]
 
 pub mod color;
 pub mod dmabuf;
 mod draw;
+pub mod fence;
 mod gpu;
 mod renderer;
 mod state;
@@ -45,6 +49,7 @@ pub use dmabuf::{
   ImportError, ImportedTexture, TextureImporter,
 };
 pub use draw::{draw, draw_with_access};
+pub use fence::{ArmedFence, FenceExporter};
 pub use gpu::{AdapterFilter, GpuContext, GpuOptions, TextureFilter};
 pub use renderer::{OffscreenRenderer, Renderer};
 pub use state::RenderState;
