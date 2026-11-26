@@ -2,9 +2,11 @@
 //!
 //! A selection's source is a [`Source`] with a [`SourceOrigin`]: a
 //! client's `wl_data_source`, a wlr-data-control source
-//! (crates/shingle/src/data_control.rs) or an X client through the
-//! XWayland selection bridge (crates/shingle/src/xwayland/selection.rs),
-//! which has no Wayland object. Sources are keyed by [`SourceKey`].
+//! (crates/shingle/src/data_control.rs), an X client through the
+//! XWayland selection bridge (crates/shingle/src/xwayland/selection.rs) or
+//! the host session of a nested Shingle
+//! (crates/shingle/src/host_selection.rs); the last two have no Wayland
+//! object. Sources are keyed by [`SourceKey`].
 //!
 //! A drag follows the surface under the pointer ([`sync_drag`]). Over a
 //! Wayland surface it is offered through that client's `wl_data_device`;
@@ -53,7 +55,7 @@ struct DeviceData;
 struct OfferData;
 
 /// Identifies a selection source: by its Wayland object, or by a number
-/// for an X11 source, which has none.
+/// for an X11 or host source, which have none.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SourceKey {
   /// A `wl_data_source`, a `zwp_primary_selection_source_v1` or a
@@ -61,12 +63,25 @@ pub(crate) enum SourceKey {
   Object(ObjectId),
   /// An X client's selection, numbered in installation order.
   X11(u64),
+  /// The host session's selection, numbered in installation order.
+  Host(u64),
 }
 
 impl SourceKey {
   /// Whether the source is an X client's.
   pub(crate) fn is_x11(&self) -> bool {
     matches!(self, Self::X11(_))
+  }
+
+  /// Whether the source is the host session's.
+  pub(crate) fn is_host(&self) -> bool {
+    matches!(self, Self::Host(_))
+  }
+
+  /// Whether no Wayland object keeps the source, so that it is forgotten
+  /// as soon as it is replaced.
+  pub(crate) fn is_compositor_owned(&self) -> bool {
+    matches!(self, Self::X11(_) | Self::Host(_))
   }
 }
 
@@ -81,11 +96,13 @@ enum SourceOrigin {
   X11,
   /// An X client's drag, through the window manager.
   X11Drag,
+  /// The host session's selection, through the nested backend.
+  Host,
 }
 
 struct Source {
   origin: SourceOrigin,
-  /// The Wayland client behind it; `None` for an X11 source.
+  /// The Wayland client behind it; `None` for an X11 or host source.
   client: Option<ClientId>,
   mime_types: Vec<String>,
   used: bool,
@@ -98,7 +115,7 @@ impl Source {
     match &self.origin {
       SourceOrigin::Client(resource) => resource.cancelled(),
       SourceOrigin::Control(control) => control.cancelled(),
-      SourceOrigin::X11 | SourceOrigin::X11Drag => {}
+      SourceOrigin::X11 | SourceOrigin::X11Drag | SourceOrigin::Host => {}
     }
   }
 
@@ -202,6 +219,8 @@ pub(crate) struct DataDevices {
   drag: Option<Drag>,
   /// The number of the last X11 source.
   x11_sources: u64,
+  /// The number of the last host source.
+  host_sources: u64,
   /// An X client's drag ended: performed with this action, or not
   /// (`None`). The XWayland bridge tells the X source.
   pub(crate) x11_drag_ended: Option<Option<wl_data_device_manager::DndAction>>,
@@ -234,8 +253,8 @@ impl DataDevices {
   }
 
   /// Makes `key` the selection, cancelling the previous source unless it
-  /// is the same. A replaced X11 source is forgotten, since no Wayland
-  /// object keeps it.
+  /// is the same. A replaced X11 or host source is forgotten, since no
+  /// Wayland object keeps it.
   fn replace_selection(&mut self, key: Option<SourceKey>) {
     if self.selection == key {
       return;
@@ -244,7 +263,7 @@ impl DataDevices {
       if let Some(source) = self.sources.get(&previous) {
         source.cancel();
       }
-      if previous.is_x11() {
+      if previous.is_compositor_owned() {
         self.forget(&previous);
       }
     }
@@ -311,6 +330,41 @@ pub(crate) fn set_x11_selection(
   key
 }
 
+/// Installs the host session's selection with `mime_types` as the
+/// Wayland selection, replacing whatever was there, and returns its key.
+pub(crate) fn set_host_selection(
+  state: &mut CompositorState,
+  mime_types: Vec<String>,
+) -> SourceKey {
+  let data = &mut state.data_devices;
+  data.host_sources += 1;
+  let key = SourceKey::Host(data.host_sources);
+  data.sources.insert(
+    key.clone(),
+    Source {
+      origin: SourceOrigin::Host,
+      client: None,
+      mime_types,
+      used: true,
+      actions: wl_data_device_manager::DndAction::Copy,
+    },
+  );
+  data.replace_selection(Some(key.clone()));
+  key
+}
+
+/// Clears the selection if the host session's source holds it.
+pub(crate) fn clear_host_selection(state: &mut CompositorState) {
+  if state
+    .data_devices
+    .selection
+    .as_ref()
+    .is_some_and(SourceKey::is_host)
+  {
+    state.data_devices.replace_selection(None);
+  }
+}
+
 /// Clears the selection if an X client's source holds it.
 pub(crate) fn clear_x11_selection(state: &mut CompositorState) {
   if state
@@ -324,7 +378,9 @@ pub(crate) fn clear_x11_selection(state: &mut CompositorState) {
 }
 
 /// Asks `source` for `mime_type` in `fd`. An X11 source's request goes to
-/// the window manager on its next flush. Nothing is sent for a type the
+/// the window manager on its next flush, a host source's to the nested
+/// backend's host bridge (crates/shingle/src/host_selection.rs). Nothing
+/// is sent for a type the
 /// source does not offer; dropping `fd` ends the reader's transfer.
 pub(crate) fn receive_from(
   state: &mut CompositorState,
@@ -351,6 +407,13 @@ pub(crate) fn receive_from(
       mime_type,
       fd,
     )),
+    SourceOrigin::Host => crate::host_selection::request(
+      state,
+      crate::host_selection::SelectionKind::Clipboard,
+      source.clone(),
+      mime_type,
+      fd,
+    ),
   }
 }
 

@@ -1,5 +1,5 @@
-//! The primary selection protocol, with sources of the same three origins
-//! as `wl_data_device`'s clipboard (crates/shingle/src/data_device.rs).
+//! The primary selection protocol, with sources of the same origins as
+//! `wl_data_device`'s clipboard (crates/shingle/src/data_device.rs).
 
 use std::{
   collections::HashMap,
@@ -36,11 +36,13 @@ enum SourceOrigin {
   Control(ZwlrDataControlSourceV1),
   /// An X client, through the window manager.
   X11,
+  /// The host session, through the nested backend.
+  Host,
 }
 
 struct Source {
   origin: SourceOrigin,
-  /// The Wayland client behind it; `None` for an X11 source.
+  /// The Wayland client behind it; `None` for an X11 or host source.
   client: Option<ClientId>,
   mime_types: Vec<String>,
 }
@@ -51,7 +53,7 @@ impl Source {
     match &self.origin {
       SourceOrigin::Client(resource) => resource.cancelled(),
       SourceOrigin::Control(control) => control.cancelled(),
-      SourceOrigin::X11 => {}
+      SourceOrigin::X11 | SourceOrigin::Host => {}
     }
   }
 }
@@ -71,6 +73,8 @@ pub(crate) struct PrimarySelection {
   selection: Option<SourceKey>,
   /// The number of the last X11 source.
   x11_sources: u64,
+  /// The number of the last host source.
+  host_sources: u64,
 }
 
 impl PrimarySelection {
@@ -97,7 +101,7 @@ impl PrimarySelection {
   }
 
   /// Makes `key` the selection, cancelling the previous source unless it
-  /// is the same. A replaced X11 source is forgotten.
+  /// is the same. A replaced X11 or host source is forgotten.
   fn replace_selection(&mut self, key: Option<SourceKey>) {
     if self.selection == key {
       return;
@@ -106,7 +110,7 @@ impl PrimarySelection {
       if let Some(source) = self.sources.get(&previous) {
         source.cancel();
       }
-      if previous.is_x11() {
+      if previous.is_compositor_owned() {
         self.forget(&previous);
       }
     }
@@ -169,6 +173,39 @@ pub(crate) fn set_x11_selection(
   key
 }
 
+/// Installs the host session's primary selection with `mime_types`,
+/// replacing whatever was there, and returns its key.
+pub(crate) fn set_host_selection(
+  state: &mut CompositorState,
+  mime_types: Vec<String>,
+) -> SourceKey {
+  let data = &mut state.primary_selection;
+  data.host_sources += 1;
+  let key = SourceKey::Host(data.host_sources);
+  data.sources.insert(
+    key.clone(),
+    Source {
+      origin: SourceOrigin::Host,
+      client: None,
+      mime_types,
+    },
+  );
+  data.replace_selection(Some(key.clone()));
+  key
+}
+
+/// Clears the primary selection if the host session's source holds it.
+pub(crate) fn clear_host_selection(state: &mut CompositorState) {
+  if state
+    .primary_selection
+    .selection
+    .as_ref()
+    .is_some_and(SourceKey::is_host)
+  {
+    state.primary_selection.replace_selection(None);
+  }
+}
+
 /// Clears the primary selection if an X client's source holds it.
 pub(crate) fn clear_x11_selection(state: &mut CompositorState) {
   if state
@@ -203,6 +240,13 @@ pub(crate) fn receive_from(
       mime_type,
       fd,
     )),
+    SourceOrigin::Host => crate::host_selection::request(
+      state,
+      crate::host_selection::SelectionKind::Primary,
+      source.clone(),
+      mime_type,
+      fd,
+    ),
   }
 }
 

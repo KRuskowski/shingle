@@ -247,6 +247,8 @@ pub(crate) struct CompositorState {
   pub(crate) data_devices: crate::data_device::DataDevices,
   pub(crate) data_control: crate::data_control::DataControl,
   pub(crate) primary_selection: crate::primary_selection::PrimarySelection,
+  /// Reads of the host session's selections, for a nested backend.
+  pub(crate) host_selection: crate::host_selection::HostSelections,
   pub(crate) screencopy: crate::screencopy::Screencopy,
   pub(crate) security_context: crate::security_context::SecurityContexts,
   pub(crate) alpha_modifiers: crate::alpha_modifier::AlphaModifiers,
@@ -440,6 +442,7 @@ impl CompositorState {
       data_devices: Default::default(),
       data_control: Default::default(),
       primary_selection: Default::default(),
+      host_selection: Default::default(),
       screencopy: Default::default(),
       security_context: crate::security_context::SecurityContexts::new(
         config.security_privileged_protocols,

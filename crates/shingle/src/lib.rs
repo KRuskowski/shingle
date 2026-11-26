@@ -64,6 +64,7 @@ mod foreign_toplevel;
 mod fractional_scale;
 pub mod frame;
 mod gamma_control;
+mod host_selection;
 mod idle_notify;
 mod input;
 mod input_device;
@@ -148,6 +149,9 @@ use wayland_server::{
 
 pub use buffer::ShmContent;
 pub use buffer_lock::BufferLock;
+pub use host_selection::{
+  HostSelectionRequest, SelectionKind, SelectionOwner, SelectionSourceId,
+};
 pub use linux_dmabuf::{
   DmabufBuffer, DmabufFeedback, DmabufFormat, DmabufImporter, DmabufPlane,
   fourcc_name,
