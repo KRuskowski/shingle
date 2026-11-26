@@ -37,12 +37,12 @@ class AllowedPathTest(unittest.TestCase):
   def test_bound_and_private_nodes(self):
     for path in ('/dev/null', '/dev/dri/renderD128', '/dev/nvidia0',
                  '/dev/pts/0', '/dev/ptmx', '/dev/shm/x', '/home/a',
-                 'pipe:[12]', 'anon_inode:[eventfd]'):
+                 'pipe:[12]', 'anon_inode:[eventfd]', '/dev/dri'):
       self.assertTrue(run.is_allowed_path(path, self.devices), path)
 
   def test_card_input_tty_and_unbound(self):
     for path in ('/dev/dri/card0', '/dev/input/event3', '/dev/tty1',
-                 '/dev/nvidia-modeset', '/dev/udmabuf', '/dev/dri'):
+                 '/dev/nvidia-modeset', '/dev/udmabuf', '/dev/input'):
       self.assertFalse(run.is_allowed_path(path, self.devices), path)
 
   def test_disallowed_pairs(self):

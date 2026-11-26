@@ -112,12 +112,18 @@ def is_allowed_path(path, devices):
   """Whether an open file at `path` is allowed inside the namespace.
 
   Paths outside /dev are always allowed. Under /dev, only the bound
-  `devices`, the private pts and shm, and ptmx are.
+  `devices`, the directories that hold them, the private pts and shm, and
+  ptmx are. A directory such as /dev/dri is allowed because the private
+  /dev holds nothing in it but the bound nodes, so listing it, as Mesa and
+  libdrm do, reaches no other device.
   """
   if not path.startswith('/dev/'):
     return True
   name = path[len('/dev/'):]
   if name in devices or name == 'ptmx':
+    return True
+  if name in {device.rsplit('/', 1)[0] for device in devices
+              if '/' in device}:
     return True
   return name.startswith(('pts/', 'shm/'))
 
