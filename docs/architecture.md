@@ -51,6 +51,9 @@
 | xdg-decoration: modes sent, followed by a configure and applied when acknowledged | `crates/shingle/src/decoration.rs` |
 | Frame pixels: the pieces of a frame, title text and buttons as Wayfire's theme draws them; the scene's frame textures and tiles | `crates/shingle-frontend/src/frame_raster.rs`, `crates/shingle-frontend/src/frontend/frames.rs`; GPU tests in `frontend/tests/frames.rs` |
 | WG-6's real-client checks of frames (GPU harness group `decoration`) | `tools/gpu_test/decoration_checks.py` |
+| The Alt+Tab switcher's view (WG-7): Wayfire's slots, moves, expiring copies, render order and 3D transform (`SwitcherView`, `projection`); the frontend's views, keys and scene (`SwitcherScene`) | `crates/shingle-frontend/src/switcher_view.rs`, `crates/shingle-frontend/src/frontend/switcher.rs`; input-script tests in `frontend/tests/switcher.rs` |
+| Tiles drawn through a perspective matrix (`Projection`) | `crates/shingle-render/src/lib.rs`, `quad` in `crates/shingle-render/src/draw.rs` |
+| WG-7's real-client checks of the switcher (GPU harness group `switcher`) | `tools/gpu_test/switcher_checks.py` |
 | Modifier-alone bindings (`ModifierBindingTracker`) | `crates/shingle/src/modifier_binding.rs`; the frontend's use in `crates/shingle-frontend/src/frontend/bindings.rs` (`track_modifier_binding`) |
 | XWayland glue: display, Xwayland start and exit, XWM connection, `xwayland-ready` | `crates/shingle/src/xwayland/mod.rs` |
 | `xwayland_shell_v1` and `Role::Xwayland` | `crates/shingle/src/xwayland/shell.rs` |

@@ -71,6 +71,19 @@ expo:
 
 Wayfire's `select_workspace_2 = <super> KEY_2` and i3's `bindsym Mod4+2 expo select 2` import the same direct binding. WCM edits these as comma-separated `workspace=binding` pairs alongside the other Expo options.
 
+### Alt+Tab switcher
+
+Alt+Tab (`keybindings.focus_next`, Wayfire's `[switcher] next_view`) and Alt+Shift+Tab (`focus_previous`, `prev_view`) show the windows of the current workspace as Wayfire's switcher plugin does: the selected window in the middle of the output, scaled to fit 45 % of it, and the others a third of the output to its left and right, smaller, further back, dimmer and turned towards it, over black, with the wallpaper and bottom layers dimmed and panels on top. Each press moves the selection, by focus order, and the thumbnails slide between the slots; releasing Alt focuses and raises the selected window, restoring it if it was minimized, and the thumbnails slide back into place. Minimized windows are included. IPC sees the `switcher` plugin activate and deactivate (`plugin-activation-state-changed`).
+
+```yaml
+switcher:
+  duration_ms: 500
+  view_thumbnail_scale: 1.0
+  view_thumbnail_rotation: 30
+```
+
+Wayfire's `[switcher] speed`, `view_thumbnail_scale` and `view_thumbnail_rotation` import directly; the easing curve of `speed` is ignored. The fast switcher (`[fast-switcher]`, Alt+Escape) still only dims the other windows.
+
 ### Vswitch workspace transitions
 
 Normal workspace switches slide the old and new workspaces along the configured grid. The transition preserves window sizes and positions, keeps layer-shell panels stationary, and never writes temporary coordinates into the session. Opening Scale or Expo cancels the slide so overview transforms remain separate. Output changes and configuration reloads also discard stale transitions.

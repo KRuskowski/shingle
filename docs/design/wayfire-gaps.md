@@ -49,7 +49,7 @@ Ranked by how much a daily Wayfire user with the tiling plugin would notice them
 
 **A4. No server-side decorations.** (Fixed by WG-6, see [WG-6 as built](#wg-6-as-built).) Wayfire's `decoration` plugin draws a title bar with title, minimize, maximize and close buttons and a border for views that want server-side decorations, X11 windows without their own frame among them (wayfire:plugins/decor/decoration.cpp). Shingle can tell clients to use server-side decorations (`preferred_decoration_mode: server`, crates/shingle/src/decoration.rs:22) but draws nothing: there is no decoration code in shingle-frontend or shingle-render. Floating X11 windows and SSD-only Wayland clients have no title bar or border and can only be moved with `super`+drag. None of the 14 options is read.
 
-**A5. The Alt+Tab switcher has no view.** Wayfire's `switcher` shows the views as rotated thumbnails while cycling (`speed`, `view_thumbnail_scale`, `view_thumbnail_rotation`, wayfire:plugins/single_plugins/switcher.cpp); Shingle's regular switcher only changes focus and opacity (crates/shingle-frontend/src/frontend/switcher.rs:12, `SwitcherKind::Regular`).
+**A5. The Alt+Tab switcher has no view.** (Fixed by WG-7, see [WG-7 as built](#wg-7-as-built).) Wayfire's `switcher` shows the views as rotated thumbnails while cycling (`speed`, `view_thumbnail_scale`, `view_thumbnail_rotation`, wayfire:plugins/single_plugins/switcher.cpp); Shingle's regular switcher only changes focus and opacity (crates/shingle-frontend/src/frontend/switcher.rs:12, `SwitcherKind::Regular`).
 
 **A6. The client environment lacks Wayfire's variables.** (Fixed by WG-3, see [WG-3 as built](#wg-3-as-built).) Wayfire sets `XDG_CURRENT_DESKTOP=wayfire` when it is unset (wayfire:src/main.cpp:313), which xdg-desktop-portal uses to pick `wayfire-portals.conf` (wlr for screen casting, wayfire:wayfire-portals.conf), sets `XCURSOR_THEME` and `XCURSOR_SIZE` from `[input] cursor_theme` and `cursor_size` (wayfire:src/core/seat/cursor.cpp:116), and `WAYFIRE_CONFIG_FILE` (wayfire:src/default-config-backend.cpp:66), which WCM and scripts read. Shingle's client environment has none of them (crates/shingle-session/src/environment.rs:42): clients draw their own cursors in the toolkit default, and portals started from Shingle choose their backend from whatever the login set. There is no session `.desktop` file for display managers (Wayfire installs wayfire:wayfire.desktop).
 
@@ -74,7 +74,7 @@ Ranked by how much a daily Wayfire user with the tiling plugin would notice them
 | `[workarounds] use_external_output_configuration`, `app_id_mode`, `enable_input_method_v2` (Shingle always offers input-method v2 with text-input v3; Wayfire only with this option), `force_xwayland_scaling`, `use_native_buffer_size` (XW-7) | kanshi users, Steam and GTK app-id quirks, X11 HiDPI | no arm in wayfire.rs:481-527 |
 | `xdg_toplevel` `suspended` state and `wm_capabilities` (Wayfire's xdg-shell is version 6 with `suspended`, wayfire:src/view/xdg-shell.cpp:487) | clients throttling when hidden | crates/shingle/src/shell.rs:158 has no `Suspended` |
 | `scale-title-filter/share_filter` still has no effect, though several outputs exist now | multi-monitor Scale users | config/lib.rs:1238 |
-| Cosmetic options of implemented plugins: `move/preview_*`, `grid/duration` and `type`, `switcher/speed` | few | rows of [Plugins and options](#plugins-and-options) |
+| Cosmetic options of implemented plugins: `move/preview_*`, `grid/duration` and `type` (`switcher/speed` since WG-7) | few | rows of [Plugins and options](#plugins-and-options) |
 | Override-redirect X windows are not in `list-views` (Wayfire lists them as `x-or`) | X11 scripting | docs/ipc.md, views and outputs |
 
 ## Plugins and options
@@ -306,8 +306,8 @@ Shingle also reads `key_move_*` and `key_resize_*` from `[simple-tile]` (116-137
 
 | Option | Status | Evidence |
 | --- | --- | --- |
-| `next_view`, `prev_view` | partly: focus cycles without the thumbnail view (A5) | 80-85; crates/shingle-frontend/src/frontend/switcher.rs:12 |
-| `speed`, `view_thumbnail_scale`, `view_thumbnail_rotation` | missing | no arm |
+| `next_view`, `prev_view` | implemented since WG-7, with Wayfire's thumbnails (A5 before) | 80-85; crates/shingle-frontend/src/switcher_view.rs, crates/shingle-frontend/src/frontend/switcher.rs |
+| `speed`, `view_thumbnail_scale`, `view_thumbnail_rotation` | implemented since WG-7; `speed`'s easing curve is ignored | `SwitcherConfig` |
 
 ### vk-color-management (no options)
 
@@ -622,6 +622,28 @@ Acceptance:
 
 - Frontend input-script tests for selection order, forward and backward, release on modifier up, a view closing while the switcher runs, and one view only.
 - Real run in tools/gpu_test/run.py's namespace with offscreen Shingle: `grim` captures while STIPC holds `alt` and taps `tab` show the thumbnails in Wayfire's arrangement, and releasing `alt` focuses the selected view.
+
+#### WG-7 as built
+
+Behaviour was checked against wayfire:plugins/single_plugins/switcher.cpp and wayfire:metadata/switcher.xml at the pinned commit, with wayfire:src/view/view-3d.cpp for the 3D transform and wf-config:src/duration.cpp for its timers.
+
+`SwitcherConfig` (crates/shingle-config/src/lib.rs) holds `speed` (`duration_ms`), `view_thumbnail_scale` and `view_thumbnail_rotation` with Wayfire's defaults (500 ms, 1.0, 30°), YAML `switcher:`; the Wayfire importer reads them when `[core] plugins` lists `switcher`.
+
+- crates/shingle-frontend/src/switcher_view.rs ports the plugin's arithmetic: `SwitcherView` keeps Wayfire's list of thumbnails (`SwitcherView` in Wayfire, one timer and seven transitions each) with `arrange`, `move`, `next_view`, `fill_empty_slot`, `invalidate_last_in_slot`, `rebuild_view_list`, `dearrange`, `cleanup_expired`, `handle_view_removed` and the render order of `calculate_render_order`, including its bubble sort. Its timers are wf-config's `duration_t`: a transition never started is at its end, and every restart starts from the value at that moment. `projection` builds `view_3d_transformer_t`'s total transform for a thumbnail (`translation * perspective * view * depth_scale * rotation * scaling`, the eye at 1/tan(22.5°) and the depth scaled by the larger side of the view's box).
+- The renderer draws a tile through a 4x4 matrix (`shingle_render::Projection`): its corners are transformed relative to an origin and the vertex keeps w, so that the GPU interpolates texture coordinates with perspective, as Wayfire's GLES renderer does.
+- The frontend (crates/shingle-frontend/src/frontend/switcher.rs) starts the view on the active output for `next_view` and `prev_view` with the views of its current workspace, minimized ones included, by focus order (`Views`), each with its bounding box around its surfaces, subsurfaces, popups and frame. Each further press moves the selection, releasing any of the first press's modifiers lets go (`handle_done`), and the view stays until the thumbnails are back in place, as Wayfire's `pre_hook` ends the plugin; the `switcher` plugin's `plugin-activation-state-changed` events come at its start and end. While the view is up, the scene of that output (`SwitcherScene`) clears it to black and draws the background and bottom layers dimmed to 60 %, every thumbnail with its frame through its projection in render order, then the top and overlay layers and the cursor (`Compositor::layer_surfaces_on`, `stacking_order_on`), as `switcher_render_node_t` draws over the whole output. Letting go focuses and raises the selected view, restoring it if minimized, as `focus_raise_view` does; `next_view` raises the new selection as Wayfire's `view_bring_to_front` does.
+
+Where the code differs from the plan and from Wayfire, and why:
+
+- Starting with `prev_view` puts the views left of the selection in reverse focus order. Wayfire's `arrange(1)` leaves them in focus order, so that from the fourth view on its `prev_view` takes the one after the selection rather than the one before it: with four views it selects the last, then the second, the third, the last again and only then the first. Shingle selects the last, the third, the second and the first, as every later step of Wayfire's own code does.
+- Wayfire's `move` sets every moved thumbnail's opacity to 0.7, also the one that comes to the middle, because it tests the slot the thumbnail leaves, which is never expired; Shingle keeps that, so after the first press the selection is drawn at 0.7 too, as in Wayfire.
+- `speed`'s easing curve is ignored, as for Shingle's other animations: the thumbnails move linearly over its duration.
+- Wayfire's input grab keeps the pointer from clients too while the switcher is held; Shingle's switcher takes the keyboard only, as before.
+- Scale and Expo, a configuration reload and the loss of the output end the view at once. In Wayfire Scale and Expo cannot start while the switcher plugin is active, including its exit animation.
+- Thumbnails of a window rotated by `wrot` are drawn unrotated, and closing animations and the workspace-set label are not drawn on the switcher's output while it is up, as the switcher's node covers them in Wayfire.
+- A window minimized while the switcher is held stays in it until the next press rearranges, as in Wayfire, which only rearranges on `view-disappeared`.
+
+Tested by the unit tests in crates/shingle-frontend/src/switcher_view.rs (selection order both ways and mixed, two views and one, every slot's offsets, depth, scale, turn and opacity, expiring copies, the render order, letting go, pressing again during the exit, removed and minimized views, the options and the projection against Wayfire's numbers), crates/shingle-frontend/src/frontend/tests/switcher.rs (input scripts through `FakeHost`: selection order forward and backward, the first press's modifiers and other keys, a view closing while switching, the last one closing, one view and none, a minimized view restored, Scale ending the view, and on the GPU the thumbnails over black with the background layer dimmed and the panel above them, then the usual scene after letting go), crates/shingle-render/src/draw.rs (the projection), crates/shingle/src/output/protocol_tests.rs (layer surfaces and stacking per output) and crates/shingle-config/src/lib.rs (the import). The real run is tools/gpu_test/run.py's group `switcher` (tools/gpu_test/switcher_checks.py), recorded in docs/status.md.
 
 ### Later
 
