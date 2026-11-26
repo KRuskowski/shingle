@@ -3,8 +3,8 @@
 //! bindings, key repeat), `scale` and `expo` (the overviews), `switcher`,
 //! `drag`, `effects` (zoom, inversion, alpha), `animation`, `outputs`
 //! (what is kept per output, and which outputs need a frame), `scene` (the
-//! scene build and drawing) and `session` (saving, config reload, the lock
-//! client).
+//! scene build and drawing), `session` (saving, config reload, the lock
+//! client) and `vswipe` (touchpad workspace swipes).
 
 mod animation;
 mod bindings;
@@ -18,6 +18,7 @@ mod session;
 mod switcher;
 #[cfg(test)]
 mod tests;
+mod vswipe;
 
 use std::{
   cell::RefCell,
@@ -125,6 +126,13 @@ pub struct Frontend {
   expo_touch: Option<u64>,
   expo_config: shingle_config::ExpoConfig,
   vswitch: shingle_config::VswitchConfig,
+  /// `[vswipe]`'s options.
+  vswipe_config: shingle_config::VswipeConfig,
+  /// Wayfire's `vswipe` plugin is loaded.
+  vswipe_enabled: bool,
+  /// The touchpad swipe vswipe follows, from its begin until its slide
+  /// ends.
+  vswipe: Option<vswipe::SwipeState>,
   left_handed_mode: bool,
   middle_emulation: bool,
   pointer_x: f64,
@@ -481,6 +489,9 @@ impl Frontend {
       expo_touch: None,
       expo_config: config.expo.clone(),
       vswitch: config.vswitch.clone(),
+      vswipe_config: config.vswipe.clone(),
+      vswipe_enabled: config.plugin_enabled("vswipe"),
+      vswipe: None,
       left_handed_mode: config.input.left_handed_mode,
       middle_emulation: config.input.middle_emulation,
       pointer_x: 0.0,
@@ -624,6 +635,11 @@ impl Frontend {
           save = true;
         }
         Event::OutputAdded { .. } | Event::OutputRemoved { .. } => {
+          if self.vswipe.as_ref().is_some_and(|state| {
+            self.compositor.output_view(&state.output).is_none()
+          }) {
+            self.vswipe = None;
+          }
           self.prune_scenes();
           save = true;
         }
@@ -652,7 +668,10 @@ impl Frontend {
               || self.scale_exit.is_some()
               || self.expo.is_some()
               || self.expo_exit.is_some());
-          let animate = !overview_active && self.vswitch.duration_ms > 0;
+          // vswipe's own slide shows a swipe's switch.
+          let animate = !overview_active
+            && !self.vswipe_on(&output)
+            && self.vswitch.duration_ms > 0;
           let scene = self.scene_mut(&output);
           scene.workspace_transition = (from != target && animate).then(|| {
             workspace_transition::WorkspaceTransition::new(from, target)
@@ -832,6 +851,7 @@ impl Frontend {
       }
       (InputDeviceKind::Pointer, false) => {
         self.rotation_drag = None;
+        self.cancel_vswipe();
         if let Some(state) = &mut self.expo {
           state.cancel_pointer();
         }
@@ -978,6 +998,7 @@ impl Frontend {
       self.request_redraw();
     }
     let now = Instant::now();
+    self.finish_vswipe(now);
     self.pace_virtual_outputs(now);
     self.expire_labels(now);
     self.flush(host);
@@ -1051,10 +1072,14 @@ impl Frontend {
     result
   }
 
-  /// Ends what a resize of `output` invalidates: its workspace slide, and
-  /// Expo's exit; Scale and Expo are laid out again.
+  /// Ends what a resize of `output` invalidates: its workspace slide,
+  /// vswipe's swipe on it, and Expo's exit; Scale and Expo are laid out
+  /// again.
   fn after_output_resize(&mut self, output: &OutputHandle) {
     self.expo_exit = None;
+    if self.vswipe_on(output) {
+      self.cancel_vswipe();
+    }
     if let Some(scene) = self.scenes.get_mut(output) {
       scene.workspace_transition = None;
     }
@@ -1087,6 +1112,7 @@ impl Frontend {
       }
       self.expo_touch = None;
       self.gestures.cancel();
+      self.cancel_vswipe();
       self.abandon_drag();
       self.compositor.set_session_active(false);
     }
@@ -1284,17 +1310,7 @@ impl Frontend {
         }
         self.touch(device, touch)
       }
-      InputEvent::Swipe(gesture) => match gesture {
-        Gesture::Begin { fingers } => {
-          self.compositor.pointer_swipe_begin(device, fingers)
-        }
-        Gesture::Update { dx, dy, .. } => {
-          self.compositor.pointer_swipe_update(device, dx, dy)
-        }
-        Gesture::End { cancelled } => {
-          self.compositor.pointer_swipe_end(device, cancelled)
-        }
-      },
+      InputEvent::Swipe(gesture) => self.swipe_input(device, gesture),
       InputEvent::Pinch(gesture) => match gesture {
         Gesture::Begin { fingers } => {
           self.compositor.pointer_pinch_begin(device, fingers)

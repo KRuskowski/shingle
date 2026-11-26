@@ -23,6 +23,7 @@ mod shm;
 mod test_client;
 #[cfg(test)]
 mod test_gpu;
+pub mod vswipe;
 pub mod workspace_transition;
 
 pub use frontend::Frontend;

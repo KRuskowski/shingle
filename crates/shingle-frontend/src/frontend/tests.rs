@@ -30,6 +30,7 @@ use wayland_client::Proxy;
 use super::{Frontend, drag::DragState, switcher::SwitcherKind};
 
 mod outputs;
+mod vswipe;
 use crate::{
   host::{Axis, Host, InputEvent, Touch, TouchPhase},
   render_target::RenderTarget,
@@ -997,6 +998,8 @@ struct RecordingTarget {
   delay: Duration,
   /// The size of every screencopy capture drawn.
   captures: Vec<(u32, u32)>,
+  /// The colour every frame was cleared to.
+  clears: Vec<[f64; 4]>,
 }
 
 impl RecordingTarget {
@@ -1064,6 +1067,7 @@ impl RenderTarget for RecordingTarget {
         .map(|tile| (tile.geometry, tile.texture.is_some()))
         .collect(),
     );
+    self.clears.push(clear);
     self
       .alphas
       .push(tiles.iter().map(|tile| tile.color[3]).collect());
@@ -1097,6 +1101,7 @@ fn recording_target() -> Option<RecordingTarget> {
     alphas: Vec::new(),
     delay: Duration::ZERO,
     captures: Vec::new(),
+    clears: Vec::new(),
   })
 }
 

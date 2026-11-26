@@ -11,13 +11,17 @@ use shingle::Compositor;
 use wayland_client::{
   Connection, Dispatch, EventQueue, Proxy, QueueHandle,
   protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm,
-    wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_output, wl_pointer, wl_registry,
+    wl_seat, wl_shm, wl_shm_pool, wl_surface,
   },
 };
 use wayland_protocols::{
   wp::linux_dmabuf::zv1::client::{
     zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1,
+  },
+  wp::pointer_gestures::zv1::client::{
+    zwp_pointer_gesture_swipe_v1::{self, ZwpPointerGestureSwipeV1},
+    zwp_pointer_gestures_v1::ZwpPointerGesturesV1,
   },
   xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
 };
@@ -67,6 +71,9 @@ pub(crate) struct Events {
   frames_done: Vec<u32>,
   /// `zwf_output_v2` events, by name, in order.
   shell: Vec<&'static str>,
+  /// Swipe gesture events, as `begin FINGERS`, `update DX DY` and `end
+  /// CANCELLED`, in order.
+  swipes: Vec<String>,
   synced: bool,
 }
 
@@ -199,6 +206,21 @@ impl TestClient {
       _xdg_surface: xdg_surface,
       _toplevel: toplevel,
     }
+  }
+
+  /// Binds the seat's pointer and a swipe gesture for it, so that the
+  /// client records the swipes it gets while it has the pointer.
+  pub(crate) fn listen_for_swipes(&mut self, compositor: &mut Compositor) {
+    let seat = self.bind::<wl_seat::WlSeat>(5);
+    let pointer = seat.get_pointer(&self.handle, ());
+    let gestures = self.bind::<ZwpPointerGesturesV1>(1);
+    gestures.get_swipe_gesture(&pointer, &self.handle, ());
+    self.roundtrip(compositor);
+  }
+
+  /// The swipe events received, in order.
+  pub(crate) fn swipes(&self) -> &[String] {
+    &self.events.swipes
   }
 
   /// A `zwf_output_v2` of version 3 for the `nth` `wl_output` global
@@ -578,8 +600,35 @@ impl Dispatch<ZwfOutputV2, ()> for Events {
   }
 }
 
+impl Dispatch<ZwpPointerGestureSwipeV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ZwpPointerGestureSwipeV1,
+    event: zwp_pointer_gesture_swipe_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.swipes.push(match event {
+      zwp_pointer_gesture_swipe_v1::Event::Begin { fingers, .. } => {
+        format!("begin {fingers}")
+      }
+      zwp_pointer_gesture_swipe_v1::Event::Update { dx, dy, .. } => {
+        format!("update {dx} {dy}")
+      }
+      zwp_pointer_gesture_swipe_v1::Event::End { cancelled, .. } => {
+        format!("end {cancelled}")
+      }
+      _ => return,
+    });
+  }
+}
+
 ignore_events!(
   ZwfShellManagerV2,
+  wl_seat::WlSeat,
+  wl_pointer::WlPointer,
+  ZwpPointerGesturesV1,
   wl_compositor::WlCompositor,
   wl_surface::WlSurface,
   wl_shm::WlShm,

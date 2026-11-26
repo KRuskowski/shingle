@@ -79,6 +79,7 @@ impl Frontend {
       Ok(config) => {
         let gestures_enabled = config.plugin_enabled("extra-gestures");
         let scale_filter_enabled = config.plugin_enabled("scale-title-filter");
+        let vswipe_enabled = config.plugin_enabled("vswipe");
         self.reloaded_config = Some(config.clone());
         self.finish_switcher();
         self.cancel_scale();
@@ -99,6 +100,9 @@ impl Frontend {
         self.scale_filter_enabled = scale_filter_enabled;
         self.expo_config = config.expo.clone();
         self.vswitch = config.vswitch.clone();
+        self.cancel_vswipe();
+        self.vswipe_config = config.vswipe.clone();
+        self.vswipe_enabled = vswipe_enabled;
         self.keybindings = config.keybindings;
         self.commands = config.commands;
         self.modifier_binding_timeout = config.input.modifier_binding_timeout;

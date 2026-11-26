@@ -383,6 +383,7 @@ impl Frontend {
       }
     }
     let overview_here = self.overview_output() == *output;
+    let vswipe_here = self.vswipe_on(output);
     let expo_here =
       overview_here && (self.expo.is_some() || self.expo_exit.is_some());
     let scale_here =
@@ -451,7 +452,8 @@ impl Frontend {
           ),
         );
       }
-      if scene.workspace_transition.is_some() {
+      let wall = self.vswipe_viewport(output, now);
+      if scene.workspace_transition.is_some() || wall.is_some() {
         extend(
           &mut snapshots,
           self.compositor.scale_surfaces_on(output, true, false),
@@ -754,7 +756,7 @@ impl Frontend {
             let layout = workspace_transition::TransitionLayout {
               output: rect,
               grid_width,
-              gap: self.vswitch.gap,
+              gap: f64::from(self.vswitch.gap),
             };
             let geometry = transition.geometry(
               snapshot.geometry,
@@ -762,6 +764,30 @@ impl Frontend {
               layout,
               now,
               Duration::from_millis(self.vswitch.duration_ms),
+            );
+            for tile in &mut tiles {
+              tile.geometry = geometry;
+            }
+          }
+          if let Some(window) = snapshot.window
+            && let Some(viewport) = wall
+            && let Ok(info) = self.compositor.core().window_info(window)
+            && info.location.output.as_str() == output.name()
+          {
+            let (grid_width, _) = self.compositor.workspace_grid_dimensions();
+            let workspace = info.location.workspace.y as usize
+              * grid_width as usize
+              + info.location.workspace.x as usize;
+            let layout = workspace_transition::TransitionLayout {
+              output: rect,
+              grid_width,
+              gap: self.vswipe_config.gap,
+            };
+            let geometry = workspace_transition::wall_geometry(
+              snapshot.geometry,
+              workspace,
+              layout,
+              viewport,
             );
             for tile in &mut tiles {
               tile.geometry = geometry;
@@ -908,6 +934,8 @@ impl Frontend {
     let renderer = target;
     let background = if expo_here {
       self.expo_config.background
+    } else if vswipe_here {
+      self.vswipe_config.background
     } else if scene.workspace_transition.is_some() {
       self.vswitch.background
     } else {
@@ -991,8 +1019,12 @@ impl Frontend {
         .get(surface)
         .is_some_and(|started| animation_progress(*started, now, open) < 1.0)
     });
+    // vswipe draws every frame while its wall is up, as Wayfire's
+    // `post_frame` does; the last one ends it.
+    self.finish_vswipe(now);
     if !scene.animations.is_empty()
       || scene.workspace_transition.is_some()
+      || self.vswipe_on(output)
       || scene.zoom_animation.is_some()
       || opening
     {
