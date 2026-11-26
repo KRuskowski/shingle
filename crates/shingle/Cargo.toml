@@ -37,3 +37,8 @@ wayland-client = "0.31"
 [[example]]
 name = "wl_probe"
 test = true
+
+# The stalled-acquire probe for tools/gpu_test/run.py (DB-5).
+[[example]]
+name = "syncobj_probe"
+test = true
