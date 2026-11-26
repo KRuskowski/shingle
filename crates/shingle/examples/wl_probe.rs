@@ -15,7 +15,14 @@
 //! wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern] [--fifo]
 //!          [--damage] [--animate FRAMES] [--presentation]
 //!          [--report-outputs] [--layer OUTPUT] [--fullscreen]
+//!          [--decoration server|client]
 //! ```
+//!
+//! With `--decoration MODE`, the probe asks for server-side or
+//! client-side decorations through `zxdg_decoration_manager_v1` before
+//! its first commit, and reports each mode the compositor configures
+//! (`decoration`, mode `server` or `client`), as WG-6's checks of
+//! server-side frames use it (docs/design/wayfire-gaps.md).
 //!
 //! With `--fullscreen`, once mapped the probe asks to be fullscreen on
 //! the output the compositor chooses (`xdg_toplevel.set_fullscreen`
@@ -81,7 +88,8 @@
 //! (frames, milliseconds), `presented` (output, seq, msec), `discarded`,
 //! `output-enter` and `output-leave` (output),
 //! `preferred-scale` (scale), `buffer-scale` (factor), `layer-configure`
-//! (width, height), `layer-closed`, `close` and `error`.
+//! (width, height), `layer-closed`, `decoration` (mode), `close` and
+//! `error`.
 
 use std::{
   io::Write,
@@ -107,7 +115,12 @@ use wayland_protocols::{
     },
     presentation_time::client::{wp_presentation, wp_presentation_feedback},
   },
-  xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
+  xdg::{
+    decoration::zv1::client::{
+      zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
+    },
+    shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
+  },
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
   zwlr_layer_shell_v1, zwlr_layer_surface_v1,
@@ -164,6 +177,8 @@ struct Options {
   layer: Option<String>,
   /// Asks to be fullscreen once mapped.
   fullscreen: bool,
+  /// The decoration mode to ask for: server-side when true.
+  decoration: Option<bool>,
 }
 
 /// The XRGB8888 bytes (B, G, R, X) of pixel (`x`, `y`) of a `width` by
@@ -192,7 +207,8 @@ fn buffer_bytes(width: i32, height: i32, pattern: bool) -> Vec<u8> {
 
 /// Parses `wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern]
 /// [--fifo] [--damage] [--animate FRAMES] [--presentation]
-/// [--report-outputs] [--layer OUTPUT] [--fullscreen]`.
+/// [--report-outputs] [--layer OUTPUT] [--fullscreen]
+/// [--decoration server|client]`.
 fn parse(arguments: &[String]) -> Result<Options, String> {
   let mut options = Options::default();
   let mut arguments = arguments.iter();
@@ -217,6 +233,13 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
       }
       "--fifo" => options.fifo = true,
       "--fullscreen" => options.fullscreen = true,
+      "--decoration" => {
+        options.decoration = Some(match arguments.next().map(String::as_str) {
+          Some("server") => true,
+          Some("client") => false,
+          _ => return Err("--decoration needs server or client".into()),
+        });
+      }
       "--damage" => options.damage = true,
       "--animate" => {
         let value = arguments.next().ok_or("--animate needs a number")?;
@@ -263,6 +286,8 @@ struct Probe {
   fractional_manager:
     Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
   layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
+  decoration_manager:
+    Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
   /// Every `wl_output` bound, with its name once it was told.
   outputs: Vec<(wl_output::WlOutput, Option<String>)>,
   /// Whether the toplevel's surface reports outputs and scales.
@@ -447,6 +472,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
       "zwlr_layer_shell_v1" => {
         probe.layer_shell =
           Some(registry.bind(name, version.min(4), handle, ()));
+      }
+      "zxdg_decoration_manager_v1" => {
+        probe.decoration_manager = Some(registry.bind(name, 1, handle, ()));
       }
       "wl_shm" => probe.shm = Some(registry.bind(name, 1, handle, ())),
       "xdg_wm_base" => probe.wm_base = Some(registry.bind(name, 1, handle, ())),
@@ -1006,6 +1034,27 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for Probe {
   }
 }
 
+impl Dispatch<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1, ()>
+  for Probe
+{
+  fn event(
+    _: &mut Self,
+    _: &zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+    event: zxdg_toplevel_decoration_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let zxdg_toplevel_decoration_v1::Event::Configure { mode } = event {
+      let mode = match mode {
+        WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ServerSide) => "server",
+        _ => "client",
+      };
+      report("decoration", &[("mode", format!("\"{mode}\""))]);
+    }
+  }
+}
+
 /// Objects whose events the probe ignores.
 macro_rules! ignore_events {
   ($($interface:ty),*) => {
@@ -1036,7 +1085,8 @@ ignore_events!(
   wl_data_offer::WlDataOffer,
   wp_fifo_manager_v1::WpFifoManagerV1,
   wp_fifo_v1::WpFifoV1,
-  wp_presentation::WpPresentation
+  wp_presentation::WpPresentation,
+  zxdg_decoration_manager_v1::ZxdgDecorationManagerV1
 );
 
 /// Maps the toplevel, sets the selection with `--copy`, and serves events
@@ -1082,6 +1132,23 @@ fn run(options: &Options) -> Result<(), String> {
   let toplevel = xdg_surface.get_toplevel(&handle, ());
   toplevel.set_app_id(app_id.into());
   toplevel.set_title(app_id.into());
+  // Kept alive for as long as the probe runs.
+  let _decoration = match options.decoration {
+    Some(server) => {
+      let manager = probe
+        .decoration_manager
+        .as_ref()
+        .ok_or("zxdg_decoration_manager_v1 is missing")?;
+      let decoration = manager.get_toplevel_decoration(&toplevel, &handle, ());
+      decoration.set_mode(if server {
+        zxdg_toplevel_decoration_v1::Mode::ServerSide
+      } else {
+        zxdg_toplevel_decoration_v1::Mode::ClientSide
+      });
+      Some(decoration)
+    }
+    None => None,
+  };
   surface.commit();
   probe.surface = Some(surface.clone());
   if options.fullscreen {
@@ -1191,9 +1258,23 @@ mod tests {
         report_outputs: false,
         layer: None,
         fullscreen: false,
+        decoration: None,
       }
     );
     assert!(parse(&arguments(&["--fullscreen"])).unwrap().fullscreen);
+    assert_eq!(
+      parse(&arguments(&["--decoration", "server"]))
+        .unwrap()
+        .decoration,
+      Some(true)
+    );
+    assert_eq!(
+      parse(&arguments(&["--decoration", "client"]))
+        .unwrap()
+        .decoration,
+      Some(false)
+    );
+    assert!(parse(&arguments(&["--decoration", "both"])).is_err());
     assert!(
       parse(&arguments(&["--report-outputs"]))
         .unwrap()
