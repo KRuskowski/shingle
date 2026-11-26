@@ -92,6 +92,8 @@ impl Frontend {
         self.scale_exit = None;
         self.scale_titles.clear();
         self.scale_icons.clear();
+        self.decoration_config = config.decoration.clone();
+        self.frame_textures.clear();
         self.scale_filter.clear();
         self.scale_filter_texture = None;
         self.switcher_inactive_alpha = config.fast_switcher.inactive_alpha;

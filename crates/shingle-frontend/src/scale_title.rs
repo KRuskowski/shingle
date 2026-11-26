@@ -19,7 +19,8 @@ pub struct RasterTitle {
   pub rgba: Vec<u8>,
 }
 
-fn font() -> &'static FontRef<'static> {
+/// The bundled Inter Regular.
+pub(crate) fn font() -> &'static FontRef<'static> {
   static FONT_REF: OnceLock<FontRef<'static>> = OnceLock::new();
   FONT_REF.get_or_init(|| FontRef::try_from_slice(FONT).unwrap())
 }

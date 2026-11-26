@@ -29,6 +29,7 @@ use wayland_client::Proxy;
 
 use super::{Frontend, drag::DragState, switcher::SwitcherKind};
 
+mod frames;
 mod outputs;
 mod vswipe;
 use crate::{

@@ -11,6 +11,7 @@ pub mod bindings;
 mod dmabuf;
 pub mod expo;
 pub mod extra_gestures;
+pub mod frame_raster;
 mod frontend;
 pub mod host;
 pub mod icon_theme;

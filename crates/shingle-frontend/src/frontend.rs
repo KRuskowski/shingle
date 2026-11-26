@@ -2,15 +2,17 @@
 //! module adds the methods for one area: `bindings` (key and pointer
 //! bindings, key repeat), `scale` and `expo` (the overviews), `switcher`,
 //! `drag`, `effects` (zoom, inversion, alpha), `animation`, `outputs`
-//! (what is kept per output, and which outputs need a frame), `scene` (the
-//! scene build and drawing), `session` (saving, config reload, the lock
-//! client) and `vswipe` (touchpad workspace swipes).
+//! (what is kept per output, and which outputs need a frame), `frames`
+//! (server-side window frames), `scene` (the scene build and drawing),
+//! `session` (saving, config reload, the lock client) and `vswipe`
+//! (touchpad workspace swipes).
 
 mod animation;
 mod bindings;
 mod drag;
 mod effects;
 mod expo;
+mod frames;
 mod outputs;
 mod scale;
 mod scene;
@@ -119,6 +121,10 @@ pub struct Frontend {
   scale_filter_enabled: bool,
   scale_titles: HashMap<TileWindowId, ScaleTitle>,
   scale_icons: HashMap<TileWindowId, GpuTexture>,
+  /// `[decoration]`, which server-side frames are drawn with.
+  decoration_config: shingle_config::DecorationConfig,
+  /// The title and button textures of server-side frames.
+  frame_textures: frames::FrameTextures,
   scale_filter: String,
   scale_filter_texture: Option<ScaleTitle>,
   expo: Option<crate::expo::ExpoState>,
@@ -482,6 +488,8 @@ impl Frontend {
       scale_filter_enabled: config.plugin_enabled("scale-title-filter"),
       scale_titles: HashMap::new(),
       scale_icons: HashMap::new(),
+      decoration_config: config.decoration.clone(),
+      frame_textures: frames::FrameTextures::default(),
       scale_filter: String::new(),
       scale_filter_texture: None,
       expo: None,
@@ -574,6 +582,7 @@ impl Frontend {
           self.scale_window_destroyed(window);
           self.scale_titles.remove(&window);
           self.scale_icons.remove(&window);
+          self.frame_textures.window_destroyed(window);
           self.rotations.remove(&window);
           if self
             .rotation_drag
@@ -1143,6 +1152,7 @@ impl Frontend {
     }
     self.scale_titles.clear();
     self.scale_icons.clear();
+    self.frame_textures.clear();
     self.scale_filter_texture = None;
     self.request_redraw();
   }

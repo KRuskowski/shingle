@@ -525,6 +525,17 @@ impl Frontend {
           snapshot.id.get()
         ));
       }
+      // Frames of the windows drawn here, below their surfaces.
+      let mut frames = self.compositor.frames();
+      frames.retain(|surface, _| {
+        snapshots.iter().any(|snapshot| snapshot.id == *surface)
+      });
+      self.frame_textures.prepare(
+        &*renderer,
+        &frames,
+        &self.decoration_config,
+        view.scale,
+      )?;
       for snapshot in &snapshots {
         if snapshot.buffer.is_none() {
           continue;
@@ -800,6 +811,29 @@ impl Frontend {
             for tile in &mut tiles {
               tile.rotation = *angle;
             }
+          }
+          // A frame follows its surface wherever the scene put it; a
+          // rotated window is drawn without one, since its pieces would
+          // turn about their own centres.
+          if let Some(frame) = frames.get(&snapshot.id)
+            && let Some(content) = tiles.last()
+            && content.rotation == 0.0
+          {
+            let surface = RenderRect {
+              x: geometry.x,
+              y: geometry.y,
+              width: geometry.width,
+              height: geometry.height,
+            };
+            let mut framed = self.frame_textures.tiles(
+              frame,
+              surface,
+              content,
+              &self.decoration_config,
+              view.scale,
+            );
+            framed.append(&mut tiles);
+            tiles = framed;
           }
           Some(tiles)
         })
