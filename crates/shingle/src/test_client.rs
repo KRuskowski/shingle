@@ -50,6 +50,10 @@ use wayland_protocols::{
     single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1,
     viewporter::client::{wp_viewport, wp_viewporter},
   },
+  xdg::decoration::zv1::client::{
+    zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
+    zxdg_toplevel_decoration_v1::{self, ZxdgToplevelDecorationV1},
+  },
   xdg::{
     shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
     xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1},
@@ -206,6 +210,8 @@ pub(crate) struct Events {
   /// `leave_fullscreen` and `toggle_menu` of outputs, `enter`, `leave`
   /// and `proximity N` of hotspots.
   pub(crate) wayfire_shell: Vec<(ObjectId, String)>,
+  /// `zxdg_toplevel_decoration_v1.configure` modes, with their object.
+  pub(crate) decoration_modes: Vec<(ObjectId, u32)>,
   synced: bool,
 }
 
@@ -1112,6 +1118,21 @@ impl Dispatch<ZwfHotspotV2, ()> for Events {
   }
 }
 
+impl Dispatch<ZxdgToplevelDecorationV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    decoration: &ZxdgToplevelDecorationV1,
+    event: zxdg_toplevel_decoration_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let zxdg_toplevel_decoration_v1::Event::Configure { mode } = event {
+      events.decoration_modes.push((decoration.id(), mode.into()));
+    }
+  }
+}
+
 /// Implements `Dispatch` for objects whose events the tests ignore.
 macro_rules! ignore_events {
   ($($interface:ty),* $(,)?) => {
@@ -1399,6 +1420,7 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for Events {
 }
 
 ignore_events!(
+  ZxdgDecorationManagerV1,
   ZwfShellManagerV2,
   ZwfSurfaceV2,
   ZwlrOutputPowerManagerV1,

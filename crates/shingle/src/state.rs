@@ -300,6 +300,14 @@ pub(crate) struct CompositorState {
   pub(crate) dialogs: crate::dialog::Dialogs,
   pub(crate) preferred_decoration_mode: zxdg_toplevel_decoration_v1::Mode,
   pub(crate) force_preferred_decoration_mode: bool,
+  /// Wayfire's `decoration` plugin is loaded.
+  pub(crate) decorations_enabled: bool,
+  /// `[decoration]`, for which windows get frames.
+  pub(crate) decoration: shingle_config::DecorationConfig,
+  /// The frame sizes `decoration` gives.
+  pub(crate) frame_theme: crate::frame::FrameTheme,
+  /// The frame under the pointer.
+  pub(crate) frame_pointer: crate::decorator::FramePointer,
   pub(crate) focus_main_surface_instead_of_popup: bool,
   pub(crate) last_workspace: Option<shingle_core::WorkspaceId>,
   last_lock_state: LockState,
@@ -478,6 +486,10 @@ impl CompositorState {
         &config.preferred_decoration_mode,
       ),
       force_preferred_decoration_mode: config.force_preferred_decoration_mode,
+      decorations_enabled: config.decorations,
+      decoration: config.decoration.clone(),
+      frame_theme: crate::frame::FrameTheme::new(&config.decoration),
+      frame_pointer: Default::default(),
       focus_main_surface_instead_of_popup: config
         .focus_main_surface_instead_of_popup,
       last_workspace: None,

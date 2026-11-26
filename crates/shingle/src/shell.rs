@@ -201,6 +201,13 @@ pub(crate) struct ToplevelRole {
   /// The client's PID, for IPC's `pid`. Only X11 windows have one so far:
   /// their X client's, from XRes or `_NET_WM_PID`.
   pub(crate) pid: Option<i32>,
+  /// The client draws its own decorations: an xdg toplevel unless it
+  /// acknowledged server-side mode, an X window whose `_MOTIF_WM_HINTS`
+  /// leave out the title or border (Wayfire's `has_client_decoration`).
+  pub(crate) client_decorated: bool,
+  /// Whether the window has a server-side frame (`decorator.rs`), once
+  /// that is decided.
+  pub(crate) decorated: Option<bool>,
 }
 
 impl ToplevelRole {
@@ -327,47 +334,63 @@ pub(crate) fn opacity(state: &CompositorState, object: &ObjectId) -> f32 {
   }
 }
 
+/// The geometry of the window on toplevel surface `object`: its tile,
+/// floating, maximized (workarea) or fullscreen (output) rectangle, which
+/// includes its server-side frame, as a Wayfire view's geometry does.
+pub(crate) fn window_geometry(
+  state: &CompositorState,
+  object: &ObjectId,
+) -> Option<Rect> {
+  let surface = state.surfaces.get(object)?;
+  let toplevel = surface.role.toplevel()?;
+  if toplevel.window().is_some_and(|window| {
+    state
+      .core
+      .window_info(window)
+      .is_ok_and(|info| info.state.fullscreen)
+  }) {
+    toplevel
+      .window()
+      .map(|window| state.output_of_window(window).rect)
+  } else if !toplevel.tiled
+    && toplevel.window().is_some_and(|window| {
+      state
+        .core
+        .window_info(window)
+        .is_ok_and(|info| info.state.maximized)
+    })
+  {
+    toplevel
+      .window()
+      .and_then(|window| state.core.window_location(window).ok())
+      .and_then(|location| {
+        state.core.tree(&location.output, location.workspace).ok()
+      })
+      .map_or(state.active().rect, |tree| tree.workarea())
+      .into()
+  } else if !toplevel.tiled {
+    Some(toplevel.floating_geometry)
+  } else {
+    Some(
+      toplevel
+        .window()
+        .and_then(|window| state.core.window_layout(window).ok())
+        .map_or(state.active().rect, |layout| layout.geometry),
+    )
+  }
+}
+
+/// Where surface `object` is drawn, in layout coordinates. A toplevel is
+/// drawn inside its window's geometry, less its frame.
 pub(crate) fn surface_geometry(
   state: &CompositorState,
   object: &ObjectId,
 ) -> Option<Rect> {
   let surface = state.surfaces.get(object)?;
-  if let Some(toplevel) = surface.role.toplevel() {
-    return if toplevel.window().is_some_and(|window| {
-      state
-        .core
-        .window_info(window)
-        .is_ok_and(|info| info.state.fullscreen)
-    }) {
-      toplevel
-        .window()
-        .map(|window| state.output_of_window(window).rect)
-    } else if !toplevel.tiled
-      && toplevel.window().is_some_and(|window| {
-        state
-          .core
-          .window_info(window)
-          .is_ok_and(|info| info.state.maximized)
-      })
-    {
-      toplevel
-        .window()
-        .and_then(|window| state.core.window_location(window).ok())
-        .and_then(|location| {
-          state.core.tree(&location.output, location.workspace).ok()
-        })
-        .map_or(state.active().rect, |tree| tree.workarea())
-        .into()
-    } else if !toplevel.tiled {
-      Some(toplevel.floating_geometry)
-    } else {
-      Some(
-        toplevel
-          .window()
-          .and_then(|window| state.core.window_layout(window).ok())
-          .map_or(state.active().rect, |layout| layout.geometry),
-      )
-    };
+  if surface.role.toplevel().is_some() {
+    return window_geometry(state, object).map(|geometry| {
+      crate::decorator::margins(state, object).shrink(geometry)
+    });
   }
   match &surface.role {
     Role::Xwayland(role) => crate::xwayland::unmanaged::geometry(state, role),
@@ -951,7 +974,9 @@ pub(crate) fn set_toplevel_parent(
   }
 }
 
-fn activated_window(state: &CompositorState) -> Option<WindowId> {
+/// The window shown as active: the focused one, else the one keeping the
+/// activated state while an X menu or a layer surface has the keyboard.
+pub(crate) fn activated_window(state: &CompositorState) -> Option<WindowId> {
   if let Some(window) = crate::input::focused_window(state) {
     return Some(window);
   }
@@ -993,6 +1018,9 @@ pub(crate) fn reconfigure_all(state: &mut CompositorState) {
     })
     .collect::<Vec<_>>();
   targets.sort_by_key(|(_, window)| window.unwrap_or(WindowId(u64::MAX)));
+  for (object, _) in &targets {
+    crate::decorator::refresh(state, object);
+  }
   for (object, window) in targets {
     let layout =
       window.and_then(|window| state.core.window_layout(window).ok());
@@ -1084,17 +1112,23 @@ fn configure_toplevel(
   };
   let previous = toplevel.configured_geometry.replace(geometry);
   let window = toplevel.window();
-  match toplevel.handle.clone() {
+  let handle = toplevel.handle.clone();
+  // The client gets the window's geometry less its frame.
+  let content = crate::decorator::margins(state, object).shrink(geometry);
+  let Some(surface) = state.surfaces.get_mut(object) else {
+    return;
+  };
+  match handle {
     ToplevelHandle::X11(x_window) => {
       // No acknowledgement: X11 has no configure serials.
       crate::xwayland::windows::configure(
-        state, x_window, window, geometry, states,
+        state, x_window, window, content, states,
       );
     }
     ToplevelHandle::Xdg(xdg_toplevel) => {
       xdg_toplevel.configure(
-        geometry.width.min(i32::MAX as u32) as i32,
-        geometry.height.min(i32::MAX as u32) as i32,
+        content.width.min(i32::MAX as u32) as i32,
+        content.height.min(i32::MAX as u32) as i32,
         states.xdg_states(),
       );
       // The xdg_surface half of the configure, which the client
@@ -1106,6 +1140,7 @@ fn configure_toplevel(
         resource.configure(serial);
         serials.insert(serial);
       }
+      crate::decoration::configured(state, &xdg_toplevel, serial);
     }
   }
   if let (Some(window), Some(old_geometry)) = (window, previous)
@@ -2198,6 +2233,8 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
               created_rules_pending: None,
               unmapped: false,
               pid: None,
+              client_decorated: true,
+              decorated: None,
             }))),
             serials: BTreeSet::new(),
             initial_acked: false,
@@ -2309,6 +2346,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
           } else {
             serials.retain(|candidate| *candidate > serial);
             *initial_acked = true;
+            crate::decoration::acknowledged(state, &object, serial);
           }
         }
       }

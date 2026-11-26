@@ -808,7 +808,9 @@ impl Frontend {
           };
           self.dispatch_input(host, device, event);
         }
+        // Any event but a commit redraws, which a frame change needs.
         Event::DpmsChanged(_)
+        | Event::DecorationChanged { .. }
         | Event::OpacityChanged { .. }
         | Event::Idle
         | Event::Resume

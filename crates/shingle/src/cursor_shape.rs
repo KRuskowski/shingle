@@ -37,12 +37,16 @@ pub(crate) fn snapshot(state: &CompositorState) -> Option<SurfaceSnapshot> {
 
 /// Returns the theme's default arrow (`default`, or `left_ptr` in older
 /// themes) when the compositor draws a default cursor and the client under
-/// the pointer, if any, has not set one.
+/// the pointer, if any, has not set one. On the border of a server-side
+/// frame it is the border's resize cursor instead, as Wayfire's
+/// `update_cursor` sets it.
 pub(crate) fn default_snapshot(
   state: &CompositorState,
 ) -> Option<SurfaceSnapshot> {
-  (state.default_cursor && !state.input.cursor_set)
-    .then(|| shape_snapshot(state, Shape::Default))
+  (state.default_cursor && !state.input.cursor_set).then(|| {
+    let shape = state.frame_pointer.cursor.unwrap_or(Shape::Default);
+    shape_snapshot(state, shape)
+  })
 }
 
 fn shape_snapshot(state: &CompositorState, shape: Shape) -> SurfaceSnapshot {

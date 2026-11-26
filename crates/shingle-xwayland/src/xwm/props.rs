@@ -186,16 +186,28 @@ impl WmHints {
   }
 }
 
-/// `_MOTIF_WM_HINTS`: `Some(false)` when the client asks for no
-/// decorations, `Some(true)` when it asks for some, `None` when it says
-/// nothing about them.
+/// `_MOTIF_WM_HINTS`: `Some(false)` when the client leaves out the title
+/// or the border, `Some(true)` when it asks for both or for all
+/// decorations, `None` when it says nothing about them. This is wlroots'
+/// reading (`read_surface_motif_hints`), which ignores hints of fewer than
+/// five words and takes `MWM_DECOR_ALL` as everything, and Wayfire draws
+/// a frame only for `Some(true)` or `None`
+/// (wayfire:src/view/xwayland/xwayland-toplevel-view.hpp,
+/// `update_decorated`).
 pub fn motif_decorations(values: &[u32]) -> Option<bool> {
-  const MWM_HINTS_DECORATIONS: u32 = 2;
-  let flags = *values.first()?;
-  if flags & MWM_HINTS_DECORATIONS == 0 {
+  const MWM_HINTS_DECORATIONS: u32 = 1 << 1;
+  const MWM_DECOR_ALL: u32 = 1 << 0;
+  const MWM_DECOR_BORDER: u32 = 1 << 1;
+  const MWM_DECOR_TITLE: u32 = 1 << 3;
+  if values.len() < 5 || values[0] & MWM_HINTS_DECORATIONS == 0 {
     return None;
   }
-  values.get(2).map(|decorations| *decorations != 0)
+  let decorations = values[2];
+  Some(
+    decorations & MWM_DECOR_ALL != 0
+      || decorations & (MWM_DECOR_BORDER | MWM_DECOR_TITLE)
+        == MWM_DECOR_BORDER | MWM_DECOR_TITLE,
+  )
 }
 
 #[cfg(test)]
@@ -291,5 +303,12 @@ mod tests {
     assert_eq!(motif_decorations(&[1, 1, 0, 0, 0]), None);
     assert_eq!(motif_decorations(&[2, 0, 0, 0, 0]), Some(false));
     assert_eq!(motif_decorations(&[2, 0, 1, 0, 0]), Some(true));
+    // Too short for wlroots.
+    assert_eq!(motif_decorations(&[2, 0, 0]), None);
+    // A border without a title, or a title without a border, is the
+    // client's own frame; both are a server-side one.
+    assert_eq!(motif_decorations(&[2, 0, 2, 0, 0]), Some(false));
+    assert_eq!(motif_decorations(&[2, 0, 8, 0, 0]), Some(false));
+    assert_eq!(motif_decorations(&[2, 0, 10, 0, 0]), Some(true));
   }
 }

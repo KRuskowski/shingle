@@ -555,8 +555,17 @@ pub(crate) fn focus_at(
   x: f64,
   y: f64,
 ) -> Option<WindowId> {
-  let target = surface_at(state, x, y)?;
-  focus_object(state, target)
+  match hit_at(state, x, y)? {
+    Hit::Surface(target) => focus_object(state, target),
+    // A click on a frame focuses its window; the pointer stays on the
+    // frame, so no client gets it.
+    Hit::Frame(window) => {
+      let target = object_for_window(state, window)?;
+      let focused = focus_object(state, target);
+      set_pointer_focus(state, None);
+      focused
+    }
+  }
 }
 
 pub(crate) fn focus_window(
@@ -1038,8 +1047,17 @@ fn pointer_motion_inner(
   state.input.pointer_x = x;
   state.input.pointer_y = y;
   crate::wayfire_shell::input_moved(state, x, y);
-  let target = surface_at(state, x, y);
+  let hit = hit_at(state, x, y);
+  let target = match &hit {
+    Some(Hit::Surface(object)) => Some(object.clone()),
+    _ => None,
+  };
   set_pointer_focus(state, target.clone());
+  let frame = match hit {
+    Some(Hit::Frame(window)) => Some(window),
+    _ => None,
+  };
+  crate::decorator::pointer_moved(state, frame, x, y);
   let Some(target) = target else {
     return;
   };
@@ -1092,6 +1110,10 @@ pub(crate) fn pointer_button(
     false
   };
   if focus_changed && !state.focus.buttons_passthrough {
+    return;
+  }
+  // A press on a frame is the frame's, never a client's.
+  if crate::decorator::pointer_button(state, button, pressed) {
     return;
   }
   let Some(target) = state.input.pointer_focus.clone() else {
@@ -1626,9 +1648,19 @@ fn input_allowed(state: &CompositorState, object: &ObjectId) -> bool {
   }
 }
 
-/// The surface under layout point (`x`, `y`): among those drawn on the
-/// output there, else on the first output.
-fn surface_at(state: &CompositorState, x: f64, y: f64) -> Option<ObjectId> {
+/// What is under a layout point.
+enum Hit {
+  /// A surface, which takes the input.
+  Surface(ObjectId),
+  /// The server-side frame of a window (`decorator.rs`).
+  Frame(WindowId),
+}
+
+/// What is under layout point (`x`, `y`): among the surfaces drawn on the
+/// output there, else on the first output, the topmost whose input region
+/// contains it, or the frame of a toplevel, which is just below the
+/// toplevel's own surface.
+fn hit_at(state: &CompositorState, x: f64, y: f64) -> Option<Hit> {
   let output = crate::surface_outputs::output_at(state, x, y)
     .unwrap_or_else(|| state.primary().id.clone());
   state
@@ -1637,19 +1669,31 @@ fn surface_at(state: &CompositorState, x: f64, y: f64) -> Option<ObjectId> {
     .rev()
     .filter(|snapshot| snapshot.role != crate::SurfaceRole::Cursor)
     .find_map(|snapshot| {
-      if !contains(snapshot.geometry, x, y) {
-        return None;
-      }
       let object = state.surface_ids.get(&snapshot.id)?;
       let surface = state.surfaces.get(object)?;
-      crate::region::contains(
-        state,
-        surface,
-        x - f64::from(snapshot.geometry.x),
-        y - f64::from(snapshot.geometry.y),
-      )
-      .then_some(object.clone())
+      if contains(snapshot.geometry, x, y)
+        && crate::region::contains(
+          state,
+          surface,
+          x - f64::from(snapshot.geometry.x),
+          y - f64::from(snapshot.geometry.y),
+        )
+      {
+        return Some(Hit::Surface(object.clone()));
+      }
+      if snapshot.role != crate::SurfaceRole::Toplevel {
+        return None;
+      }
+      crate::decorator::frame_at(state, object, x, y).map(Hit::Frame)
     })
+}
+
+/// The surface under layout point (`x`, `y`), unless a frame is above it.
+fn surface_at(state: &CompositorState, x: f64, y: f64) -> Option<ObjectId> {
+  match hit_at(state, x, y)? {
+    Hit::Surface(object) => Some(object),
+    Hit::Frame(_) => None,
+  }
 }
 
 fn contains(rect: Rect, x: f64, y: f64) -> bool {
@@ -1670,7 +1714,8 @@ fn local_position(
   ))
 }
 
-fn object_for_window(
+/// The surface of `window`'s toplevel, once it is mapped with a buffer.
+pub(crate) fn object_for_window(
   state: &CompositorState,
   window: WindowId,
 ) -> Option<ObjectId> {
@@ -1712,8 +1757,10 @@ pub(crate) fn window_at(
   x: f64,
   y: f64,
 ) -> Option<WindowId> {
-  let object = surface_at(state, x, y)?;
-  window_for_object(state, &object)
+  match hit_at(state, x, y)? {
+    Hit::Surface(object) => window_for_object(state, &object),
+    Hit::Frame(window) => Some(window),
+  }
 }
 
 pub(crate) fn focused_window(state: &CompositorState) -> Option<WindowId> {
@@ -1747,7 +1794,7 @@ pub(crate) fn set_event_time(
 
 /// Returns the `CLOCK_MONOTONIC` time of the input being handled: the
 /// backend's event time if one is set, otherwise now.
-fn event_time(state: &CompositorState) -> Duration {
+pub(crate) fn event_time(state: &CompositorState) -> Duration {
   state
     .input
     .event_time

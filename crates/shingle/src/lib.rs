@@ -54,6 +54,7 @@ mod cursor_shape;
 mod data_control;
 mod data_device;
 mod decoration;
+mod decorator;
 mod dialog;
 mod ext_toplevel;
 mod ext_workspace;
@@ -61,6 +62,7 @@ mod fifo;
 mod foreign;
 mod foreign_toplevel;
 mod fractional_scale;
+pub mod frame;
 mod gamma_control;
 mod idle_notify;
 mod input;
@@ -330,6 +332,11 @@ pub struct Config {
   /// Ignores clients' xdg-decoration mode requests and always sends the
   /// preferred mode.
   pub force_preferred_decoration_mode: bool,
+  /// Wayfire's `decoration` plugin is loaded: windows that want
+  /// server-side decorations get a frame.
+  pub decorations: bool,
+  /// `[decoration]`: the frame's sizes and which windows get one.
+  pub decoration: shingle_config::DecorationConfig,
   /// Wayfire's `workarounds/focus_main_surface_instead_of_popup`: keyboard
   /// focus goes to a popup's main surface, for Qt clipboard bugs.
   pub focus_main_surface_instead_of_popup: bool,
@@ -445,6 +452,8 @@ impl Default for Config {
       max_buffer_size: 16384,
       preferred_decoration_mode: "client".into(),
       force_preferred_decoration_mode: false,
+      decorations: true,
+      decoration: shingle_config::DecorationConfig::default(),
       focus_main_surface_instead_of_popup: false,
       disable_primary_selection: false,
       security_privileged_protocols: security_context::parse_privileged(
@@ -471,6 +480,7 @@ impl From<shingle_config::ShingleConfig> for Config {
       .collect();
     let (width, height) = output::configured_size(&config.output);
     let tiling = config.plugin_enabled("simple-tile");
+    let decorations = config.plugin_enabled("decoration");
     let protocol_plugins = ProtocolPlugins::from_config(&config);
     let wayfire_values = std::mem::take(&mut config.wayfire_values);
     Self {
@@ -528,6 +538,8 @@ impl From<shingle_config::ShingleConfig> for Config {
       force_preferred_decoration_mode: config
         .behavior
         .force_preferred_decoration_mode,
+      decorations,
+      decoration: config.decoration,
       focus_main_surface_instead_of_popup: config
         .behavior
         .focus_main_surface_instead_of_popup,
@@ -949,6 +961,13 @@ pub enum Event {
   /// the split weights or nesting `simple-tile/set-layout` applied or the
   /// rectangle IPC gave a floating window. The session should be saved.
   LayoutChanged,
+  /// What the server-side frame of `window` shows changed: it gained or
+  /// lost its frame, or a button under the pointer is hovered or pressed.
+  /// Its title, focus and geometry have their own events.
+  DecorationChanged {
+    /// The decorated window.
+    window: WindowId,
+  },
   /// Show-desktop was turned on (`true`) or off. Turning it on minimizes
   /// the current workspace's windows; mapping or unminimizing a window,
   /// or switching workspace, turns it off, as in Wayfire's
@@ -1753,6 +1772,13 @@ impl Compositor {
     )
   }
 
+  /// The server-side frames to draw, by the surface of their toplevel:
+  /// one for every decorated window that is not fullscreen. A frame is
+  /// drawn below its toplevel's surface, wherever that surface is drawn.
+  pub fn frames(&self) -> HashMap<SurfaceId, frame::FrameSnapshot> {
+    decorator::frames(&self.state)
+  }
+
   /// A snapshot of any live surface, visible or not; `None` once it is
   /// destroyed.
   pub fn surface(&self, id: SurfaceId) -> Option<SurfaceSnapshot> {
@@ -1932,6 +1958,9 @@ impl Compositor {
       crate::decoration::preferred_mode(&config.preferred_decoration_mode);
     self.state.force_preferred_decoration_mode =
       config.force_preferred_decoration_mode;
+    self.state.decorations_enabled = config.decorations;
+    self.state.frame_theme = crate::frame::FrameTheme::new(&config.decoration);
+    self.state.decoration = config.decoration;
     self.state.focus_main_surface_instead_of_popup =
       config.focus_main_surface_instead_of_popup;
     crate::decoration::apply_preferences(&mut self.state);

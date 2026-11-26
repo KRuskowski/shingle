@@ -1003,11 +1003,13 @@ pub(crate) fn view_json(state: &CompositorState, window: WindowId) -> Value {
       .toplevel()
       .is_some_and(|toplevel| toplevel.window() == Some(window))
   });
-  let (geometry_value, app_id, title, min_size, max_size, pid) = surface
-    .map_or_else(
+  let (geometry_value, base_geometry, app_id, title, min_size, max_size, pid) =
+    surface.map_or_else(
       || {
+        let floating = geometry(info.state.floating.unwrap_or_default());
         (
-          geometry(info.state.floating.unwrap_or_default()),
+          floating.clone(),
+          floating,
           info.identity.app_id.clone(),
           String::new(),
           (0, 0),
@@ -1020,11 +1022,12 @@ pub(crate) fn view_json(state: &CompositorState, window: WindowId) -> Value {
           .role
           .toplevel()
           .expect("the surface was found as a toplevel");
+        let object = Resource::id(&surface.resource);
+        // The geometry includes a server-side frame, as a Wayfire view's
+        // does; the base geometry is the client's surface.
         (
-          geometry(
-            shell::surface_geometry(state, &Resource::id(&surface.resource))
-              .unwrap_or_default(),
-          ),
+          geometry(shell::window_geometry(state, &object).unwrap_or_default()),
+          geometry(shell::surface_geometry(state, &object).unwrap_or_default()),
           role.app_id.clone(),
           role.title.clone(),
           role.min_size,
@@ -1046,7 +1049,7 @@ pub(crate) fn view_json(state: &CompositorState, window: WindowId) -> Value {
       "pid": pid.map_or(-1, i64::from),
       "title": title,
       "app-id": app_id,
-      "base-geometry": geometry_value,
+      "base-geometry": base_geometry,
       "parent": info.parent.map_or(-1, |parent| parent.0 as i64),
       "geometry": geometry_value,
       "bbox": geometry_value,

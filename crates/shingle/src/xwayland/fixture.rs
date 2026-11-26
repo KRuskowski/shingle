@@ -27,7 +27,17 @@ pub(crate) struct Fixture {
 }
 
 impl Fixture {
+  /// A fixture without the `decoration` plugin, so that X windows are
+  /// configured exactly as Shingle places them.
   pub(crate) fn new() -> Self {
+    let mut fixture = Self::decorated();
+    fixture.state().decorations_enabled = false;
+    fixture
+  }
+
+  /// A fixture with the `decoration` plugin, which frames X windows that
+  /// do not draw their own (decorator.rs).
+  pub(crate) fn decorated() -> Self {
     let (mut compositor, path) = crate::tests::test_compositor();
     let client = TestClient::connect_xwayland(&mut compositor);
     let wl_compositor = client.bind::<wl_compositor::WlCompositor>(4);

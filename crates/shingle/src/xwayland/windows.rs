@@ -255,6 +255,7 @@ fn try_map(state: &mut CompositorState, window: Window, from_commit: bool) {
   }
   role.toplevel = Some(Box::new(toplevel));
   let has_buffer = surface.buffer.is_some();
+  crate::decorator::decide_x_toplevel(state, &object);
   if from_commit || !has_buffer {
     return;
   }
@@ -300,6 +301,8 @@ fn new_toplevel(
     created_rules_pending: None,
     unmapped: false,
     pid,
+    client_decorated: info.draws_own_frame(),
+    decorated: None,
   }
 }
 
@@ -421,6 +424,13 @@ fn changed(state: &mut CompositorState, window: Window, info: WindowInfo) {
       .and_then(|parent| shingle_window(state, parent));
     shell::set_toplevel_parent(state, &object, parent);
   }
+  if old.draws_own_frame() != info.draws_own_frame() {
+    crate::decorator::set_client_decorated(
+      state,
+      &object,
+      info.draws_own_frame(),
+    );
+  }
   if old.size_hints != info.size_hints
     && let Some(toplevel) = state
       .surfaces
@@ -457,7 +467,10 @@ fn set_app_id(state: &mut CompositorState, object: &ObjectId, app_id: String) {
 /// Answers a `ConfigureRequest`. Before the window is a Shingle window it
 /// gets what it asked, and the request is its start geometry. After that
 /// tiled, maximized and fullscreen windows get their geometry back, and
-/// floating ones the request clamped to the workarea, as in Wayfire.
+/// floating ones the request clamped to the workarea, as in Wayfire. The
+/// request is the X window's own rectangle, so a decorated window's
+/// geometry is the request grown by its frame, and it is clamped with the
+/// frame, as Wayfire's `configure_request` expands it by the margins.
 fn configure_request(
   state: &mut CompositorState,
   window: Window,
@@ -466,6 +479,9 @@ fn configure_request(
   if !state.xwayland.windows.contains_key(&window) {
     return;
   }
+  let margins = toplevel_object(state, window)
+    .map(|object| crate::decorator::margins(state, &object))
+    .unwrap_or_default();
   let placement = match shingle_window(state, window) {
     Some(shingle) => placement(state, window, shingle),
     None => {
@@ -478,17 +494,22 @@ fn configure_request(
           .get_mut(&object)
           .and_then(|surface| surface.role.toplevel_mut())
       {
-        toplevel.floating_geometry = rect(request);
+        toplevel.floating_geometry = margins.expand(rect(request));
       }
       Placement::Unmapped
     }
   };
-  let reply = configure_reply(request, placement);
-  if let (Placement::Floating { .. }, Some(shingle)) =
-    (placement, shingle_window(state, window))
-  {
-    let _ = shell::set_floating_geometry(state, shingle, rect(reply));
-  }
+  let reply = match placement {
+    Placement::Floating { .. } => {
+      let frame =
+        configure_reply(geometry(margins.expand(rect(request))), placement);
+      if let Some(shingle) = shingle_window(state, window) {
+        let _ = shell::set_floating_geometry(state, shingle, rect(frame));
+      }
+      geometry(margins.shrink(rect(frame)))
+    }
+    _ => configure_reply(request, placement),
+  };
   state.xwayland.requests.push(XRequest::Configure {
     window,
     geometry: reply,
@@ -949,6 +970,106 @@ mod tests {
     );
     let views = fixture.call("window-rules/view-info", json!({"id": window.0}));
     assert_eq!(views["info"]["geometry"]["x"], 0, "{views}");
+  }
+
+  #[test]
+  fn decorated_x_windows_are_configured_inside_their_frame() {
+    let mut fixture = Fixture::decorated();
+    map(&mut fixture, XTERM, "XTerm", 5);
+    let mut frameless = info("XEyes", "eyes");
+    frameless.decorations = Some(false);
+    map_info(&mut fixture, XEYES, frameless.clone(), 6);
+    let last_geometry = |requests: &[XRequest], window| {
+      requests.iter().rev().find_map(|request| match request {
+        XRequest::Configure {
+          window: candidate,
+          geometry,
+          ..
+        } if *candidate == window => Some(*geometry),
+        _ => None,
+      })
+    };
+    let requests = fixture.requests();
+    let xterm = fixture.windows("XTerm")[0];
+    let xeyes = fixture.windows("XEyes")[0];
+    let state = fixture.state();
+    let margins = state.frame_theme.margins();
+    let tile = |window| state.core.window_layout(window).unwrap().geometry;
+    // Without _MOTIF_WM_HINTS, xterm gets a frame and is configured
+    // inside it; a window that turned its decorations off gets none.
+    assert_eq!(
+      last_geometry(&requests, XTERM),
+      Some(geometry(margins.shrink(tile(xterm))))
+    );
+    assert_eq!(last_geometry(&requests, XEYES), Some(geometry(tile(xeyes))));
+    let frames = crate::decorator::frames(state);
+    assert_eq!(frames.len(), 1);
+    assert!(frames.values().all(|frame| frame.window == xterm));
+    // Hints that ask for decorations again bring the frame.
+    frameless.decorations = Some(true);
+    fixture.apply(XwmEvent::Changed {
+      window: XEYES,
+      info: frameless,
+    });
+    let requests = fixture.requests();
+    let state = fixture.state();
+    let tile = state.core.window_layout(xeyes).unwrap().geometry;
+    assert_eq!(
+      last_geometry(&requests, XEYES),
+      Some(geometry(margins.shrink(tile)))
+    );
+    assert_eq!(crate::decorator::frames(state).len(), 2);
+  }
+
+  #[test]
+  fn a_floating_x_window_gets_its_request_inside_a_clamped_frame() {
+    let mut fixture = Fixture::decorated();
+    // Before it maps, the frame is around what it asked for.
+    let asked = Geometry::new(30, 40, 200, 100);
+    fixture.apply(XwmEvent::Mapped {
+      window: XTERM,
+      info: info("XTerm", "x"),
+    });
+    fixture.apply(XwmEvent::ConfigureRequest {
+      window: XTERM,
+      geometry: asked,
+    });
+    assert_eq!(
+      fixture.requests(),
+      [XRequest::Configure {
+        window: XTERM,
+        geometry: asked,
+        force: true,
+      }]
+    );
+    let (surface, _) = fixture.surface(5);
+    fixture.commit_buffer(&surface);
+    fixture.apply(XwmEvent::Serial {
+      window: XTERM,
+      serial: 5,
+    });
+    let window = fixture.windows("XTerm")[0];
+    let margins = fixture.state().frame_theme.margins();
+    shell::toggle_tiling(fixture.state(), window).unwrap();
+    fixture.requests();
+    // A request off the workarea is clamped with its frame, and the X
+    // window gets the inside of the frame.
+    fixture.apply(XwmEvent::ConfigureRequest {
+      window: XTERM,
+      geometry: Geometry::new(-100, 10, 300, 200),
+    });
+    let frame = Rect::new(0, 0, 308, 238);
+    assert_eq!(
+      fixture.requests().last(),
+      Some(&XRequest::Configure {
+        window: XTERM,
+        geometry: geometry(margins.shrink(frame)),
+        force: true,
+      })
+    );
+    let views = fixture.call("window-rules/view-info", json!({"id": window.0}));
+    assert_eq!(views["info"]["geometry"]["y"], 0, "{views}");
+    assert_eq!(views["info"]["base-geometry"]["y"], 34, "{views}");
   }
 
   #[test]

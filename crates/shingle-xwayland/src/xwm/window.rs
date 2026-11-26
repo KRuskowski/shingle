@@ -267,6 +267,15 @@ impl WindowInfo {
     self.types.contains(&kind)
   }
 
+  /// Whether the client draws its own frame, so that Shingle gives it
+  /// none unless `[decoration] forced_views` says so: its
+  /// `_MOTIF_WM_HINTS` leave out the title or the border, or it is a
+  /// splash screen (Wayfire's `should_be_decorated`,
+  /// wayfire:src/view/xwayland/xwayland-toplevel-view.hpp).
+  pub fn draws_own_frame(&self) -> bool {
+    self.decorations == Some(false) || self.has_type(WindowType::Splash)
+  }
+
   /// The ICCCM input model.
   pub fn input_model(&self) -> InputModel {
     InputModel::new(self.hints.input, self.protocols.take_focus)
