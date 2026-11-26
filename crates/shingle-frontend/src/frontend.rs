@@ -74,6 +74,8 @@ const BTN_MIDDLE: u32 = 0x112;
 pub struct Frontend {
   compositor: Compositor,
   store: SessionStore,
+  /// [`Frontend::shutdown`] has saved the session for the last time.
+  shut_down: bool,
   textures: HashMap<SurfaceId, GpuTexture>,
   animations: HashMap<SurfaceId, GeometryAnimation>,
   open_animations: HashMap<SurfaceId, Instant>,
@@ -411,6 +413,7 @@ impl Frontend {
     Ok(Self {
       compositor,
       store,
+      shut_down: false,
       textures: HashMap::new(),
       animations: HashMap::new(),
       open_animations: HashMap::new(),
@@ -996,9 +999,24 @@ impl Frontend {
     self.keyboard.leds()
   }
 
-  /// Saves the session. Hosts call this when their event loop ends.
+  /// Saves the session for the last time. Hosts call this when their
+  /// event loop ends; later calls, and saves after it, do nothing.
+  ///
+  /// The snapshot is taken first, then Xwayland is stopped and the X
+  /// display's lock and sockets are removed, and only then is the
+  /// snapshot written: the write syncs to disk, which can take many
+  /// seconds on a busy one, and a SIGKILL during it must not leave the
+  /// display behind. Stopping Xwayland takes the X windows out of the
+  /// model, so a later save would lose them.
   pub fn shutdown(&mut self) {
-    self.save();
+    if std::mem::replace(&mut self.shut_down, true) {
+      return;
+    }
+    let snapshot = self.compositor.core().snapshot();
+    self.compositor.stop_xwayland();
+    if let Err(error) = self.store.save_snapshot(&snapshot) {
+      eprintln!("shingle: failed to save session: {error}");
+    }
   }
 
   fn request_redraw(&mut self) {

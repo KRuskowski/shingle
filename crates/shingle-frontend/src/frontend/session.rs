@@ -32,6 +32,9 @@ impl Frontend {
   }
 
   pub(super) fn save(&self) {
+    if self.shut_down {
+      return;
+    }
     if let Err(error) = self.store.save(self.compositor.core()) {
       eprintln!("shingle: failed to save session: {error}");
     }

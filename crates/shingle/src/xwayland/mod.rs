@@ -783,6 +783,26 @@ mod tests {
   }
 
   #[test]
+  fn stop_xwayland_frees_the_display_before_the_drop() {
+    let directory = temp_dir();
+    let mut compositor =
+      compositor(&directory, XwaylandMode::Eager, "exec sleep 60");
+    let pid = compositor.state.xwayland.pid.expect("started at once");
+    compositor.stop_xwayland();
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert!(!directory.join(".X0-lock").exists());
+    assert!(!directory.join(".X11-unix/X0").exists());
+    assert_eq!(compositor.x_display(), None);
+    assert_eq!(compositor.client_environment().value("DISPLAY"), None);
+    assert_eq!(call(&mut compositor, "stipc/get_xwayland_pid")["pid"], -1);
+    // A second call, and the drop after it, have nothing left to do.
+    compositor.stop_xwayland();
+    compositor.poll(Some(Duration::from_millis(10))).unwrap();
+    drop(compositor);
+    fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[test]
   fn a_server_that_exits_at_once_is_not_restarted() {
     let directory = temp_dir();
     let runs = directory.join("runs");

@@ -28,10 +28,10 @@ use std::{
 };
 
 pub use environment::ClientEnvironment;
+pub use shingle_core::SessionSnapshot;
 
 use shingle_core::{
-  LaunchIdentity, NodeSnapshot, SessionSnapshot, Shingle, ShingleError,
-  WindowId,
+  LaunchIdentity, NodeSnapshot, Shingle, ShingleError, WindowId,
 };
 use thiserror::Error;
 
@@ -155,10 +155,25 @@ impl SessionStore {
   /// [`SessionError::Core`] if the model fails validation or the write
   /// fails.
   pub fn save(&self, session: &Shingle) -> Result<(), SessionError> {
+    self.save_snapshot(&session.snapshot())
+  }
+
+  /// Writes a snapshot taken earlier with `Shingle::snapshot`, as
+  /// [`SessionStore::save`] does. Shutdown takes the snapshot first and
+  /// writes it after the compositor has released its displays, because
+  /// the write syncs to disk and can stall for many seconds on a busy one.
+  ///
+  /// # Errors
+  ///
+  /// As [`SessionStore::save`].
+  pub fn save_snapshot(
+    &self,
+    snapshot: &SessionSnapshot,
+  ) -> Result<(), SessionError> {
     if let Some(parent) = self.path.parent() {
       fs::create_dir_all(parent)?;
     }
-    session.save_atomic(&self.path)?;
+    snapshot.save_atomic(&self.path)?;
     Ok(())
   }
 
@@ -661,6 +676,25 @@ mod tests {
     // A good session saved afterwards loads again.
     store.save(&Shingle::new()).unwrap();
     assert!(store.load().unwrap().is_some());
+    fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[test]
+  fn save_snapshot_writes_the_model_as_it_was_when_taken() {
+    let directory = temp_dir();
+    let store = SessionStore::new(directory.join("state/session.json"));
+    let mut core = Shingle::new();
+    let first = OutputId::new("FIRST-1");
+    core
+      .add_output(first.clone(), Rect::new(0, 0, 640, 480))
+      .unwrap();
+    let snapshot = core.snapshot();
+    core
+      .add_output(OutputId::new("SECOND-1"), Rect::new(640, 0, 640, 480))
+      .unwrap();
+    store.save_snapshot(&snapshot).unwrap();
+    let (loaded, _) = store.load().unwrap().expect("a saved session");
+    assert_eq!(loaded.outputs().collect::<Vec<_>>(), [&first]);
     fs::remove_dir_all(directory).unwrap();
   }
 

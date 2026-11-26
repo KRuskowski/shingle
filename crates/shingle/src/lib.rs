@@ -1484,6 +1484,23 @@ impl Compositor {
     self.state.shutdown
   }
 
+  /// Stops the X window manager and Xwayland now and removes the X
+  /// display's sockets and lock, which dropping the compositor does too.
+  /// Afterwards [`Compositor::x_display`] is `None`, and the model no
+  /// longer has the X windows, so a host takes its session snapshot
+  /// first. Calling it again does nothing.
+  ///
+  /// Hosts call it on shutdown before writing the session, so that a
+  /// write stalled on a busy disk does not hold the display: a SIGKILL
+  /// that ends such a stall would otherwise leave the lock and socket
+  /// behind.
+  pub fn stop_xwayland(&mut self) {
+    if let Some(mut xwayland) = self.xwayland.take() {
+      xwayland.shut_down(&mut self.state, &self.event_loop.handle());
+    }
+    self.state.xwayland.display = None;
+  }
+
   /// Re-applies a reloaded configuration to the running compositor:
   /// workspace grid, output geometry, scale and transform, gaps, idle timers,
   /// focus, decoration and input settings and window rules, then reconfigures
@@ -3197,9 +3214,7 @@ impl Drop for Compositor {
   /// are destroyed, as Wayfire does on shutdown, then removes the X
   /// display's sockets and lock.
   fn drop(&mut self) {
-    if let Some(mut xwayland) = self.xwayland.take() {
-      xwayland.shut_down(&mut self.state, &self.event_loop.handle());
-    }
+    self.stop_xwayland();
   }
 }
 

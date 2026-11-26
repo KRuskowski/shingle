@@ -15,7 +15,7 @@ use shingle::{
 };
 use shingle_config::ShingleConfig;
 use shingle_session::{
-  SessionStore, launch_autostart, launch_program, launch_saved,
+  SessionSnapshot, SessionStore, launch_autostart, launch_program, launch_saved,
 };
 
 /// Runs Shingle headless with `config` and saves the session when it ends.
@@ -88,8 +88,25 @@ pub fn run(
   }
   let _session_children = session_children;
   run_with_frames(&mut compositor)?;
-  store.save(compositor.core())?;
+  shut_down(compositor, |snapshot| store.save_snapshot(snapshot))?;
   Ok(())
+}
+
+/// Ends a compositor whose loop has finished: takes the session snapshot,
+/// drops the compositor, which stops Xwayland, removes the X display's
+/// lock and sockets and closes the Wayland and IPC sockets, and only then
+/// hands the snapshot to `save`.
+///
+/// Saving syncs the file and its directory to disk, which took more than
+/// 10 s on a busy disk, so the display is freed first: a SIGKILL sent
+/// because the exit took too long then leaves nothing behind.
+fn shut_down<E>(
+  compositor: Compositor,
+  save: impl FnOnce(&SessionSnapshot) -> Result<(), E>,
+) -> Result<(), E> {
+  let snapshot = compositor.core().snapshot();
+  drop(compositor);
+  save(&snapshot)
 }
 
 /// Serves clients until shutdown, reporting a frame at the output's
@@ -196,6 +213,39 @@ mod tests {
     );
     drop(compositor);
     let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn shutdown_frees_the_displays_before_the_session_is_saved() {
+    let directory = std::env::temp_dir()
+      .join(format!("shingle-headless-shutdown-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let config = Config {
+      xwayland: shingle::XwaylandSettings {
+        mode: shingle_config::XwaylandMode::Lazy,
+        socket_base: directory.clone(),
+        program: Some("/nonexistent/shingle-test-xwayland".into()),
+        ..shingle::XwaylandSettings::default()
+      },
+      ..Config::default()
+    };
+    let socket = directory.join("wayland");
+    let compositor = Compositor::with_socket_path(config, &socket).unwrap();
+    assert!(directory.join(".X0-lock").exists());
+    assert!(socket.exists());
+    let mut outputs = 0;
+    shut_down(compositor, |snapshot| {
+      // What a SIGKILL during a slow save would leave behind.
+      assert!(!directory.join(".X0-lock").exists());
+      assert!(!directory.join(".X11-unix/X0").exists());
+      assert!(!socket.exists());
+      outputs = snapshot.outputs.len();
+      Ok::<(), ()>(())
+    })
+    .unwrap();
+    assert_eq!(outputs, 1);
+    std::fs::remove_dir_all(directory).unwrap();
   }
 
   #[test]

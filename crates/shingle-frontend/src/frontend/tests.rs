@@ -1371,3 +1371,60 @@ fn an_uploaded_texture_stays_while_its_surface_is_hidden() {
   assert!(drew_texture(&target), "shown again without a commit");
   assert_eq!(fixture.frontend.uploads.len(), uploads);
 }
+
+#[test]
+fn shutdown_frees_the_x_display_and_saves_once() {
+  static NEXT: AtomicU32 = AtomicU32::new(0);
+  let directory = std::env::temp_dir().join(format!(
+    "shingle-frontend-shutdown-{}-{}",
+    std::process::id(),
+    NEXT.fetch_add(1, Ordering::Relaxed)
+  ));
+  let _ = std::fs::remove_dir_all(&directory);
+  std::fs::create_dir_all(&directory).unwrap();
+  let mut yaml = ShingleConfig::default();
+  yaml.behavior.auto_reload = false;
+  yaml.session.restore = false;
+  let mut config = Config::from(yaml.clone());
+  // A lazy server in a private directory, which never starts here.
+  config.xwayland.mode = shingle_config::XwaylandMode::Lazy;
+  config.xwayland.socket_base = directory.clone();
+  config.xwayland.program = Some("/nonexistent/shingle-test-xwayland".into());
+  let compositor =
+    Compositor::with_socket_path(config, &directory.join("wayland")).unwrap();
+  let session = directory.join("session.json");
+  let mut frontend = Frontend::with_compositor(
+    yaml,
+    compositor,
+    SessionStore::new(&session),
+    Vec::new(),
+    None,
+  )
+  .unwrap();
+  assert!(directory.join(".X0-lock").exists());
+  frontend.shutdown();
+  // Freed while the compositor still exists, not only on its drop.
+  assert!(!directory.join(".X0-lock").exists());
+  assert!(!directory.join(".X11-unix/X0").exists());
+  assert_eq!(frontend.compositor().x_display(), None);
+  assert!(session.exists());
+  // The last save was the one before Xwayland stopped.
+  std::fs::remove_file(&session).unwrap();
+  frontend.shutdown();
+  frontend.save();
+  assert!(!session.exists());
+  drop(frontend);
+  std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn shutdown_saves_the_mapped_windows() {
+  let mut fixture = Fixture::new(ShingleConfig::default());
+  fixture.window("alpha");
+  fixture.frontend.shutdown();
+  let session = fixture.base.with_extension("session.json");
+  let (core, _) = SessionStore::new(&session).load().unwrap().unwrap();
+  let windows = core.snapshot().windows;
+  assert_eq!(windows.len(), 1);
+  assert_eq!(windows[0].identity.app_id, "alpha");
+}
