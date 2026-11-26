@@ -1,5 +1,7 @@
 # Native backend test plan
 
+The first test machine is a laptop; [laptop-bringup.md](laptop-bringup.md) gives the order to work through these steps, plus laptop-only checks (suspend, lid, brightness keys) not listed here yet.
+
 The steps here verify the parts of the native backend that need a seat, real input devices, a VT or a display. They run only on the dedicated test machine ([design, Layer 2](design/native-backend.md#layer-2-dedicated-test-machine)), never on a host whose display, input or VTs belong to someone's session: starting `shingle` from a VT login takes that VT, and the uinput tool injects input into whatever session is active. Unit tests through fakes cover the logic behind every step ([status.md](status.md#automated)); this plan checks that the real libseat and libinput behave the way the fakes assume.
 
 Record each result in [status.md](status.md#with-real-clients), with the date, the commit, the libseat backend and the devices used, separately from the unit tests.
