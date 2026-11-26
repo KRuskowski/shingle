@@ -2396,6 +2396,36 @@ mod tests {
   use super::*;
 
   #[test]
+  fn survey_claim_wcm_escaped_colour_is_refused() {
+    let error = ShingleConfig::parse(
+      "[core]\nbackground_color = \\#101010FF\n",
+      ConfigFormat::Wayfire,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("invalid color"), "{error}");
+    for text in [
+      "[animate]\nenabled_for = (type equals \"toplevel\" | \
+       (type equals \"x-or\" & focusable equals true))\n",
+      "[animate]\nminimize_animation = squeezimize\n",
+      "[scale]\ntoggle = <super>\n",
+    ] {
+      assert!(ShingleConfig::parse(text, ConfigFormat::Wayfire).is_err());
+    }
+    let pinch = ShingleConfig::parse(
+      "[scale]\ntoggle = <super> KEY_P | pinch in 4\n",
+      ConfigFormat::Wayfire,
+    )
+    .unwrap();
+    assert_eq!(pinch.keybindings.scale_toggle.key, "4");
+    let joined = ShingleConfig::parse(
+      "[core]\nplugins = \\\n  preserve-output\n",
+      ConfigFormat::Wayfire,
+    )
+    .unwrap();
+    assert_eq!(joined.output_layout.unplug, UnplugPolicy::Return);
+  }
+
+  #[test]
   fn default_path_prefers_shingle_location() {
     let home = Path::new("/cfg");
     let path = resolve_default_path(home, |_| true);
