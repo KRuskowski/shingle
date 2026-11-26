@@ -291,7 +291,8 @@ impl<S: Session, I: InputSource> Backend<S, I> {
 
   /// Logs every presented page flip with its sequence and time, as
   /// `SHINGLE_TRACE_FLIPS=1` asks, for comparing with what clients get
-  /// (tools/native_test/present_check.py).
+  /// (tools/native_test/present_check.py), and every flip of a cursor
+  /// plane alone, which presents no frame.
   pub fn set_trace_flips(&mut self, trace: bool) {
     self.trace_flips = trace;
   }
@@ -945,7 +946,9 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       let output = OutputHandle::new(name.clone());
       self.update_cursor(&name, &output);
       if !self.host.redraw.contains(&output) {
-        self.display.commit_cursor(&name, now);
+        if self.display.commit_cursor(&name, now) && self.trace_flips {
+          diagnostics::log(&format!("{name}: cursor plane flip"));
+        }
         continue;
       }
       // Zero-copy is tried, or given up, before the output's next frame.
