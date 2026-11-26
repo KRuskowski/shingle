@@ -70,6 +70,8 @@ pub fn probe(device: &mut dyn KmsDevice) -> io::Result<Card> {
 pub enum OutputError {
   /// None of its encoders can drive a CRTC that has a primary plane.
   NoCrtc(String),
+  /// Every CRTC that can drive it drives another output.
+  Busy(String),
   /// Its CRTC's primary plane cannot scan out XRGB8888.
   NoXrgb8888(String),
   /// An object lacks a property atomic modesetting needs.
@@ -81,6 +83,9 @@ impl fmt::Display for OutputError {
     match self {
       Self::NoCrtc(name) => {
         write!(formatter, "{name} has no CRTC with a primary plane")
+      }
+      Self::Busy(name) => {
+        write!(formatter, "every CRTC that can drive {name} is in use")
       }
       Self::NoXrgb8888(name) => write!(
         formatter,

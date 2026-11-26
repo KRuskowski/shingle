@@ -732,3 +732,456 @@ fn the_edid_names_make_model_and_serial_and_modes_are_listed() {
   let info = plain.output_info().unwrap();
   assert_eq!((info.make.as_str(), info.serial), ("Unknown", None));
 }
+
+/// A card with HDMI-A-1 on CRTC 2 and `extra` more connectors, each on a
+/// CRTC and primary plane of its own, all connected, with the CRTC of
+/// each extra connector.
+fn pipes(extra: &[(&str, Vec<Mode>)]) -> (Card, Vec<CrtcId>) {
+  let mut fake = FakeKms::single_output();
+  let mut crtcs = Vec::new();
+  for (index, (name, modes)) in extra.iter().enumerate() {
+    let mut info = crate::kms::fake::connector_info(20 + index as u32, name);
+    info.modes = modes.clone();
+    crtcs.push(fake.add_pipe(info));
+  }
+  (fake.shared(), crtcs)
+}
+
+/// DP-1's modes: 1920x1080 at 60 Hz preferred, then 1280x720 at 30 Hz.
+fn dp_modes() -> Vec<Mode> {
+  vec![mode(1920, 1080, 60, true), mode(1280, 720, 30, false)]
+}
+
+/// The value `request` sets for `name` on `object`.
+fn value(
+  card: &Card,
+  request: &AtomicRequest,
+  object: Object,
+  name: &str,
+) -> Option<u64> {
+  request.get(object, property(card, name))
+}
+
+#[test]
+fn two_monitors_are_lit_with_one_combined_modeset() {
+  let (card, crtcs) = pipes(&[("DP-1", dp_modes())]);
+  let mut display = prepare(&card).unwrap();
+  assert_eq!(display.outputs(), ["HDMI-A-1", "DP-1"]);
+  assert_eq!(display.size_of("DP-1"), Some((1920, 1080)));
+  {
+    let fake = card.borrow();
+    let flags: Vec<_> = fake
+      .commits
+      .iter()
+      .map(|(_, flags, ok)| (*flags, *ok))
+      .collect();
+    let test = CommitFlags::TEST_ONLY | CommitFlags::ALLOW_MODESET;
+    assert_eq!(
+      flags,
+      [(test, true), (test, true)],
+      "one test per new output"
+    );
+    assert!(fake.real_commits().is_empty());
+    // The second test holds both outputs.
+    assert_eq!(fake.commits[1].0.entries().len(), 26);
+  }
+  display.start().unwrap();
+  let (request, flags) = card.borrow().real_commits().pop().unwrap();
+  assert_eq!(flags, CommitFlags::ALLOW_MODESET);
+  let dp = card.borrow().connector_named("DP-1");
+  let hdmi = card.borrow().connector_id;
+  assert_eq!(
+    value(&card, &request, Object::Connector(dp), "CRTC_ID"),
+    Some(u64::from(crtcs[0].0))
+  );
+  assert_eq!(
+    value(&card, &request, Object::Connector(hdmi), "CRTC_ID"),
+    Some(u64::from(card.borrow().crtc_id.0))
+  );
+  assert!(display.ready_on("HDMI-A-1") && display.ready_on("DP-1"));
+  assert_eq!(display.output_info_of("DP-1").unwrap().refresh_mhz, 60_000);
+  assert!(display.unlit().is_empty());
+}
+
+#[test]
+fn the_combined_modeset_turns_off_only_what_no_output_uses() {
+  let (card, _) = pipes(&[("DP-1", dp_modes())]);
+  let (neighbour, neighbour_crtc, cursor) =
+    card.borrow_mut().add_lit_neighbours();
+  let mut display = prepare(&card).unwrap();
+  display.start().unwrap();
+  let (request, _) = card.borrow().real_commits().pop().unwrap();
+  assert_eq!(
+    value(&card, &request, Object::Connector(neighbour), "CRTC_ID"),
+    Some(0)
+  );
+  assert_eq!(
+    value(&card, &request, Object::Crtc(neighbour_crtc), "ACTIVE"),
+    Some(0)
+  );
+  assert_eq!(
+    value(&card, &request, Object::Plane(cursor), "FB_ID"),
+    Some(0)
+  );
+  // Our two outputs are on, and nothing of theirs is turned off.
+  let on = |crtc: CrtcId| value(&card, &request, Object::Crtc(crtc), "ACTIVE");
+  let ours: Vec<_> = display
+    .outputs()
+    .iter()
+    .map(|name| display.find(name).unwrap().crtc())
+    .collect();
+  assert_eq!(
+    ours.iter().map(|crtc| on(*crtc)).collect::<Vec<_>>(),
+    [Some(1), Some(1)]
+  );
+  assert_eq!(request.entries().len(), 26 + 5);
+}
+
+#[test]
+fn a_failing_combined_test_leaves_the_lowest_priority_output_dark() {
+  let (card, crtcs) = pipes(&[("DP-1", dp_modes())]);
+  // The two CRTCs cannot be active together, as with too little
+  // bandwidth for both.
+  {
+    let mut fake = card.borrow_mut();
+    let active = fake.property_id("ACTIVE");
+    let (first, second) = (Object::Crtc(fake.crtc_id), Object::Crtc(crtcs[0]));
+    fake.reject = Box::new(move |request, _| {
+      (request.get(first, active) == Some(1)
+        && request.get(second, active) == Some(1))
+      .then_some(28)
+    });
+  }
+  let display = prepare(&card).unwrap();
+  assert_eq!(display.outputs(), ["HDMI-A-1"]);
+  let tests = card
+    .borrow()
+    .commits
+    .iter()
+    .filter(|(_, _, ok)| !ok)
+    .count();
+  assert_eq!(tests, 2, "every mode of DP-1 was tried");
+  let unlit = display.unlit();
+  assert_eq!(unlit.len(), 1);
+  assert_eq!(unlit[0].0.name, "DP-1");
+  assert_eq!(unlit[0].0.current_mode, None);
+  assert_eq!(unlit[0].1, (1920, 1080), "its preferred mode");
+}
+
+#[test]
+fn a_shared_limit_gives_the_later_output_a_smaller_mode() {
+  let (card, _) = pipes(&[("DP-1", dp_modes())]);
+  // Together the outputs may be at most 3000 pixels wide.
+  {
+    let mut fake = card.borrow_mut();
+    let width = fake.property_id("CRTC_W");
+    fake.reject = Box::new(move |request, _| {
+      let total: u64 = request
+        .entries()
+        .iter()
+        .filter(|(object, property, _)| {
+          *property == width && matches!(object, Object::Plane(_))
+        })
+        .map(|(_, _, value)| *value)
+        .sum();
+      (total > 3000).then_some(28)
+    });
+  }
+  let display = prepare(&card).unwrap();
+  assert_eq!(display.outputs(), ["HDMI-A-1", "DP-1"]);
+  assert_eq!(display.size_of("HDMI-A-1"), Some((1280, 720)));
+  assert_eq!(display.size_of("DP-1"), Some((1280, 720)), "its next mode");
+  assert_eq!(display.output_info_of("DP-1").unwrap().refresh_mhz, 30_000);
+}
+
+#[test]
+fn flips_are_paced_and_routed_per_crtc() {
+  let (card, crtcs) = pipes(&[("DP-1", dp_modes())]);
+  let mut display = prepare(&card).unwrap();
+  display.start().unwrap();
+  let now = Instant::now();
+  assert!(display.begin_frame_on("HDMI-A-1"));
+  display.present_on("HDMI-A-1", &frame(1280, 720), now);
+  assert!(display.begin_frame_on("DP-1"));
+  display.present_on("DP-1", &frame(1920, 1080), now);
+  assert!(!display.ready_on("HDMI-A-1") && !display.ready_on("DP-1"));
+  let hdmi_crtc = card.borrow().crtc_id;
+  card
+    .borrow_mut()
+    .complete_flip_on(crtcs[0], Duration::from_millis(5), 900);
+  let presented = display.dispatch_flips();
+  assert_eq!(presented.len(), 1);
+  assert_eq!(presented[0].0, "DP-1");
+  assert_eq!(presented[0].1.seq, 900);
+  assert_eq!(presented[0].1.refresh_ns, 16_666_666);
+  assert!(display.ready_on("DP-1"), "DP-1 may draw again");
+  assert!(!display.ready_on("HDMI-A-1"), "HDMI-A-1 still waits");
+  assert!(display.flip_pending());
+  // DP-1 flips again while HDMI-A-1's flip is pending.
+  assert!(display.begin_frame_on("DP-1"));
+  display.present_on("DP-1", &frame(1920, 1080), now);
+  card
+    .borrow_mut()
+    .complete_flip_on(hdmi_crtc, Duration::from_millis(9), 3);
+  card
+    .borrow_mut()
+    .complete_flip_on(crtcs[0], Duration::from_millis(21), 901);
+  let names: Vec<_> = display
+    .dispatch_flips()
+    .into_iter()
+    .map(|(name, info)| (name, info.seq))
+    .collect();
+  assert_eq!(
+    names,
+    [("HDMI-A-1".to_owned(), 3), ("DP-1".to_owned(), 901)]
+  );
+  assert!(!display.flip_pending());
+}
+
+#[test]
+fn a_lost_flip_on_one_crtc_recovers_that_output_alone() {
+  let (card, crtcs) = pipes(&[("DP-1", dp_modes())]);
+  let mut display = prepare(&card).unwrap();
+  display.start().unwrap();
+  let start = Instant::now();
+  assert!(display.begin_frame_on("HDMI-A-1"));
+  display.present_on("HDMI-A-1", &frame(1280, 720), start);
+  assert!(display.begin_frame_on("DP-1"));
+  display.present_on("DP-1", &frame(1920, 1080), start + FLIP_TIMEOUT / 2);
+  // HDMI-A-1's flip is lost; DP-1's is still in time.
+  let first = card.borrow().crtc_id;
+  card.borrow_mut().pending.remove(&first);
+  let before = card.borrow().commits.len();
+  assert_eq!(display.check_timeout(start + FLIP_TIMEOUT), Ok(()));
+  let recovery = card.borrow().commits[before..].to_vec();
+  assert_eq!(recovery.len(), 2, "a tested modeset");
+  let request = &recovery[1].0;
+  assert_eq!(
+    value(&card, request, Object::Crtc(first), "ACTIVE"),
+    Some(1)
+  );
+  assert_eq!(
+    value(&card, request, Object::Crtc(crtcs[0]), "ACTIVE"),
+    None,
+    "DP-1 and its pending flip are left alone"
+  );
+  assert!(display.ready_on("HDMI-A-1"));
+  assert!(!display.ready_on("DP-1"));
+}
+
+#[test]
+fn monitors_plugged_in_later_are_added_and_unplugged_ones_removed() {
+  let (card, crtcs) = pipes(&[("DP-1", dp_modes()), ("DP-2", dp_modes())]);
+  card
+    .borrow_mut()
+    .set_connection("DP-1", Connection::Disconnected);
+  card
+    .borrow_mut()
+    .set_connection("DP-2", Connection::Disconnected);
+  let mut display = prepare(&card).unwrap();
+  display.start().unwrap();
+  assert_eq!(display.outputs(), ["HDMI-A-1"]);
+  card
+    .borrow_mut()
+    .set_connection("DP-1", Connection::Connected);
+  let change = display.hotplug();
+  assert!(change.outputs_changed);
+  assert!(!change.output_changed, "HDMI-A-1 stays the first");
+  assert_eq!(display.outputs(), ["HDMI-A-1", "DP-1"]);
+  card
+    .borrow_mut()
+    .set_connection("DP-2", Connection::Connected);
+  display.hotplug();
+  assert_eq!(display.outputs(), ["HDMI-A-1", "DP-1", "DP-2"]);
+  let (request, _) = card.borrow().real_commits().pop().unwrap();
+  let active =
+    |crtc: CrtcId| value(&card, &request, Object::Crtc(crtc), "ACTIVE");
+  let first = card.borrow().crtc_id;
+  assert_eq!(
+    [active(first), active(crtcs[0]), active(crtcs[1])],
+    [Some(1), Some(1), Some(1)],
+    "one modeset of all three"
+  );
+  // Unplugging DP-1 turns its CRTC off and keeps the others.
+  card
+    .borrow_mut()
+    .set_connection("DP-1", Connection::Disconnected);
+  let change = display.hotplug();
+  assert!(change.outputs_changed);
+  assert_eq!(display.outputs(), ["HDMI-A-1", "DP-2"]);
+  let (request, _) = card.borrow().real_commits().pop().unwrap();
+  let active =
+    |crtc: CrtcId| value(&card, &request, Object::Crtc(crtc), "ACTIVE");
+  assert_eq!(
+    [active(first), active(crtcs[0]), active(crtcs[1])],
+    [Some(1), Some(0), Some(1)]
+  );
+  assert!(display.ready_on("HDMI-A-1") && display.ready_on("DP-2"));
+  // A hotplug that changes nothing commits nothing.
+  let commits = card.borrow().commits.len();
+  assert_eq!(display.hotplug(), Resumed::default());
+  assert_eq!(card.borrow().commits.len(), commits);
+}
+
+#[test]
+fn a_monitor_without_a_free_crtc_is_lit_once_one_is_free() {
+  // DP-2 can only use HDMI-A-1's CRTC.
+  let mut fake = FakeKms::single_output();
+  let mut dp1 = crate::kms::fake::connector_info(20, "DP-1");
+  dp1.modes = dp_modes();
+  fake.add_pipe(dp1);
+  fake.add_connector(crate::kms::fake::connector_info(21, "DP-2"));
+  let card = fake.shared();
+  let mut display = prepare(&card).unwrap();
+  display.start().unwrap();
+  assert_eq!(display.outputs(), ["HDMI-A-1", "DP-1"]);
+  let unlit: Vec<_> = display
+    .unlit()
+    .into_iter()
+    .map(|(info, _)| info.name)
+    .collect();
+  assert_eq!(unlit, ["DP-2"]);
+  card.borrow_mut().disconnect();
+  display.hotplug();
+  assert_eq!(
+    display.outputs(),
+    ["DP-1", "DP-2"],
+    "DP-2 takes the free CRTC"
+  );
+  assert!(display.unlit().is_empty());
+}
+
+#[test]
+fn outputs_turn_off_and_on_one_at_a_time() {
+  let (card, crtcs) = pipes(&[("DP-1", dp_modes())]);
+  let mut display = prepare(&card).unwrap();
+  display.start().unwrap();
+  // HDMI-A-1 has a flip pending; DP-1 turns off anyway.
+  assert!(display.begin_frame_on("HDMI-A-1"));
+  display.present_on("HDMI-A-1", &frame(1280, 720), Instant::now());
+  display.set_output_dpms("DP-1", false);
+  assert!(!display.output_on("DP-1"));
+  assert!(display.output_on("HDMI-A-1"));
+  assert!(!display.dpms_on());
+  let (request, _) = card.borrow().real_commits().pop().unwrap();
+  assert_eq!(
+    request.entries(),
+    &[(Object::Crtc(crtcs[0]), property(&card, "ACTIVE"), 0)]
+  );
+  // HDMI-A-1 waits for its flip.
+  display.set_output_dpms("HDMI-A-1", false);
+  assert!(display.output_on("HDMI-A-1"));
+  card.borrow_mut().complete_flip(Duration::from_secs(1), 1);
+  assert_eq!(display.dispatch_flips().len(), 1);
+  assert!(!display.output_on("HDMI-A-1"));
+  display.set_output_dpms("DP-1", true);
+  assert!(display.output_on("DP-1") && display.ready_on("DP-1"));
+  let (request, _) = card.borrow().real_commits().pop().unwrap();
+  assert_eq!(request.entries().len(), 13, "a modeset of DP-1 alone");
+}
+
+#[test]
+fn a_configuration_across_heads_is_tested_and_applied_at_once() {
+  let (card, crtcs) = pipes(&[("DP-1", dp_modes())]);
+  let mut display = prepare(&card).unwrap();
+  display.start().unwrap();
+  let heads = [
+    (
+      "HDMI-A-1".to_owned(),
+      HeadState::On(Some(RequestedMode::Listed(1))),
+    ),
+    ("DP-1".to_owned(), HeadState::Off),
+  ];
+  let before = card.borrow().commits.len();
+  display.test_configuration(&heads).unwrap();
+  assert_eq!(card.borrow().commits.len(), before + 1, "one test");
+  assert_eq!(
+    display.outputs(),
+    ["HDMI-A-1", "DP-1"],
+    "a test changes nothing"
+  );
+  let change = display.apply_configuration(&heads).unwrap();
+  assert_eq!(change.resized, Some((1920, 1080)));
+  assert!(change.outputs_changed);
+  assert_eq!(display.outputs(), ["HDMI-A-1"]);
+  let (request, _) = card.borrow().real_commits().pop().unwrap();
+  assert_eq!(
+    value(&card, &request, Object::Crtc(crtcs[0]), "ACTIVE"),
+    Some(0),
+    "DP-1's CRTC goes off in the same modeset"
+  );
+  assert_eq!(card.borrow().blobs.len(), 1, "DP-1's blob is freed");
+  // Output management keeps DP-1 off across hotplugs and reloads.
+  display.hotplug();
+  display.set_policy(policy(&[("DP-1", "auto")]));
+  assert_eq!(display.outputs(), ["HDMI-A-1"]);
+  assert_eq!(display.size(), Some((1920, 1080)), "and HDMI-A-1's mode");
+  // Turning DP-1 on lights it on its free CRTC.
+  let on = [("DP-1".to_owned(), HeadState::On(None))];
+  display.apply_configuration(&on).unwrap();
+  assert_eq!(display.outputs(), ["HDMI-A-1", "DP-1"]);
+  assert_eq!(display.size_of("DP-1"), Some((1920, 1080)));
+}
+
+#[test]
+fn a_refused_configuration_keeps_every_output_as_it_was() {
+  let (card, _) = pipes(&[("DP-1", dp_modes())]);
+  let mut display = prepare(&card).unwrap();
+  display.start().unwrap();
+  let buffers = card.borrow().buffers.len();
+  let blobs = card.borrow().blobs.len();
+  // The real modeset of DP-1 at 1280 pixels fails after its test passed.
+  let plane = Object::Plane(display.find("DP-1").unwrap().plane());
+  {
+    let mut fake = card.borrow_mut();
+    let width = fake.property_id("CRTC_W");
+    fake.reject = Box::new(move |request, flags| {
+      (request.get(plane, width) == Some(1280)
+        && !flags.contains(CommitFlags::TEST_ONLY))
+      .then_some(22)
+    });
+  }
+  let heads = [(
+    "DP-1".to_owned(),
+    HeadState::On(Some(RequestedMode::Listed(1))),
+  )];
+  let error = display.apply_configuration(&heads).unwrap_err();
+  assert!(error.starts_with("1280x720@30"), "{error}");
+  assert_eq!(display.size_of("DP-1"), Some((1920, 1080)));
+  assert_eq!(display.outputs(), ["HDMI-A-1", "DP-1"]);
+  assert!(
+    display.ready_on("HDMI-A-1") && display.ready_on("DP-1"),
+    "the old configuration was set again"
+  );
+  card.borrow_mut().accept_all();
+  assert_eq!(card.borrow().buffers.len(), buffers);
+  assert_eq!(card.borrow().blobs.len(), blobs);
+  let missing = [("DP-9".to_owned(), HeadState::On(None))];
+  assert_eq!(
+    display.test_configuration(&missing).unwrap_err(),
+    "DP-9 is not connected"
+  );
+}
+
+#[test]
+fn outputs_beyond_the_limit_stay_dark() {
+  let (card, _) = pipes(&[("DP-1", dp_modes())]);
+  let display = Display::prepare_limited(
+    Box::new(Rc::clone(&card)),
+    OutputPolicy::default(),
+    Some(1),
+  )
+  .unwrap();
+  assert_eq!(display.outputs(), ["HDMI-A-1"]);
+  assert_eq!(display.unlit().len(), 1);
+}
+
+#[test]
+fn a_named_output_comes_before_the_others() {
+  let (card, _) = pipes(&[("DP-1", dp_modes())]);
+  let display =
+    Display::prepare(Box::new(Rc::clone(&card)), policy(&[("DP-1", "auto")]))
+      .unwrap();
+  assert_eq!(display.outputs(), ["DP-1", "HDMI-A-1"]);
+  assert_eq!(display.output_name(), Some("DP-1"));
+}
