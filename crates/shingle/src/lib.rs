@@ -3733,6 +3733,35 @@ impl Compositor {
     self.state.set_rect_of(&id, rect, false)
   }
 
+  /// Gives an output a new scale, keeping its size in physical pixels, so
+  /// that its logical size becomes the physical one divided by `scale`.
+  /// Nested gives each output its host window's scale factor this way.
+  /// Nothing changes, and clients hear nothing, if the scale is the same.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::InvalidOutputScale`] for a zero, negative or non-finite
+  /// scale.
+  pub fn set_output_scale_on(
+    &mut self,
+    output: &OutputHandle,
+    scale: f64,
+  ) -> Result<(), Error> {
+    if !scale.is_finite() || scale <= 0.0 {
+      return Err(Error::InvalidOutputScale);
+    }
+    let id = output.id();
+    let Some(current) = self.state.outputs.get(&id) else {
+      return Ok(());
+    };
+    if current.scale == scale {
+      return Ok(());
+    }
+    let physical = current.physical_size();
+    self.state.set_scale_of(&id, scale)?;
+    self.set_output_size(output, physical)
+  }
+
   /// Every output, in the order they were added.
   pub fn outputs(&self) -> Vec<OutputView> {
     self
@@ -4552,6 +4581,28 @@ pub(crate) mod tests {
       );
       assert_eq!(compositor.output_scale(), 1.0);
     }
+  }
+
+  #[test]
+  fn a_new_output_scale_keeps_the_physical_size() {
+    let (mut compositor, _path) = test_compositor();
+    let output = compositor.primary_output();
+    compositor
+      .set_output_size(&output, (3840, 2160))
+      .expect("a valid size");
+    for (scale, logical) in [(1.5, (2560, 1440)), (2.0, (1920, 1080))] {
+      compositor
+        .set_output_scale_on(&output, scale)
+        .expect("a valid scale");
+      let view = compositor.output_view(&output).expect("the output");
+      assert_eq!(view.scale, scale);
+      assert_eq!((view.rect.width, view.rect.height), logical, "{scale}");
+      assert_eq!(compositor.physical_size_of(&output), Some((3840, 2160)));
+    }
+    for scale in [0.0, -1.0, f64::NAN] {
+      assert!(compositor.set_output_scale_on(&output, scale).is_err());
+    }
+    assert_eq!(compositor.output_view(&output).unwrap().scale, 2.0);
   }
 
   #[test]

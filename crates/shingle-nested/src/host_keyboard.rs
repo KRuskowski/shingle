@@ -105,6 +105,40 @@ mod tests {
       .expect("keymap compiles")
   }
 
+  const KEY_LEFTALT: u32 = 56;
+  const ALT: ConfigModifiers = ConfigModifiers {
+    super_key: false,
+    control: false,
+    alt: true,
+    shift: false,
+  };
+
+  #[test]
+  fn alt_counts_in_the_order_a_wayland_host_reports_it() {
+    // wl_keyboard.key comes before wl_keyboard.modifiers, so winit sends
+    // KeyboardInput before ModifiersChanged.
+    let mut keyboard = keyboard();
+    let mut host = HostKeyboard::default();
+    host.focus_changed(true);
+    host.key(KEY_LEFTALT);
+    keyboard.key(KEY_LEFTALT, KeyState::Pressed);
+    assert!(!host.host_modifiers(&mut keyboard, ALT));
+    assert_eq!(keyboard.binding_modifiers(), ALT);
+    host.key(KEY_LEFTALT);
+    keyboard.key(KEY_LEFTALT, KeyState::Released);
+    host.host_modifiers(&mut keyboard, ConfigModifiers::default());
+    assert_eq!(keyboard.binding_modifiers(), ConfigModifiers::default());
+  }
+
+  #[test]
+  fn alt_held_on_focus_gain_counts() {
+    let mut keyboard = keyboard();
+    let mut host = HostKeyboard::default();
+    host.focus_changed(true);
+    assert!(host.host_modifiers(&mut keyboard, ALT));
+    assert_eq!(keyboard.binding_modifiers(), ALT);
+  }
+
   #[test]
   fn focus_loss_drops_the_stand_ins() {
     let mut keyboard = keyboard();

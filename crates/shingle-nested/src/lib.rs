@@ -394,6 +394,7 @@ impl App {
       .with_inner_size(PhysicalSize::new(size.0, size.1));
     let window = Arc::new(event_loop.create_window(attributes)?);
     let size = window.inner_size();
+    let scale = window.scale_factor();
     let target = match &self.gpu {
       Some(gpu) => {
         let surface =
@@ -418,10 +419,12 @@ impl App {
         target
       }
     };
-    self
-      .frontend
-      .compositor_mut()
-      .set_output_size(output, (size.width, size.height))?;
+    // The output takes the window's scale factor, so that its logical
+    // pixels are the host's and the cursor Shingle draws sits under the
+    // host's.
+    let compositor = self.frontend.compositor_mut();
+    compositor.set_output_scale_on(output, scale)?;
+    compositor.set_output_size(output, (size.width, size.height))?;
     let window_id = window.id();
     self.windows.insert(
       window_id,
@@ -520,10 +523,10 @@ impl App {
     }
   }
 
-  /// A point in window `id`, in window pixels as winit reports it scaled
-  /// by the host, as a position on the output the window shows, relative
-  /// to that output's top-left corner, so that the frontend maps the
-  /// window's pointer and touch to its own output.
+  /// A point in window `id`, in the physical pixels winit reports
+  /// pointer and touch positions in, as a position on the output the
+  /// window shows, relative to that output's top-left corner, so that the
+  /// frontend maps the window's pointer and touch to its own output.
   fn output_point(
     &self,
     id: WindowId,
@@ -531,17 +534,21 @@ impl App {
     y: f64,
   ) -> Option<(f64, f64, Option<OutputHandle>)> {
     let output = self.windows.output_of(id)?;
-    let window = &self.windows.get(id)?.window;
-    let host_scale = window.scale_factor();
-    let size = window.inner_size();
-    let (x, y) = self.frontend.compositor().map_point_on(
-      output,
-      x * host_scale,
-      y * host_scale,
-      size.width,
-      size.height,
-    )?;
+    let size = self.windows.get(id)?.window.inner_size();
+    let (x, y) = window_point(self.frontend.compositor(), output, x, y, size)?;
     Some((x, y, Some(output.clone())))
+  }
+
+  /// Gives the output of window `id` the window's scale factor, after the
+  /// window moved to a monitor of another scale. The physical size
+  /// follows with the `Resized` event winit sends next.
+  fn rescale_output(&mut self, id: WindowId, scale: f64) {
+    let Some(output) = self.windows.output_of(id).cloned() else {
+      return;
+    };
+    if let Err(error) = self.frontend.output_rescaled_on(&output, scale) {
+      eprintln!("shingle: rescaling {}: {error}", output.name());
+    }
   }
 
   /// Feeds host keyboard and focus events of window `id` to the frontend.
@@ -628,14 +635,23 @@ impl App {
     }
   }
 
-  /// Gives every window's output the window's size again.
+  /// Gives every window's output the window's scale and size again.
   fn resize_outputs(&mut self) {
     let sizes = self
       .windows
       .iter()
-      .map(|(_, output, window)| (output.clone(), window.window.inner_size()))
+      .map(|(_, output, window)| {
+        let window = &window.window;
+        (output.clone(), window.scale_factor(), window.inner_size())
+      })
       .collect::<Vec<_>>();
-    for (output, size) in sizes {
+    for (output, scale, size) in sizes {
+      if let Err(error) = self.frontend.output_rescaled_on(&output, scale) {
+        eprintln!(
+          "shingle: rescaling {} after a reload: {error}",
+          output.name()
+        );
+      }
       if let Err(error) =
         self
           .frontend
@@ -702,6 +718,9 @@ impl ApplicationHandler for App {
           eprintln!("shingle: failed to resize {}: {error}", output.name());
           event_loop.exit();
         }
+      }
+      WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+        self.rescale_output(window_id, scale_factor);
       }
       WindowEvent::RedrawRequested => {
         let (Some(gpu), Some((output, window))) =
@@ -853,6 +872,21 @@ impl ApplicationHandler for App {
   fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
     self.frontend.shutdown();
   }
+}
+
+/// Maps `(x, y)` in physical pixels of a host window of `size` physical
+/// pixels showing `output` to that output's logical pixels, relative to
+/// its top-left corner. winit reports pointer and touch positions in
+/// physical pixels, and the output's logical size is the window's
+/// physical size divided by its scale factor, so this undoes the scale.
+fn window_point(
+  compositor: &Compositor,
+  output: &OutputHandle,
+  x: f64,
+  y: f64,
+  size: PhysicalSize<u32>,
+) -> Option<(f64, f64)> {
+  compositor.map_point_on(output, x, y, size.width, size.height)
 }
 
 /// Returns the seat device a host window event comes from, if it is input.
@@ -1147,6 +1181,65 @@ mod tests {
     ];
     for (event, device) in cases {
       assert_eq!(window_event_device(&event), device, "{event:?}");
+    }
+  }
+
+  /// The scale factors of the hosts nested is checked on: none, a
+  /// fractional one and an integer one.
+  const HOST_SCALES: [f64; 3] = [1.0, 1.5, 2.0];
+
+  /// Gives the fixture's output a 3840x2160 host window of `scale`, as
+  /// `App::open_window` does.
+  fn scaled_output(fixture: &mut IpcFixture, scale: f64) -> OutputHandle {
+    let output = fixture.compositor.primary_output();
+    fixture
+      .compositor
+      .set_output_scale_on(&output, scale)
+      .expect("a valid scale");
+    fixture
+      .compositor
+      .set_output_size(&output, (3840, 2160))
+      .expect("a valid size");
+    output
+  }
+
+  #[test]
+  fn the_output_takes_the_host_windows_scale_and_logical_size() {
+    let mut fixture = IpcFixture::new();
+    for scale in HOST_SCALES {
+      let output = scaled_output(&mut fixture, scale);
+      let view = fixture.compositor.output_view(&output).expect("an output");
+      assert_eq!(view.scale, scale);
+      let logical = ((3840.0 / scale) as u32, (2160.0 / scale) as u32);
+      assert_eq!((view.rect.width, view.rect.height), logical, "{scale}");
+      assert_eq!(
+        fixture.compositor.physical_size_of(&output),
+        Some((3840, 2160))
+      );
+    }
+  }
+
+  #[test]
+  fn the_pointer_lands_where_the_host_cursor_is_at_any_host_scale() {
+    let mut fixture = IpcFixture::new();
+    let window = PhysicalSize::new(3840, 2160);
+    for scale in HOST_SCALES {
+      let output = scaled_output(&mut fixture, scale);
+      // winit reports CursorMoved in physical pixels: the host cursor at
+      // physical (1500, 900) is at logical (1500, 900) / scale.
+      let point =
+        window_point(&fixture.compositor, &output, 1500.0, 900.0, window)
+          .expect("the output exists");
+      let close = |a: (f64, f64), b: (f64, f64)| {
+        (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6
+      };
+      assert!(close(point, (1500.0 / scale, 900.0 / scale)), "{scale}");
+      // And back, as a pointer warp places the host cursor.
+      let back = fixture
+        .compositor
+        .unmap_point_on(&output, point.0, point.1, 3840, 2160)
+        .expect("the output exists");
+      assert!(close(back, (1500.0, 900.0)), "{scale}");
     }
   }
 

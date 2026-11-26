@@ -1107,6 +1107,23 @@ impl Frontend {
     result
   }
 
+  /// Gives `output` the scale of the host window or display that shows
+  /// it, keeping its physical size, and lays out what depends on its
+  /// logical size again, as [`Frontend::output_resized_on`] does. Nested
+  /// calls it with each window's scale factor.
+  pub fn output_rescaled_on(
+    &mut self,
+    output: &OutputHandle,
+    scale: f64,
+  ) -> Result<(), shingle::Error> {
+    let before = self.compositor.output_view(output).map(|view| view.scale);
+    let result = self.compositor.set_output_scale_on(output, scale);
+    if before != Some(scale) {
+      self.after_output_resize(output);
+    }
+    result
+  }
+
   /// Ends what a resize of `output` invalidates: its workspace slide,
   /// vswipe's swipe on it, and Expo's exit; Scale and Expo are laid out
   /// again.

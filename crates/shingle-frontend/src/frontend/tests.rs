@@ -56,6 +56,7 @@ const KEY_F2: u32 = 60;
 const KEY_RIGHT: u32 = 106;
 const KEY_LEFTMETA: u32 = 125;
 const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
 
 /// The output every fixture starts with.
 fn primary() -> OutputHandle {
@@ -524,6 +525,134 @@ fn a_move_drag_drops_one_tile_onto_another() {
   assert!(fixture.frontend.drag.is_none());
   assert!(fixture.frontend.drop_preview.is_none());
   assert_eq!(fixture.tiles(), [bravo, charlie, alpha]);
+}
+
+/// A host cursor at physical `(x, y)` of a `size` window showing the
+/// primary output, fed as nested feeds `CursorMoved`.
+fn host_cursor(fixture: &mut Fixture, x: f64, y: f64, size: (u32, u32)) {
+  let point = fixture
+    .frontend
+    .compositor()
+    .map_point_on(&primary(), x, y, size.0, size.1)
+    .expect("the output exists");
+  fixture.input(
+    fixture.pointer,
+    InputEvent::PointerMotionAbsolute {
+      x: point.0,
+      y: point.1,
+      output: Some(primary()),
+    },
+  );
+}
+
+#[test]
+fn a_drag_on_a_scaled_host_window_starts_on_the_window_under_the_cursor() {
+  for scale in [1.0, 1.5, 2.0] {
+    let (mut fixture, [alpha, bravo, charlie]) = three_windows();
+    let size = (3000, 1600);
+    fixture
+      .frontend
+      .output_rescaled_on(&primary(), scale)
+      .expect("a valid scale");
+    fixture
+      .frontend
+      .output_resized_on(&primary(), size.0, size.1)
+      .expect("a valid size");
+    fixture.process();
+    let output = fixture.frontend.compositor().output();
+    assert_eq!(
+      (output.width, output.height),
+      (
+        (3000.0 / scale).round() as u32,
+        (1600.0 / scale).round() as u32
+      ),
+      "{scale}"
+    );
+    // The host cursor over the middle of alpha, in physical pixels.
+    let (x, y) = fixture.center(alpha);
+    let physical = (x * scale, y * scale);
+    host_cursor(&mut fixture, physical.0, physical.1, size);
+    let (pointer_x, pointer_y) =
+      (fixture.frontend.pointer_x, fixture.frontend.pointer_y);
+    // Within the rounding of a fractional logical size: 1600 / 1.5 is
+    // 1067 logical pixels.
+    assert!(
+      (pointer_x - x).abs() < 0.5 && (pointer_y - y).abs() < 0.5,
+      "the cursor at {pointer_x},{pointer_y} is drawn under the host's at \
+       {x},{y} at scale {scale}"
+    );
+    fixture.key(KEY_LEFTMETA, true);
+    fixture.button(BTN_LEFT, true);
+    assert!(
+      matches!(
+        fixture.frontend.drag,
+        Some(DragState::Move { source, .. }) if source == alpha
+      ),
+      "the drag starts on alpha at scale {scale}"
+    );
+    let (x, y) = fixture.center(charlie);
+    host_cursor(&mut fixture, (x + 100.0) * scale, y * scale, size);
+    fixture.button(BTN_LEFT, false);
+    fixture.key(KEY_LEFTMETA, false);
+    assert_eq!(fixture.tiles(), [bravo, charlie, alpha], "{scale}");
+  }
+}
+
+#[test]
+fn alt_pointer_bindings_move_and_resize_with_real_alt_keys() {
+  let config = yaml_config(concat!(
+    "pointer:\n",
+    "  move_button: alt+btn_left\n",
+    "  resize_button: alt+btn_right\n",
+  ));
+  let mut fixture = Fixture::new(config);
+  for app_id in ["alpha", "bravo", "charlie"] {
+    fixture.window(app_id);
+  }
+  let [alpha, bravo, charlie] = fixture.tiles()[..] else {
+    panic!("three tiles");
+  };
+  let (x, y) = fixture.center(alpha);
+  fixture.move_pointer(x, y);
+  fixture.key(KEY_LEFTALT, true);
+  fixture.button(BTN_LEFT, true);
+  assert!(matches!(
+    fixture.frontend.drag,
+    Some(DragState::Move { source, .. }) if source == alpha
+  ));
+  let (x, y) = fixture.center(charlie);
+  fixture.move_pointer(x + 100.0, y);
+  fixture.button(BTN_LEFT, false);
+  assert_eq!(fixture.tiles(), [bravo, charlie, alpha]);
+
+  let width = |fixture: &Fixture, window| {
+    fixture
+      .frontend
+      .compositor()
+      .core()
+      .window_layout(window)
+      .expect("a tile")
+      .geometry
+      .width
+  };
+  let before = width(&fixture, bravo);
+  // Near bravo's right edge, inside the resize corner threshold.
+  let (x, y) = fixture.center(bravo);
+  let x = x + f64::from(before) / 2.0 - 5.0;
+  fixture.move_pointer(x, y);
+  fixture.button(BTN_RIGHT, true);
+  assert!(matches!(
+    fixture.frontend.drag,
+    Some(DragState::Resize { window, .. }) if window == bravo
+  ));
+  fixture.move_pointer(x + 150.0, y);
+  fixture.button(BTN_RIGHT, false);
+  fixture.key(KEY_LEFTALT, false);
+  assert_ne!(
+    width(&fixture, bravo),
+    before,
+    "the resize changed the split"
+  );
 }
 
 #[test]
