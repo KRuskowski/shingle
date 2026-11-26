@@ -458,7 +458,22 @@ Wayfire's `mode = mirror OUTPUT`, which NB-9 imports as `off`: draw the source o
 
 MO-1 comes first. MO-2 needs MO-1, MO-3 and MO-4 need MO-2 (they touch the same modules and are best done in that order), MO-5 needs MO-3 and MO-4, MO-6 and MO-7 need MO-5 but not each other. MO-7 does not need NB-8 or NB-10, and NB-8 and NB-10 can land before or after it. XW-7 can start after MO-3.
 
-## Open questions
+## Decisions
+
+The operator asked for the work to continue without stopping for questions, so on 2026-11-26 the proposed defaults below were adopted on the operator's behalf. Each can be revisited before the workspace that depends on it lands.
+
+1. **Unplug:** `outputs.unplug` defaults to `return`; `move` and `park` are available, and `park` is imported when a Wayfire config loads preserve-output.
+2. **Nested output names** stay `HEADLESS-N`.
+3. **Nested windows at start:** one, more with `--outputs N`; `WLR_WL_OUTPUTS` is read only when the option is absent.
+4. **Mirroring** is left out (MO-8 later) and still imported as `off`.
+5. **Negative positions with Xwayland:** kept as configured, with a warning, as in Wayfire.
+6. **Focus between outputs** follows Wayfire's click rule; focus-follows-pointer is a later option.
+7. **Scale and Expo** act on the active output only.
+8. **IPC-created headless outputs** are drawn only when a screencopy asks, with frame callbacks at 60 Hz.
+9. **After a client applies an output configuration,** config reloads stop overriding those outputs until restart, as in Wayfire.
+10. **A locked output without a lock surface** shows the background colour.
+
+## Open questions (answered above)
 
 1. **Unplug default.** `outputs.unplug: return` (windows join the active output and go back when their monitor returns), or Wayfire's default `move`, or `park` (Wayfire with preserve-output)? Proposed: `return`, with the other two available and `park` imported when a Wayfire config loads `preserve-output`.
 2. **Nested output names.** Keep `HEADLESS-1`, `HEADLESS-2` for nested windows, as today, or use Wayfire's `WL-1`, `WL-2` and migrate saved sessions and `[output:HEADLESS-1]` entries? Proposed: keep `HEADLESS-N`, so existing configs, sessions and harnesses need no change.
