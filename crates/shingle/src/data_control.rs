@@ -43,6 +43,18 @@ pub(crate) struct DataControl {
   offer_clients: HashMap<ObjectId, ClientId>,
 }
 
+impl DataControl {
+  /// How many sources, devices and offers (both selections') are
+  /// tracked.
+  pub(crate) fn totals(&self) -> (usize, usize, usize) {
+    (
+      self.sources.len(),
+      self.devices.len(),
+      self.offers.len() + self.primary_offers.len(),
+    )
+  }
+}
+
 pub(crate) fn cleanup_clients(
   state: &mut CompositorState,
   clients: &[ClientId],

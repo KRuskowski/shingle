@@ -1037,6 +1037,31 @@ impl Frontend {
     self.pace_virtual_outputs(now);
     self.expire_labels(now);
     self.flush(host);
+    self.publish_counts();
+  }
+
+  /// Hands the compositor the sizes of the frontend's caches, which
+  /// `stipc/object_counts` reports for soak tests (tools/soak_test).
+  fn publish_counts(&mut self) {
+    let (dmabuf_textures, frames_in_flight) =
+      self.dmabuf.as_ref().map_or((0, 0), |dmabuf| {
+        let dmabuf = dmabuf.borrow();
+        (dmabuf.cached(), dmabuf.frames_in_flight())
+      });
+    self.compositor.set_frontend_counts(&[
+      ("textures", self.textures.len()),
+      ("uploaded", self.uploaded.len()),
+      ("dmabuf_textures", dmabuf_textures),
+      ("frames_in_flight", frames_in_flight),
+      ("open_animations", self.open_animations.len()),
+      ("closing_animations", self.closing_animations.len()),
+      ("minimize_animations", self.minimize_animations.len()),
+      ("scale_titles", self.scale_titles.len()),
+      ("scale_icons", self.scale_icons.len()),
+      ("frame_textures", self.frame_textures.len()),
+      ("rotations", self.rotations.len()),
+      ("scenes", self.scenes.len()),
+    ]);
   }
 
   /// Returns when [`Frontend::process`] next has timed work: a key

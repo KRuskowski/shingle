@@ -230,6 +230,11 @@ pub(crate) struct DataDevices {
 }
 
 impl DataDevices {
+  /// How many data sources, data devices and data offers are tracked.
+  pub(crate) fn totals(&self) -> (usize, usize, usize) {
+    (self.sources.len(), self.devices.len(), self.offers.len())
+  }
+
   pub(crate) fn cleanup_clients(&mut self, clients: &[ClientId]) {
     self.sources.retain(|_, source| {
       source

@@ -77,6 +77,7 @@ mod layer_shell;
 mod linux_dmabuf;
 mod linux_drm_syncobj;
 mod modifier_binding;
+mod object_counts;
 mod output;
 mod output_focus_api;
 mod output_management;
@@ -2496,6 +2497,14 @@ impl Compositor {
   /// into [`SnapshotContent::Pixels`] and released at commit.
   pub fn set_shm_upload(&mut self, enabled: bool) {
     self.state.shm_upload = enabled;
+  }
+
+  /// Sets the frontend's own object counts, such as its cached textures,
+  /// which `stipc/object_counts` reports under `frontend` until the next
+  /// call. A frontend calls it once a turn; the names are its own.
+  pub fn set_frontend_counts(&mut self, counts: &[(&'static str, usize)]) {
+    self.state.frontend_counts.clear();
+    self.state.frontend_counts.extend_from_slice(counts);
   }
 
   /// Answers [`Event::CaptureRequested`] `id` with `result`: the region

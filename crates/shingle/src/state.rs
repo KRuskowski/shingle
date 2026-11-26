@@ -317,6 +317,11 @@ pub(crate) struct CompositorState {
   pub(crate) last_workspace: Option<shingle_core::WorkspaceId>,
   last_lock_state: LockState,
   last_dpms_state: DpmsState,
+  /// The frontend's own object counts, as it last set them, for
+  /// `stipc/object_counts`.
+  pub(crate) frontend_counts: Vec<(&'static str, usize)>,
+  /// How many Wayfire IPC connections are open.
+  pub(crate) ipc_clients: usize,
 }
 
 impl CompositorState {
@@ -503,6 +508,8 @@ impl CompositorState {
       last_workspace: None,
       last_lock_state: LockState::Unlocked,
       last_dpms_state: DpmsState::On,
+      frontend_counts: Vec::new(),
+      ipc_clients: 0,
     };
     crate::output::relayout(&mut state);
     let first = state.primary();

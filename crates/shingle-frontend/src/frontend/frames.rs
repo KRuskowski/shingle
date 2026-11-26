@@ -32,6 +32,11 @@ pub(super) struct FrameTextures {
 }
 
 impl FrameTextures {
+  /// How many title and button textures are kept.
+  pub(super) fn len(&self) -> usize {
+    self.titles.len() + self.buttons.len()
+  }
+
   /// Forgets every texture, after a reload or the loss of the GPU.
   pub(super) fn clear(&mut self) {
     self.titles.clear();

@@ -217,13 +217,11 @@ impl DmabufTextures {
   }
 
   /// How many frames still hold locks.
-  #[cfg(test)]
   pub(crate) fn frames_in_flight(&self) -> usize {
     self.in_flight.len()
   }
 
   /// How many textures are cached.
-  #[cfg(test)]
   pub(crate) fn cached(&self) -> usize {
     self.entries.len()
   }

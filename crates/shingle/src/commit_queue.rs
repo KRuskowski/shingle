@@ -169,6 +169,15 @@ pub(crate) struct CommitQueues {
 }
 
 impl CommitQueues {
+  /// How many surfaces have commits waiting, and how many commits wait
+  /// in all.
+  pub(crate) fn totals(&self) -> (usize, usize) {
+    (
+      self.surfaces.len(),
+      self.surfaces.values().map(VecDeque::len).sum(),
+    )
+  }
+
   /// Adds a source that every later commit is asked about.
   pub(crate) fn add_source(&mut self, source: Box<dyn BlockerSource>) {
     self.sources.push(source);

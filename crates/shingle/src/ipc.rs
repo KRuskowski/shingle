@@ -85,6 +85,7 @@ impl IpcServer {
     self.publish(state);
     self.cleanup_clients(state);
     self.clients.retain(|client| !client.closed);
+    state.ipc_clients = self.clients.len();
   }
 
   fn cleanup_clients(&mut self, state: &mut CompositorState) {
@@ -404,6 +405,7 @@ const SUPPORTED_METHODS: &[&str] = &[
   "stipc/get_xwayland_pid",
   "stipc/layout_views",
   "stipc/move_cursor",
+  "stipc/object_counts",
   "stipc/ping",
   "stipc/run",
   "stipc/touch",
@@ -3230,6 +3232,7 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
     }),
     "stipc/layout_views" => layout_views(state, data),
     "stipc/move_cursor" => move_cursor(state, data),
+    "stipc/object_counts" => crate::object_counts::reply(state),
     "stipc/ping" => json_ok(),
     "stipc/run" => run_command(state, data),
     "stipc/touch" => feed_touch(state, data),
@@ -3415,12 +3418,12 @@ mod tests {
   }
 
   #[test]
-  fn list_methods_reports_87_sorted_methods_with_input_devices() {
+  fn list_methods_reports_88_sorted_methods_with_input_devices() {
     let mut state = test_state();
     let reply = call(&mut state, "list-methods", Value::Null);
     let methods = reply["methods"].as_array().unwrap();
-    assert_eq!(methods.len(), 87);
-    assert_eq!(SUPPORTED_METHODS.len(), 87);
+    assert_eq!(methods.len(), 88);
+    assert_eq!(SUPPORTED_METHODS.len(), 88);
     assert!(SUPPORTED_METHODS.windows(2).all(|pair| pair[0] < pair[1]));
     for method in [
       "input/list-devices",

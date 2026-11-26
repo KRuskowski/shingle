@@ -2155,3 +2155,36 @@ fn only_x_drag_icons_may_animate() {
   assert!(fixture.frontend.animation_matches(&icon(Some("XTerm"))));
   assert!(!fixture.frontend.animation_matches(&icon(None)));
 }
+
+#[test]
+fn object_counts_report_the_frontends_textures() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut fixture = shm_fixture(&target);
+  let counts = |fixture: &mut Fixture| -> serde_json::Value {
+    let reply = fixture.ipc(r#"{"method":"stipc/object_counts"}"#);
+    serde_json::from_str::<serde_json::Value>(&reply)
+      .expect("the reply is JSON")["frontend"]
+      .clone()
+  };
+  // The counts are those of the last turn.
+  fixture.process();
+  assert_eq!(counts(&mut fixture)["textures"], 0);
+  let toplevel = fixture.window("counted");
+  let buffer = fixture.client.shm_buffer(100, 80);
+  fixture.client.commit_buffer(
+    fixture.frontend.compositor_mut(),
+    &toplevel.surface,
+    &buffer,
+  );
+  fixture.frontend.process(&mut fixture.host);
+  fixture
+    .frontend
+    .render(&mut fixture.host, &primary(), &mut target)
+    .expect("the frame renders");
+  let after = counts(&mut fixture);
+  assert_eq!(after["textures"], 1, "{after}");
+  assert_eq!(after["uploaded"], 1, "{after}");
+  assert_eq!(after["closing_animations"], 0, "{after}");
+}

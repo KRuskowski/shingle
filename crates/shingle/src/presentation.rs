@@ -16,6 +16,13 @@ pub(crate) struct Presentation {
   pending: Vec<PendingFeedback>,
 }
 
+impl Presentation {
+  /// How many feedback objects wait for a presentation.
+  pub(crate) fn pending(&self) -> usize {
+    self.pending.len()
+  }
+}
+
 struct PendingFeedback {
   surface: SurfaceId,
   resource: WpPresentationFeedback,

@@ -58,6 +58,13 @@ pub(crate) struct SurfaceOutputs {
   surfaces: HashMap<ObjectId, Tracked>,
 }
 
+impl SurfaceOutputs {
+  /// How many surfaces are tracked.
+  pub(crate) fn len(&self) -> usize {
+    self.surfaces.len()
+  }
+}
+
 /// The intersection of two rectangles, if they share a pixel.
 pub(crate) fn intersection(first: Rect, second: Rect) -> Option<Rect> {
   let left = first.x.max(second.x);
