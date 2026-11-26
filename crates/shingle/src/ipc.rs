@@ -2695,7 +2695,7 @@ fn config_option(
     "simple-tile/keep_fullscreen_on_adjacent" => {
       (state.keep_fullscreen_on_adjacent.to_string(), "true".into())
     }
-    "simple-tile/inner_gap_size" => (state.gaps.left.to_string(), "0".into()),
+    "simple-tile/inner_gap_size" => (state.gaps.inner.to_string(), "0".into()),
     "simple-tile/outer_horiz_gap_size" => {
       (state.gaps.left.to_string(), "0".into())
     }
@@ -2911,12 +2911,7 @@ fn apply_config_updates(
       }
       ConfigUpdate::Gap(name, value) => {
         match name.as_str() {
-          "simple-tile/inner_gap_size" => {
-            state.gaps.left = value;
-            state.gaps.right = value;
-            state.gaps.top = value;
-            state.gaps.bottom = value;
-          }
+          "simple-tile/inner_gap_size" => state.gaps.inner = value,
           "simple-tile/outer_horiz_gap_size" => {
             state.gaps.left = value;
             state.gaps.right = value;
@@ -3221,6 +3216,34 @@ mod tests {
   fn press(state: &mut CompositorState, key: &str) {
     call(state, "stipc/feed_key", json!({"key": key, "state": true}));
     call(state, "stipc/feed_key", json!({"key": key, "state": false}));
+  }
+
+  #[test]
+  fn inner_and_outer_gaps_are_separate_options() {
+    let mut state = test_state();
+    let get = |state: &mut CompositorState, option: &str| {
+      call(
+        state,
+        "wayfire/get-config-option",
+        json!({"option": option}),
+      )["value"]
+        .clone()
+    };
+    let reply = call(
+      &mut state,
+      "wayfire/set-config-options",
+      json!({
+        "simple-tile/inner_gap_size": "7",
+        "simple-tile/outer_horiz_gap_size": "3",
+        "simple-tile/outer_vert_gap_size": "2",
+      }),
+    );
+    assert_eq!(reply["result"], "ok", "{reply}");
+    assert_eq!((state.gaps.inner, state.gaps.left), (7, 3));
+    assert_eq!((state.gaps.top, state.gaps.right), (2, 3));
+    assert_eq!(get(&mut state, "simple-tile/inner_gap_size"), "7");
+    assert_eq!(get(&mut state, "simple-tile/outer_horiz_gap_size"), "3");
+    assert_eq!(get(&mut state, "simple-tile/outer_vert_gap_size"), "2");
   }
 
   #[test]
