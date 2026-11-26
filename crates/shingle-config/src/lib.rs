@@ -67,11 +67,12 @@ use thiserror::Error;
 ///
 /// Imports are one way: a Wayfire or i3 file is read into a [`ShingleConfig`]
 /// and can then be saved as YAML, but nothing writes INI or i3 syntax back.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ConfigFormat {
   /// Shingle's native YAML, deserialized straight into [`ShingleConfig`]. Every
   /// section rejects unknown fields, so a typo is an error rather than a
   /// silently ignored key.
+  #[default]
   Yaml,
   /// Wayfire's `wayfire.ini`, read line by line as wf-config reads it: an
   /// unescaped `#` starts a comment, `\#` is a literal `#` (WCM writes every
@@ -236,6 +237,13 @@ pub struct ShingleConfig {
   /// written to YAML.
   #[serde(skip)]
   pub wayfire_values: WayfireValues,
+  /// The format this configuration was parsed from: set by
+  /// [`ShingleConfig::parse_with_warnings`], and [`ConfigFormat::Yaml`]
+  /// for [`ShingleConfig::default`] and configurations built by hand.
+  /// [`ShingleConfig::wayfire_config_file`] reads it. Never written to
+  /// YAML.
+  #[serde(skip)]
+  pub format: ConfigFormat,
 }
 
 impl Default for ShingleConfig {
@@ -279,6 +287,7 @@ impl Default for ShingleConfig {
       input: InputConfig::default(),
       plugins: None,
       wayfire_values: WayfireValues::default(),
+      format: ConfigFormat::Yaml,
     }
   }
 }
@@ -376,9 +385,21 @@ impl ShingleConfig {
       ConfigFormat::Wayfire => wayfire::parse(text)?,
       ConfigFormat::I3 => i3::parse(text)?,
     };
+    config.format = format;
     config.turn_off_unlisted_plugins();
     config.validate()?;
     Ok((config, warnings))
+  }
+
+  /// What Shingle's children get as `WAYFIRE_CONFIG_FILE` when this
+  /// configuration was loaded from `path`: `path`, made absolute, when it
+  /// is a Wayfire file, as Wayfire exports the file it reads
+  /// (src/default-config-backend.cpp), and `None` for YAML and i3. WCM
+  /// and scripts read the variable and edit the file as `wayfire.ini`, so
+  /// it never names a file in another format.
+  pub fn wayfire_config_file(&self, path: &Path) -> Option<PathBuf> {
+    (self.format == ConfigFormat::Wayfire)
+      .then(|| std::path::absolute(path).unwrap_or_else(|_| path.to_owned()))
   }
 
   /// Validates and serializes the configuration as native YAML. Matchers and
@@ -2619,6 +2640,53 @@ mod tests {
     for text in ["#F00", "#+1+1+1", "#ééé", "aéééb", "1 2 3", "#GG0000"] {
       assert!(parse_color(text).is_err(), "{text}");
     }
+  }
+
+  #[test]
+  fn only_a_wayfire_file_is_exported_as_wayfire_config_file() {
+    let path = Path::new("/home/user/.config/wayfire.ini");
+    let parse = |text, format| ShingleConfig::parse(text, format).unwrap();
+    let wayfire = parse("[core]\nvwidth = 2\n", ConfigFormat::Wayfire);
+    assert_eq!(wayfire.format, ConfigFormat::Wayfire);
+    assert_eq!(wayfire.wayfire_config_file(path), Some(path.to_owned()));
+    for (text, format) in [("{}", ConfigFormat::Yaml), ("", ConfigFormat::I3)] {
+      let config = parse(text, format);
+      assert_eq!(config.format, format);
+      assert_eq!(config.wayfire_config_file(path), None, "{format:?}");
+    }
+    assert_eq!(ShingleConfig::default().format, ConfigFormat::Yaml);
+  }
+
+  #[test]
+  fn a_relative_wayfire_config_file_is_made_absolute() {
+    let config = ShingleConfig::parse("", ConfigFormat::Wayfire).unwrap();
+    let exported = config
+      .wayfire_config_file(Path::new("wayfire.ini"))
+      .expect("a Wayfire file is exported");
+    assert!(exported.is_absolute(), "{exported:?}");
+    assert_eq!(
+      exported,
+      std::env::current_dir().unwrap().join("wayfire.ini")
+    );
+  }
+
+  #[test]
+  fn load_records_the_format_it_detected() {
+    let directory = std::env::temp_dir()
+      .join(format!("shingle-config-format-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let ini = directory.join("wayfire.ini");
+    std::fs::write(&ini, "[core]\nvwidth = 2\n").unwrap();
+    // A Wayfire file is recognised by its first `[` whatever its name.
+    let unnamed = directory.join("config");
+    std::fs::write(&unnamed, "[core]\n").unwrap();
+    let yaml = directory.join("shingle.yaml");
+    std::fs::write(&yaml, "workspaces: {width: 2}\n").unwrap();
+    let format = |path: &Path| ShingleConfig::load(Some(path)).unwrap().format;
+    assert_eq!(format(&ini), ConfigFormat::Wayfire);
+    assert_eq!(format(&unnamed), ConfigFormat::Wayfire);
+    assert_eq!(format(&yaml), ConfigFormat::Yaml);
+    std::fs::remove_dir_all(directory).unwrap();
   }
 
   #[test]

@@ -142,7 +142,13 @@ fn start(
         options.outputs,
         std::env::var("WLR_HEADLESS_OUTPUTS").ok().as_deref(),
       )?;
-      headless::run(config, options.ipc.as_deref(), options.spawn, outputs)
+      headless::run(
+        config,
+        options.config.as_deref(),
+        options.ipc.as_deref(),
+        options.spawn,
+        outputs,
+      )
     }
     Backend::Offscreen => {
       let outputs = headless::output_count(

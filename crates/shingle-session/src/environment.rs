@@ -18,11 +18,31 @@ use std::{
 /// `WAYLAND_SOCKET` over `WAYLAND_DISPLAY`. Shingle never changes its own
 /// environment for this, because the nested backend still connects to the
 /// host through it.
+///
+/// [`ClientEnvironment::with_desktop`] adds what Wayfire exports beyond
+/// that: `XDG_CURRENT_DESKTOP`, `XCURSOR_THEME`, `XCURSOR_SIZE` and
+/// `WAYFIRE_CONFIG_FILE`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientEnvironment {
   /// Each variable with the value children get, or `None` to remove it, in
   /// the order they are applied.
   variables: Vec<(OsString, Option<OsString>)>,
+}
+
+/// `[input] cursor_size`'s default, at which Shingle's own cursor follows
+/// an inherited `XCURSOR_SIZE` (crates/shingle/src/cursor_shape.rs).
+const DEFAULT_CURSOR_SIZE: u32 = 24;
+
+/// The configuration behind the variables
+/// [`ClientEnvironment::with_desktop`] adds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DesktopVariables<'a> {
+  /// `[input] cursor_theme`; `default` leaves `XCURSOR_THEME` alone.
+  pub cursor_theme: &'a str,
+  /// `[input] cursor_size`.
+  pub cursor_size: u32,
+  /// The Wayfire file Shingle's configuration was read from, if it was.
+  pub wayfire_config_file: Option<&'a Path>,
 }
 
 impl ClientEnvironment {
@@ -56,6 +76,53 @@ impl ClientEnvironment {
         set("_JAVA_AWT_WM_NONREPARENTING", Some(OsStr::new("1"))),
       ],
     }
+  }
+
+  /// Adds the variables Wayfire exports to every child beyond its sockets,
+  /// from `desktop` and `inherited`, which looks up a variable of the
+  /// environment Shingle itself was started with (`std::env::var_os`):
+  ///
+  /// - `XDG_CURRENT_DESKTOP` is `wayfire` when `inherited` has none, as
+  ///   Wayfire sets it at start (src/main.cpp), so that
+  ///   xdg-desktop-portal reads `wayfire-portals.conf`. One the login or
+  ///   the session file set, even to an empty value, is kept.
+  /// - `XCURSOR_THEME` is [`DesktopVariables::cursor_theme`] unless that
+  ///   is `default`, which leaves the inherited theme, as Wayfire's
+  ///   `init_xcursor` does (src/core/seat/cursor.cpp).
+  /// - `XCURSOR_SIZE` is [`DesktopVariables::cursor_size`]. Shingle draws
+  ///   its own cursor at an inherited `XCURSOR_SIZE` while the configured
+  ///   size is the default 24, so then a numeric inherited size is kept,
+  ///   and children draw theirs at the size Shingle draws.
+  /// - `WAYFIRE_CONFIG_FILE` is [`DesktopVariables::wayfire_config_file`],
+  ///   and removed without one, so a host Wayfire's file never reaches
+  ///   WCM or scripts started from Shingle.
+  pub fn with_desktop(
+    mut self,
+    desktop: &DesktopVariables<'_>,
+    inherited: impl Fn(&str) -> Option<OsString>,
+  ) -> Self {
+    let mut set = |name: &str, value: Option<&OsStr>| {
+      self
+        .variables
+        .push((OsString::from(name), value.map(OsStr::to_owned)));
+    };
+    if inherited("XDG_CURRENT_DESKTOP").is_none() {
+      set("XDG_CURRENT_DESKTOP", Some(OsStr::new("wayfire")));
+    }
+    if desktop.cursor_theme != "default" {
+      set("XCURSOR_THEME", Some(OsStr::new(desktop.cursor_theme)));
+    }
+    let inherited_size = inherited("XCURSOR_SIZE")
+      .and_then(|size| size.to_str()?.parse::<u32>().ok());
+    if desktop.cursor_size != DEFAULT_CURSOR_SIZE || inherited_size.is_none() {
+      let size = desktop.cursor_size.to_string();
+      set("XCURSOR_SIZE", Some(OsStr::new(&size)));
+    }
+    set(
+      "WAYFIRE_CONFIG_FILE",
+      desktop.wayfire_config_file.map(Path::as_os_str),
+    );
+    self
   }
 
   /// Every variable this environment changes, with its value or `None` for
@@ -173,6 +240,141 @@ mod tests {
         ("WAYLAND_SOCKET".into(), None),
         ("_JAVA_AWT_WM_NONREPARENTING".into(), Some("1".into())),
       ]
+    );
+  }
+
+  /// What `with_desktop` adds to a bare environment, for `desktop` and
+  /// the inherited variables `inherited`.
+  fn desktop_changes(
+    desktop: &DesktopVariables<'_>,
+    inherited: &[(&str, &str)],
+  ) -> Vec<(OsString, Option<OsString>)> {
+    let base = ClientEnvironment::new(OsStr::new("wayland-1"), None, None);
+    let skip = base.variables().len();
+    let lookup = |name: &str| {
+      inherited
+        .iter()
+        .find(|(variable, _)| *variable == name)
+        .map(|(_, value)| OsString::from(value))
+    };
+    base.with_desktop(desktop, lookup).variables()[skip..].to_vec()
+  }
+
+  /// The configuration's defaults: theme `default`, size 24, no Wayfire
+  /// file.
+  const DEFAULTS: DesktopVariables<'static> = DesktopVariables {
+    cursor_theme: "default",
+    cursor_size: 24,
+    wayfire_config_file: None,
+  };
+
+  #[test]
+  fn defaults_set_wayfire_s_variables_into_a_bare_environment() {
+    assert_eq!(
+      desktop_changes(&DEFAULTS, &[]),
+      [
+        ("XDG_CURRENT_DESKTOP".into(), Some("wayfire".into())),
+        ("XCURSOR_SIZE".into(), Some("24".into())),
+        ("WAYFIRE_CONFIG_FILE".into(), None),
+      ]
+    );
+  }
+
+  #[test]
+  fn an_inherited_current_desktop_is_kept_even_when_empty() {
+    for value in ["GNOME", "sway:wlroots", ""] {
+      let changes =
+        desktop_changes(&DEFAULTS, &[("XDG_CURRENT_DESKTOP", value)]);
+      assert!(
+        changes
+          .iter()
+          .all(|(name, _)| name != "XDG_CURRENT_DESKTOP"),
+        "{value:?}: {changes:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn a_configured_cursor_theme_and_size_replace_the_inherited_ones() {
+    let desktop = DesktopVariables {
+      cursor_theme: "Adwaita",
+      cursor_size: 32,
+      ..DEFAULTS
+    };
+    let inherited = [("XCURSOR_THEME", "breeze"), ("XCURSOR_SIZE", "48")];
+    let changes = desktop_changes(&desktop, &inherited);
+    assert!(
+      changes.contains(&("XCURSOR_THEME".into(), Some("Adwaita".into())))
+    );
+    assert!(changes.contains(&("XCURSOR_SIZE".into(), Some("32".into()))));
+  }
+
+  #[test]
+  fn the_default_theme_leaves_the_inherited_theme_alone() {
+    for inherited in [&[][..], &[("XCURSOR_THEME", "breeze")][..]] {
+      let changes = desktop_changes(&DEFAULTS, inherited);
+      assert!(
+        changes.iter().all(|(name, _)| name != "XCURSOR_THEME"),
+        "{changes:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn the_default_size_keeps_a_numeric_inherited_size_only() {
+    let size = |inherited: &[(&str, &str)]| {
+      desktop_changes(&DEFAULTS, inherited)
+        .into_iter()
+        .find(|(name, _)| name == "XCURSOR_SIZE")
+        .map(|(_, value)| value)
+    };
+    // Shingle draws its own cursor at 48 then, so children do too.
+    assert_eq!(size(&[("XCURSOR_SIZE", "48")]), None);
+    assert_eq!(size(&[("XCURSOR_SIZE", "big")]), Some(Some("24".into())));
+    assert_eq!(size(&[]), Some(Some("24".into())));
+  }
+
+  #[test]
+  fn the_wayfire_config_file_replaces_a_host_one_or_removes_it() {
+    let host = [("WAYFIRE_CONFIG_FILE", "/home/host/.config/wayfire.ini")];
+    let file = |desktop: &DesktopVariables<'_>| {
+      desktop_changes(desktop, &host)
+        .into_iter()
+        .find(|(name, _)| name == "WAYFIRE_CONFIG_FILE")
+        .map(|(_, value)| value)
+    };
+    assert_eq!(file(&DEFAULTS), Some(None));
+    let ini = Path::new("/tmp/test/wayfire.ini");
+    let desktop = DesktopVariables {
+      wayfire_config_file: Some(ini),
+      ..DEFAULTS
+    };
+    assert_eq!(file(&desktop), Some(Some(ini.as_os_str().to_owned())));
+  }
+
+  #[test]
+  fn a_spawned_child_sees_wayfire_s_variables() {
+    let mut command = Command::new("/bin/sh");
+    command.arg("-c").arg(
+      "printf '%s|%s|%s|%s' \"$XDG_CURRENT_DESKTOP\" \
+       \"${XCURSOR_THEME-unset}\" \"$XCURSOR_SIZE\" \
+       \"${WAYFIRE_CONFIG_FILE-unset}\"",
+    );
+    command
+      .env_remove("XDG_CURRENT_DESKTOP")
+      .env_remove("XCURSOR_THEME")
+      .env("WAYFIRE_CONFIG_FILE", "/host/wayfire.ini");
+    let desktop = DesktopVariables {
+      cursor_size: 40,
+      ..DEFAULTS
+    };
+    ClientEnvironment::new(OsStr::new("wayland-9"), None, None)
+      .with_desktop(&desktop, |_| None)
+      .apply(&mut command);
+    let output = command.output().expect("sh runs");
+    assert_eq!(
+      String::from_utf8_lossy(&output.stdout),
+      "wayfire|unset|40|unset"
     );
   }
 

@@ -1541,6 +1541,69 @@ fn shutdown_frees_the_x_display_and_saves_once() {
 }
 
 #[test]
+fn a_reload_changes_the_variables_of_later_children() {
+  static NEXT: AtomicU32 = AtomicU32::new(0);
+  let directory = std::env::temp_dir().join(format!(
+    "shingle-frontend-environment-{}-{}",
+    std::process::id(),
+    NEXT.fetch_add(1, Ordering::Relaxed)
+  ));
+  let _ = std::fs::remove_dir_all(&directory);
+  std::fs::create_dir_all(&directory).unwrap();
+  // No `.ini`: the first `[` makes it a Wayfire file, so it can turn into
+  // YAML below.
+  let ini = directory.join("config");
+  let write = |theme: &str, size: u32| {
+    let text = format!(
+      "[core]\nxwayland = false\n[workarounds]\nauto_reload_config = false\n\
+       [input]\ncursor_theme = {theme}\ncursor_size = {size}\n"
+    );
+    std::fs::write(&ini, text).unwrap();
+  };
+  write("Adwaita", 32);
+  let config = ShingleConfig::load(Some(&ini)).unwrap();
+  let compositor = Compositor::with_socket_path(
+    Config::from(config.clone()),
+    &directory.join("wayland"),
+  )
+  .unwrap();
+  let mut frontend = Frontend::with_compositor(
+    config,
+    compositor,
+    SessionStore::new(directory.join("session.json")),
+    Vec::new(),
+    Some(ini.clone()),
+  )
+  .unwrap();
+  let value = |frontend: &Frontend, name: &str| {
+    frontend
+      .compositor()
+      .client_environment()
+      .value(name)
+      .map(|value| value.to_string_lossy().into_owned())
+  };
+  assert_eq!(
+    value(&frontend, "WAYFIRE_CONFIG_FILE").as_deref(),
+    ini.to_str()
+  );
+  assert_eq!(
+    value(&frontend, "XCURSOR_THEME").as_deref(),
+    Some("Adwaita")
+  );
+  assert_eq!(value(&frontend, "XCURSOR_SIZE").as_deref(), Some("32"));
+  write("breeze", 48);
+  frontend.reload_config();
+  assert_eq!(value(&frontend, "XCURSOR_THEME").as_deref(), Some("breeze"));
+  assert_eq!(value(&frontend, "XCURSOR_SIZE").as_deref(), Some("48"));
+  // A file that is YAML now is no longer offered to WCM as wayfire.ini.
+  std::fs::write(&ini, "xwayland: {mode: false}\n").unwrap();
+  frontend.reload_config();
+  assert_eq!(value(&frontend, "WAYFIRE_CONFIG_FILE"), None);
+  drop(frontend);
+  std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn shutdown_saves_the_mapped_windows() {
   let mut fixture = Fixture::new(ShingleConfig::default());
   fixture.window("alpha");

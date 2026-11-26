@@ -62,6 +62,9 @@ impl Frontend {
       }
       let keymap = config.input.load_keymap()?;
       self.compositor.apply_config(config.clone().into())?;
+      self
+        .compositor
+        .set_wayfire_config_file(config.wayfire_config_file(&path).as_deref());
       self.compositor.set_keymap(&keymap)?;
       self.keyboard.set_keymap(&keymap)?;
       self

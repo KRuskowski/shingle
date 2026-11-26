@@ -8,7 +8,7 @@ use shingle_core::{
   Gaps, LaunchIdentity, OutputId, Rect, Shingle, WindowId, WorkspaceId,
 };
 use shingle_idle::{Command, DpmsState, IdleCoordinator, LockState};
-use shingle_session::ClientEnvironment;
+use shingle_session::{ClientEnvironment, DesktopVariables};
 use wayland_protocols::{
   ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1,
   wp::fractional_scale::v1::server::wp_fractional_scale_v1::WpFractionalScaleV1,
@@ -229,6 +229,10 @@ pub(crate) struct CompositorState {
   /// Where Wayfire IPC is served, once [`crate::Compositor::enable_ipc`]
   /// ran; children find it as `WAYFIRE_SOCKET`.
   pub(crate) ipc_socket: Option<std::path::PathBuf>,
+  /// The Wayfire file the configuration was read from, which children
+  /// find as `WAYFIRE_CONFIG_FILE`; see
+  /// [`crate::Compositor::set_wayfire_config_file`].
+  pub(crate) wayfire_config_file: Option<std::path::PathBuf>,
   pub(crate) ipc_children: Vec<std::process::Child>,
   /// The X display and server, for IPC and the client environment.
   pub(crate) xwayland: crate::xwayland::Status,
@@ -408,6 +412,7 @@ impl CompositorState {
       launch_templates: HashMap::new(),
       socket_name: socket_name.to_owned(),
       ipc_socket: None,
+      wayfire_config_file: None,
       ipc_children: Vec::new(),
       xwayland: crate::xwayland::Status::default(),
       next_surface: 1,
@@ -741,14 +746,31 @@ impl CompositorState {
   }
 
   /// The environment of every process Shingle starts. `DISPLAY` is
-  /// Shingle's own X display while one is bound, and removed otherwise.
+  /// Shingle's own X display while one is bound, and removed otherwise;
+  /// the cursor variables follow the live cursor settings, so a reload or
+  /// `wayfire/set-config-options` reaches every later child.
   pub(crate) fn client_environment(&self) -> ClientEnvironment {
+    self.client_environment_inheriting(|name| std::env::var_os(name))
+  }
+
+  /// [`CompositorState::client_environment`] for a Shingle whose own
+  /// environment `inherited` looks up.
+  pub(crate) fn client_environment_inheriting(
+    &self,
+    inherited: impl Fn(&str) -> Option<std::ffi::OsString>,
+  ) -> ClientEnvironment {
     let display = self.xwayland.display.as_deref().map(std::ffi::OsStr::new);
+    let desktop = DesktopVariables {
+      cursor_theme: &self.cursor_theme,
+      cursor_size: self.cursor_size,
+      wayfire_config_file: self.wayfire_config_file.as_deref(),
+    };
     ClientEnvironment::new(
       &self.socket_name,
       display,
       self.ipc_socket.as_deref(),
     )
+    .with_desktop(&desktop, inherited)
   }
 
   pub(crate) fn serial(&mut self) -> u32 {

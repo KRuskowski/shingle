@@ -1392,9 +1392,23 @@ impl Compositor {
   /// or removed when XWayland is disabled, and
   /// nothing of the host session's `WAYLAND_SOCKET`, `DISPLAY` or
   /// `WAYFIRE_SOCKET` gets through. IPC `stipc/run` and IPC binding
-  /// commands use it too. See [`ClientEnvironment`].
+  /// commands use it too. It also carries Wayfire's own variables
+  /// ([`ClientEnvironment::with_desktop`]): `XDG_CURRENT_DESKTOP=wayfire`
+  /// unless Shingle inherited one, `XCURSOR_THEME` and `XCURSOR_SIZE` from
+  /// the live cursor settings, and `WAYFIRE_CONFIG_FILE` as
+  /// [`Compositor::set_wayfire_config_file`] set it. See
+  /// [`ClientEnvironment`].
   pub fn client_environment(&self) -> ClientEnvironment {
     self.state.client_environment()
+  }
+
+  /// Sets the Wayfire file children find as `WAYFIRE_CONFIG_FILE`, or
+  /// with `None` removes the variable from their environment. The host
+  /// calls it with [`shingle_config::ShingleConfig::wayfire_config_file`]
+  /// at start and after each configuration reload, since
+  /// [`Compositor::apply_config`] does not know the file.
+  pub fn set_wayfire_config_file(&mut self, path: Option<&std::path::Path>) {
+    self.state.wayfire_config_file = path.map(std::path::Path::to_owned);
   }
 
   /// Reports a frontend plugin's actual activation state to IPC watchers.
@@ -4093,6 +4107,115 @@ pub(crate) mod tests {
     let environment = compositor.client_environment();
     assert_eq!(environment.value("WAYFIRE_SOCKET"), Some(ipc.as_os_str()));
     assert_eq!(environment.value("DISPLAY"), None);
+  }
+
+  /// The value the client environment of `compositor` gives `name` when
+  /// Shingle inherited nothing: `Some(None)` when it removes the
+  /// variable, `None` when it leaves it alone.
+  fn exported(
+    compositor: &Compositor,
+    name: &str,
+  ) -> Option<Option<std::ffi::OsString>> {
+    compositor
+      .state
+      .client_environment_inheriting(|_| None)
+      .variables()
+      .iter()
+      .find(|(variable, _)| variable == name)
+      .map(|(_, value)| value.clone())
+  }
+
+  #[test]
+  fn the_cursor_variables_follow_a_config_reload() {
+    let (mut compositor, _path) = test_compositor_with(Config {
+      cursor_theme: "Adwaita".into(),
+      cursor_size: 32,
+      ..Config::default()
+    });
+    assert_eq!(
+      exported(&compositor, "XCURSOR_THEME"),
+      Some(Some("Adwaita".into()))
+    );
+    assert_eq!(
+      exported(&compositor, "XCURSOR_SIZE"),
+      Some(Some("32".into()))
+    );
+    compositor
+      .apply_config(Config {
+        cursor_theme: "breeze".into(),
+        cursor_size: 48,
+        ..Config::default()
+      })
+      .unwrap();
+    // A child started after the reload gets the new values.
+    assert_eq!(
+      exported(&compositor, "XCURSOR_THEME"),
+      Some(Some("breeze".into()))
+    );
+    assert_eq!(
+      exported(&compositor, "XCURSOR_SIZE"),
+      Some(Some("48".into()))
+    );
+    compositor.apply_config(Config::default()).unwrap();
+    assert_eq!(exported(&compositor, "XCURSOR_THEME"), None);
+    assert_eq!(
+      exported(&compositor, "XCURSOR_SIZE"),
+      Some(Some("24".into()))
+    );
+  }
+
+  #[test]
+  fn the_cursor_variables_follow_set_config_options() {
+    let (mut compositor, _path) = test_compositor();
+    let reply = ipc::respond(
+      &mut compositor.state,
+      &serde_json::json!({
+        "method": "wayfire/set-config-options",
+        "data": {"input/cursor_theme": "Adwaita", "input/cursor_size": "40"},
+      }),
+    );
+    assert_eq!(reply["result"], "ok", "{reply}");
+    assert_eq!(
+      exported(&compositor, "XCURSOR_THEME"),
+      Some(Some("Adwaita".into()))
+    );
+    assert_eq!(
+      exported(&compositor, "XCURSOR_SIZE"),
+      Some(Some("40".into()))
+    );
+  }
+
+  #[test]
+  fn the_wayfire_config_file_and_current_desktop_are_exported() {
+    let (mut compositor, _path) = test_compositor();
+    assert_eq!(exported(&compositor, "WAYFIRE_CONFIG_FILE"), Some(None));
+    assert_eq!(
+      exported(&compositor, "XDG_CURRENT_DESKTOP"),
+      Some(Some("wayfire".into()))
+    );
+    let ini = std::path::Path::new("/tmp/test/wayfire.ini");
+    compositor.set_wayfire_config_file(Some(ini));
+    assert_eq!(
+      exported(&compositor, "WAYFIRE_CONFIG_FILE"),
+      Some(Some(ini.as_os_str().to_owned()))
+    );
+    // A reload keeps it: only the host knows the file.
+    compositor.apply_config(Config::default()).unwrap();
+    assert_eq!(
+      compositor.client_environment().value("WAYFIRE_CONFIG_FILE"),
+      Some(ini.as_os_str())
+    );
+    compositor.set_wayfire_config_file(None);
+    assert_eq!(exported(&compositor, "WAYFIRE_CONFIG_FILE"), Some(None));
+    let kept = compositor.state.client_environment_inheriting(|name| {
+      (name == "XDG_CURRENT_DESKTOP").then(|| "GNOME".into())
+    });
+    assert!(
+      kept
+        .variables()
+        .iter()
+        .all(|(name, _)| name != "XDG_CURRENT_DESKTOP")
+    );
   }
 
   #[test]

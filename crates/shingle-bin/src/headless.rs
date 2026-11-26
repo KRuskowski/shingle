@@ -42,10 +42,13 @@ pub fn output_count(
 /// `[output:HEADLESS-N]` entry, and saves the session when it ends.
 ///
 /// With `ipc_path`, Wayfire IPC is served there, and every client finds it
-/// as `WAYFIRE_SOCKET`. `spawn`, if not empty, is a program and its
+/// as `WAYFIRE_SOCKET`. `config_path` is the file `yaml` was loaded from,
+/// `None` for the default one; clients find a Wayfire file as
+/// `WAYFIRE_CONFIG_FILE`. `spawn`, if not empty, is a program and its
 /// arguments to start as a client.
 pub fn run(
   yaml: ShingleConfig,
+  config_path: Option<&Path>,
   ipc_path: Option<&Path>,
   spawn: Vec<OsString>,
   outputs: u32,
@@ -68,6 +71,11 @@ pub fn run(
     (Compositor::new(config)?, None)
   };
   compositor.set_keymap(&keymap)?;
+  let config_path = config_path
+    .map(Path::to_owned)
+    .unwrap_or_else(shingle_config::default_path);
+  compositor
+    .set_wayfire_config_file(yaml.wayfire_config_file(&config_path).as_deref());
   add_outputs(&mut compositor, outputs)?;
   // Every output is there, so a restored session's sets are settled
   // before any client connects.

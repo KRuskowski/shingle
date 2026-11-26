@@ -424,6 +424,12 @@ impl Frontend {
     // Screencopy shows the frames drawn here, not a CPU composite.
     compositor.set_frame_capture(true);
     compositor.set_repeat(config.input.repeat_rate, config.input.repeat_delay);
+    let wayfire_file = config.wayfire_config_file(
+      &config_path
+        .clone()
+        .unwrap_or_else(shingle_config::default_path),
+    );
+    compositor.set_wayfire_config_file(wayfire_file.as_deref());
     let mut keyboard = Keyboard::new(&keymap)?;
     keyboard.sync_locked(
       compositor.locked_modifiers(),

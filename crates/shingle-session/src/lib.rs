@@ -31,7 +31,7 @@ use std::{
   process::{Child, Command, Stdio},
 };
 
-pub use environment::ClientEnvironment;
+pub use environment::{ClientEnvironment, DesktopVariables};
 pub use shingle_core::SessionSnapshot;
 pub use writer::{ReportFn, SessionWriter, WriteFn};
 
