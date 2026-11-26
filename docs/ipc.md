@@ -8,7 +8,7 @@ cargo run --bin shingle -- --ipc /tmp/shingle-ipc.socket
 
 The socket path is exported as `WAYFIRE_SOCKET` to every client Shingle starts, from restored and autostarted clients and `--spawn` programs to everything launched later, so existing Wayfire scripts work unchanged. Without `--ipc`, `WAYFIRE_SOCKET` is removed from their environment, so a nested Shingle never hands its children the host compositor's socket. Shingle's own environment is not changed; the children's comes from `Compositor::client_environment` (`shingle_session::ClientEnvironment`). Library users can start the same server with `Compositor::enable_ipc(path)`, before starting any client.
 
-`list-methods` returns a sorted inventory of the 81 supported methods. Numeric vswitch activators such as `binding_4` are matched dynamically and are not part of that count. The method table lives in `SUPPORTED_METHODS` in `crates/shingle/src/ipc.rs`.
+`list-methods` returns a sorted inventory of the 83 supported methods. Numeric vswitch activators such as `binding_4` are matched dynamically and are not part of that count. The method table lives in `SUPPORTED_METHODS` in `crates/shingle/src/ipc.rs`.
 
 ## Methods
 
@@ -18,6 +18,7 @@ The socket path is exported as `WAYFIRE_SOCKET` to every client Shingle starts, 
 | `wm-actions` | `minimize`, `set-minimized`, `set-fullscreen`, `set-sticky`, `set-always-on-top`, `set-always-on-bottom`, `bring-to-front`, `send-to-back`, `toggle_maximize`, `toggle_fullscreen`, `toggle_sticky`, `toggle_always_on_top`, `toggle_always_on_bottom`, `toggle_showdesktop` |
 | `vswitch` | `set-workspace`, `send-view`, `binding_{left,right,up,down,last}`, `with_win_{…}`, `send_win_{…}`, plus numeric `binding_N` forms |
 | `simple-tile` | `get-layout`, `set-layout`, `set-show-maximized` |
+| `wsets` | `set-output-wset`, `send-view-to-wset` |
 | `wayfire` | `create-headless-output`, `destroy-headless-output`, `get-config-option`, `list-config-options`, `set-config-options`, `get-keyboard-state`, `set-keyboard-state` |
 | `wf/alpha` | `get-view-alpha`, `set-view-alpha` |
 | `command` | `register-binding`, `unregister-binding`, `clear-bindings` |
@@ -29,9 +30,10 @@ The socket path is exported as `WAYFIRE_SOCKET` to every client Shingle starts, 
 ## Views and outputs
 
 - View IDs accept Wayfire's `id` and `view-id` spellings and the legacy `view_id`.
-- Outputs have Wayfire's ids: counted from 1 and never reused, so an output that goes and comes back gets a new id. `list-outputs`, `output-info` (`id`) and `get-focused-output` describe every output with its id, name, layout geometry, workarea, `wset-index` and current workspace; `list-wsets` and `wset-info` (`id` is the index) list every workspace set, a parked one with `output-id` -1 and `output-name` "". Views report their set's output id and name (-1 and "null" while the set is parked) and `wset-index`. Until MO-4, `vswitch/set-workspace` takes only the active output's `output-id`, `simple-tile` layouts only its set's `wset-index`, and `configure-view` only the view's own output's `output_id` or `output-id`; other outputs are rejected.
+- Outputs have Wayfire's ids: counted from 1 and never reused, so an output that goes and comes back gets a new id. `list-outputs`, `output-info` (`id`) and `get-focused-output` describe every output with its id, name, layout geometry, workarea, `wset-index` and current workspace; `list-wsets` and `wset-info` (`id` is the index) list every workspace set, a parked one with `output-id` -1 and `output-name` "". Views report their set's output id and name (-1 and "null" while the set is parked) and `wset-index`. `get-focused-output` is the active output, which a click or touch on another output, focusing a view (`focus-view` too), oswitch and an activator naming an output change, as in Wayfire; each change sends `output-gain-focus`. Geometries are in layout coordinates, as Shingle has always reported them, where Wayfire's are relative to the view's output; for the first output the two are the same.
 - `wayfire/create-headless-output` with `width` and `height` adds a virtual output named after the next unused `HEADLESS-N` and replies `ok` with its `output`; `wayfire/destroy-headless-output` with `output` (a name) or `output-id` removes one, moving its windows to the active output, and refuses outputs it did not create with Wayfire's errors (``Missing `output` or `output-id`!``, `Output not found!`, `Output is not a headless output created from an IPC command!`). They work on every backend. Clients on them get frame callbacks from headless at the output's refresh rate and from nested with its own frames; offscreen and native send none for them yet (MO-5).
 - `configure-view` sets floating geometry, fullscreen and sticky state. Supplying geometry detaches a tiled view, updates its XDG role and emits the normal tiling event. The exact rectangle is preserved in saved sessions.
+- `configure-view` with `output_id` (or `output-id`) first moves the view, with its dialogs, to that output, as Wayfire's `move_view_to_output`: a tiled view is appended to the target workspace's tree, a floating one keeps its place relative to the output scaled by the ratio of the outputs' sizes and clamped into the target workarea, and snapped and fullscreen views are applied again there. It lands on the workspace with the same offset from the target's current workspace as it had from its own. With a `geometry` the view is moved without rescaling and then given that rectangle. An unknown id is `output not found`.
 - `tiled-edges` accepts masks 0–15 for floating, half, quarter, combined and full-workarea tiling. The requested mask is also preserved in sessions.
 - `wf/alpha/*` query and set per-window opacity, clamped to the inclusive 0–1 range.
 - `get-view-property` and `set-view-property` store typed runtime metadata: booleans, signed and unsigned integers, strings and floats. Changing an existing property's type is rejected, and properties are removed with their view.
@@ -43,16 +45,24 @@ The socket path is exported as `WAYFIRE_SOCKET` to every client Shingle starts, 
 - The `wm-actions` activators accept an explicit view ID, or act on the focused view when it is omitted.
 - `toggle_showdesktop` preserves the set of windows that were already minimized and restores focus when leaving the desktop.
 - `scale/*`, `expo/toggle` and `invert/toggle` dispatch frontend events to the nested renderer and also work as binding callbacks.
+- Activators take Wayfire's `output_id` or `output-id`: `scale/toggle`, `scale/toggle_all`, `expo/toggle`, `wm-actions/toggle_showdesktop` and the vswitch `binding_*`, `with_win_*` and `send_win_*` activators first make that output active, since Scale, Expo, show-desktop and the bindings act on the active output, and an unknown id is `output id not found!`. Without one they act on the active output.
 
 ## Workspaces
 
-- `vswitch/set-workspace` switches by grid coordinate, optionally taking a view along. `vswitch/send-view` moves a view without switching.
+- `vswitch/set-workspace` switches the workspace of the output `output-id` names by grid coordinate, without making it active, optionally taking a view of that output along (`view belongs to a different output` otherwise). `vswitch/send-view` moves a view to another workspace of its own set, on whichever output shows it, without switching.
 - `binding_*` switches, `with_win_*` carries the focused window and `send_win_*` sends it. Each supports left/right/up/down, last-workspace and one-based numeric targets. Directional actions honour configured wraparound. Invalid or out-of-grid numbers are rejected without changing state.
 
 ## Tiling layout
 
-- `simple-tile/get-layout` exports split directions, child order, percentages, node geometry and view IDs from the persistent tiling tree. Floating views are omitted, and an unused workspace returns an empty layout.
-- `simple-tile/set-layout` validates and imports split trees with positive `weight` or `percent` values. Included views move to the selected workspace, omitted views stay floating, mapped state is preserved, and invalid input is rejected without changing the session.
+- `simple-tile/get-layout` exports split directions, child order, percentages, node geometry and view IDs from the persistent tiling tree of the set `wset-index` names, shown or parked. Floating views are omitted, and an unused workspace returns an empty layout.
+- `simple-tile/set-layout` validates and imports split trees with positive `weight` or `percent` values into the set `wset-index` names. Included views move to the selected workspace, views of other sets first join this one as Wayfire's set-layout moves them, omitted views stay floating, mapped state is preserved, and invalid input is rejected without changing the session.
+
+## Workspace sets
+
+Wayfire's `wsets` plugin, by IPC and by the `wsets` bindings (`wset_N`, `send_to_wset_N`):
+
+- `wsets/set-output-wset` (`output-id`, `wset-index`) shows that set on that output, creating it if no set has the index. An output that showed the set gets a new, empty set with the lowest free index, and the set the output showed until then is parked, or destroyed if nothing is left in it and no window is away from it. Two calls therefore swap two outputs' sets. `output-wset-changed` is sent for each output whose set changed, and `view-set-output` for each window whose output changed with its set.
+- `wsets/send-view-to-wset` (`view-id`, `wset-index`) sends the view with its dialogs to that set, creating it if needed; the view keeps its place relative to the output, and is out of sight while the set is parked. Errors are Wayfire's `output not found` and `view not found`.
 - `simple-tile/set-show-maximized` controls tiled-view maximization and rejects floating views.
 
 ## Configuration and keyboard
@@ -94,6 +104,7 @@ Each device tracks the keys, buttons and touch points it holds. Disabling or rem
 `window-rules/events/watch` subscribes a connection to all events or to a requested list. Duplicate watches and unknown event names return errors.
 
 - Lifecycle, focus, title/app ID, geometry, workspace, minimized, fullscreen, sticky, tiling, stacking, workspace-set and output-layout events include current view or output metadata where available.
+- `output-gain-focus` carries the `output` that became active. `view-set-output` carries the view's new `output` (null while its set is parked) and the `view`, and `view-wset-changed` the `old-wset`, the `new-wset` and the `view`, whenever a window moves between outputs or sets: by `configure-view`, oswitch, the wsets methods and bindings, `start_on_output`, `set_fullscreen` with an output, a drag onto another output, or an output going and coming back.
 - `output-added` and `output-removed` carry the `output` as `list-outputs` describes it, and `output-wset-changed` `new-wset`, `output`, `new-wset-data` and `output-data` when an output takes a parked set. `output-layout-changed` carries Wayfire's `configuration`, every output with `name`, `output-id`, `source` (`self`, or `none` for a dark output), `depth`, `scale`, `vrr`, `transform`, `mirror-from`, `position` and `mode`, once per batch of changes; `wset-workspace-changed` carries `previous-workspace`, `new-workspace`, `output`, `wset`, `output-data` and `wset-data`. Before MO-2 the two carried `[output]` and `wset` only.
 - Geometry events include `old-geometry`; tiling events include `old-edges` and `new-edges`; workspace events include `from` and `to`.
 - Top/bottom stacking events distinguish state changes from ordinary z-ordering.
