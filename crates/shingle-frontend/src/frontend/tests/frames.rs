@@ -205,3 +205,45 @@ fn the_maximize_button_works_through_the_frontend() {
     fixture.frontend.compositor().workarea()
   );
 }
+
+#[test]
+fn scale_puts_the_frame_where_it_lays_the_window_out() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut config = framed();
+  config.scale.duration_ms = 0;
+  config.scale.title_overlay = "never".into();
+  let mut fixture = Fixture::new(config);
+  fixture.window("first");
+  render_until_idle(&mut fixture, &mut target);
+  fixture.frontend.toggle_scale(false);
+  fixture.process();
+  render_until_idle(&mut fixture, &mut target);
+  let frame = fixture.frame_of(None);
+  let slot = fixture
+    .frontend
+    .scale
+    .as_ref()
+    .expect("Scale runs")
+    .geometry[&frame.window];
+  let drawn = target.frames.last().expect("a frame").clone();
+  // Scale lays out the window's geometry, which is its frame: the top
+  // band starts at the slot's corner and spans it, and the surface is
+  // inside the slot.
+  assert_eq!(
+    (drawn[0].0.x, drawn[0].0.y, drawn[0].0.width),
+    (slot.x, slot.y, slot.width),
+    "{drawn:?}"
+  );
+  let surface = drawn[8].0;
+  assert!(
+    surface.x > slot.x && surface.y > slot.y,
+    "{surface:?} {slot:?}"
+  );
+  assert!(
+    surface.x + surface.width as i32 <= slot.x + slot.width as i32
+      && surface.y + surface.height as i32 <= slot.y + slot.height as i32,
+    "{surface:?} {slot:?}"
+  );
+}

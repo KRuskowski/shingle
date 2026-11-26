@@ -20,6 +20,7 @@ use super::{
   Frontend,
   animation::{ClosingAnimation, GeometryAnimation, apply_opening_animation},
   drag::DragState,
+  frames::map_rect,
   outputs::{
     OutputScene, WsetLabel, label_rect, overlaps, rasterize_label, translate,
   },
@@ -623,6 +624,22 @@ impl Frontend {
         .filter_map(|snapshot| {
           let texture = self.textures.get(&snapshot.id)?;
           let geometry = snapshot.geometry;
+          let content_rect = RenderRect {
+            x: geometry.x,
+            y: geometry.y,
+            width: geometry.width,
+            height: geometry.height,
+          };
+          // The window's geometry, which includes its frame if it has one.
+          let window_rect =
+            frames
+              .get(&snapshot.id)
+              .map_or(content_rect, |frame| RenderRect {
+                x: frame.rect.x,
+                y: frame.rect.y,
+                width: frame.rect.width,
+                height: frame.rect.height,
+              });
           let mut tile = RenderTile::textured(
             RenderRect {
               x: geometry.x,
@@ -704,14 +721,20 @@ impl Frontend {
             } else {
               1.0 - (1.0 - inactive_alpha) * progress
             };
+            // Scale lays out the window's geometry, its frame included,
+            // and the surface goes where the frame puts it.
+            let origin = state
+              .animation_origin
+              .get(&window)
+              .copied()
+              .unwrap_or(window_rect);
+            let target = map_rect(
+              content_rect,
+              window_rect,
+              interpolate_scale_rect(origin, *geometry, progress),
+            );
             for tile in &mut tiles {
-              let origin = state
-                .animation_origin
-                .get(&window)
-                .copied()
-                .unwrap_or(tile.geometry);
-              tile.geometry =
-                interpolate_scale_rect(origin, *geometry, progress);
+              tile.geometry = target;
               tile.color[3] *= opacity;
             }
           }
@@ -741,15 +764,17 @@ impl Frontend {
             let dragged = state
               .dragged_window()
               .filter(|(dragged, _, _)| *dragged == window);
+            // Expo lays out the window's geometry, its frame included,
+            // and the surface goes where the frame puts it.
+            let mut target =
+              crate::expo::interpolate_rect(origin, *geometry, progress);
+            if let Some((_, x, y)) = dragged {
+              target.x = (x - f64::from(target.width) / 2.0).round() as i32;
+              target.y = (y - f64::from(target.height) / 2.0).round() as i32;
+            }
+            let target = map_rect(content_rect, window_rect, target);
             for tile in &mut tiles {
-              tile.geometry =
-                crate::expo::interpolate_rect(origin, *geometry, progress);
-              if let Some((_, x, y)) = dragged {
-                tile.geometry.x =
-                  (x - f64::from(tile.geometry.width) / 2.0).round() as i32;
-                tile.geometry.y =
-                  (y - f64::from(tile.geometry.height) / 2.0).round() as i32;
-              }
+              tile.geometry = target;
               for component in &mut tile.color[..3] {
                 *component *= brightness;
               }
@@ -819,15 +844,9 @@ impl Frontend {
             && let Some(content) = tiles.last()
             && content.rotation == 0.0
           {
-            let surface = RenderRect {
-              x: geometry.x,
-              y: geometry.y,
-              width: geometry.width,
-              height: geometry.height,
-            };
             let mut framed = self.frame_textures.tiles(
               frame,
-              surface,
+              content_rect,
               content,
               &self.decoration_config,
               view.scale,
