@@ -401,6 +401,8 @@ pub(crate) fn rename(
   if let Some(output) = state.outputs.get_mut(id) {
     output.id = new_id.clone();
   }
+  crate::layer_shell::output_renamed(state, id, &new_id);
+  crate::shell::lock_output_renamed(state, id, &new_id);
   if state.active_output == *id {
     state.active_output = new_id.clone();
   }
@@ -422,14 +424,10 @@ pub(crate) fn rename(
 /// Tells the client of `output` that its surfaces, toplevels and workspace
 /// groups left it, and forgets its xdg-outputs.
 fn retire(state: &mut CompositorState, output: &WlOutput) {
-  let Some(client) = output.client().map(|client| client.id()) else {
+  if output.client().is_none() {
     return;
-  };
-  for surface in state.surfaces.values() {
-    if surface.client == client {
-      surface.resource.leave(output);
-    }
   }
+  // Surfaces leave it at the end of the turn (crate::surface_outputs).
   crate::foreign_toplevel::output_removed(state, output);
   crate::ext_workspace::output_removed(state, output);
   state.xdg_outputs.retain(|_, xdg_output| {
@@ -571,5 +569,7 @@ pub(crate) fn claim_parked(
 
 #[cfg(test)]
 mod multi_tests;
+#[cfg(test)]
+mod protocol_tests;
 #[cfg(test)]
 mod tests;

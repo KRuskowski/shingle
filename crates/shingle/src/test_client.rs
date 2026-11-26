@@ -19,11 +19,20 @@ use wayland_client::{
   },
 };
 use wayland_protocols::{
+  ext::session_lock::v1::client::{
+    ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+    ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
+    ext_session_lock_v1::{self, ExtSessionLockV1},
+  },
   wp::{
     commit_timing::v1::client::{
       wp_commit_timer_v1, wp_commit_timing_manager_v1,
     },
     fifo::v1::client::{wp_fifo_manager_v1, wp_fifo_v1},
+    fractional_scale::v1::client::{
+      wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+      wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
     linux_dmabuf::zv1::client::{
       zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1,
       zwp_linux_dmabuf_v1,
@@ -57,6 +66,10 @@ use wayland_protocols_wlr::{
     zwlr_data_control_manager_v1::ZwlrDataControlManagerV1,
     zwlr_data_control_offer_v1::{self, ZwlrDataControlOfferV1},
     zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
+  },
+  layer_shell::v1::client::{
+    zwlr_layer_shell_v1::ZwlrLayerShellV1,
+    zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
   },
   output_management::v1::client::{
     zwlr_output_configuration_head_v1::ZwlrOutputConfigurationHeadV1,
@@ -136,6 +149,18 @@ pub(crate) struct Events {
   /// `zwp_linux_buffer_params_v1` answers: the params and the created
   /// buffer, or `None` for `failed`.
   pub(crate) dmabuf_created: Vec<(ObjectId, Option<wl_buffer::WlBuffer>)>,
+  /// Every `wl_surface` event, with its surface.
+  pub(crate) surface: Vec<(ObjectId, wl_surface::Event)>,
+  /// Layer-surface configures: surface, serial, width and height.
+  pub(crate) layer_configures: Vec<(ObjectId, u32, u32, u32)>,
+  /// Layer surfaces that received `closed`.
+  pub(crate) layer_closed: Vec<ObjectId>,
+  /// `ext_session_lock_v1` events, as `locked` and `finished`.
+  pub(crate) lock: Vec<&'static str>,
+  /// Lock-surface configures: lock surface, serial, width and height.
+  pub(crate) lock_configures: Vec<(ObjectId, u32, u32, u32)>,
+  /// `wp_fractional_scale_v1.preferred_scale`, with its object.
+  pub(crate) preferred_scales: Vec<(ObjectId, u32)>,
   synced: bool,
 }
 
@@ -397,6 +422,50 @@ impl TestClient {
     );
     pool.destroy();
     buffer
+  }
+
+  /// Creates a `width` by `height` XRGB8888 shm buffer, which is opaque,
+  /// in a pool of its own, without attaching it.
+  pub(crate) fn opaque_buffer(
+    &self,
+    width: i32,
+    height: i32,
+  ) -> wl_buffer::WlBuffer {
+    let shm = self.bind::<wl_shm::WlShm>(1);
+    let size = width * height * 4;
+    let fd = rustix::fs::memfd_create(
+      "shingle-test-buffer",
+      rustix::fs::MemfdFlags::CLOEXEC,
+    )
+    .expect("memfd_create succeeds");
+    rustix::fs::ftruncate(&fd, size as u64).expect("ftruncate succeeds");
+    let pool =
+      shm.create_pool(rustix::fd::AsFd::as_fd(&fd), size, &self.handle, ());
+    let buffer = pool.create_buffer(
+      0,
+      width,
+      height,
+      width * 4,
+      wl_shm::Format::Xrgb8888,
+      &self.handle,
+      (),
+    );
+    pool.destroy();
+    buffer
+  }
+
+  /// The `wl_surface` events `surface` received, in order.
+  pub(crate) fn surface_events(
+    &self,
+    surface: &wl_surface::WlSurface,
+  ) -> Vec<&wl_surface::Event> {
+    self
+      .events
+      .surface
+      .iter()
+      .filter(|(id, _)| *id == surface.id())
+      .map(|(_, event)| event)
+      .collect()
   }
 
   /// Attaches and commits a `width` by `height` shm buffer on `surface`.
@@ -955,9 +1024,105 @@ macro_rules! ignore_events {
   };
 }
 
+impl Dispatch<wl_surface::WlSurface, ()> for Events {
+  fn event(
+    events: &mut Self,
+    surface: &wl_surface::WlSurface,
+    event: wl_surface::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.surface.push((surface.id(), event));
+  }
+}
+
+impl Dispatch<ZwlrLayerSurfaceV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    layer: &ZwlrLayerSurfaceV1,
+    event: zwlr_layer_surface_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      zwlr_layer_surface_v1::Event::Configure {
+        serial,
+        width,
+        height,
+      } => events
+        .layer_configures
+        .push((layer.id(), serial, width, height)),
+      zwlr_layer_surface_v1::Event::Closed => {
+        events.layer_closed.push(layer.id());
+      }
+      _ => {}
+    }
+  }
+}
+
+impl Dispatch<ExtSessionLockV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ExtSessionLockV1,
+    event: ext_session_lock_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      ext_session_lock_v1::Event::Locked => events.lock.push("locked"),
+      ext_session_lock_v1::Event::Finished => events.lock.push("finished"),
+      _ => {}
+    }
+  }
+}
+
+impl Dispatch<ExtSessionLockSurfaceV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    lock_surface: &ExtSessionLockSurfaceV1,
+    event: ext_session_lock_surface_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let ext_session_lock_surface_v1::Event::Configure {
+      serial,
+      width,
+      height,
+    } = event
+    {
+      events
+        .lock_configures
+        .push((lock_surface.id(), serial, width, height));
+    }
+  }
+}
+
+impl Dispatch<WpFractionalScaleV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    scale: &WpFractionalScaleV1,
+    event: wp_fractional_scale_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wp_fractional_scale_v1::Event::PreferredScale { scale: value } =
+      event
+    {
+      events.preferred_scales.push((scale.id(), value));
+    }
+  }
+}
+
 ignore_events!(
   wl_compositor::WlCompositor,
-  wl_surface::WlSurface,
+  ZwlrLayerShellV1,
+  ExtSessionLockManagerV1,
+  WpFractionalScaleManagerV1,
   wl_shm::WlShm,
   wl_shm_pool::WlShmPool,
   wl_seat::WlSeat,

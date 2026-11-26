@@ -1,6 +1,12 @@
+//! wlr-layer-shell: panels, backgrounds and overlays, each on one output
+//! (docs/design/multi-output.md, section 8). A surface goes on the output
+//! it names, else on the active output; its anchors, exclusive zone and
+//! the workarea it takes are its output's, and it is sent `closed` when
+//! that output goes.
+
 use std::collections::BTreeSet;
 
-use shingle_core::Rect;
+use shingle_core::{OutputId, Rect};
 use wayland_protocols_wlr::layer_shell::v1::server::{
   zwlr_layer_shell_v1::{self, ZwlrLayerShellV1},
   zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
@@ -45,6 +51,8 @@ impl LayerState {
 #[derive(Clone)]
 pub(crate) struct LayerRole {
   pub(crate) resource: ZwlrLayerSurfaceV1,
+  /// The output the surface is on.
+  pub(crate) output: OutputId,
   pub(crate) current: LayerState,
   pending: LayerState,
   serials: BTreeSet<u32>,
@@ -124,10 +132,11 @@ pub(crate) fn geometry(
   let Role::Layer(layer) = &surface.role else {
     return None;
   };
+  let output = state.outputs.get(&layer.output)?.rect;
   let area = if layer.current.exclusive_zone == 0 {
-    usable_output(state)
+    usable_output(state, &layer.output, output)
   } else {
-    state.primary().rect
+    output
   };
   let width = surface
     .buffer
@@ -169,25 +178,71 @@ pub(crate) fn geometry(
   Some(Rect::new(x, y, width, height))
 }
 
-/// Lays out every workspace set in its output's workarea: the first
-/// output's minus the exclusive zones of layer surfaces, which are all on
-/// it until they have outputs of their own (MO-3), and every other
-/// output's whole rectangle.
+/// Lays out every workspace set in its output's workarea: the output's
+/// rectangle minus the exclusive zones of the layer surfaces on it.
 pub(crate) fn update_workarea(state: &mut CompositorState) {
-  let workarea = usable_output(state);
-  let primary = state.primary().id.clone();
-  let others = state
+  let workareas = state
     .outputs
     .iter()
-    .filter(|output| output.id != primary)
-    .map(|output| (output.id.clone(), output.rect))
+    .map(|output| {
+      (
+        output.id.clone(),
+        usable_output(state, &output.id, output.rect),
+      )
+    })
     .collect::<Vec<_>>();
-  for (id, rect) in others {
-    let _ = state.core.set_output_workarea(&id, rect);
+  for (id, workarea) in workareas {
+    let _ = state.core.set_output_workarea(&id, workarea);
   }
-  if state.core.set_output_workarea(&primary, workarea).is_ok() {
-    shell::reconfigure_all(state);
-    reconfigure(state);
+  shell::reconfigure_all(state);
+  reconfigure(state);
+}
+
+/// Sends `closed` to every layer surface on output `id`, which is going,
+/// and forgets them, as Wayfire closes them; panels create new ones on
+/// the outputs that remain.
+pub(crate) fn output_removed(state: &mut CompositorState, id: &OutputId) {
+  let mut closed = false;
+  for surface in state.surfaces.values_mut() {
+    let Role::Layer(layer) = &surface.role else {
+      continue;
+    };
+    if layer.output != *id {
+      continue;
+    }
+    layer.resource.closed();
+    surface.role = Role::Dead;
+    surface.buffer = None;
+    closed = true;
+  }
+  if closed {
+    crate::input::sync_focus(state);
+  }
+}
+
+/// Moves the layer surfaces of output `old` to `new`, its new name.
+pub(crate) fn output_renamed(
+  state: &mut CompositorState,
+  old: &OutputId,
+  new: &OutputId,
+) {
+  for surface in state.surfaces.values_mut() {
+    if let Role::Layer(layer) = &mut surface.role
+      && layer.output == *old
+    {
+      layer.output = new.clone();
+    }
+  }
+}
+
+/// The output a layer surface is on.
+pub(crate) fn output_of(
+  state: &CompositorState,
+  object: &ObjectId,
+) -> Option<OutputId> {
+  match &state.surfaces.get(object)?.role {
+    Role::Layer(layer) => Some(layer.output.clone()),
+    _ => None,
   }
 }
 
@@ -237,8 +292,13 @@ pub(crate) fn assign_popup(
 }
 
 fn configure_surface(state: &mut CompositorState, object: &ObjectId) {
+  let Some(output) = output_of(state, object)
+    .and_then(|id| state.outputs.get(&id))
+    .map(|output| output.rect)
+  else {
+    return;
+  };
   let serial = state.serial();
-  let output = state.primary().rect;
   let Some(surface) = state.surfaces.get_mut(object) else {
     return;
   };
@@ -278,14 +338,16 @@ fn configured_size(output: Rect, layer: &LayerState) -> (u32, u32) {
   (width, height)
 }
 
-fn usable_output(state: &CompositorState) -> Rect {
-  let mut output = state.primary().rect;
+/// `output`, the rectangle of output `id`, minus the exclusive zones of
+/// the mapped layer surfaces on it.
+fn usable_output(state: &CompositorState, id: &OutputId, output: Rect) -> Rect {
+  let mut output = output;
   let mut surfaces = state
     .surfaces
     .values()
     .filter(|surface| surface.buffer.is_some())
     .filter_map(|surface| match &surface.role {
-      Role::Layer(layer) => Some(layer),
+      Role::Layer(layer) if layer.output == *id => Some(layer),
       _ => None,
     })
     .collect::<Vec<_>>();
@@ -395,6 +457,7 @@ impl Dispatch<ZwlrLayerShellV1, ()> for CompositorState {
       zwlr_layer_shell_v1::Request::GetLayerSurface {
         id,
         surface,
+        output,
         layer: WEnum::Value(layer),
         ..
       } => {
@@ -410,9 +473,19 @@ impl Dispatch<ZwlrLayerShellV1, ()> for CompositorState {
           return;
         }
         let layer_resource = data_init.init(id, ());
+        // The requested output, else the active one, as Wayfire chooses
+        // (src/view/layer-shell/layer-shell.cpp); an output that is gone
+        // counts as none.
+        let output = output
+          .and_then(|output| state.outputs.of_resource(&output))
+          .map_or_else(
+            || state.active().id.clone(),
+            |output| output.id.clone(),
+          );
         if let Some(surface) = state.surfaces.get_mut(&surface.id()) {
           surface.role = Role::Layer(Box::new(LayerRole {
             resource: layer_resource,
+            output,
             current: LayerState::new(layer),
             pending: LayerState::new(layer),
             serials: BTreeSet::new(),

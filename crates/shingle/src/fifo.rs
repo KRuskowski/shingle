@@ -26,6 +26,8 @@ use wayland_server::{
   backend::{ClientId, ObjectId},
 };
 
+use shingle_core::OutputId;
+
 use crate::{commit_queue::Blocker, state::CompositorState};
 
 /// One queued update's wait for the barrier.
@@ -90,11 +92,7 @@ pub(crate) fn blocker(
   {
     return None;
   }
-  let visible = state
-    .visible_surfaces()
-    .into_iter()
-    .any(|snapshot| state.surface_ids.get(&snapshot.id) == Some(object));
-  if !visible {
+  if !state.visible_anywhere(object) {
     return None;
   }
   let open = Rc::new(Cell::new(false));
@@ -122,16 +120,26 @@ pub(crate) fn applied(
   }
 }
 
-/// A frame was presented: on every surface with a set barrier, releases
-/// the queued updates up to and including the first that sets the
-/// barrier again, or clears the barrier if none does, and applies what is
-/// ready, before frame callbacks.
-pub(crate) fn frame(state: &mut CompositorState) {
+/// A frame was presented on `output`: on every surface with a set barrier
+/// whose primary output it is, releases the queued updates up to and
+/// including the first that sets the barrier again, or clears the barrier
+/// if none does, and applies what is ready, before frame callbacks.
+pub(crate) fn frame(state: &mut CompositorState, output: &OutputId) {
   let mut released = Vec::new();
-  for (object, fifo) in &mut state.fifo.surfaces {
-    if !fifo.barrier {
+  let paced = state
+    .fifo
+    .surfaces
+    .iter()
+    .filter(|(object, fifo)| {
+      fifo.barrier
+        && crate::surface_outputs::primary_of(state, object) == *output
+    })
+    .map(|(object, _)| object.clone())
+    .collect::<Vec<_>>();
+  for object in paced {
+    let Some(fifo) = state.fifo.surfaces.get_mut(&object) else {
       continue;
-    }
+    };
     let mut sets_barrier = false;
     while let Some(wait) = fifo.waiting.pop_front() {
       wait.open.set(true);
@@ -143,7 +151,7 @@ pub(crate) fn frame(state: &mut CompositorState) {
     if !sets_barrier {
       fifo.barrier = false;
     }
-    released.push(object.clone());
+    released.push(object);
   }
   for object in released {
     crate::commit_queue::process(state, &object);

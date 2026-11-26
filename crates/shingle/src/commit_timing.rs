@@ -22,6 +22,8 @@ use wayland_server::{
   backend::{ClientId, ObjectId},
 };
 
+use shingle_core::OutputId;
+
 use crate::{commit_queue::Blocker, state::CompositorState};
 
 /// The slop wlroots subtracts so that a deadline is not missed.
@@ -82,8 +84,13 @@ pub(crate) fn blocker(
   object: &ObjectId,
 ) -> Option<Box<dyn Blocker>> {
   let timestamp = state.surfaces.get(object)?.pending.timestamp?;
+  let primary = crate::surface_outputs::primary_of(state, object);
+  let refresh_mhz = state
+    .outputs
+    .get(&primary)
+    .map_or(0, |output| output.info.refresh_mhz);
   let refresh = Duration::from_nanos(u64::from(
-    crate::presentation::refresh_ns(state.primary().info.refresh_mhz),
+    crate::presentation::refresh_ns(refresh_mhz),
   ));
   let at = deadline(timestamp, refresh);
   if at <= now() + MINIMUM_WAIT {
@@ -99,9 +106,10 @@ pub(crate) fn blocker(
   Some(Box::new(Deadline { at, done }))
 }
 
-/// A frame was presented: applies, in order, the updates whose deadlines
-/// have come, before frame callbacks.
-pub(crate) fn frame(state: &mut CompositorState) {
+/// A frame was presented on `output`: applies, in order, the updates of
+/// the surfaces it is the primary output of whose deadlines have come,
+/// before frame callbacks.
+pub(crate) fn frame(state: &mut CompositorState, output: &OutputId) {
   let now = now();
   let mut due = Vec::new();
   for (object, timer) in &mut state.commit_timing.surfaces {
@@ -110,6 +118,9 @@ pub(crate) fn frame(state: &mut CompositorState) {
       due.push(object.clone());
     }
   }
+  due.retain(|object| {
+    crate::surface_outputs::primary_of(state, object) == *output
+  });
   for object in due {
     crate::commit_queue::process(state, &object);
   }

@@ -1,7 +1,12 @@
-use std::{collections::BTreeSet, sync::Mutex};
+use std::{
+  collections::{BTreeMap, BTreeSet},
+  sync::Mutex,
+};
 
 use shingle_config::RuleEvent;
-use shingle_core::{LaunchIdentity, LeafState, Rect, WindowId, WindowPresence};
+use shingle_core::{
+  LaunchIdentity, LeafState, OutputId, Rect, WindowId, WindowPresence,
+};
 use shingle_idle::LockState;
 use wayland_protocols::{
   ext::session_lock::v1::server::{
@@ -49,7 +54,10 @@ pub(crate) enum Role {
   },
   SessionLock {
     resource: ExtSessionLockSurfaceV1,
-    serials: BTreeSet<u32>,
+    /// The output the surface covers.
+    output: OutputId,
+    /// The configures not acknowledged yet, with the size each sent.
+    serials: BTreeMap<u32, (u32, u32)>,
     acked: Option<(u32, u32, u32)>,
   },
   /// A surface of Xwayland's, named by `xwayland_shell_v1`.
@@ -396,7 +404,9 @@ pub(crate) fn surface_geometry(
         height,
       ))
     }
-    Role::SessionLock { .. } => Some(state.primary().rect),
+    Role::SessionLock { output, .. } => {
+      state.outputs.get(output).map(|output| output.rect)
+    }
     _ => {
       let (width, height) = crate::viewport::dimensions(state, object)
         .unwrap_or_else(|| logical_buffer_dimensions(surface));
@@ -673,26 +683,74 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
   {
     return;
   }
+  finish_lock(state);
+}
+
+/// Sends `locked` once the pending lock's client covers every output that
+/// is not dark with a lock surface of its size whose buffer hides what is
+/// under it (ext-session-lock-v1; docs/design/multi-output.md, section
+/// 8). Outputs added later show the background until their surface comes.
+pub(crate) fn finish_lock(state: &mut CompositorState) {
+  if state.idle.lock_state() != LockState::Pending {
+    return;
+  }
   let Some(active) = state.active_lock.clone() else {
     return;
   };
   let Some(active_client) = active.client().map(|client| client.id()) else {
     return;
   };
-  let ready = state.surfaces.values().any(|surface| {
-    surface.client == active_client
-      && matches!(surface.role, Role::SessionLock { .. })
-      && surface.buffer.as_ref().is_some_and(|buffer| {
-        buffer.width == state.primary().rect.width
-          && buffer.height == state.primary().rect.height
-          && covers_opaquely(buffer)
-      })
-  });
+  let ready =
+    state
+      .outputs
+      .iter()
+      .filter(|output| !output.dark)
+      .all(|output| {
+        state.surfaces.values().any(|surface| {
+          surface.client == active_client
+            && matches!(
+              &surface.role,
+              Role::SessionLock { output: on, .. } if *on == output.id
+            )
+            && surface.buffer.as_ref().is_some_and(|buffer| {
+              buffer.width == output.rect.width
+                && buffer.height == output.rect.height
+                && covers_opaquely(buffer)
+            })
+        })
+      });
   if ready {
     state.idle.lock_surface_ready(state.now());
     active.locked();
     state.emit_idle_changes();
     crate::input::sync_focus(state);
+  }
+}
+
+/// Makes the lock surfaces on output `id`, which is going, inert: they
+/// are no longer drawn or configured, and the session stays locked.
+pub(crate) fn lock_output_removed(state: &mut CompositorState, id: &OutputId) {
+  for surface in state.surfaces.values_mut() {
+    if matches!(&surface.role, Role::SessionLock { output, .. } if output == id)
+    {
+      surface.role = Role::Dead;
+      surface.buffer = None;
+    }
+  }
+}
+
+/// Moves the lock surfaces of output `old` to `new`, its new name.
+pub(crate) fn lock_output_renamed(
+  state: &mut CompositorState,
+  old: &OutputId,
+  new: &OutputId,
+) {
+  for surface in state.surfaces.values_mut() {
+    if let Role::SessionLock { output, .. } = &mut surface.role
+      && output == old
+    {
+      *output = new.clone();
+    }
   }
 }
 
@@ -1049,8 +1107,15 @@ pub(crate) fn reconfigure_lock_surfaces(state: &mut CompositorState) {
 }
 
 fn configure_lock_surface(state: &mut CompositorState, object: &ObjectId) {
+  let Some(Role::SessionLock { output, .. }) =
+    state.surfaces.get(object).map(|surface| &surface.role)
+  else {
+    return;
+  };
+  let Some(rect) = state.outputs.get(output).map(|output| output.rect) else {
+    return;
+  };
   let serial = state.serial();
-  let output = state.primary().rect;
   let Some(surface) = state.surfaces.get_mut(object) else {
     return;
   };
@@ -1060,8 +1125,8 @@ fn configure_lock_surface(state: &mut CompositorState, object: &ObjectId) {
   else {
     return;
   };
-  resource.configure(serial, output.width, output.height);
-  serials.insert(serial);
+  resource.configure(serial, rect.width, rect.height);
+  serials.insert(serial, (rect.width, rect.height));
 }
 
 fn update_app_id(
@@ -2521,10 +2586,19 @@ impl Dispatch<ExtSessionLockV1, SessionLockData> for CompositorState {
       } => {
         let lock_surface = data_init.init(id, SessionLockSurfaceData);
         let object = surface.id();
-        let duplicate = state
-          .surfaces
-          .values()
-          .any(|surface| matches!(surface.role, Role::SessionLock { .. }));
+        let on = state
+          .outputs
+          .of_resource(&output)
+          .map(|output| output.id.clone());
+        // One lock surface per output, as the protocol requires.
+        let duplicate = on.as_ref().is_some_and(|on| {
+          state.surfaces.values().any(|surface| {
+            matches!(
+              &surface.role,
+              Role::SessionLock { output, .. } if output == on
+            )
+          })
+        });
         let invalid = state.surfaces.get(&object).is_none_or(|surface| {
           !matches!(surface.role, Role::None)
             || surface.committed_once
@@ -2544,17 +2618,18 @@ impl Dispatch<ExtSessionLockV1, SessionLockData> for CompositorState {
           );
           return;
         }
-        if !state.outputs.is_bound(&output.id()) {
+        let Some(on) = on else {
           resource.post_error(
             ext_session_lock_v1::Error::DuplicateOutput,
             "unknown or removed output",
           );
           return;
-        }
+        };
         if let Some(surface) = state.surfaces.get_mut(&object) {
           surface.role = Role::SessionLock {
             resource: lock_surface,
-            serials: BTreeSet::new(),
+            output: on,
+            serials: BTreeMap::new(),
             acked: None,
           };
         }
@@ -2619,18 +2694,17 @@ impl Dispatch<ExtSessionLockSurfaceV1, SessionLockSurfaceData>
         }
       }
       ext_session_lock_surface_v1::Request::AckConfigure { serial } => {
-        let output = state.primary().rect;
         if let Some(surface) = state.surfaces.get_mut(&object)
           && let Role::SessionLock { serials, acked, .. } = &mut surface.role
         {
-          if !serials.remove(&serial) {
+          if let Some((width, height)) = serials.remove(&serial) {
+            serials.retain(|candidate, _| *candidate > serial);
+            *acked = Some((serial, width, height));
+          } else {
             resource.post_error(
               ext_session_lock_surface_v1::Error::InvalidSerial,
               "configure serial was not sent or was already acknowledged",
             );
-          } else {
-            serials.retain(|candidate| *candidate > serial);
-            *acked = Some((serial, output.width, output.height));
           }
         }
       }

@@ -502,10 +502,15 @@ pub(crate) fn sync_focus(state: &mut CompositorState) {
         })
       });
       if !valid {
-        let target = state
-          .visible_surfaces()
-          .into_iter()
-          .find_map(|snapshot| state.surface_ids.get(&snapshot.id).cloned());
+        // The active output's lock surface, else any output's.
+        let mut outputs = vec![state.active().id.clone()];
+        outputs.extend(state.outputs.iter().map(|output| output.id.clone()));
+        let target = outputs.iter().find_map(|output| {
+          state
+            .visible_surfaces_on(output)
+            .into_iter()
+            .find_map(|snapshot| state.surface_ids.get(&snapshot.id).cloned())
+        });
         set_keyboard_focus(state, target.clone());
         set_pointer_focus(state, target);
       }
@@ -1592,9 +1597,13 @@ fn input_allowed(state: &CompositorState, object: &ObjectId) -> bool {
   }
 }
 
+/// The surface under layout point (`x`, `y`): among those drawn on the
+/// output there, else on the first output.
 fn surface_at(state: &CompositorState, x: f64, y: f64) -> Option<ObjectId> {
+  let output = crate::surface_outputs::output_at(state, x, y)
+    .unwrap_or_else(|| state.primary().id.clone());
   state
-    .visible_surfaces()
+    .visible_surfaces_on(&output)
     .into_iter()
     .rev()
     .filter(|snapshot| snapshot.role != crate::SurfaceRole::Cursor)

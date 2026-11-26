@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use wayland_protocols::wp::presentation_time::server::{
   wp_presentation::{self, WpPresentation},
@@ -65,33 +65,50 @@ impl Presented {
 }
 
 /// Sends feedback for a frame presented on output `id`: `presented`, with
-/// that output as `sync_output`, for surfaces in it, nothing yet for
-/// surfaces shown on another output, and `discarded` for the rest.
+/// that output as `sync_output`, for surfaces in it whose primary output
+/// it is (or whose primary output does not show them), nothing yet for
+/// surfaces whose feedback another output's frame gives, and `discarded`
+/// for surfaces shown nowhere.
 pub(crate) fn frame(
   state: &mut CompositorState,
   id: &shingle_core::OutputId,
   info: &PresentInfo,
 ) {
-  let visible = state
-    .visible_surfaces_on(id)
-    .into_iter()
-    .map(|surface| surface.id)
-    .collect::<HashSet<_>>();
-  let elsewhere = state
+  let shown = state
     .outputs
     .iter()
-    .filter(|output| output.id != *id)
     .map(|output| output.id.clone())
     .collect::<Vec<_>>()
-    .iter()
-    .flat_map(|other| state.visible_surfaces_on(other))
-    .map(|surface| surface.id)
-    .collect::<HashSet<_>>();
+    .into_iter()
+    .map(|output| {
+      let surfaces = state
+        .visible_surfaces_on(&output)
+        .into_iter()
+        .map(|surface| surface.id)
+        .collect::<HashSet<_>>();
+      (output, surfaces)
+    })
+    .collect::<HashMap<_, _>>();
   let pending = std::mem::take(&mut state.presentation.pending);
   let presented = Presented::new(info);
   for feedback in pending {
-    if !visible.contains(&feedback.surface) {
-      if elsewhere.contains(&feedback.surface) {
+    let here = shown
+      .get(id)
+      .is_some_and(|surfaces| surfaces.contains(&feedback.surface));
+    let primary = state
+      .surface_ids
+      .get(&feedback.surface)
+      .map(|object| crate::surface_outputs::primary_of(state, object));
+    let on_primary = primary.as_ref().is_some_and(|primary| {
+      shown
+        .get(primary)
+        .is_some_and(|surfaces| surfaces.contains(&feedback.surface))
+    });
+    if !here || (on_primary && primary.as_ref() != Some(id)) {
+      let elsewhere = shown.iter().any(|(output, surfaces)| {
+        output != id && surfaces.contains(&feedback.surface)
+      });
+      if elsewhere {
         state.presentation.pending.push(feedback);
       } else {
         feedback.resource.discarded();

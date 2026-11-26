@@ -128,6 +128,8 @@ pub(crate) fn remove(
     let target = state.core.wset_of(&state.active_output);
     unplug_wset(state, wset, target, policy)?;
   }
+  crate::layer_shell::output_removed(state, id);
+  crate::shell::lock_output_removed(state, id);
   retire_global(state, id);
   crate::output_management::output_removed(state, id);
   state.outputs.remove(id);
@@ -141,6 +143,7 @@ pub(crate) fn remove(
     "output": removed,
   }));
   crate::shell::reconfigure_all(state);
+  crate::shell::finish_lock(state);
   crate::input::sync_focus(state);
   Ok(())
 }

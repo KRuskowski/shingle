@@ -190,6 +190,8 @@ pub(crate) struct CompositorState {
   pub(crate) subsurface_order: HashMap<ObjectId, Vec<ObjectId>>,
   pub(crate) viewports: HashMap<ObjectId, crate::viewport::Viewport>,
   pub(crate) fractional_scales: HashMap<ObjectId, WpFractionalScaleV1>,
+  /// The outputs each surface was told it is on.
+  pub(crate) surface_outputs: crate::surface_outputs::SurfaceOutputs,
   pub(crate) surface_ids: HashMap<SurfaceId, ObjectId>,
   pub(crate) pools: HashMap<ObjectId, Arc<ShmPool>>,
   pub(crate) buffers: HashMap<ObjectId, Attachment>,
@@ -358,6 +360,7 @@ impl CompositorState {
       subsurface_order: HashMap::new(),
       viewports: HashMap::new(),
       fractional_scales: HashMap::new(),
+      surface_outputs: Default::default(),
       surface_ids: HashMap::new(),
       pools: HashMap::new(),
       buffers: HashMap::new(),
@@ -710,14 +713,25 @@ impl CompositorState {
     self.snapshot(object)
   }
 
+  /// Whether surface `object` is drawn on any output.
+  pub(crate) fn visible_anywhere(&self, object: &ObjectId) -> bool {
+    self.outputs.iter().any(|output| {
+      self
+        .visible_surfaces_on(&output.id)
+        .iter()
+        .any(|snapshot| self.surface_ids.get(&snapshot.id) == Some(object))
+    })
+  }
+
   pub(crate) fn visible_surfaces(&self) -> Vec<SurfaceSnapshot> {
     self.visible_surfaces_on(&self.primary().id)
   }
 
-  /// The surfaces to draw on output `id`, bottom to top. Until layer, lock
-  /// and X11 override-redirect surfaces and the cursor have outputs of
-  /// their own (MO-3), they are on the first output; other outputs show
-  /// the windows of their workspace sets. A dark output shows nothing.
+  /// The surfaces to draw on output `id`, bottom to top: its layer
+  /// surfaces, the windows of its workspace set, the unmanaged X windows
+  /// whose top-left corner is on it, and the cursor while the pointer is
+  /// on it. While the session is locked, only its lock surface. A dark
+  /// output shows nothing. Input-method panels are on the first output.
   pub(crate) fn visible_surfaces_on(
     &self,
     id: &OutputId,
@@ -730,15 +744,15 @@ impl CompositorState {
       return Vec::new();
     }
     if self.idle.lock_state() != LockState::Unlocked {
-      if !primary {
-        return Vec::new();
-      }
       let mut surfaces = self
         .surfaces
         .values()
         .filter(|surface| {
           surface.buffer.is_some()
-            && matches!(surface.role, Role::SessionLock { .. })
+            && matches!(
+              &surface.role,
+              Role::SessionLock { output, .. } if output == id
+            )
         })
         .collect::<Vec<_>>();
       surfaces.sort_by_key(|surface| surface.id);
@@ -748,9 +762,12 @@ impl CompositorState {
         .collect();
     }
     let mut snapshots = Vec::new();
-    if primary {
-      self.append_layers(&mut snapshots, &[Layer::Background, Layer::Bottom]);
-    }
+    self.append_layers(
+      &mut snapshots,
+      id,
+      primary,
+      &[Layer::Background, Layer::Bottom],
+    );
     let Ok(workspace) = self.core.current_workspace(id) else {
       return snapshots;
     };
@@ -843,18 +860,21 @@ impl CompositorState {
     // window, whose menus they may be.
     if let Some(object) = fullscreen {
       self.append_surface_and_popups(&object, &mut snapshots);
-    } else if primary {
-      self.append_layers(&mut snapshots, &[Layer::Top]);
-    }
-    if !primary {
-      return snapshots;
+    } else {
+      self.append_layers(&mut snapshots, id, primary, &[Layer::Top]);
     }
     for object in crate::xwayland::unmanaged::drawn(self) {
-      if let Some(snapshot) = self.snapshot(&object) {
+      if let Some(snapshot) = self.snapshot(&object)
+        && crate::surface_outputs::unmanaged_output(self, snapshot.geometry)
+          == *id
+      {
         snapshots.push(snapshot);
       }
     }
-    self.append_layers(&mut snapshots, &[Layer::Overlay]);
+    self.append_layers(&mut snapshots, id, primary, &[Layer::Overlay]);
+    if crate::surface_outputs::pointer_output(self) != *id {
+      return snapshots;
+    }
     if let Some(snapshot) = crate::cursor_shape::default_snapshot(self) {
       snapshots.push(snapshot);
     } else if let Some(object) = &self.input.cursor_surface
@@ -871,9 +891,13 @@ impl CompositorState {
     snapshots
   }
 
+  /// Appends the mapped layer surfaces of `layers` on output `id`, and
+  /// with `primary` the visible input-method panels among the overlays.
   fn append_layers(
     &self,
     snapshots: &mut Vec<SurfaceSnapshot>,
+    id: &OutputId,
+    primary: bool,
     layers: &[Layer],
   ) {
     let mut surfaces = self
@@ -882,9 +906,11 @@ impl CompositorState {
       .filter(|surface| {
         surface.buffer.is_some()
           && match &surface.role {
-            Role::Layer(layer) => layers.contains(&layer.current.layer),
+            Role::Layer(layer) => {
+              layer.output == *id && layers.contains(&layer.current.layer)
+            }
             Role::InputPanel(panel) => {
-              panel.visible && layers.contains(&Layer::Overlay)
+              primary && panel.visible && layers.contains(&Layer::Overlay)
             }
             _ => false,
           }
@@ -1099,7 +1125,6 @@ impl CompositorState {
     output.scale = scale;
     output.send_all();
     let rect = output.rect;
-    crate::fractional_scale::sync(self);
     crate::output_management::sync(self);
     self.events.push(Event::OutputChanged {
       output: crate::OutputHandle::from(id),
@@ -1547,22 +1572,6 @@ impl CompositorState {
       Vec::new()
     };
     self.frame_callbacks.extend(callbacks);
-    if let Some(surface) = self.surfaces.get(object) {
-      // Until surfaces enter outputs by overlap (MO-3), a toplevel is on its
-      // window's output and everything else on the first output.
-      let output = surface
-        .role
-        .toplevel()
-        .and_then(|toplevel| toplevel.window())
-        .map_or_else(|| self.primary(), |window| self.output_of_window(window));
-      for resource in output.bound.values() {
-        if resource.client().map(|client| client.id())
-          == Some(surface.client.clone())
-        {
-          surface.resource.enter(resource);
-        }
-      }
-    }
     crate::xwayland::windows::committed(self, object);
     shell::committed(self, object);
     crate::toplevel_icon::commit(self, object);

@@ -9,15 +9,6 @@ use wayland_server::{
 
 use crate::state::CompositorState;
 
-pub(crate) fn sync(state: &mut CompositorState) {
-  let scale = (state.primary().scale * 120.0)
-    .round()
-    .clamp(1.0, u32::MAX as f64) as u32;
-  for resource in state.fractional_scales.values() {
-    resource.preferred_scale(scale);
-  }
-}
-
 pub(crate) fn create_global(handle: &DisplayHandle) {
   handle
     .create_global::<CompositorState, WpFractionalScaleManagerV1, ()>(1, ());
@@ -74,12 +65,10 @@ impl Dispatch<WpFractionalScaleManagerV1, ()> for CompositorState {
           );
           return;
         }
+        // The preferred scale, that of the surface's output, is sent at
+        // the end of the turn (crate::surface_outputs::sync).
         let scale = data_init.init(id, ());
-        scale.preferred_scale(
-          (state.primary().scale * 120.0)
-            .round()
-            .clamp(1.0, u32::MAX as f64) as u32,
-        );
+        crate::surface_outputs::fractional_scale_created(state, &object);
         state.fractional_scales.insert(object, scale);
       }
       _ => {}

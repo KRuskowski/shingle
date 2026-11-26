@@ -1,0 +1,468 @@
+//! Client protocols with several outputs: surfaces entering and leaving
+//! outputs, preferred scales, layer and lock surfaces per output, and
+//! presentation, FIFO and commit timing by primary output
+//! (docs/design/multi-output.md, MO-3).
+
+use std::collections::HashMap;
+
+use shingle_core::{OutputId, WindowId, WorkspaceId};
+use wayland_client::{
+  Proxy,
+  protocol::{
+    wl_compositor::WlCompositor,
+    wl_output::{self, WlOutput},
+    wl_surface,
+  },
+};
+use wayland_protocols::{
+  ext::session_lock::v1::client::ext_session_lock_manager_v1 as lock_manager,
+  wp::{
+    fifo::v1::client::wp_fifo_manager_v1::WpFifoManagerV1,
+    fractional_scale::v1::client::wp_fractional_scale_manager_v1 as scales,
+    presentation_time::client::{
+      wp_presentation::WpPresentation, wp_presentation_feedback,
+    },
+  },
+};
+use wayland_protocols_wlr::layer_shell::v1::client::{
+  zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
+  zwlr_layer_surface_v1::{Anchor, ZwlrLayerSurfaceV1},
+};
+
+use super::{OutputHandle, OutputInfo};
+use crate::{
+  Compositor, Config,
+  test_client::{TestClient, Toplevel},
+  tests::test_compositor_with,
+};
+
+fn id(name: &str) -> OutputId {
+  OutputId::new(name)
+}
+
+/// A compositor with HEADLESS-1 (1280x720) and HEADLESS-2 (800x600) to
+/// its right.
+fn two_outputs() -> (Compositor, std::path::PathBuf) {
+  let (mut compositor, path) = test_compositor_with(Config::default());
+  compositor
+    .add_output(
+      OutputInfo {
+        name: "HEADLESS-2".into(),
+        ..OutputInfo::default()
+      },
+      (800, 600),
+    )
+    .expect("a second output");
+  (compositor, path)
+}
+
+/// Binds every `wl_output` global the client sees, by output name.
+fn bind_outputs(
+  compositor: &mut Compositor,
+  client: &mut TestClient,
+) -> HashMap<String, WlOutput> {
+  let globals = client
+    .events
+    .globals
+    .iter()
+    .filter(|(_, interface, _)| interface == "wl_output")
+    .map(|(name, ..)| *name)
+    .collect::<Vec<_>>();
+  let mut outputs = HashMap::new();
+  for global in globals {
+    client.events.output.clear();
+    let output = client.bind_name::<WlOutput>(global, 4);
+    client.roundtrip(compositor);
+    let name = client.events.output.iter().find_map(|event| match event {
+      wl_output::Event::Name { name } => Some(name.clone()),
+      _ => None,
+    });
+    outputs.insert(name.expect("a version 4 output is named"), output);
+  }
+  outputs
+}
+
+/// The outputs a surface entered and left, in order, by name.
+fn enters_and_leaves(
+  client: &TestClient,
+  surface: &wl_surface::WlSurface,
+  outputs: &HashMap<String, WlOutput>,
+) -> Vec<String> {
+  let name = |output: &WlOutput| {
+    outputs
+      .iter()
+      .find(|(_, candidate)| candidate.id() == output.id())
+      .map_or_else(|| "?".to_owned(), |(name, _)| name.clone())
+  };
+  client
+    .surface_events(surface)
+    .into_iter()
+    .filter_map(|event| match event {
+      wl_surface::Event::Enter { output } => {
+        Some(format!("enter {}", name(output)))
+      }
+      wl_surface::Event::Leave { output } => {
+        Some(format!("leave {}", name(output)))
+      }
+      _ => None,
+    })
+    .collect()
+}
+
+/// A mapped 64x64 toplevel and its window.
+fn mapped(
+  compositor: &mut Compositor,
+  client: &mut TestClient,
+  app_id: &str,
+) -> (Toplevel, WindowId) {
+  let toplevel = client.toplevel(compositor, app_id);
+  client.attach_buffer(compositor, &toplevel.surface, 64, 64);
+  client.roundtrip(compositor);
+  let window = compositor.focused_window().expect("the toplevel maps");
+  (toplevel, window)
+}
+
+/// Moves `window` to the current workspace of `output`'s set.
+fn move_to(compositor: &mut Compositor, window: WindowId, output: &str) {
+  let target = compositor.core().wset_of(&id(output)).unwrap();
+  compositor
+    .state
+    .core
+    .move_window_to_wset(window, target, WorkspaceId::ORIGIN)
+    .unwrap();
+  crate::shell::reconfigure_all(&mut compositor.state);
+}
+
+#[test]
+fn a_window_enters_the_output_it_is_shown_on_and_leaves_it() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let (toplevel, window) = mapped(&mut compositor, &mut client, "mover");
+  assert_eq!(
+    enters_and_leaves(&client, &toplevel.surface, &outputs),
+    ["enter HEADLESS-1"],
+    "only its own output, once, however often it commits"
+  );
+  client.attach_buffer(&mut compositor, &toplevel.surface, 64, 64);
+  move_to(&mut compositor, window, "HEADLESS-2");
+  client.roundtrip(&mut compositor);
+  assert_eq!(
+    enters_and_leaves(&client, &toplevel.surface, &outputs),
+    ["enter HEADLESS-1", "leave HEADLESS-1", "enter HEADLESS-2"]
+  );
+  // Another workspace of HEADLESS-2 hides it there.
+  let second = WorkspaceId::new(1, 0);
+  let core = &mut compositor.state.core;
+  core.ensure_workspace(&id("HEADLESS-2"), second).unwrap();
+  core
+    .set_current_workspace(&id("HEADLESS-2"), second)
+    .unwrap();
+  client.roundtrip(&mut compositor);
+  assert_eq!(
+    enters_and_leaves(&client, &toplevel.surface, &outputs).last(),
+    Some(&"leave HEADLESS-2".to_owned())
+  );
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_surface_leaves_an_output_that_goes() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let (toplevel, window) = mapped(&mut compositor, &mut client, "unplugged");
+  move_to(&mut compositor, window, "HEADLESS-2");
+  client.roundtrip(&mut compositor);
+  compositor
+    .remove_output(&OutputHandle::new("HEADLESS-2"))
+    .unwrap();
+  client.roundtrip(&mut compositor);
+  // Under `return` the window joins the active output.
+  assert_eq!(
+    enters_and_leaves(&client, &toplevel.surface, &outputs),
+    [
+      "enter HEADLESS-1",
+      "leave HEADLESS-1",
+      "enter HEADLESS-2",
+      "leave HEADLESS-2",
+      "enter HEADLESS-1",
+    ]
+  );
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn preferred_scales_are_those_of_the_windows_output() {
+  let (mut compositor, path) = two_outputs();
+  compositor
+    .state
+    .set_scale_of(&id("HEADLESS-2"), 2.0)
+    .unwrap();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let wl_compositor = client.bind::<WlCompositor>(6);
+  let manager = client.bind::<scales::WpFractionalScaleManagerV1>(1);
+  let wm_base =
+    client
+      .bind::<wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase>(1);
+  let surface = wl_compositor.create_surface(&client.handle, ());
+  let scale = manager.get_fractional_scale(&surface, &client.handle, ());
+  let xdg_surface = wm_base.get_xdg_surface(&surface, &client.handle, ());
+  let _toplevel = xdg_surface.get_toplevel(&client.handle, ());
+  surface.commit();
+  client.roundtrip(&mut compositor);
+  client.attach_buffer(&mut compositor, &surface, 64, 64);
+  let window = compositor.focused_window().unwrap();
+  let scales = |client: &TestClient| {
+    client
+      .events
+      .preferred_scales
+      .iter()
+      .filter(|(object, _)| *object == scale.id())
+      .map(|(_, value)| *value)
+      .collect::<Vec<_>>()
+  };
+  let buffer_scales = |client: &TestClient| {
+    client
+      .surface_events(&surface)
+      .into_iter()
+      .filter_map(|event| match event {
+        wl_surface::Event::PreferredBufferScale { factor } => Some(*factor),
+        _ => None,
+      })
+      .collect::<Vec<_>>()
+  };
+  assert_eq!(scales(&client), [120], "HEADLESS-1 has scale 1");
+  assert!(buffer_scales(&client).is_empty(), "1 is the default");
+  move_to(&mut compositor, window, "HEADLESS-2");
+  client.roundtrip(&mut compositor);
+  assert_eq!(scales(&client), [120, 240]);
+  assert_eq!(buffer_scales(&client), [2]);
+  let _ = std::fs::remove_file(path);
+}
+
+/// A layer surface on `output` (or the active output) anchored to the top
+/// edge, 30 pixels high with an exclusive zone of 30.
+fn panel(
+  compositor: &mut Compositor,
+  client: &mut TestClient,
+  output: Option<&WlOutput>,
+) -> (wl_surface::WlSurface, ZwlrLayerSurfaceV1) {
+  let wl_compositor = client.bind::<WlCompositor>(4);
+  let shell = client.bind::<ZwlrLayerShellV1>(4);
+  let surface = wl_compositor.create_surface(&client.handle, ());
+  let layer = shell.get_layer_surface(
+    &surface,
+    output,
+    Layer::Top,
+    "panel".into(),
+    &client.handle,
+    (),
+  );
+  layer.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+  layer.set_size(0, 30);
+  layer.set_exclusive_zone(30);
+  surface.commit();
+  client.roundtrip(compositor);
+  (surface, layer)
+}
+
+#[test]
+fn a_layer_surface_is_on_its_output_and_closed_when_it_goes() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let (surface, layer) =
+    panel(&mut compositor, &mut client, Some(&outputs["HEADLESS-2"]));
+  let &(_, serial, width, height) = client
+    .events
+    .layer_configures
+    .last()
+    .expect("the panel is configured");
+  assert_eq!((width, height), (800, 30), "HEADLESS-2's width");
+  layer.ack_configure(serial);
+  client.attach_buffer(&mut compositor, &surface, 800, 30);
+  client.roundtrip(&mut compositor);
+  let workarea = |compositor: &Compositor, output: &str| {
+    compositor
+      .core()
+      .tree(&id(output), WorkspaceId::ORIGIN)
+      .unwrap()
+      .workarea()
+  };
+  assert_eq!(
+    workarea(&compositor, "HEADLESS-2"),
+    shingle_core::Rect::new(1280, 30, 800, 570)
+  );
+  assert_eq!(
+    workarea(&compositor, "HEADLESS-1"),
+    shingle_core::Rect::new(0, 0, 1280, 720)
+  );
+  let drawn = |compositor: &Compositor, output: &str| {
+    compositor
+      .visible_surfaces_on(&OutputHandle::new(output))
+      .iter()
+      .any(|snapshot| snapshot.role == crate::SurfaceRole::LayerShell)
+  };
+  assert!(
+    drawn(&compositor, "HEADLESS-2") && !drawn(&compositor, "HEADLESS-1")
+  );
+  let geometry = compositor
+    .visible_surfaces_on(&OutputHandle::new("HEADLESS-2"))
+    .into_iter()
+    .find(|snapshot| snapshot.role == crate::SurfaceRole::LayerShell)
+    .unwrap()
+    .geometry;
+  assert_eq!(geometry, shingle_core::Rect::new(1280, 0, 800, 30));
+  assert_eq!(
+    enters_and_leaves(&client, &surface, &outputs),
+    ["enter HEADLESS-2"]
+  );
+  compositor
+    .remove_output(&OutputHandle::new("HEADLESS-2"))
+    .unwrap();
+  client.roundtrip(&mut compositor);
+  assert_eq!(client.events.layer_closed, [layer.id()]);
+  assert!(!drawn(&compositor, "HEADLESS-1"));
+  // Without an output, the next panel goes on the active output.
+  let (_surface, _layer) = panel(&mut compositor, &mut client, None);
+  let (_, _, width, _) = *client.events.layer_configures.last().unwrap();
+  assert_eq!(width, 1280);
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn every_output_gets_a_lock_surface_before_the_session_is_locked() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let wl_compositor = client.bind::<WlCompositor>(4);
+  let manager = client.bind::<lock_manager::ExtSessionLockManagerV1>(1);
+  let lock = manager.lock(&client.handle, ());
+  let mut surfaces = Vec::new();
+  for name in ["HEADLESS-1", "HEADLESS-2"] {
+    let surface = wl_compositor.create_surface(&client.handle, ());
+    let lock_surface =
+      lock.get_lock_surface(&surface, &outputs[name], &client.handle, ());
+    surfaces.push((surface, lock_surface));
+  }
+  client.roundtrip(&mut compositor);
+  let sizes = client
+    .events
+    .lock_configures
+    .iter()
+    .map(|(_, _, width, height)| (*width, *height))
+    .collect::<Vec<_>>();
+  assert_eq!(sizes, [(1280, 720), (800, 600)]);
+  let configures = client.events.lock_configures.clone();
+  for ((surface, lock_surface), (_, serial, width, height)) in
+    surfaces.iter().zip(&configures)
+  {
+    lock_surface.ack_configure(*serial);
+    let buffer = client.opaque_buffer(*width as i32, *height as i32);
+    surface.attach(Some(&buffer), 0, 0);
+    surface.commit();
+    client.roundtrip(&mut compositor);
+    if lock_surface.id() == surfaces[0].1.id() {
+      assert!(client.events.lock.is_empty(), "HEADLESS-2 is not covered");
+    }
+  }
+  assert_eq!(client.events.lock, ["locked"]);
+  for name in ["HEADLESS-1", "HEADLESS-2"] {
+    let drawn = compositor.visible_surfaces_on(&OutputHandle::new(name));
+    assert_eq!(drawn.len(), 1, "{name} shows its own lock surface");
+    assert_eq!(drawn[0].role, crate::SurfaceRole::SessionLock);
+  }
+  // An output that goes takes its lock surface; the session stays locked.
+  compositor
+    .remove_output(&OutputHandle::new("HEADLESS-2"))
+    .unwrap();
+  client.roundtrip(&mut compositor);
+  assert!(compositor.is_locked());
+  // A second lock surface on one output is a protocol error.
+  let surface = wl_compositor.create_surface(&client.handle, ());
+  let _second =
+    lock.get_lock_surface(&surface, &outputs["HEADLESS-1"], &client.handle, ());
+  let error = client.protocol_error(&mut compositor);
+  assert!(
+    error.is_some_and(|error| error.message.contains("already has")),
+    "duplicate_output"
+  );
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn presentation_feedback_follows_the_primary_output() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let (toplevel, window) = mapped(&mut compositor, &mut client, "paced");
+  move_to(&mut compositor, window, "HEADLESS-2");
+  client.roundtrip(&mut compositor);
+  let presentation = client.bind::<WpPresentation>(2);
+  presentation.feedback(&toplevel.surface, &client.handle, ());
+  toplevel.surface.commit();
+  client.roundtrip(&mut compositor);
+  client.events.feedback.clear();
+  compositor.frame_now(&OutputHandle::new("HEADLESS-1"));
+  client.roundtrip(&mut compositor);
+  assert!(client.events.feedback.is_empty(), "not HEADLESS-1's frame");
+  compositor.frame_now(&OutputHandle::new("HEADLESS-2"));
+  client.roundtrip(&mut compositor);
+  let synced = client.events.feedback.iter().find_map(|event| match event {
+    wp_presentation_feedback::Event::SyncOutput { output } => Some(output.id()),
+    _ => None,
+  });
+  assert_eq!(synced, Some(outputs["HEADLESS-2"].id()));
+  assert!(client.events.feedback.iter().any(|event| matches!(
+    event,
+    wp_presentation_feedback::Event::Presented { .. }
+  )));
+  let object = compositor
+    .state
+    .surfaces
+    .keys()
+    .find(|object| {
+      compositor.state.surfaces[*object]
+        .role
+        .toplevel()
+        .and_then(|toplevel| toplevel.window())
+        == Some(window)
+    })
+    .cloned()
+    .unwrap();
+  assert_eq!(
+    crate::surface_outputs::primary_of(&compositor.state, &object),
+    id("HEADLESS-2")
+  );
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn fifo_barriers_wait_for_the_frames_of_the_primary_output() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let (toplevel, window) = mapped(&mut compositor, &mut client, "fifo");
+  move_to(&mut compositor, window, "HEADLESS-2");
+  client.roundtrip(&mut compositor);
+  let manager = client.bind::<WpFifoManagerV1>(1);
+  let fifo = manager.get_fifo(&toplevel.surface, &client.handle, ());
+  let buffers = [0; 2].map(|_| client.shm_buffer(64, 64));
+  client.roundtrip(&mut compositor);
+  let surface = &toplevel.surface;
+  surface.attach(Some(&buffers[0]), 0, 0);
+  fifo.set_barrier();
+  surface.commit();
+  surface.attach(Some(&buffers[1]), 0, 0);
+  fifo.wait_barrier();
+  surface.commit();
+  client.roundtrip(&mut compositor);
+  assert!(compositor.needs_frame(), "the second update waits");
+  compositor.frame_now(&OutputHandle::new("HEADLESS-1"));
+  client.roundtrip(&mut compositor);
+  assert!(compositor.needs_frame(), "HEADLESS-1 does not show it");
+  compositor.frame_now(&OutputHandle::new("HEADLESS-2"));
+  client.roundtrip(&mut compositor);
+  assert!(!compositor.needs_frame());
+  let _ = std::fs::remove_file(path);
+}

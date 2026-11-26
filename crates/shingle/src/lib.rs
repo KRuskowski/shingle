@@ -91,6 +91,7 @@ mod shortcuts;
 mod single_pixel_buffer;
 mod state;
 mod subsurface;
+mod surface_outputs;
 mod tearing;
 #[cfg(test)]
 mod test_client;
@@ -1317,6 +1318,7 @@ impl Compositor {
     input_method::sync(&mut self.state, &self.display.handle());
     input_method_v2::sync(&mut self.state);
     input_panel::sync(&mut self.state);
+    surface_outputs::sync(&mut self.state);
     foreign_toplevel::sync(&mut self.state, &self.display.handle());
     ext_workspace::sync(&mut self.state, &self.display.handle());
     data_device::sync_selection(&mut self.state, &self.display.handle());
@@ -1384,10 +1386,11 @@ impl Compositor {
   /// callbacks, with `info.time` in milliseconds, and their
   /// `wp_presentation` feedback, with every field of `info` and the output
   /// as `sync_output`. Surfaces hidden everywhere keep their callbacks for
-  /// a later frame, and their feedback is discarded; those shown on another
-  /// output wait for its frame. FIFO and commit-timing barriers waiting for
-  /// a frame are released by the first output's frames, until surfaces
-  /// follow their own output's (MO-3). A dark output presents nothing.
+  /// a later frame, and their feedback is discarded. Feedback, FIFO
+  /// barriers and commit-timing deadlines follow each surface's primary
+  /// output, the one it overlaps most: a surface also shown on another
+  /// output gets its feedback from its primary output's frame, as
+  /// wlroots' scene gives it. A dark output presents nothing.
   ///
   /// Does nothing while the session is inactive
   /// ([`Compositor::set_session_active`]).
@@ -1399,10 +1402,8 @@ impl Compositor {
     if self.state.outputs.get(&id).is_none_or(|output| output.dark) {
       return;
     }
-    if self.state.primary().id == id {
-      commit_timing::frame(&mut self.state);
-      fifo::frame(&mut self.state);
-    }
+    commit_timing::frame(&mut self.state, &id);
+    fifo::frame(&mut self.state, &id);
     self.state.buffer_releases.flush();
     let time = clock::millis(info.time);
     let visible = self
