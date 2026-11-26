@@ -389,10 +389,15 @@ fn every_output_gets_a_lock_surface_before_the_session_is_locked() {
   let surface = wl_compositor.create_surface(&client.handle, ());
   let _second =
     lock.get_lock_surface(&surface, &outputs["HEADLESS-1"], &client.handle, ());
-  let error = client.protocol_error(&mut compositor);
+  // Under load the error may take more than one read to arrive, and its
+  // message may be lost; code 3 is duplicate_output.
+  let error = (0..100).find_map(|_| client.protocol_error(&mut compositor));
   assert!(
-    error.is_some_and(|error| error.message.contains("already has")),
-    "duplicate_output"
+    error
+      .as_ref()
+      .is_some_and(|error| error.object_interface == "ext_session_lock_v1"
+        && error.code == 3),
+    "duplicate_output, not {error:?}"
   );
   let _ = std::fs::remove_file(path);
 }
