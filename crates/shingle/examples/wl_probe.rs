@@ -15,7 +15,8 @@
 //! wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern] [--fifo]
 //!          [--damage] [--animate FRAMES] [--presentation]
 //!          [--report-outputs] [--layer OUTPUT] [--fullscreen]
-//!          [--decoration server|client] [--drag TEXT] [--drop]
+//!          [--decoration server|client] [--drag TEXT] [--drag-icon]
+//!          [--drop]
 //! ```
 //!
 //! With `--drag TEXT`, a press of the first button on the probe starts a
@@ -23,7 +24,11 @@
 //! `text/plain;charset=utf-8` with the copy action, which answers each
 //! `send` with TEXT. It reports `drag_started`, the source's `drag_target`
 //! (mime, or null), `drag_action` (action bits), `drag_drop_performed`,
-//! `drag_finished`, `cancelled` and `send` (mime). With `--drop`, the
+//! `drag_finished`, `cancelled` and `send` (mime). With `--drag-icon`
+//! the drag has an icon: a magenta 32x32 surface centred on the pointer
+//! (attached 16 pixels up and left of it), reported as `drag_icon`, as
+//! the drag icon checks of WG-10 (docs/design/wayfire-gaps.md) look for
+//! it in captures. With `--drop`, the
 //! probe accepts drags that offer `text/plain;charset=utf-8` with the
 //! copy action; it reports `drop_enter` (types), `drop_leave` and `drop`,
 //! reads the data and reports it as `dropped` (text) before it calls
@@ -193,9 +198,14 @@ struct Options {
   decoration: Option<bool>,
   /// Text to drag on a press of the first button.
   drag: Option<String>,
+  /// Gives the drag an icon.
+  drag_icon: bool,
   /// Accepts text drags and reports what is dropped.
   drop: bool,
 }
+
+/// The size of the `--drag-icon` icon.
+const DRAG_ICON_SIZE: i32 = 32;
 
 /// The XRGB8888 bytes (B, G, R, X) of pixel (`x`, `y`) of a `width` by
 /// `height` quadrant pattern.
@@ -261,6 +271,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         options.drag =
           Some(arguments.next().ok_or("--drag needs a text")?.clone());
       }
+      "--drag-icon" => options.drag_icon = true,
       "--drop" => options.drop = true,
       "--animate" => {
         let value = arguments.next().ok_or("--animate needs a number")?;
@@ -346,6 +357,10 @@ struct Probe {
   drag_text: Option<String>,
   /// The source of the drag started, if any.
   drag_source: Option<wl_data_source::WlDataSource>,
+  /// Whether `--drag-icon` gives the drag an icon.
+  drag_icon: bool,
+  /// The icon surface, made for the first drag and kept for the next.
+  icon: Option<wl_surface::WlSurface>,
   /// Whether `--drop` accepts drags.
   drop_target: bool,
   /// The types each data offer announced.
@@ -355,6 +370,50 @@ struct Probe {
 }
 
 impl Probe {
+  /// The `--drag-icon` surface with its magenta buffer attached 16 pixels
+  /// up and left of where it is, to commit once the drag started; made
+  /// once and reused, as the protocol allows. None after reporting an
+  /// error.
+  fn drag_icon_surface(
+    &mut self,
+    handle: &QueueHandle<Self>,
+  ) -> Option<wl_surface::WlSurface> {
+    if self.icon.is_none() {
+      let compositor = self.compositor.as_ref()?;
+      self.icon = Some(compositor.create_surface(handle, ()));
+    }
+    let icon = self.icon.clone()?;
+    let shm = self.shm.as_ref()?;
+    let size = DRAG_ICON_SIZE;
+    let Ok(fd) = rustix::fs::memfd_create(
+      "wl-probe-drag-icon",
+      rustix::fs::MemfdFlags::CLOEXEC,
+    ) else {
+      report("error", &[("text", "\"memfd_create failed\"".into())]);
+      return None;
+    };
+    let mut file = std::fs::File::from(fd);
+    // XRGB8888 bytes B, G, R, X: magenta.
+    let _ =
+      file.write_all(&[0xff, 0, 0xff, 0xff].repeat((size * size) as usize));
+    let pool = shm.create_pool(file.as_fd(), size * size * 4, handle, ());
+    let buffer = pool.create_buffer(
+      0,
+      size,
+      size,
+      size * 4,
+      wl_shm::Format::Xrgb8888,
+      handle,
+      (),
+    );
+    pool.destroy();
+    // wl_compositor version 4 moves a surface by its attach offset; each
+    // drag starts the icon at the pointer, so this centres it there.
+    icon.attach(Some(&buffer), -size / 2, -size / 2);
+    icon.damage_buffer(0, 0, size, size);
+    Some(icon)
+  }
+
   /// A pool holding `count` white or patterned buffers of `width` by
   /// `height`, one after the other, or None after reporting an error.
   fn pool(
@@ -679,7 +738,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
     let (Some(text), None) = (&probe.drag_text, &probe.drag_source) else {
       return;
     };
-    let (Some(manager), Some(device), Some(surface)) =
+    let (Some(manager), Some(_), Some(_)) =
       (&probe.data_device_manager, &probe.device, &probe.surface)
     else {
       return;
@@ -687,8 +746,22 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
     let source = manager.create_data_source(handle, ());
     source.offer(COPY_TYPE.into());
     source.set_actions(wl_data_device_manager::DndAction::Copy);
-    device.start_drag(Some(&source), surface, None, serial);
-    report("drag_started", &[("text", format!("{text:?}"))]);
+    let text = format!("{text:?}");
+    let icon = if probe.drag_icon {
+      probe.drag_icon_surface(handle)
+    } else {
+      None
+    };
+    let (Some(device), Some(surface)) = (&probe.device, &probe.surface) else {
+      return;
+    };
+    device.start_drag(Some(&source), surface, icon.as_ref(), serial);
+    report("drag_started", &[("text", text)]);
+    if let Some(icon) = icon {
+      // The icon moves by the commits after `start_drag`, as in wlroots.
+      icon.commit();
+      report("drag_icon", &[("size", DRAG_ICON_SIZE.to_string())]);
+    }
     probe.drag_source = Some(source);
   }
 }
@@ -1301,6 +1374,7 @@ fn run(options: &Options) -> Result<(), String> {
     report_outputs: options.report_outputs || options.layer.is_some(),
     wants_presentation: options.presentation,
     drag_text: options.drag.clone(),
+    drag_icon: options.drag_icon,
     drop_target: options.drop,
     ..Probe::default()
   };
@@ -1466,12 +1540,17 @@ mod tests {
         fullscreen: false,
         decoration: None,
         drag: None,
+        drag_icon: false,
         drop: false,
       }
     );
     let options = parse(&arguments(&["--drag", "text", "--drop"])).unwrap();
     assert_eq!(options.drag.as_deref(), Some("text"));
     assert!(options.drop);
+    assert!(!options.drag_icon);
+    let options =
+      parse(&arguments(&["--drag", "text", "--drag-icon"])).unwrap();
+    assert!(options.drag_icon);
     assert!(parse(&arguments(&["--drag"])).is_err());
     assert!(parse(&arguments(&["--fullscreen"])).unwrap().fullscreen);
     assert_eq!(

@@ -757,11 +757,12 @@ def all_checks():
   (dmabuf_checks.py), MO-5's (output_checks.py), MO-6's
   (nested_output_checks.py), WG-2's (wayfire_checks.py), WG-5's
   (vswipe_checks.py), WG-6's (decoration_checks.py), WG-7's
-  (switcher_checks.py), and the Wayfire comparisons of configured
-  colours (colour_checks.py) and of focus after a minimize
-  (focus_checks.py)."""
+  (switcher_checks.py), WG-10's (drag_icon_checks.py), and the Wayfire
+  comparisons of configured colours (colour_checks.py) and of focus
+  after a minimize (focus_checks.py)."""
   import colour_checks
   import decoration_checks
+  import drag_icon_checks
   import dmabuf_checks
   import focus_checks
   import nested_output_checks
@@ -773,7 +774,7 @@ def all_checks():
           **nested_output_checks.CHECKS, **wayfire_checks.CHECKS,
           **vswipe_checks.CHECKS, **decoration_checks.CHECKS,
           **switcher_checks.CHECKS, **colour_checks.CHECKS,
-          **focus_checks.CHECKS}
+          **focus_checks.CHECKS, **drag_icon_checks.CHECKS}
 
 def run_checks(groups, binary, wl_probe, captures_directory=None):
   """Runs the check `groups` in order; returns 0 when all passed."""
