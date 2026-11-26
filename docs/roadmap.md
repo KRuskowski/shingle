@@ -68,9 +68,18 @@ XW-6 is next, when drag and drop between X and Wayland is wanted; XW-7 waits for
 
 ## 5. Multi-output
 
-Complete output lifecycle, focus, workspaces, sessions and rendering across outputs, including headless outputs over IPC where Wayfire offers them.
+Complete output lifecycle, focus, workspaces, sessions and rendering across outputs, including headless outputs over IPC where Wayfire offers them. The design is [design/multi-output.md](design/multi-output.md), from 2026-11-26; its [open questions](design/multi-output.md#open-questions) wait for the operator.
 
-The configuration already keeps one entry per `[output:NAME]` section (NB-9, `ShingleConfig::outputs`), and the native backend's output model is per connector; what remains is in `shingle` and `shingle-core`: more than one output rectangle, per-output `wl_output` globals and frame callbacks, and lighting more than one connector.
+In short:
+
+- **Model.** The compositor keeps a map of outputs, each with its own rectangle, scale, transform, IPC id, `wl_output` global and protocol state. `[output:NAME] position` gains Wayfire's default `auto`, placed as wlroots does.
+- **Workspace sets.** The core separates workspace sets (Wayfire's wsets, each with a tiling tree per workspace) from outputs; each output shows one set, and a set without an output is parked.
+- **Focus and moving views.** One active output, changed by a click, a touch, a focused view, `oswitch` or IPC, as in Wayfire. Views move between outputs with Wayfire's `move_view_to_output` rules, through `oswitch`, IPC, `wsets`, `start_on_output` and drags.
+- **Unplug and replug.** `outputs.unplug` is `move` (Wayfire's default), `park` (Wayfire's preserve-output) or `return` (proposed default: windows join the active output and go back to their trees when the monitor returns, matched by EDID identity, else by name). Sessions store sets with their output's name and identity.
+- **Rendering.** One scene per output, clipped to it; frame callbacks per output and presentation from each surface's primary output. Nested opens one window per output, native lights one CRTC per output with wlroots' CRTC matching and combined `TEST_ONLY` modesets, and headless and offscreen take `--outputs N`.
+- **IPC.** Real output ids and wset indices, six new methods (headless and nested outputs, `wsets`) and six new events, and Wayfire's payloads for `output-layout-changed` and `wset-workspace-changed`.
+
+The work is split into seven workspaces, MO-1 to MO-7, each with acceptance criteria in the design: core workspace sets and sessions, the compositor's output registry, client protocols per output, focus and moving views, the frontend's scenes per output with the offscreen backend, nested windows, and native multi-CRTC. All but MO-7 are verified on this host with headless, offscreen and nested Shingle inside the harness namespaces; MO-7 needs the test machine. Mirroring is a later, optional MO-8.
 
 ## 6. Remaining Wayfire compatibility
 
