@@ -16,6 +16,13 @@ wgpu.workspace = true
 [dev-dependencies]
 pollster.workspace = true
 rustix.workspace = true
+# The frame layout and its pixels, for the pinned frame in
+# tests/offscreen_pixels.rs. The cycle is a dev-dependency only, and the
+# integration tests link the one shingle-render the frontend uses.
+shingle = { path = "../shingle" }
+shingle-config = { path = "../shingle-config" }
+shingle-core = { path = "../shingle-core" }
+shingle-frontend = { path = "../shingle-frontend" }
 
 [lints]
 workspace = true

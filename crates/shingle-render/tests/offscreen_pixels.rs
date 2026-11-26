@@ -222,6 +222,96 @@ fn nearest_filter_and_inversion_match_reference() {
   check_golden("nearest_inverted", &rgba);
 }
 
+/// A decorated window as the frontend draws it: the checker as its
+/// client, inside a frame with Wayfire's translucent active colour, a
+/// title and three buttons, the close button hovered, on a small theme
+/// that fits the scene.
+fn frame_scene(gpu: &GpuContext, state: &RenderState) -> Vec<u8> {
+  use shingle::frame::{FrameLayout, FrameSnapshot, FrameTheme};
+  use shingle_frontend::frame_raster::{self, FramePiece, TitleStyle};
+  let config = shingle_config::DecorationConfig {
+    title_height: 14,
+    border_size: 2,
+    button_padding: 2,
+    ..shingle_config::DecorationConfig::default()
+  };
+  let theme = FrameTheme::new(&config);
+  let outer = shingle_core::Rect::new(2, 2, 92, 60);
+  let frame = FrameSnapshot {
+    window: shingle::WindowId(1),
+    rect: outer,
+    margins: theme.margins(),
+    activated: true,
+    title: "Shingle".into(),
+    layout: FrameLayout::new(&theme, outer.width, outer.height, false, true),
+    hovered: Some(0),
+    pressed: None,
+  };
+  let filter = state.texture_filter();
+  let checker = gpu
+    .create_texture(4, 4, &checker_rgba(), filter)
+    .expect("texture upload");
+  let pieces = frame_raster::frame_pieces(&frame, &config);
+  let textures = pieces
+    .iter()
+    .map(|piece| match piece {
+      FramePiece::Fill { .. } => None,
+      FramePiece::Title { rect } => frame_raster::rasterize_title(
+        &frame.title,
+        rect.width,
+        rect.height,
+        &TitleStyle::new(&config),
+      )
+      .map(|raster| {
+        gpu
+          .create_texture(raster.width, raster.height, &raster.rgba, filter)
+          .expect("title upload")
+      }),
+      FramePiece::Button { button, look, .. } => {
+        let size = config.title_height;
+        let rgba = frame_raster::rasterize_button(*button, *look, size);
+        Some(
+          gpu
+            .create_texture(size, size, &rgba, filter)
+            .expect("button upload"),
+        )
+      }
+    })
+    .collect::<Vec<_>>();
+  let at = |rect: shingle_core::Rect| RenderRect {
+    x: rect.x,
+    y: rect.y,
+    width: rect.width,
+    height: rect.height,
+  };
+  let mut tiles = pieces
+    .iter()
+    .zip(&textures)
+    .filter_map(|(piece, texture)| match piece {
+      FramePiece::Fill { rect, color } => {
+        Some(RenderTile::solid(at(*rect), *color))
+      }
+      FramePiece::Title { rect } | FramePiece::Button { rect, .. } => {
+        Some(RenderTile::textured(at(*rect), texture.as_ref()?))
+      }
+    })
+    .collect::<Vec<_>>();
+  tiles.push(RenderTile::textured(
+    at(frame.margins.shrink(outer)),
+    &checker,
+  ));
+  draw_frame(gpu, state, (WIDTH, HEIGHT), &tiles, CLEAR)
+}
+
+#[test]
+fn a_decorated_window_matches_reference() {
+  let Some(gpu) = gpu() else {
+    return;
+  };
+  let rgba = frame_scene(&gpu, &RenderState::default());
+  check_golden("frame", &rgba);
+}
+
 #[test]
 fn empty_scene_is_clear_color() {
   let Some(gpu) = gpu() else {
