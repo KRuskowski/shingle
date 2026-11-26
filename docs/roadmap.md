@@ -113,6 +113,12 @@ Since `shingle-colour-and-focus-fixes` every configured colour shows the bytes W
 
 Add long-running nested and native soak tests. Measure CPU, RSS, frame latency and GPU behaviour before making any resource or stability claims.
 
+## 8. Application launcher
+
+The operator's own wish (2026-11-26): a launcher that combines rofi's quick type-to-run with the KDE start menu's in-place customization. rofi is fast to use but hard to style and only configurable through files; KDE's menu can be rearranged to taste while it is open. The goal is one launcher that starts as fast as rofi from a keybinding, and lets entries be pinned, renamed, reordered, grouped and hidden directly in the open menu, with every change saved at once and no config file to edit by hand.
+
+Not designed yet. A design pass should cover: building it with Gloomy (already a Shingle dependency); whether it is a layer-shell client or drawn by the frontend; application discovery from `.desktop` files and `$PATH`; fuzzy matching and ranking by use; where the user's layout is stored; theming that follows Shingle's config; launching through Shingle's client environment so apps get the right `XDG_CURRENT_DESKTOP` and sockets; and keyboard-only use alongside mouse editing. It comes after the work that makes Shingle usable day to day.
+
 ## Open decisions
 
 - **Removing Tilefire fallbacks.** The rename kept fallbacks for old config, session, PAM service and environment variable names. Decide when they can be dropped.
