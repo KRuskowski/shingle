@@ -321,5 +321,18 @@ class SelectionTest(unittest.TestCase):
     failing.wait(10)
     self.assertEqual(failing.errors(), 'oops')
 
+class ListMonitorsTest(unittest.TestCase):
+  """Parsing `xrandr --listmonitors`."""
+
+  def test_monitors_and_positions(self):
+    text = ('Monitors: 2\n'
+            ' 0: +XWAYLAND0 1280/310x720/175+0+0  XWAYLAND0\n'
+            ' 1: +XWAYLAND1 1024/310x768/175-1024+200  XWAYLAND1\n')
+    self.assertEqual(run.parse_listmonitors(text), [
+        ('XWAYLAND0', (0, 0, 1280, 720)),
+        ('XWAYLAND1', (-1024, 200, 1024, 768)),
+    ])
+    self.assertEqual(run.parse_listmonitors('Monitors: 0\n'), [])
+
 if __name__ == '__main__':
   unittest.main()

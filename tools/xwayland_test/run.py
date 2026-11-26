@@ -22,7 +22,7 @@ user namespaces:
       [--probe target/debug/examples/xw_probe]
       [--wl-probe target/debug/examples/wl_probe] [--keep]
       [--only lazy|disabled|eager|running|idle|windows|probe|behaviour|
-              session|nested|selection ...]
+              session|nested|selection|outputs ...]
 
 It prints one line per check and exits 0 when all pass. Every signal it
 sends goes to its own children or, through `kill_xwayland`, to a
@@ -38,7 +38,11 @@ both inside the namespace, and checks pixels in wlr-screencopy captures
 of the headless output, which show the frames nested drew. The
 `selection` group copies between `xclip` and `wl-copy`/`wl-paste` in both
 directions; they too run only inside the namespace, against the private
-Shingle, so the operator's clipboard is never touched.
+Shingle, so the operator's clipboard is never touched. The `outputs`
+group (MO-3, docs/design/multi-output.md) runs headless Shingle with two
+outputs and checks that `xrandr --listmonitors` lists both at their
+positions and `xdpyinfo` reports their union as the root, also after
+`wlr-randr --pos` moves one.
 """
 
 import argparse
@@ -203,6 +207,20 @@ def signal_checked(pid, sig, expected):
 def kill_xwayland(pid):
   """SIGKILLs the Xwayland process `pid`; returns whether it did."""
   return signal_checked(pid, signal.SIGKILL, 'Xwayland')
+
+XRANDR_MONITOR = re.compile(
+    r'^\s*\d+: \S+ (\d+)/\d+x(\d+)/\d+([+-]\d+)([+-]\d+)\s+(\S+)$')
+
+def parse_listmonitors(text):
+  """The monitors `xrandr --listmonitors` lists, as (name, (x, y, width,
+  height)) in its order."""
+  monitors = []
+  for line in text.splitlines():
+    match = XRANDR_MONITOR.match(line)
+    if match:
+      width, height, x, y, name = match.groups()
+      monitors.append((name, (int(x), int(y), int(width), int(height))))
+  return monitors
 
 def parse_xwininfo(text):
   """The absolute geometry in `xwininfo -id` output, or None."""
@@ -2577,7 +2595,52 @@ def _selection_no_primary(results, binary):
   return shingle.log_text()
 
 GROUPS = ('lazy', 'disabled', 'eager', 'running', 'idle', 'windows', 'probe',
-          'behaviour', 'session', 'nested', 'selection')
+          'behaviour', 'session', 'nested', 'selection', 'outputs')
+
+def outputs_checks(results, binary, work):
+  """MO-3: Xwayland sees both outputs of headless Shingle, at their
+  positions, under a root that is their union, also after one moves."""
+  config = {
+      'xwayland': {'mode': True},
+      'outputs': [{'name': 'HEADLESS-2', 'mode': '1024x768@60'}],
+  }
+  shingle = Shingle(binary, work, 'outputs', config,
+                    backend=('--headless', '--outputs', '2'))
+  pid = shingle.wait_pid(lambda value: value > 0)
+  results.check('outputs: Xwayland runs', pid > 0, f'pid {pid}')
+
+  def monitors():
+    status, output = shingle.x_client(['xrandr', '--listmonitors'], ':0')
+    if status != 0:
+      return None
+    return sorted(geometry for _, geometry in parse_listmonitors(output))
+
+  def root():
+    status, output = shingle.x_client(['xdpyinfo'], ':0')
+    match = re.search(r'dimensions:\s+(\d+)x(\d+) pixels', output)
+    return (int(match.group(1)), int(match.group(2))) if match else None
+  side_by_side = [(0, 0, 1280, 720), (1280, 0, 1024, 768)]
+  seen = wait_for(lambda: monitors() == side_by_side) and monitors()
+  results.check('outputs: xrandr --listmonitors lists both at their '
+                'positions', seen == side_by_side, str(monitors()))
+  results.check('outputs: xdpyinfo reports their union as the root',
+                root() == (2304, 768), str(root()))
+  done = subprocess.run(
+      ['wlr-randr', '--output', 'HEADLESS-2', '--pos', '0,720'],
+      env=shingle.wayland_environment(), capture_output=True, text=True,
+      timeout=10)
+  # HEADLESS-2 is fixed now, so the automatic HEADLESS-1 follows its
+  # right edge at its y, as wlroots places it, and the root grows to the
+  # bottom-right corner of both (Xwayland's output_get_new_size).
+  moved_layout = [(0, 720, 1024, 768), (1024, 720, 1280, 720)]
+  moved = wait_for(lambda: monitors() == moved_layout)
+  results.check('outputs: a moved output moves in RandR and the root',
+                done.returncode == 0 and moved and root() == (2304, 1488),
+                f'{done.stdout}{done.stderr} {monitors()} {root()}')
+  status = shingle.stop()
+  results.check('outputs: SIGTERM exits with status 0', status == 0,
+                shingle.stop_detail(status))
+  return shingle.log_text()
 
 def inner(binary, probe, wl_probe, work, groups):
   """Runs the check `groups` inside the namespace; returns the status."""
@@ -2606,6 +2669,7 @@ def inner(binary, probe, wl_probe, work, groups):
       'session': session_checks,
       'nested': nested_checks,
       'selection': selection_checks,
+      'outputs': outputs_checks,
   }
   for group in groups:
     if group == 'behaviour':
