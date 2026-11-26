@@ -93,16 +93,16 @@ The work is split into seven workspaces, MO-1 to MO-7, each with acceptance crit
 
 Continue the missing plugins and configuration options, using Wayfire's source as the behavioural reference. The survey is [design/wayfire-gaps.md](design/wayfire-gaps.md), from 2026-11-26, against Wayfire `669bbe36`: every Wayfire plugin, option, protocol and IPC method classified as implemented, partly or missing, the gaps ranked, and seven workspaces with acceptance criteria. Its questions were answered with the proposed defaults ([Decisions](design/wayfire-gaps.md#decisions)).
 
-A WCM-written `wayfire.ini` loads since WG-1 ([status.md](status.md#configuration-and-wcm)). Still, options a file leaves out take Shingle's defaults, Shingle's extra bindings are always on (`super+shift+q` quits), and `core/plugins` is ignored. After those come the numbered `[vswitch]` bindings, touchpad workspace swipes, wf-shell's `zwf_shell_manager_v2`, server-side decorations, the switcher's view and Wayfire's client environment variables.
+A WCM-written `wayfire.ini` loads since WG-1, and since WG-2 it behaves like that Wayfire: an import starts from Wayfire's metadata defaults, Shingle's extra bindings are off, `core/plugins` decides which plugins are on, and the numbered `[vswitch]` bindings and `autostart_wf_shell` work ([status.md](status.md#configuration-and-wcm)). Still missing are Wayfire's client environment variables, wf-shell's `zwf_shell_manager_v2`, touchpad workspace swipes, server-side decorations and the switcher's view.
 
-1. WG-2 `shingle-wayfire-defaults`: Wayfire's metadata defaults, `core/plugins`, the numbered vswitch bindings, `autostart_wf_shell` and every option over IPC.
+1. WG-2 `shingle-wayfire-defaults`: done. Wayfire's metadata defaults from a generated table, `core/plugins` for every plugin Shingle implements, the numbered vswitch bindings, `autostart_wf_shell` and every option over IPC ([WG-2 as built](design/wayfire-gaps.md#wg-2-as-built)).
 2. WG-3 `shingle-client-environment`: `XDG_CURRENT_DESKTOP`, `XCURSOR_*`, `WAYFIRE_CONFIG_FILE` and a session file.
 3. WG-4 `shingle-wayfire-shell`: `zwf_shell_manager_v2`, modifier-only bindings and `toggle_menu`.
 4. WG-5 `shingle-vswipe`: touchpad workspace swipes.
 5. WG-6 `shingle-decoration`: server-side decorations.
 6. WG-7 `shingle-switcher-view`: the switcher's thumbnails.
 
-WG-2 is next.
+WG-3 is next.
 
 ## 7. Soak tests and measurements
 

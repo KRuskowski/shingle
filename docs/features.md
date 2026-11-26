@@ -8,6 +8,10 @@ A `wayfire.ini` is read line by line as Wayfire's wf-config reads it: every `#` 
 
 `shingle` prints the warnings once when it starts and again on a reload, as `shingle: PATH: line N: MESSAGE`. `shingle-wcm --config PATH --check` prints them and exits 0, or 1 when the file cannot be read.
 
+A Wayfire import starts from Wayfire's own defaults, taken from its metadata (crates/shingle-config/data/wayfire-options.tsv, written by tools/wayfire_options/generate.py), so an empty `wayfire.ini` gives a 3×3 workspace grid, exits on `ctrl+alt+backspace` and leaves the wm-actions bindings disabled. Shingle's bindings that no Wayfire option sets are off: moving and resizing tiles, `super+1` to `super+0` with and without `shift`, `super+shift+r` reload and `super+f8` lock; `[simple-tile] key_move_*`, `key_resize_*` and `key_lock`, and `[idle] key_lock`, still set them. `[core] plugins`, or Wayfire's default list when the file has none, decides which plugins are on, as Wayfire loads only those: a plugin the list leaves out reads none of its options and its bindings, effects, animations, rules and autostart entries are off. Without `simple-tile` nothing tiles, without `place` new views open at the top left of the workarea, and the globals of `xdg-activation`, `foreign-toplevel`, `ext-toplevel`, `ext-workspace`, `security-context-v1`, `session-lock`, `shortcuts-inhibit` and `input-method-v1` are created only when they are listed. IPC is not a plugin here: `--ipc` turns it on, and the methods of an unlisted plugin still answer. YAML can set the same list as `plugins:`; without it every plugin is on.
+
+`[vswitch] binding_N` switches to workspace N, counted row by row, `with_win_N` carries the focused window there and follows it, and `send_win_N` sends it there without switching; in YAML they are `vswitch.workspace_bindings`, `workspace_bindings_win` and `bindings_win`, lists of `{workspace: N, binding: KEY}`. With `[autostart] autostart_wf_shell` true, Wayfire's default, `wf-panel` and `wf-background` are added to the autostart commands, each unless an entry already names it.
+
 ## Overviews and effects
 
 ### Scale overview
