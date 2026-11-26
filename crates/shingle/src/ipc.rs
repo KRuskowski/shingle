@@ -3451,9 +3451,9 @@ mod tests {
       for field in ["name", "vendor", "product"] {
         assert!(device[field].is_string(), "{field}");
       }
-      // Without a backend that applies libinput options, no section.
-      assert_eq!(device["input-section"], Value::Null);
-      assert_eq!(device["input-device-section"], Value::Null);
+      // Without a backend that applies libinput options, Wayfire's fields
+      // alone.
+      assert_eq!(device.as_object().unwrap().len(), 6);
     }
     let pointer = crate::input_device::add(
       &mut state,

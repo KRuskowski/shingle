@@ -1444,7 +1444,7 @@ impl Compositor {
   }
 
   /// Records which config sections a backend applied to seat device `id`,
-  /// which `input/list-devices` reports as `input-section` and
+  /// which `input/list-devices` then reports as `input-section` and
   /// `input-device-section`. Returns whether the device is registered.
   pub fn set_input_device_sections(
     &mut self,

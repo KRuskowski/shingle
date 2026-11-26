@@ -87,7 +87,7 @@ pub struct InputDeviceInfo {
 /// `input/list-devices` reports them: Wayfire's `[input:NAME]` (or
 /// `[input]`) for libinput options and `[input-device:NAME]` for the output
 /// and calibration. `None` where the backend applies none, as nested and
-/// headless do.
+/// headless do; `input/list-devices` then leaves both fields out.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InputDeviceSections {
   /// `input` or `input:NAME`.
@@ -370,16 +370,21 @@ pub(crate) fn list_json(state: &CompositorState) -> Value {
       .devices
       .iter()
       .map(|(id, device)| {
-        json!({
+        let mut entry = json!({
             "id": id.get(),
             "name": device.info.name,
             "vendor": unknown_or(device.info.vendor),
             "product": unknown_or(device.info.product),
             "type": device.info.kind.wayfire_type(),
             "enabled": device.enabled,
-            "input-section": device.sections.input,
-            "input-device-section": device.sections.input_device,
-        })
+        });
+        // Shingle's own fields, only where a backend applied sections,
+        // so that other backends' replies stay Wayfire's.
+        if let Some(input) = &device.sections.input {
+          entry["input-section"] = json!(input);
+          entry["input-device-section"] = json!(device.sections.input_device);
+        }
+        entry
       })
       .collect(),
   )
