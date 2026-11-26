@@ -1160,7 +1160,8 @@ impl Frontend {
             .pointer_relative_motion(device, dx, dy, dx_unaccel, dy_unaccel);
         }
       }
-      InputEvent::PointerMotionAbsolute { x, y } => {
+      InputEvent::PointerMotionAbsolute { x, y, output } => {
+        let (x, y) = self.layout_point(x, y, output.as_ref());
         self.pointer_motion(device, x, y)
       }
       InputEvent::PointerButton { code, pressed } => {
@@ -1259,8 +1260,23 @@ impl Frontend {
     }
   }
 
+  /// `(x, y)` in layout coordinates: as given, or relative to `output`'s
+  /// top-left corner when the event names its output.
+  fn layout_point(
+    &self,
+    x: f64,
+    y: f64,
+    output: Option<&shingle::OutputHandle>,
+  ) -> (f64, f64) {
+    match output.and_then(|output| self.compositor.output_view(output)) {
+      Some(view) => (x + f64::from(view.rect.x), y + f64::from(view.rect.y)),
+      None => (x, y),
+    }
+  }
+
   fn touch(&mut self, device: InputDeviceId, touch: Touch) {
-    let (x, y) = self.map_zoom_input(touch.x, touch.y);
+    let (x, y) = self.layout_point(touch.x, touch.y, touch.output.as_ref());
+    let (x, y) = self.map_zoom_input(x, y);
     if self.expo.is_some() {
       match touch.phase {
         TouchPhase::Down if self.expo_touch.is_none() => {

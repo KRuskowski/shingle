@@ -73,17 +73,23 @@ impl Frontend {
             .core()
             .window_info(source)
             .is_ok_and(|info| info.state.floating.is_some());
-          if !floating
-            && let Some(target) =
-              self.compositor.focus_at(self.pointer_x, self.pointer_y)
-            && target != source
-          {
+          let target = if floating {
+            None
+          } else {
+            self
+              .compositor
+              .focus_at(self.pointer_x, self.pointer_y)
+              .filter(|target| *target != source)
+          };
+          if let Some(target) = target {
             let direction = self.drop_direction(target);
             if let Err(error) =
               self.compositor.drop_window(source, target, direction)
             {
               eprintln!("shingle: pointer move failed: {error}");
             }
+          } else {
+            self.drop_on_output(source, floating);
           }
         }
         self.save();
@@ -430,6 +436,14 @@ impl Frontend {
       }
       if self.keybindings.invert_toggle.matches(modifiers, key) {
         self.toggle_inversion();
+        return;
+      }
+      // Wayfire's oswitch and wsets bindings, which the compositor matches
+      // so that headless STIPC keys run them too.
+      if let Some(action) = self.compositor.output_binding(modifiers, key) {
+        self.compositor.run_output_action(action);
+        self.request_redraw();
+        self.save();
         return;
       }
       let direction = if self.keybindings.focus_left.matches(modifiers, key) {

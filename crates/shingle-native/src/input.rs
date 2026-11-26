@@ -421,7 +421,7 @@ impl Translator {
           let (x, y) = self.pointer;
           self.pointer = clamp(output.bounds, x + dx, y + dy);
           let (x, y) = self.pointer;
-          events.push(InputEvent::PointerMotionAbsolute { x, y });
+          events.push(InputEvent::PointerMotionAbsolute { x, y, output: None });
         }
         events
       }
@@ -429,7 +429,7 @@ impl Translator {
         let (x, y) = (output.map)(x, y);
         self.pointer = clamp(output.bounds, x, y);
         let (x, y) = self.pointer;
-        vec![InputEvent::PointerMotionAbsolute { x, y }]
+        vec![InputEvent::PointerMotionAbsolute { x, y, output: None }]
       }
       DeviceInput::Button { code, pressed } => {
         vec![InputEvent::PointerButton { code, pressed }]
@@ -462,6 +462,7 @@ impl Translator {
           phase,
           x: position.0,
           y: position.1,
+          output: None,
         })]
       }
       DeviceInput::Swipe(gesture) => vec![InputEvent::Swipe(gesture)],
@@ -666,12 +667,17 @@ pub(crate) mod tests {
           dx_unaccel: 5.0,
           dy_unaccel: 2.5,
         },
-        InputEvent::PointerMotionAbsolute { x: 10.0, y: 5.0 },
+        InputEvent::PointerMotionAbsolute {
+          x: 10.0,
+          y: 5.0,
+          output: None,
+        },
       ]
     );
     let events =
       translator.translate(&mouse, motion(5000.0, -50.0), &output(&identity));
-    let InputEvent::PointerMotionAbsolute { x, y } = events[1] else {
+    let InputEvent::PointerMotionAbsolute { x, y, output: None } = events[1]
+    else {
       panic!("{events:?}");
     };
     assert!(x < 1280.0 && x > 1279.99, "{x}");
@@ -711,7 +717,11 @@ pub(crate) mod tests {
         DeviceInput::MotionAbsolute { x: 800.0, y: 600.0 },
         &output(&halved),
       ),
-      [InputEvent::PointerMotionAbsolute { x: 400.0, y: 300.0 }]
+      [InputEvent::PointerMotionAbsolute {
+        x: 400.0,
+        y: 300.0,
+        output: None,
+      }]
     );
     let touch = |phase, position| DeviceInput::Touch {
       slot: 2,
@@ -730,6 +740,7 @@ pub(crate) mod tests {
         phase: TouchPhase::Down,
         x: 50.0,
         y: 25.0,
+        output: None,
       })]
     );
     // Up has no position of its own; it lifts where the point was.
@@ -745,6 +756,7 @@ pub(crate) mod tests {
         phase: TouchPhase::Up,
         x: 50.0,
         y: 25.0,
+        output: None,
       })]
     );
   }

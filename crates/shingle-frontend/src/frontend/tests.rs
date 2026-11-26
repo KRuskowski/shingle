@@ -189,7 +189,10 @@ impl Fixture {
   }
 
   fn move_pointer(&mut self, x: f64, y: f64) {
-    self.input(self.pointer, InputEvent::PointerMotionAbsolute { x, y });
+    self.input(
+      self.pointer,
+      InputEvent::PointerMotionAbsolute { x, y, output: None },
+    );
   }
 
   fn button(&mut self, code: u32, pressed: bool) {
@@ -601,6 +604,7 @@ fn touch_taps_commit_scale() {
       phase,
       x: f64::from(target.x) + 5.0,
       y: f64::from(target.y) + 5.0,
+      output: None,
     })
   };
   fixture.input(fixture.touch, touch(TouchPhase::Down));
@@ -1510,4 +1514,101 @@ fn a_layout_that_changes_only_weights_is_saved() {
   assert_eq!(fixture.ipc(&request), r#"{"result":"ok"}"#);
   let [left_width, right_width] = saved_widths(&fixture);
   assert_eq!(left_width, 2 * right_width);
+}
+
+/// Adds HEADLESS-2, 800x600, to the right of the 1000x800 first output.
+fn add_second_output(fixture: &mut Fixture) {
+  fixture
+    .frontend
+    .compositor_mut()
+    .add_output(
+      shingle::OutputInfo {
+        name: "HEADLESS-2".into(),
+        ..shingle::OutputInfo::default()
+      },
+      (800, 600),
+    )
+    .expect("a second output");
+  fixture.process();
+}
+
+/// The name of the output that shows `window`'s workspace set.
+fn window_output(fixture: &Fixture, window: TileWindowId) -> Option<String> {
+  let core = fixture.frontend.compositor().core();
+  let info = core.window_info(window).ok()?;
+  let output = core.wset(info.wset).ok()?.output?;
+  Some(output.as_str().to_owned())
+}
+
+const KEY_O: u32 = 24;
+
+#[test]
+fn oswitch_keys_move_focus_and_a_window_between_outputs() {
+  let (mut fixture, [alpha, _, charlie]) = three_windows();
+  add_second_output(&mut fixture);
+  let focused = fixture.focused().expect("a focused window");
+  assert_eq!(focused, charlie, "the last window mapped has the focus");
+  fixture.tap(KEY_O, &[KEY_LEFTMETA]);
+  let compositor = fixture.frontend.compositor();
+  assert_eq!(compositor.active_output().name(), "HEADLESS-2");
+  assert_eq!(fixture.focused(), None, "HEADLESS-2 shows no window");
+  assert_eq!(
+    (fixture.frontend.pointer_x, fixture.frontend.pointer_y),
+    (1400.0, 300.0),
+    "the pointer is warped into HEADLESS-2"
+  );
+  assert!(!fixture.host.warps.is_empty());
+  // Back, then over again with alpha, which goes along and keeps the focus.
+  fixture.tap(KEY_O, &[KEY_LEFTMETA]);
+  fixture.frontend.compositor_mut().focus_window(alpha);
+  fixture.process();
+  fixture.tap(KEY_O, &[KEY_LEFTMETA, KEY_LEFTSHIFT]);
+  let compositor = fixture.frontend.compositor();
+  assert_eq!(compositor.active_output().name(), "HEADLESS-2");
+  assert_eq!(
+    window_output(&fixture, alpha).as_deref(),
+    Some("HEADLESS-2")
+  );
+  assert_eq!(fixture.focused(), Some(alpha));
+}
+
+#[test]
+fn a_move_drag_onto_another_output_moves_the_window_there() {
+  let (mut fixture, [alpha, bravo, charlie]) = three_windows();
+  add_second_output(&mut fixture);
+  let (x, y) = fixture.center(alpha);
+  fixture.move_pointer(x, y);
+  fixture.key(KEY_LEFTMETA, true);
+  fixture.button(BTN_LEFT, true);
+  fixture.move_pointer(1400.0, 300.0);
+  assert_eq!(
+    fixture.frontend.compositor().active_output().name(),
+    "HEADLESS-2",
+    "the drag makes the output it crosses into active"
+  );
+  fixture.button(BTN_LEFT, false);
+  fixture.key(KEY_LEFTMETA, false);
+  assert_eq!(
+    window_output(&fixture, alpha).as_deref(),
+    Some("HEADLESS-2")
+  );
+  let first = fixture
+    .frontend
+    .compositor()
+    .core()
+    .tree(
+      &shingle_core::OutputId::new("HEADLESS-1"),
+      Default::default(),
+    )
+    .unwrap()
+    .windows();
+  assert_eq!(first, [bravo, charlie]);
+  let geometry = fixture
+    .frontend
+    .compositor()
+    .core()
+    .window_layout(alpha)
+    .unwrap()
+    .geometry;
+  assert_eq!(geometry, shingle_core::Rect::new(1000, 0, 800, 600));
 }

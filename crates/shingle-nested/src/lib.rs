@@ -18,7 +18,9 @@ use std::{
   time::{Duration, Instant},
 };
 
-use shingle::{Compositor, InputDeviceId, InputDeviceInfo, InputDeviceKind};
+use shingle::{
+  Compositor, InputDeviceId, InputDeviceInfo, InputDeviceKind, OutputHandle,
+};
 use shingle_config::{Modifiers as ConfigModifiers, ShingleConfig};
 use shingle_frontend::{
   Frontend,
@@ -297,6 +299,20 @@ impl App {
     )
   }
 
+  /// A point in the window as a position on the output the window shows,
+  /// relative to that output's top-left corner, so that the frontend maps
+  /// the window's pointer and touch to its own output.
+  fn output_point(&self, x: f64, y: f64) -> (f64, f64, Option<OutputHandle>) {
+    let (x, y) = self.map_point(x, y);
+    let compositor = self.frontend.compositor();
+    let rect = compositor.output();
+    (
+      x - f64::from(rect.x),
+      y - f64::from(rect.y),
+      Some(compositor.primary_output()),
+    )
+  }
+
   /// Feeds host keyboard and focus events to the frontend. Returns whether
   /// the event was a keyboard event.
   fn keyboard_event(&mut self, event: &WindowEvent) -> bool {
@@ -464,10 +480,10 @@ impl ApplicationHandler for App {
           self.host.pending_warp = None;
           return;
         }
-        let (x, y) = self.map_point(position.x, position.y);
+        let (x, y, output) = self.output_point(position.x, position.y);
         self.input(
           self.devices.pointer,
-          InputEvent::PointerMotionAbsolute { x, y },
+          InputEvent::PointerMotionAbsolute { x, y, output },
         );
       }
       WindowEvent::MouseInput { state, button, .. } => {
@@ -493,7 +509,8 @@ impl ApplicationHandler for App {
         }
       }
       WindowEvent::Touch(touch) => {
-        let (x, y) = self.map_point(touch.location.x, touch.location.y);
+        let (x, y, output) =
+          self.output_point(touch.location.x, touch.location.y);
         let phase = match touch.phase {
           winit::event::TouchPhase::Started => TouchPhase::Down,
           winit::event::TouchPhase::Moved => TouchPhase::Motion,
@@ -507,6 +524,7 @@ impl ApplicationHandler for App {
             phase,
             x,
             y,
+            output,
           }),
         );
       }

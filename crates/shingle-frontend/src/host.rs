@@ -8,8 +8,8 @@
 //! winit; the native backend (NB-6) will implement it on top of libseat and
 //! libinput.
 
-use shingle::InputDeviceId;
 pub use shingle::{Axis, AxisSource};
+use shingle::{InputDeviceId, OutputHandle};
 
 /// What a frontend binary provides to the shared frontend.
 ///
@@ -46,8 +46,10 @@ pub trait Host {
 ///
 /// Positions are in the compositor's output layout, before the frontend's
 /// zoom is undone; the host has already applied its own scale and output
-/// transform.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// transform. An absolute position that names its output, as a nested
+/// window's pointer does, is in that output's logical coordinates instead,
+/// with its top-left corner at 0,0.
+#[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
   /// A key press or release, by evdev code. Hosts pass no repeats: the
   /// frontend repeats held keys itself, at the configured rate.
@@ -77,6 +79,9 @@ pub enum InputEvent {
     x: f64,
     /// Vertical position in output pixels.
     y: f64,
+    /// The output the position is on, for a device mapped to one output
+    /// such as a nested window's pointer; `None` for layout coordinates.
+    output: Option<OutputHandle>,
   },
   /// A pointer button, by evdev code (`BTN_LEFT` is `0x110`).
   PointerButton {
@@ -114,7 +119,7 @@ pub enum TouchPhase {
 }
 
 /// One touch point's event.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Touch {
   /// The touch point, unique while it is down.
   pub id: u64,
@@ -124,6 +129,9 @@ pub struct Touch {
   pub x: f64,
   /// Vertical position in output pixels.
   pub y: f64,
+  /// The output the position is on, for a touch screen mapped to one
+  /// output; `None` for layout coordinates.
+  pub output: Option<OutputHandle>,
 }
 
 /// One step of a touchpad gesture.

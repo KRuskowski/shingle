@@ -66,6 +66,55 @@ impl Frontend {
       })
   }
 
+  /// Ends a move drag of `source` that dropped on no other window: a
+  /// window dropped on another output than its own joins that output's
+  /// set, as Wayfire's move plugin moves a view to the output a drag ends
+  /// on. A floating window stays where the pointer put it; a tiled one is
+  /// appended to the target tree.
+  pub(super) fn drop_on_output(
+    &mut self,
+    source: TileWindowId,
+    floating: bool,
+  ) {
+    let Some(output) =
+      self.compositor.output_at(self.pointer_x, self.pointer_y)
+    else {
+      return;
+    };
+    let own = self
+      .compositor
+      .core()
+      .window_info(source)
+      .ok()
+      .and_then(|info| self.compositor.core().wset(info.wset).ok())
+      .and_then(|wset| wset.output);
+    if own.as_ref().map(shingle_core::OutputId::as_str) == Some(output.name()) {
+      return;
+    }
+    let geometry = if floating {
+      shingle::MoveGeometry::Keep
+    } else {
+      shingle::MoveGeometry::Scale
+    };
+    if let Err(error) = self
+      .compositor
+      .move_window_to_output(source, &output, geometry)
+    {
+      eprintln!("shingle: dropping on {} failed: {error}", output.name());
+    }
+  }
+
+  /// Makes the output under the pointer active while a move drag crosses
+  /// into it, as Wayfire's move plugin focuses the output a drag enters.
+  fn follow_drag_output(&mut self) {
+    if let Some(output) =
+      self.compositor.output_at(self.pointer_x, self.pointer_y)
+      && output != self.compositor.active_output()
+    {
+      self.compositor.focus_output(&output);
+    }
+  }
+
   pub(super) fn drop_direction(&self, target: TileWindowId) -> Direction {
     let Some(geometry) = self.window_geometry(target) else {
       return Direction::Right;
@@ -283,6 +332,7 @@ impl Frontend {
       *last_y = y;
       (*source, released || moved)
     };
+    self.follow_drag_output();
     self.update_drop_preview(source);
     if changed {
       self.save();
