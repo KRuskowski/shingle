@@ -3287,6 +3287,13 @@ impl Compositor {
     gamma_control::ramp(&self.state, &output.id())
   }
 
+  /// Whether a wlr-gamma-control client set a ramp for `output`, which
+  /// only what the renderer draws gets: a hardware cursor plane would
+  /// show the cursor without it.
+  pub fn gamma_set_on(&self, output: &OutputHandle) -> bool {
+    gamma_control::ramp_set(&self.state, &output.id())
+  }
+
   /// Whether `output` is lit: idle DPMS is on and no wlr-output-power
   /// client turned it off. An output that is not lit draws nothing.
   pub fn output_powered(&self, output: &OutputHandle) -> bool {
@@ -3762,6 +3769,21 @@ impl Compositor {
     output: &OutputHandle,
   ) -> Vec<SurfaceSnapshot> {
     self.state.visible_surfaces_on(&output.id())
+  }
+
+  /// The cursor [`Compositor::visible_surfaces_on`] draws last on
+  /// `output`, as a [`SurfaceRole::Cursor`] snapshot at its place in the
+  /// layout: the default arrow ([`Compositor::set_default_cursor`]), the
+  /// client's cursor surface or the shape it chose. `None` while the
+  /// pointer is on another output, the output is dark or off, or the
+  /// session is locked. A native backend shows it on a cursor plane.
+  pub fn cursor_on(&self, output: &OutputHandle) -> Option<SurfaceSnapshot> {
+    self.state.cursor_on(&output.id())
+  }
+
+  /// The output the pointer is on, which draws the cursor.
+  pub fn pointer_output(&self) -> OutputHandle {
+    OutputHandle::from(&crate::surface_outputs::pointer_output(&self.state))
   }
 
   /// The layer-shell surfaces of `output` and their popups, bottom to top:
@@ -5058,6 +5080,63 @@ pub(crate) mod tests {
     let current = cursors(&compositor);
     assert_eq!(current.len(), 1);
     assert_ne!(current, default);
+  }
+
+  #[test]
+  fn the_cursor_is_on_the_pointer_output_only() {
+    let (mut compositor, _) = test_compositor();
+    let first = compositor.primary_output();
+    assert!(compositor.cursor_on(&first).is_none(), "no default cursor");
+    compositor.set_default_cursor(true);
+    let cursor = compositor.cursor_on(&first).expect("the default arrow");
+    assert_eq!(cursor.role, SurfaceRole::Cursor);
+    assert_eq!(
+      compositor
+        .visible_surfaces()
+        .last()
+        .map(|surface| surface.id),
+      Some(cursor.id),
+      "the cursor is drawn last"
+    );
+    let info = OutputInfo {
+      name: "HEADLESS-2".into(),
+      ..OutputInfo::default()
+    };
+    let hotspot = (
+      compositor.state.input.pointer_x as i32 - cursor.geometry.x,
+      compositor.state.input.pointer_y as i32 - cursor.geometry.y,
+    );
+    let second = compositor.add_output(info, (800, 600)).unwrap();
+    let rect = compositor.output_view(&second).unwrap().rect;
+    crate::input::pointer_motion(
+      &mut compositor.state,
+      f64::from(rect.x) + 10.0,
+      f64::from(rect.y) + 20.0,
+    );
+    assert_eq!(compositor.pointer_output(), second);
+    assert!(compositor.cursor_on(&first).is_none());
+    let moved = compositor.cursor_on(&second).expect("the cursor moved");
+    assert_eq!(
+      (moved.geometry.x, moved.geometry.y),
+      (rect.x + 10 - hotspot.0, rect.y + 20 - hotspot.1),
+      "it keeps its hotspot"
+    );
+  }
+
+  #[test]
+  fn cursor_surfaces_keep_their_pixels_with_shm_upload() {
+    let (mut compositor, path) = test_compositor();
+    compositor.set_shm_upload(true);
+    let mut client = test_client::TestClient::connect(&mut compositor, &path);
+    let surface = client.cursor_surface(&mut compositor);
+    client.commit_surface_again(&mut compositor, &surface);
+    let output = compositor.primary_output();
+    let cursor = compositor.cursor_on(&output).expect("the client cursor");
+    let buffer = cursor.buffer.expect("a buffer");
+    assert!(
+      matches!(buffer.content, SnapshotContent::Pixels(_)),
+      "a cursor's shm buffer is copied at its commit"
+    );
   }
 
   #[test]

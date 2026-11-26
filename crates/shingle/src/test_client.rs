@@ -440,6 +440,35 @@ impl TestClient {
     surface
   }
 
+  /// Attaches a new 1x1 ARGB8888 shm buffer to `surface` and commits it.
+  pub(crate) fn commit_surface_again(
+    &mut self,
+    compositor: &mut Compositor,
+    surface: &wl_surface::WlSurface,
+  ) {
+    let shm = self.bind::<wl_shm::WlShm>(1);
+    let fd = rustix::fs::memfd_create(
+      "shingle-test-buffer",
+      rustix::fs::MemfdFlags::CLOEXEC,
+    )
+    .expect("memfd_create succeeds");
+    rustix::fs::ftruncate(&fd, 4).expect("ftruncate succeeds");
+    let pool =
+      shm.create_pool(rustix::fd::AsFd::as_fd(&fd), 4, &self.handle, ());
+    let buffer = pool.create_buffer(
+      0,
+      1,
+      1,
+      4,
+      wl_shm::Format::Argb8888,
+      &self.handle,
+      (),
+    );
+    surface.attach(Some(&buffer), 0, 0);
+    surface.commit();
+    self.roundtrip(compositor);
+  }
+
   /// Creates an `xdg_toplevel` with `app_id` and commits it without a
   /// buffer. The initial configure is acknowledged during the round trip,
   /// so a buffer can be attached next.

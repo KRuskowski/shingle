@@ -971,20 +971,43 @@ impl CompositorState {
     if crate::surface_outputs::pointer_output(self) != *id {
       return snapshots;
     }
+    snapshots.extend(self.cursor_snapshot());
+    snapshots
+  }
+
+  /// The cursor [`CompositorState::visible_surfaces_on`] draws last on
+  /// output `id`: none while the pointer is on another output, the output
+  /// is dark or off, or the session is locked.
+  pub(crate) fn cursor_on(&self, id: &OutputId) -> Option<SurfaceSnapshot> {
+    let output = self.outputs.get(id)?;
+    if self.idle.dpms_state() == DpmsState::Off
+      || output.dark
+      || !output.powered
+      || self.idle.lock_state() != LockState::Unlocked
+      || crate::surface_outputs::pointer_output(self) != *id
+    {
+      return None;
+    }
+    self.cursor_snapshot()
+  }
+
+  /// The cursor at the pointer: the default arrow where the compositor
+  /// draws one, else the client's cursor surface, else the shape the
+  /// client chose.
+  fn cursor_snapshot(&self) -> Option<SurfaceSnapshot> {
     if let Some(snapshot) = crate::cursor_shape::default_snapshot(self) {
-      snapshots.push(snapshot);
-    } else if let Some(object) = &self.input.cursor_surface
+      return Some(snapshot);
+    }
+    if let Some(object) = &self.input.cursor_surface
       && self
         .surfaces
         .get(object)
         .is_some_and(|surface| surface.buffer.is_some())
       && let Some(snapshot) = self.snapshot(object)
     {
-      snapshots.push(snapshot);
-    } else if let Some(snapshot) = crate::cursor_shape::snapshot(self) {
-      snapshots.push(snapshot);
+      return Some(snapshot);
     }
-    snapshots
+    crate::cursor_shape::snapshot(self)
   }
 
   /// The surface of the fullscreen window output `id` draws above its top
@@ -1713,6 +1736,9 @@ impl CompositorState {
       surface.tearing = tearing;
     }
     let scale = surface.pending.scale;
+    // Cursor images keep their pixels, which a native backend copies into
+    // its cursor plane's buffer whenever the cursor is shown.
+    let cursor = matches!(surface.role, Role::Cursor);
     let pending_buffer =
       std::mem::replace(&mut surface.pending.buffer, PendingBuffer::Unchanged);
     // The lock travels with the attachment until its pixels are copied.
@@ -1758,7 +1784,7 @@ impl CompositorState {
       ));
       let offset_x = surface.pending.offset_x;
       let offset_y = surface.pending.offset_y;
-      let upload = self.shm_upload;
+      let upload = self.shm_upload && !cursor;
       match attachment.snapshot(damage, offset_x, offset_y, Some(lock), upload)
       {
         Ok(mut snapshot) => {

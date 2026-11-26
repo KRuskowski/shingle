@@ -46,6 +46,15 @@ pub(crate) fn ramp<'a>(state: &'a CompositorState, id: &OutputId) -> &'a [u16] {
   }
 }
 
+/// Whether a control set a ramp of output `id`.
+pub(crate) fn ramp_set(state: &CompositorState, id: &OutputId) -> bool {
+  state
+    .gamma_control
+    .ramps
+    .get(id)
+    .is_some_and(|ramp| ramp.len() == RAMP_SIZE * 3)
+}
+
 pub(crate) fn cleanup_client(state: &mut CompositorState, client: &ClientId) {
   let outputs = state
     .gamma_control
