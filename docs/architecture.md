@@ -85,8 +85,10 @@
 | GPU namespace and DB-2's, DB-3's and DB-6's real-client checks (offscreen, nested, baseline, buffers, shm) | `tools/gpu_test/run.py`, `tools/gpu_test/checks.py`; the probe `crates/shingle/examples/wl_probe.rs` |
 | DB-4's and DB-5's real-client checks (dmabuf, browsers, xwayland, nested-gpu, nodmabuf, weston, syncobj, nosyncobj) | `tools/gpu_test/dmabuf_checks.py`; the stall probe `crates/shingle/examples/syncobj_probe.rs` |
 | MO-5's and MO-6's real-client checks (outputs; nested-outputs, nested-smoke) | `tools/gpu_test/output_checks.py`, `tools/gpu_test/nested_output_checks.py` |
+| Real-client checks of the nested host clipboard (nested-clipboard) | `tools/gpu_test/nested_clipboard_checks.py` |
 | winit host: windows, input translation, button emulation | `crates/shingle-nested/src/lib.rs` |
 | Which nested window shows which output, window titles and sizes, keyboard focus across windows | `crates/shingle-nested/src/windows.rs` |
+| Clipboard and primary selection shared with the host session: the bridge and its loop prevention, the host's data-control connection | `crates/shingle-nested/src/clipboard.rs`, `crates/shingle-nested/src/clipboard/host.rs`; host sources in `crates/shingle/src/host_selection.rs` |
 | Host window outputs: `stipc/create_wayland_output` and `destroy_wayland_output` (`Compositor::set_host_outputs`) | `crates/shingle/src/output/host.rs` |
 | Native seat: `Session`, libseat, startup checks (SSH, enable timeout, backend) | `crates/shingle-native/src/session.rs` |
 | libinput events, translation to `InputEvent`, device options | `crates/shingle-native/src/input.rs`, `input/libinput.rs` |
