@@ -515,9 +515,10 @@ def _nested(binary, outer, name, extra_environment=None, config=None):
                  extra_environment=environment)
 
 def _window_geometry(outer):
-  """The geometry of the one view on `outer`, nested's window, or None."""
+  """Where the one view on `outer`, nested's window, draws its surface,
+  inside a server-side frame if it has one (WG-6), or None."""
   views = [view for view in outer.views() if view.get('mapped', True)]
-  return views[0]['geometry'] if len(views) == 1 else None
+  return views[0]['base-geometry'] if len(views) == 1 else None
 
 def nested_checks(results, binary, wl_probe, captures):
   """Nested Shingle on lavapipe inside offscreen Shingle."""

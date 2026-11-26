@@ -70,11 +70,13 @@ def window_title(output):
   return 'Shingle' if output == 'HEADLESS-1' else f'Shingle - {output}'
 
 def host_windows(outer):
-  """The mapped views of the headless Shingle by title: geometry tuples."""
+  """The mapped views of the headless Shingle by title: where each draws
+  its surface, inside a server-side frame if it has one (WG-6), as
+  geometry tuples."""
   found = {}
   for view in outer.views():
     if view.get('mapped', True):
-      geometry = view['geometry']
+      geometry = view['base-geometry']
       found[view.get('title')] = (geometry['x'], geometry['y'],
                                   geometry['width'], geometry['height'])
   return found

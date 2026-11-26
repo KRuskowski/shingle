@@ -594,7 +594,8 @@ def nested_checks(results, binary):
                       })
     window = wait_for(lambda: outer.ipc.call('window-rules/list-views'),
                       timeout=30)
-    size = window[0]['geometry'] if window else {}
+    # Nested's surface, inside a server-side frame if it has one (WG-6).
+    size = window[0]['base-geometry'] if window else {}
     head = nested.heads().get('HEADLESS-1')
     expected = (size.get('width'), size.get('height'), 75.0)
     results.check('nested: the mode is the window at the configured refresh',

@@ -343,8 +343,9 @@ class Run:
     self.view = xw.wait_for(lambda: one_view(shingle), timeout=30)
 
   def geometry(self):
-    """The view's geometry, or None."""
-    return self.view['geometry'] if self.view else None
+    """Where the view's client draws, inside a server-side frame if it
+    has one (WG-6), or None."""
+    return self.view['base-geometry'] if self.view else None
 
   def summary(self):
     """`summarise` of the trace since the client started."""
@@ -658,7 +659,7 @@ def nested_gpu_checks(results, binary, wl_probe, captures, mode=DEFAULT):
     view = xw.wait_for(lambda: one_view(inner), timeout=30)
     geometry = None
     if view is not None and window is not None:
-      geometry = dict(view['geometry'])
+      geometry = dict(view['base-geometry'])
       geometry['x'] += window['x']
       geometry['y'] += window['y']
     shot = captures.settled(outer, lambda shot: drawn(shot, geometry) > 0.2)
