@@ -5,14 +5,19 @@ use crate::ConfigError;
 /// `animate/enabled_for`, the shortcuts-inhibit lists and window rules.
 ///
 /// Grammar, loosest first: `A | B`, `A & B`, `!A`, `( A )`, and the atoms
-/// `all`, `none`, `FIELD OP VALUE` and `PREDICATE [is true|false]`. `FIELD` is
-/// `app_id`, `title`, `role` or `type`; `OP` is `is` or `equals` (exact,
-/// case-sensitive) or `contains` (substring). `role` is always `TOPLEVEL`,
-/// since Shingle has no X11 or desktop-environment views. `PREDICATE` is one of
-/// `fullscreen`, `activated`, `minimized`, `focusable`, `mapped`, `tiled-left`,
-/// `tiled-right`, `tiled-top`, `tiled-bottom`, `maximized` or `floating`;
-/// without `is` it tests for true. Values containing spaces or operator
-/// characters must be double-quoted.
+/// `all`, `none`, `FIELD OP VALUE` and `PREDICATE [is|equals true|false]`.
+/// `FIELD` is `app_id`, `title`, `role` or `type`; `OP` is `is` or `equals`
+/// (exact, case-sensitive) or `contains` (substring). `role` is always
+/// `TOPLEVEL`. `type` takes Wayfire's values (wayfire:src/core/
+/// view-access-interface.cpp): `toplevel`, `x-or` for override-redirect X
+/// windows, `unmanaged`, `background`, `panel` and `overlay` for layer-shell
+/// surfaces, and `unknown`; the compositor says which applies to a view.
+/// `PREDICATE` is one of `fullscreen`, `activated`, `minimized`, `focusable`,
+/// `mapped`, `tiled-left`, `tiled-right`, `tiled-top`, `tiled-bottom`,
+/// `maximized` or `floating`, compared with `true` or `false` as Wayfire
+/// writes it (`focusable equals true`); a bare predicate, a Shingle
+/// extension, tests for true. Values containing spaces or operator characters
+/// must be double-quoted.
 ///
 /// The matcher serializes back to the text it was parsed from. Parsing fails
 /// with [`ConfigError::Invalid`] on unknown fields or operators, missing
@@ -292,7 +297,7 @@ impl Parser<'_> {
       return Err(self.invalid());
     };
     if let Some(field) = PredicateField::parse(name) {
-      let expected = if self.consume("is") {
+      let expected = if self.consume("is") || self.consume("equals") {
         match self.next() {
           Some("true") => true,
           Some("false") => false,
@@ -394,6 +399,71 @@ fn tokenize(text: &str) -> Result<Vec<String>, ConfigError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn matches(text: &str, view: &ViewProperties<'_>) -> bool {
+    ViewMatcher::try_from(text.to_owned())
+      .unwrap()
+      .matches_view(view)
+  }
+
+  #[test]
+  fn wayfire_default_enabled_for_parses_and_matches() {
+    let text = concat!(
+      "(type equals \"toplevel\" | ",
+      "(type equals \"x-or\" & focusable equals true))"
+    );
+    assert!(matches(text, &ViewProperties::default()));
+    let override_redirect = ViewProperties {
+      view_type: "x-or",
+      ..ViewProperties::default()
+    };
+    assert!(matches(text, &override_redirect));
+    assert!(!matches(
+      text,
+      &ViewProperties {
+        focusable: false,
+        ..override_redirect
+      }
+    ));
+    assert!(!matches(
+      text,
+      &ViewProperties {
+        view_type: "panel",
+        ..ViewProperties::default()
+      }
+    ));
+  }
+
+  #[test]
+  fn predicates_compare_with_is_and_equals() {
+    let fullscreen = ViewProperties {
+      fullscreen: true,
+      ..ViewProperties::default()
+    };
+    for text in ["fullscreen", "fullscreen is true", "fullscreen equals true"] {
+      assert!(matches(text, &fullscreen), "{text}");
+      assert!(!matches(text, &ViewProperties::default()), "{text}");
+    }
+    assert!(matches(
+      "fullscreen equals false",
+      &ViewProperties::default()
+    ));
+    for text in ["fullscreen equals", "fullscreen equals maybe"] {
+      assert!(ViewMatcher::try_from(text.to_owned()).is_err(), "{text}");
+    }
+  }
+
+  #[test]
+  fn wayfire_view_types_are_compared() {
+    for kind in ["x-or", "unmanaged", "background", "panel", "overlay"] {
+      let view = ViewProperties {
+        view_type: kind,
+        ..ViewProperties::default()
+      };
+      assert!(matches(&format!("type is \"{kind}\""), &view), "{kind}");
+      assert!(!matches("type is \"toplevel\"", &view), "{kind}");
+    }
+  }
 
   #[test]
   fn equals_uses_actual_view_type() {
