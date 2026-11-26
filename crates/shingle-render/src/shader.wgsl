@@ -3,6 +3,8 @@ struct VertexInput {
     @location(1) uv: vec2<f32>,
     @location(2) color: vec4<f32>,
     @location(3) flags: u32,
+    // The w the position was divided by, 1 unless the tile is projected.
+    @location(4) w: f32,
 };
 
 struct VertexOutput {
@@ -37,7 +39,7 @@ struct EffectUniform {
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
-    output.position = vec4<f32>(input.position, 0.0, 1.0);
+    output.position = vec4<f32>(input.position * input.w, 0.0, input.w);
     output.uv = input.uv;
     output.color = input.color;
     output.flags = input.flags;

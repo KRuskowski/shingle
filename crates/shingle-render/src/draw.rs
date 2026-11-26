@@ -18,6 +18,10 @@ pub(crate) struct Vertex {
   color: [f32; 4],
   // The sampled texture's dmabuf::tile_flags.
   pub(crate) flags: u32,
+  // The clip-space w the position was divided by: 1 for flat tiles, and
+  // a projected tile's w' (`Projection`), so that the GPU interpolates
+  // its texture coordinates with perspective.
+  pub(crate) w: f32,
 }
 
 impl Vertex {
@@ -30,6 +34,7 @@ impl Vertex {
           1 => Float32x2,
           2 => Float32x4,
           3 => Uint32,
+          4 => Float32,
       ],
     };
 }
@@ -170,10 +175,31 @@ pub(crate) fn quad(
   let x1 = (rect.x + rect.width as i32) as f32 / output_width * 2.0 - 1.0;
   let y0 = 1.0 - rect.y as f32 / output_height * 2.0;
   let y1 = 1.0 - (rect.y + rect.height as i32) as f32 / output_height * 2.0;
-  let top_left = transformed_vertex(tile, x0, y0, 0.0, 0.0);
-  let top_right = transformed_vertex(tile, x1, y0, 1.0, 0.0);
-  let bottom_left = transformed_vertex(tile, x0, y1, 0.0, 1.0);
-  let bottom_right = transformed_vertex(tile, x1, y1, 1.0, 1.0);
+  let mut top_left = transformed_vertex(tile, x0, y0, 0.0, 0.0);
+  let mut top_right = transformed_vertex(tile, x1, y0, 1.0, 0.0);
+  let mut bottom_left = transformed_vertex(tile, x0, y1, 0.0, 1.0);
+  let mut bottom_right = transformed_vertex(tile, x1, y1, 1.0, 1.0);
+  if let Some(projection) = &tile.projection {
+    let left = rect.x as f32;
+    let top = rect.y as f32;
+    let right = left + rect.width as f32;
+    let bottom = top + rect.height as f32;
+    let corners = [
+      (&mut top_left, left, top),
+      (&mut top_right, right, top),
+      (&mut bottom_left, left, bottom),
+      (&mut bottom_right, right, bottom),
+    ];
+    for (vertex, x, y) in corners {
+      let Some(([x, y], w)) = projection.apply(x, y) else {
+        // A corner behind the eye: the tile is not drawn.
+        return [Vertex::zeroed(); 6];
+      };
+      vertex.position =
+        [x / output_width * 2.0 - 1.0, 1.0 - y / output_height * 2.0];
+      vertex.w = w;
+    }
+  }
   let mut vertices = [
     top_left,
     bottom_left,
@@ -297,12 +323,14 @@ fn transformed_vertex(
     uv: [u, v],
     color: tile.color,
     flags: tile.texture.map_or(0, |texture| texture.flags),
+    w: 1.0,
   }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::Projection;
 
   #[test]
   fn tile_rotation_preserves_center_and_swaps_extents() {
@@ -366,6 +394,102 @@ mod tests {
     );
     assert_eq!(vertices[0].position, [-1.0, 1.0]);
     assert_eq!(vertices[5].position, [1.0, -1.0]);
+  }
+
+  /// `matrix` as a column-major [`Projection`] around (`x`, `y`).
+  fn projection(x: f32, y: f32, matrix: [[f32; 4]; 4]) -> Projection {
+    Projection {
+      origin: [x, y],
+      matrix,
+    }
+  }
+
+  const IDENTITY: [[f32; 4]; 4] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+  ];
+
+  #[test]
+  fn an_identity_projection_draws_the_tile_flat() {
+    let rect = RenderRect {
+      x: 100,
+      y: 200,
+      width: 300,
+      height: 100,
+    };
+    let flat = RenderTile::solid(rect, [1.0; 4]);
+    let mut projected = RenderTile::solid(rect, [1.0; 4]);
+    projected.projection = Some(projection(250.0, 250.0, IDENTITY));
+    let flat = quad(&flat, 1000, 800, 1.0, Zoom::default(), Default::default());
+    let projected = quad(
+      &projected,
+      1000,
+      800,
+      1.0,
+      Zoom::default(),
+      Default::default(),
+    );
+    for (flat, projected) in flat.iter().zip(&projected) {
+      for axis in 0..2 {
+        assert!((flat.position[axis] - projected.position[axis]).abs() < 1e-6);
+      }
+      assert_eq!(projected.w, 1.0);
+    }
+  }
+
+  #[test]
+  fn a_projection_divides_by_w_and_keeps_it() {
+    // Scales by 2 around the origin, then w = 2 halves it again, and a
+    // translation of (10, 20) pixels with y up, scaled by w as well.
+    let mut matrix = IDENTITY;
+    matrix[0][0] = 2.0;
+    matrix[1][1] = 2.0;
+    matrix[3][0] = 20.0;
+    matrix[3][1] = 40.0;
+    matrix[3][3] = 2.0;
+    let projection = projection(500.0, 400.0, matrix);
+    let (point, w) = projection.apply(600.0, 300.0).expect("in front");
+    assert_eq!(w, 2.0);
+    assert!((point[0] - 610.0).abs() < 1e-4, "{point:?}");
+    assert!((point[1] - 280.0).abs() < 1e-4, "{point:?}");
+    let mut tile = RenderTile::solid(
+      RenderRect {
+        x: 500,
+        y: 400,
+        width: 100,
+        height: 100,
+      },
+      [1.0; 4],
+    );
+    tile.projection = Some(projection);
+    let vertices =
+      quad(&tile, 1000, 800, 1.0, Zoom::default(), Default::default());
+    // The top left corner, at the origin, only moves by the translation.
+    assert!((vertices[0].position[0] - (510.0 / 500.0 - 1.0)).abs() < 1e-6);
+    assert!((vertices[0].position[1] - (1.0 - 380.0 / 400.0)).abs() < 1e-6);
+    assert!(vertices.iter().all(|vertex| vertex.w == 2.0));
+  }
+
+  #[test]
+  fn a_tile_with_a_corner_behind_the_eye_is_not_drawn() {
+    // w = 1 - x / 50 is negative right of x = 50.
+    let mut matrix = IDENTITY;
+    matrix[0][3] = -0.02;
+    let mut tile = RenderTile::solid(
+      RenderRect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100,
+      },
+      [1.0; 4],
+    );
+    tile.projection = Some(projection(0.0, 0.0, matrix));
+    let vertices =
+      quad(&tile, 1000, 800, 1.0, Zoom::default(), Default::default());
+    assert!(vertices.iter().all(|vertex| vertex.position == [0.0, 0.0]));
   }
 
   #[test]

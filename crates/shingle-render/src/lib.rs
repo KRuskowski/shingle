@@ -3,8 +3,9 @@
 //!
 //! A frame is a list of [`RenderTile`]s in logical pixels, drawn back to
 //! front by [`draw`] after clearing the target. Each tile is mapped to clip
-//! space through the output's [`RenderState`] in a fixed order: divide by
-//! the scale factor, rotate the tile around its centre, apply the zoom crop,
+//! space through the output's [`RenderState`] in a fixed order: project
+//! its corners through its [`Projection`], if it has one, divide by the
+//! scale factor, rotate the tile around its centre, apply the zoom crop,
 //! then the output transform. Colours are premultiplied, and the gamma ramp
 //! and inversion effect held by the [`GpuContext`] apply to every tile.
 //!
@@ -253,6 +254,47 @@ pub struct RenderTile<'a> {
   pub transform: TextureTransform,
   /// Counterclockwise rotation around the tile center, in radians.
   pub rotation: f32,
+  /// A perspective transform of the tile's corners, applied before
+  /// everything else; `None` draws the tile flat.
+  pub projection: Option<Projection>,
+}
+
+/// A 3D transform of a tile, as Wayfire's `view_3d_transformer_t` draws a
+/// view: each corner of the tile, as the point `(x, y, 0, 1)` in logical
+/// pixels relative to `origin` with `y` pointing up, is multiplied by
+/// `matrix` to `(x', y', z', w')` and drawn at `origin + (x' / w', -y' /
+/// w')`. Texture coordinates are interpolated with perspective, and `z'`
+/// is ignored, since tiles are drawn in order without a depth test.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Projection {
+  /// The point the corners are relative to, in logical pixels of the
+  /// output layout, `y` pointing down as everywhere else.
+  pub origin: [f32; 2],
+  /// The transform, column-major as in GLSL and glm: `matrix[column][row]`.
+  /// Every corner must end up with `w'` above 0, in front of the eye.
+  pub matrix: [[f32; 4]; 4],
+}
+
+impl Projection {
+  /// Where the point `(x, y)` of the layout, in logical pixels with `y`
+  /// pointing down, is drawn, and its `w'`. `None` when `w'` is not above
+  /// a small positive bound, behind or too close to the eye.
+  pub fn apply(&self, x: f32, y: f32) -> Option<([f32; 2], f32)> {
+    let local = [x - self.origin[0], self.origin[1] - y, 0.0, 1.0];
+    let row = |index: usize| {
+      (0..4)
+        .map(|column| self.matrix[column][index] * local[column])
+        .sum::<f32>()
+    };
+    let w = row(3);
+    if !w.is_finite() || w < 1e-4 {
+      return None;
+    }
+    Some((
+      [self.origin[0] + row(0) / w, self.origin[1] - row(1) / w],
+      w,
+    ))
+  }
 }
 
 impl<'a> RenderTile<'a> {
@@ -265,6 +307,7 @@ impl<'a> RenderTile<'a> {
       uv: [0.0, 0.0, 1.0, 1.0],
       transform: TextureTransform::Normal,
       rotation: 0.0,
+      projection: None,
     }
   }
 
@@ -278,6 +321,7 @@ impl<'a> RenderTile<'a> {
       uv: [0.0, 0.0, 1.0, 1.0],
       transform: TextureTransform::Normal,
       rotation: 0.0,
+      projection: None,
     }
   }
 }
