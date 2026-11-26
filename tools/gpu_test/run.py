@@ -30,7 +30,7 @@ namespaces:
                nested-gpu|nodmabuf|weston|syncobj|nosyncobj|outputs|
                nested-outputs|nested-smoke|wayfire-plugins|wayfire-shell|
                vswipe|decoration|switcher|colours|minimize-focus|
-               drag-icon ...
+               drag-icon|resize ...
 
 For example, DB-1's import test:
 
@@ -69,6 +69,10 @@ the namespace as an unprivileged user, when `wayfire` starts there.
 WG-10's `--checks drag-icon` (drag_icon_checks.py) drags from a
 `wl_probe --drag-icon` window with STIPC's pointer and requires captures
 to show the icon following the pointer and gone after the drop.
+`--checks resize` (resize_checks.py) drags the boundary between `kitty`
+and a `wl_probe` with STIPC's pointer, one motion and eight motions per
+frame, and reports kitty's configures, buffers and settle time from its
+`WAYLAND_DEBUG` log and the configures of a floating probe beside them.
 
 It exits with the command's status, or 1 when a check failed. With
 `--checks` it prints one PASS or FAIL line per check and INFO lines for
@@ -80,7 +84,7 @@ test_dmabuf_checks.py, test_output_checks.py,
 test_nested_output_checks.py, test_wayfire_checks.py,
 test_vswipe_checks.py, test_decoration_checks.py,
 test_switcher_checks.py, test_colour_checks.py, test_focus_checks.py,
-test_drag_icon_checks.py).
+test_drag_icon_checks.py, test_resize_checks.py).
 The work directory under `target/` is removed afterwards unless `--keep`
 is given.
 """
@@ -108,14 +112,14 @@ SAMPLE_INTERVAL = 0.05
 # nested_output_checks.GROUPS, wayfire_checks.GROUPS,
 # vswipe_checks.GROUPS, decoration_checks.GROUPS and
 # switcher_checks.GROUPS, colour_checks.GROUPS, focus_checks.GROUPS and
-# drag_icon_checks.GROUPS, kept here so that
+# drag_icon_checks.GROUPS and resize_checks.GROUPS, kept here so that
 # `--help` works without importing them.
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
                 'weston', 'syncobj', 'nosyncobj', 'outputs', 'nested-outputs',
                 'nested-smoke', 'wayfire-plugins', 'wayfire-shell', 'vswipe',
                 'decoration', 'switcher', 'colours', 'minimize-focus',
-                'drag-icon')
+                'drag-icon', 'resize')
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset; `syncobj` runs no Vulkan client.
 MODESET_GROUPS = ('dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
