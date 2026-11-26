@@ -107,6 +107,25 @@ impl Shingle {
     Ok(id)
   }
 
+  /// Creates parked workspace set `wset`, laid out in `workarea`, unless it
+  /// exists, as Wayfire's wsets plugin creates a set by the index a binding
+  /// names. Returns whether it was created.
+  ///
+  /// # Errors
+  ///
+  /// [`ShingleError::WsetNotFound`] for index 0, which no set has, and
+  /// [`ShingleError::InvalidWorkarea`].
+  pub fn ensure_wset(&mut self, wset: WsetId, workarea: Rect) -> Result<bool> {
+    if wset.0 == 0 {
+      return Err(ShingleError::WsetNotFound(0));
+    }
+    if self.wsets.contains_key(&wset) {
+      return Ok(false);
+    }
+    self.wsets.insert(wset, WsetState::new(workarea)?);
+    Ok(true)
+  }
+
   /// Shows `wset` on `output`, or parks it with `None`.
   ///
   /// A set shown on `output` before is parked, and `wset` stops being shown
@@ -570,6 +589,21 @@ mod tests {
   fn unplug(shingle: &mut Shingle, from: WsetId, to: WsetId) {
     shingle.attach_wset(from, None, None).unwrap();
     shingle.transfer_wset(from, to, true).unwrap();
+  }
+
+  #[test]
+  fn ensure_wset_creates_a_named_set_once() {
+    let (mut shingle, panel, _) = docked();
+    assert!(!shingle.ensure_wset(panel, MONITOR).unwrap());
+    assert_eq!(shingle.wset(panel).unwrap().workarea, LAPTOP);
+    assert!(shingle.ensure_wset(WsetId(5), MONITOR).unwrap());
+    let info = shingle.wset(WsetId(5)).unwrap();
+    assert_eq!((info.output, info.workarea), (None, MONITOR));
+    assert_eq!(shingle.create_wset(LAPTOP).unwrap(), WsetId(3));
+    assert!(matches!(
+      shingle.ensure_wset(WsetId(0), LAPTOP),
+      Err(ShingleError::WsetNotFound(0))
+    ));
   }
 
   #[test]

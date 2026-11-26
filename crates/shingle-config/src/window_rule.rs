@@ -123,6 +123,12 @@ pub enum RuleAction {
     /// New top edge in output coordinates.
     y: i32,
   },
+  /// `start_on_output NAME`: move the view to the output with connector
+  /// name `NAME`, else to the one whose `make model` or `make model serial`
+  /// is `NAME`, as Wayfire's window-rules do
+  /// (plugins/window-rules/view-action-interface.cpp, `_start_on_output`).
+  /// Dialogs stay with their parent; a name no output has does nothing.
+  StartOnOutput(String),
   /// `resize W H`: float the view at this size, keeping its position. Both must
   /// be nonzero.
   Resize {
@@ -212,6 +218,9 @@ fn parse_action(tokens: &[String]) -> Option<RuleAction> {
         x: parse(&tokens[1])?,
         y: parse(&tokens[2])?,
       })
+    }
+    "start_on_output" if tokens.len() == 2 && !tokens[1].is_empty() => {
+      Some(RuleAction::StartOnOutput(tokens[1].clone()))
     }
     "move" if tokens.len() == 3 => Some(RuleAction::Move {
       x: parse(&tokens[1])?,
@@ -365,4 +374,38 @@ fn tokenize(text: &str) -> Result<Vec<String>, ConfigError> {
   }
   flush(&mut tokens, &mut token, &mut started);
   Ok(tokens)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn action(text: &str) -> Option<RuleAction> {
+    WindowRule::try_from(text.to_owned())
+      .ok()
+      .map(|rule| rule.action)
+  }
+
+  #[test]
+  fn start_on_output_takes_a_name_or_a_quoted_identity() {
+    let Some(RuleAction::StartOnOutput(name)) =
+      action("on created if app_id is \"foot\" then start_on_output DP-2")
+    else {
+      panic!("start_on_output did not parse");
+    };
+    assert_eq!(name, "DP-2");
+    let Some(RuleAction::StartOnOutput(name)) = action(
+      "on created if app_id is \"foot\" then start_on_output \"Dell U2720Q\"",
+    ) else {
+      panic!("a quoted identity did not parse");
+    };
+    assert_eq!(name, "Dell U2720Q");
+    assert!(
+      action("on created if app_id is \"foot\" then start_on_output").is_none()
+    );
+    assert!(
+      action("on created if app_id is \"foot\" then start_on_output a b")
+        .is_none()
+    );
+  }
 }
