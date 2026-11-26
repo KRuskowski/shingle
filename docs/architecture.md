@@ -79,9 +79,11 @@
 | libinput events, translation to `InputEvent`, device options | `crates/shingle-native/src/input.rs`, `input/libinput.rs` |
 | Hotplugged input devices and their seat devices | `crates/shingle-native/src/udev.rs` |
 | KMS device trait, property cache, `IN_FORMATS`, mode selection, atomic requests, connector and plane choice | `crates/shingle-native/src/kms.rs`, `kms/` (`drm.rs` is the real card, `fake.rs` the tests' card) |
-| The lit output: startup test, flips, presentation, DPMS, pause and resume, failures | `crates/shingle-native/src/display.rs`; tests in `display/tests.rs` |
+| The lit outputs, one CRTC each: combined startup test and modesets, flips and presentation per CRTC, DPMS per output, hotplug, output-management configurations, pause and resume, failures | `crates/shingle-native/src/display.rs`; tests in `display/tests.rs` |
+| Matching connectors to CRTCs (wlroots' `match_connectors_with_crtcs`) | `crates/shingle-native/src/crtcs.rs`; CRTC and plane allocation `Card::allocate` in `kms/output.rs` |
+| The compositor's outputs following the lit connectors, frames per output, absolute input per output | `crates/shingle-native/src/host.rs` (`Backend::sync_outputs`, `absolute_position`) |
 | DRM hotplug monitor (`DeviceMonitor`, udev) | `crates/shingle-native/src/hotplug.rs` |
-| Configured output modes, output choice, connector diffing, requested modes | `crates/shingle-native/src/outputs.rs` |
+| Configured output modes, connector priority (`rank`), connector diffing, requested modes | `crates/shingle-native/src/outputs.rs` |
 | EDID make, model and serial | `crates/shingle-native/src/kms/edid.rs` |
 | Copy scanout into dumb buffers | `crates/shingle-native/src/scanout.rs`, `scanout/copy.rs` |
 | Page-flip state machine | `crates/shingle-native/src/pacing.rs` |

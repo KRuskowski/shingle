@@ -394,7 +394,7 @@ All `time_usec` values are passed through, so clients see libinput timestamps in
 - CRTC assignment for more than one output is a bipartite match over `encoder.possible_crtcs()`, done when `enabled` grows past one entry.
 - What multi-output must still add lives in `shingle` and `shingle-core`: more than one `Rect`, per-output `wl_output` globals, and per-output frame callbacks. It does not need to change the native crate's structure.
 - Mirroring and multi-GPU (outputs on a second card) are out of scope.
-- The multi-output design ([multi-output.md](multi-output.md#decision-native-extends-nb-9)) takes this up in its MO-7: a list of lit outputs instead of NB-9's one, wlroots' CRTC matching, combined modesets and flips per CRTC.
+- The multi-output design ([multi-output.md](multi-output.md#decision-native-extends-nb-9)) takes this up in its MO-7: a list of lit outputs instead of NB-9's one, wlroots' CRTC matching, combined modesets and flips per CRTC. Built, and unit-tested through the fake card; see [MO-7 as built](multi-output.md#mo-7-as-built) and steps 25 to 35 of [native-testing.md](../native-testing.md).
 
 ### Rejected alternatives
 

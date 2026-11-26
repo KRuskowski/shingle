@@ -256,7 +256,7 @@ Unit tests through a fake card cover the logic behind every step ([design, NB-7 
    export WAYLAND_DISPLAY="$(sed -n 's/^WAYLAND_DISPLAY=//p' /tmp/shingle-stdout)"
    ```
 
-   `SHINGLE_TRACE_FLIPS=1` adds a `page flip seq=S at SEC.NSEC s` line to the log for every frame shown.
+   `SHINGLE_TRACE_FLIPS=1` adds a `CONN: page flip seq=S at SEC.NSEC s` line to the log for every frame shown, with `CONN` the connector that showed it (before MO-7 the line had no connector).
 
 ### Step 10: a client is visible on the display
 
@@ -274,7 +274,7 @@ Acceptance: "A client is visible on the test machine's display, checked with `gr
 
    Expected: the log has `using /dev/dri/cardN` (the boot VGA card), `output NAME: WxH at R Hz, copy scanout` with the monitor's connector name (such as `HDMI-A-1` or `DP-1`) and preferred mode, and `rendering on ADAPTER; zero-copy scanout is not built yet, so frames are copied`, where ADAPTER is the GPU on that card's PCI slot. The descriptors include that `/dev/dri/cardN`. `grim` writes a PNG of the mode's size showing the foot window, tiled over the whole output. `wayland-info` reports the output with the connector name, the mode's size and refresh rate, and the monitor's physical size.
 3. On the physical screen: the same foot window, sharp, at the monitor's native resolution, and its cursor follows typing on the test machine's keyboard. The mouse pointer is drawn and moves.
-4. If a second monitor is connected, it is dark (Shingle lights one output in NB-7) and the log names only the first.
+4. Run this step with one monitor connected. (In NB-7 a second monitor stayed dark; since MO-7 every connected monitor that a CRTC is free for is lit, which steps 25 to 35 check.)
 5. End Shingle with `kill -TERM`; expected `exit=0` and the text console back on the screen.
 
 ### Step 11: presentation times are the page-flip times, and frames are paced by flips
@@ -307,7 +307,7 @@ Acceptance: "DPMS off and on works through `wlr-output-power-management`."
    tail -n 3 ~/.local/state/shingle/native.log | grep -v 'page flip'
    ```
 
-   Expected: `wlopm` first lists the output as `on`, then `off`. The monitor goes dark and reports no signal or standby within a few seconds, and the log says `display off`. While it is off the probe's output does not grow (no frame callbacks without flips). After `--on` the picture returns within about a second, without a restart, the log says `display on`, `wlopm` lists `on` and the probe's output grows again.
+   Expected: `wlopm` first lists the output as `on`, then `off`. The monitor goes dark and reports no signal or standby within a few seconds, and the log says `output CONN off` (`display off` before MO-7), with `CONN` the connector. While it is off the probe's output does not grow (no frame callbacks without flips). After `--on` the picture returns within about a second, without a restart, the log says `output CONN on`, `wlopm` lists `on` and the probe's output grows again.
 3. Moving the mouse or pressing a key while the display is off also turns it on, as Wayfire's idle handling does.
 
 ### Step 13: a VT switch away and back resumes with a fresh modeset
@@ -353,7 +353,7 @@ The other rows cannot be produced on a healthy machine and are unit-tested only:
 
 ## NB-9: hotplug and output configuration
 
-From NB-9 on, a udev monitor for the card reports DRM hotplug, so plugging and unplugging monitors takes effect without a VT switch. Shingle still lights one output: the one it lit while that stays connected, else a connector named in the configuration, else an internal panel, else the first connected one, never one whose mode is `off`. The mode comes from the output's `mode` option, chosen as Wayfire chooses it. Unit tests through the fake card and a fake monitor cover the logic ([design, NB-9 as built](design/native-backend.md#nb-9-as-built)); these steps check that real connectors, EDIDs, udev events and drivers behave the way the fakes assume.
+From NB-9 on, a udev monitor for the card reports DRM hotplug, so plugging and unplugging monitors takes effect without a VT switch. In NB-9 Shingle lit one output: the one it lit while that stays connected, else a connector named in the configuration, else an internal panel, else the first connected one, never one whose mode is `off`. Since MO-7 it lights every connected monitor in that order as far as the card's CRTCs allow; where a step below has A and B connected at once, both are lit unless the step says otherwise, and the multi-monitor behaviour itself is steps 25 to 35. The mode comes from the output's `mode` option, chosen as Wayfire chooses it. Unit tests through the fake card and a fake monitor cover the logic ([design, NB-9 as built](design/native-backend.md#nb-9-as-built)); these steps check that real connectors, EDIDs, udev events and drivers behave the way the fakes assume.
 
 ### Step 16: prepare the test machine for NB-9
 
@@ -408,14 +408,14 @@ Acceptance: "Disconnecting all outputs keeps Shingle and its clients alive, and 
 1. Start Shingle on tty1 with `nb9.yaml` and monitor A, open two more windows (`ipc stipc/run '{"cmd": "foot"}'` twice) and move one to another workspace with its keybinding, so the tree has a split and two workspaces. Save `ipc simple-tile/get-layout '{"wset-index": 1, "workspace": {"x": 0, "y": 0}}'` and `ipc window-rules/list-views` to files.
 2. Unplug A. For a minute: foot windows keep running (type into one over SSH with `ipc stipc/feed_key` and check it echoes nothing to the screen but keeps its process), `list-views` and `get-layout` are unchanged, and the log shows no frame drawn (`grep -c 'page flip'` stops growing).
 3. Plug A in again. Expected: the picture returns within a second at A's mode, `get-layout` and `list-views` are byte for byte the files of 1 (the same mode gives the same geometry), and typing reaches the focused foot.
-4. With A and B connected and A lit, unplug A: B is lit (`output CONN_B: ...`), every window keeps its workspace and tile order (`get-layout` lists the same windows in the same order, scaled to B's size), and `wlr-randr` and `wayland-info` list only `CONN_B`: clients saw the old output's global go and a new one appear.
+4. Start again with only A connected and windows as in 1, then plug in B (both are lit now) and unplug A: A's windows join B's workspace set under the default `output_layout.unplug: return` (`list-views` shows them on `CONN_B`, each keeping its workspace, tiled ones appended to B's tree), and `wlr-randr` and `wayland-info` list only `CONN_B`. On a card with one usable CRTC, B is lit only once A is unplugged (`output CONN_B: ...` then).
 
 ### Step 20: the configured mode follows Wayfire
 
 Acceptance: "Mode-selection tests cover Wayfire's heuristics" is unit-tested; this step checks the configuration end to end.
 
 1. Start Shingle on tty1 with `nb9-explicit.yaml` and monitor A. Expected: `output CONN_A: 1280x720 at 60.000 Hz` (the configured mode, not the preferred one) and `wlr-randr` marks it `current`.
-2. With Shingle running, edit `nb9-explicit.yaml` to each of the values below in turn (the config reloads by itself) and check the log and `wlr-randr` after each: `highres` lights the largest mode, `highrr` the largest among the fastest, a size A does not offer (`mode: "1234x567"`) lights the preferred mode as Wayfire falls back to `auto`, a size with an unlisted refresh lights the listed refresh closest to it, and `off` turns A off (`no connected output`), leaving B lit if it is connected.
+2. With Shingle running, edit `nb9-explicit.yaml` to each of the values below in turn (the config reloads by itself) and check the log and `wlr-randr` after each: `highres` lights the largest mode, `highrr` the largest among the fastest, a size A does not offer (`mode: "1234x567"`) lights the preferred mode as Wayfire falls back to `auto`, a size with an unlisted refresh lights the listed refresh closest to it, and `off` turns A off (`no connected output` if B is not connected), leaving B lit if it is connected; `wlr-randr` then lists A as a disabled head (`Enabled: no`).
 3. Repeat 1 with the same option in a Wayfire file, `printf '[core]\nxwayland = false\n[output:CONN_A]\nmode = 1280x720@60\n[output:CONN_B]\nmode = off\n' > ~/.config/shingle/nb9.ini`, started with `--config ~/.config/shingle/nb9.ini`: the same mode is lit and B stays dark, which shows each `[output:NAME]` section kept apart.
 
 ### Step 21: wlr-randr changes the mode, with `TEST_ONLY` first
@@ -456,6 +456,124 @@ These steps check `wp_linux_drm_syncobj_manager_v1` ([design/dmabuf.md](design/d
 3. While `vkcube` runs, switch VT away and back (`sudo chvt 2; sleep 5; sudo chvt 1`). Expected: the cube keeps turning, and no client exits or stops with a commit stuck in `blocked syncobj`.
 4. Repeat 2 with `SHINGLE_SYNCOBJ=0`: the log says `SHINGLE_SYNCOBJ=0 forces implicit sync`, `wayland-info` has no syncobj global, the clients draw, and the trace has no `syncobj` lines. Record whether the NVIDIA EGL clients' frame rate differs from 2, since without the protocol they wait for their own GPU before every commit.
 5. With `weston-simple-dmabuf-feedback` (which needs the card node the namespace hides), record the tranche it prints.
+
+## MO-7: several monitors
+
+From MO-7 on, native lights every connected monitor that is not configured `off`, each on a CRTC of its own, in priority order (lit ones, then those named in `outputs`, internal panels, then card order) as far as the card's CRTCs and primary planes allow, with one `TEST_ONLY` modeset of all of them before one real modeset; each monitor flips on its own CRTC at its own refresh rate. Connected monitors that are not lit are listed as disabled heads in wlr-output-management. Unit tests through the fake card cover the matching, the combined modesets and their fallback, flips routed by CRTC, hotplug of a second and a third monitor, configurations across heads, DPMS per output and the absolute input mapping ([design, MO-7 as built](design/multi-output.md#mo-7-as-built)); these steps check them with real monitors, connectors and drivers.
+
+### Step 25: prepare the test machine for MO-7
+
+1. In addition to steps 0, 9 and 16, install `drm-info` and `wlopm`, and have monitors A and B at hand, ideally with different preferred refresh rates (for example 60 and 144 Hz), and a third, C, if the GPU has three outputs. Connect them to the boot VGA card and note their connector names as `CONN_A`, `CONN_B` and `CONN_C`. `drm_info | grep -E '^(├|└)───(Connector|CRTC)|Possible CRTCs'` lists the CRTCs and which CRTCs each connector's encoders can use; record the number of CRTCs.
+2. Write the MO-7 test configs, one per unplug policy:
+
+   ```sh
+   cd ~/.config/shingle
+   for policy in return move park; do
+     printf 'session: {restore: false}\nxwayland: {mode: false}\n' \
+       > "mo7-$policy.yaml"
+     printf 'output_layout: {unplug: %s}\n' "$policy" >> "mo7-$policy.yaml"
+   done
+   ```
+
+3. In the MO-7 steps, "start Shingle on tty1 with CONFIG" means step 9's command with `SHINGLE_TRACE_FLIPS=1`, `--config ~/.config/shingle/CONFIG` and `--spawn foot`. Over SSH, also use step 16's `udevadm monitor` and the log `tail`, and
+
+   ```sh
+   view() { ipc window-rules/list-views | python3 -c 'import json, sys
+   for v in json.load(sys.stdin):
+     print(v["id"], v["app-id"], v["output-name"], v["geometry"])'; }
+   outputs() { ipc window-rules/list-outputs | python3 -c 'import json, sys
+   for o in json.load(sys.stdin):
+     print(o["id"], o["name"], o["geometry"])'; }
+   ```
+
+### Step 26: two and three monitors are lit at once with their preferred modes
+
+1. With A and B connected, start Shingle on tty1 with `mo7-return.yaml`. Expected: the log has `output CONN_A: ...` and `output CONN_B: ...`, each with that monitor's preferred mode, and no `stays dark` line; both screens show Shingle's background, foot on one of them, and the pointer crosses from one screen to the other when moved past their shared edge.
+2. Over SSH, `wlr-randr` lists both heads as `Enabled: yes` with their preferred modes `current`; `outputs` lists both, the first at 0,0 and the second at the first's width, 0 (automatic placement); `wayland-info | grep -A3 wl_output` shows two outputs with those names.
+3. `grep -c 'page flip' ~/.local/state/shingle/native.log` grows while foot's cursor blinks, and `grep 'CONN_B: page flip' ~/.local/state/shingle/native.log | tail -3` shows that B's flips are logged under its own name, with B's own vblank sequence.
+4. With C connected too (and a CRTC for it), repeat: three `output` lines, three heads, three screens with a picture. Record the GPU, the driver and the number of CRTCs.
+
+### Step 27: more monitors than CRTCs, and `--outputs`
+
+1. If the card has fewer usable CRTCs than the monitors at hand (step 25.1), connect them all and start Shingle with `mo7-return.yaml`. Expected: the lowest-priority monitors (last in card order, unless named in `outputs`) are dark, the log has `every CRTC that can drive CONN_C is in use; CONN_C stays dark`, and `wlr-randr` lists that head as `Enabled: no`. Unplug a lit monitor: the dark one is lit within a second (`output CONN_C: ...`). If the card has a CRTC for every connector, record that the case is not producible on it.
+2. On any card: with A and B connected, start Shingle with `mo7-return.yaml` and `--outputs 1` added. Expected: only the first is lit, the log has `CONN_B stays dark: --outputs allows 1 lit outputs`, `wlr-randr` lists `CONN_B` as `Enabled: no`, and `wlr-randr --output CONN_B --on` lights it (status 0, B shows the background, `outputs` lists two).
+
+### Step 28: plugging a second monitor in and out while clients run, under each unplug policy
+
+1. Start Shingle on tty1 with `mo7-return.yaml`, A and B connected. Over SSH, start a second foot with `ipc stipc/run '{"cmd": "foot"}'`, find its view id and B's output id with `view` and `outputs`, and move it to B with `ipc window-rules/configure-view '{"id": VIEW, "output_id": OUT_B}'`. Expected: `view` shows it on `CONN_B`, and it is on B's screen.
+2. Unplug B. Expected within a second: `CONN_B disconnected` in the log, B's foot on A (`view` shows it on `CONN_A`, on A's current workspace), `wlr-randr` lists only A, and both foot processes keep running.
+3. Plug B in again. Expected: `output CONN_B: ...`, and the foot is back on B (`view` shows `CONN_B`) in its old place in B's tree.
+4. Repeat 1 to 3 with `mo7-move.yaml`: in 2 the foot moves to A as before, but in 3 it stays on A and B shows an empty workspace set.
+5. Repeat 1 to 3 with `mo7-park.yaml`: in 2 the foot is hidden (`view` shows it with `output-name` `null` or an `output-id` of -1, nothing on A's screen) but its process runs; in 3 it is back on B.
+6. With `mo7-return.yaml`, plug and unplug B ten times quickly while `present_probe 100000` runs on A: Shingle keeps running, A's probe output keeps growing, and the log has no `modeset failed` or `page flip of CONN_A failed`.
+
+### Step 29: a monitor moved to another connector gets its windows back by its EDID identity
+
+Needs two free connectors for B (for example DisplayPort and HDMI) and a monitor B whose EDID has a serial number (`edid-decode /sys/class/drm/card*-CONN_B/edid | grep -i serial`).
+
+1. Start Shingle with `mo7-return.yaml`, A on `CONN_A` and B on `CONN_B`, with a foot moved to B as in step 28.1.
+2. Unplug B from `CONN_B`: the foot joins A.
+3. Plug B into the other connector, `CONN_C`. Expected: `output CONN_C: ...`, and the foot is back on B, now named `CONN_C` (`view`), because the parked workspace set is found by make, model and serial. `wlr-randr` lists `CONN_C` with B's make, model and serial.
+
+### Step 30: a dock disconnected and reconnected
+
+Needs a dock or MST hub with two monitors (B and C) behind one cable; otherwise record that the step could not be run.
+
+1. Start Shingle with `mo7-return.yaml`, the internal panel or A on the GPU directly and B and C on the dock, with a foot on each of B and C (step 28.1).
+2. Pull the dock's cable. Expected: both `disconnected` lines, both foot windows on the remaining monitor, no `modeset failed`.
+3. Plug the dock in again. Expected: B and C lit again (the dock may renumber its connectors; the windows follow their monitors' EDID identities as in step 29), each foot back on its monitor.
+
+### Step 31: mode, position and disable changes through wlr-randr with two heads
+
+1. Start Shingle with `mo7-return.yaml`, A and B connected, and `present_probe 100000` as the client, so that flips are pending at almost any moment.
+2. `wlr-randr --output CONN_B --mode WxH@R --dryrun; echo "status=$?"` with a mode B lists but is not current: `status=0`, nothing changes and the log has no new `output CONN_B:` line.
+3. `wlr-randr --output CONN_B --mode WxH@R; echo "status=$?"`: `status=0`, B switches mode within a second, the log says `output CONN_B: WxH at R Hz, copy scanout`, and A's picture does not flicker or drop out.
+4. Both at once: `wlr-randr --output CONN_A --mode W1xH1 --output CONN_B --mode W2xH2; echo "status=$?"`: `status=0` and both `output` lines appear together (one combined modeset).
+5. `wlr-randr --output CONN_B --pos 0,-1080` (B above A, using B's height): `outputs` shows B at 0,-1080, and the pointer crosses at the top edge of A.
+6. `wlr-randr --output CONN_B --off`: B goes dark, `wlr-randr` lists it `Enabled: no`, windows on B join A, and A keeps its probe running. `wlr-randr --output CONN_B --on`: B is lit again and its windows come back. Unplugging and replugging B now leaves it as it is (`--off` and `--on` hold until Shingle restarts, as in Wayfire).
+7. `wlr-randr --output CONN_A --off --output CONN_B --off; echo "status=$?"` fails (`status` non-zero): the last output is never turned off.
+
+### Step 32: flips and presentation per CRTC at different refresh rates
+
+1. With A and B at different refresh rates (step 25.1), start Shingle on tty1 with `mo7-return.yaml` and `sh -c 'exec present_probe 600 > /tmp/probe-a.out'` as the client. Over SSH, start a second probe with `ipc stipc/run '{"cmd": "exec present_probe 600 > /tmp/probe-b.out"}'` and move it to B at once with `configure-view` as in step 28.1.
+2. After 20 s:
+
+   ```sh
+   cd ~/shingle/tools/native_test
+   python3 present_check.py --output CONN_A \
+     ~/.local/state/shingle/native.log /tmp/probe-a.out; echo "a=$?"
+   python3 present_check.py --output CONN_B \
+     ~/.local/state/shingle/native.log /tmp/probe-b.out; echo "b=$?"
+   ```
+
+   Expected: `a=0` and `b=0`. Each summary's `"median_frame_interval_ms"` is one refresh period of that probe's own monitor (for example 16 or 17 at 60 Hz and 7 at 144 Hz), and its `presented` lines carry that monitor's `"refresh"`. B's probe may report failures for the first frames, drawn on A before the move; record their number.
+
+### Step 33: DPMS per output
+
+1. Start Shingle with `mo7-return.yaml`, A and B connected, and `present_probe 100000` on A.
+2. `wlopm; wlopm --off CONN_B; sleep 3; wlopm`: B goes dark, `wlopm` lists `CONN_A on` and `CONN_B off`, the log says `output CONN_B off`, and `wc -l < /tmp/probe.out` keeps growing (A keeps flipping).
+3. `wlopm --on CONN_B`: B's picture returns within a second and the log says `output CONN_B on`.
+4. `wlopm --off '*'`: both go dark and the probe output stops growing; moving the mouse turns both on again.
+
+### Step 34: a VT switch away and back with two outputs lit
+
+1. Start Shingle with `mo7-return.yaml`, A and B connected, a probe on each (step 32.1, with `100000` frames).
+2. `sudo chvt 2; sleep 2; sudo chvt 1`. Expected: `seat disabled; paused`, then `seat enabled; resumed`; both monitors show Shingle again and both probe outputs grow again; the log has no `modeset after resume failed`.
+3. `sudo chvt 2`, unplug B, `sudo chvt 1`: only A is lit, B's probe joins A. `sudo chvt 2`, plug B in, `sudo chvt 1`: B is lit again and its probe goes back to it.
+4. Repeat 2 with Ctrl+Alt+F2 and Ctrl+Alt+F1 on the physical keyboard, five times quickly: Shingle keeps running, and both monitors show it after the last switch back.
+
+### Step 35: absolute input mapped to an output
+
+1. Add a mapping for the uinput touchscreen to `mo7-return.yaml`:
+
+   ```sh
+   printf 'input_devices:\n  "shingle-test touch": {output: CONN_B}\n' \
+     >> ~/.config/shingle/mo7-return.yaml
+   ```
+
+   and start Shingle with it, A and B connected and `sh -c 'exec wev > /tmp/wev.log 2>&1'` as the client; move wev's window to B (step 28.1).
+2. `uinput touch 0.5 0.5`. Expected: wev's log has a `wl_touch` `down` in the middle of its window on B (half of B's width and height in window coordinates), not on A.
+3. Without the mapping (remove the two lines and restart), `uinput touch 0.5 0.5` touches the middle of the whole layout's bounding box: with A and B side by side and equally wide and high, the point on the edge between them.
 
 ## Results
 
