@@ -131,6 +131,7 @@ use wayland_server::{
   backend::{ClientData, ClientId, DisconnectReason},
 };
 
+pub use buffer::ShmContent;
 pub use buffer_lock::BufferLock;
 pub use linux_dmabuf::{
   DmabufBuffer, DmabufFeedback, DmabufFormat, DmabufImporter, DmabufPlane,
@@ -483,16 +484,21 @@ pub enum SurfaceRole {
 }
 
 /// What a [`BufferSnapshot`] holds of its buffer (docs/design/dmabuf.md,
-/// section 4). DB-6 adds a view of an shm buffer to upload.
+/// sections 4 and 5).
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum SnapshotContent {
   /// Tightly packed 8-bit RGBA rows, top to bottom, copied when the commit
   /// applied, so the buffer is released to its client at once. ARGB/XRGB
   /// formats are swizzled, X formats get opaque alpha, and colour stays
-  /// premultiplied as `wl_shm` defines it. Shared-memory and single-pixel
-  /// buffers are copied like this.
+  /// premultiplied as `wl_shm` defines it. Single-pixel buffers are copied
+  /// like this, and shared-memory buffers too unless
+  /// [`Compositor::set_shm_upload`] is on.
   Pixels(Arc<[u8]>),
+  /// A shared-memory buffer, still in the client's pool, that the
+  /// frontend uploads to the GPU and then releases, with
+  /// [`Compositor::set_shm_upload`] on.
+  Shm(ShmContent),
   /// A client DMA-BUF, which only the GPU reads: the frontend imports it
   /// (or finds it in its cache by serial) and samples it.
   Dmabuf(DmabufContent),
@@ -553,6 +559,7 @@ impl std::fmt::Debug for BufferSnapshot {
       .field("transform", &self.transform);
     match &self.content {
       SnapshotContent::Pixels(rgba) => debug.field("rgba", rgba),
+      SnapshotContent::Shm(content) => debug.field("shm", content),
       SnapshotContent::Dmabuf(content) => {
         debug.field("dmabuf", &content.buffer)
       }
@@ -573,10 +580,13 @@ impl BufferSnapshot {
 
   /// The buffer as tightly packed RGBA rows, as described for
   /// [`SnapshotContent::Pixels`], or `None` for content the CPU cannot
-  /// read: a DMA-BUF.
+  /// read: a DMA-BUF, or a shared-memory buffer the frontend has already
+  /// uploaded and released. A shared-memory buffer that is still locked
+  /// is converted now, on every call.
   pub fn rgba(&self) -> Option<Arc<[u8]>> {
     match &self.content {
       SnapshotContent::Pixels(rgba) => Some(Arc::clone(rgba)),
+      SnapshotContent::Shm(content) => content.rgba().map(Arc::from),
       SnapshotContent::Dmabuf(_) => None,
     }
   }
@@ -585,7 +595,16 @@ impl BufferSnapshot {
   pub fn dmabuf(&self) -> Option<&DmabufContent> {
     match &self.content {
       SnapshotContent::Dmabuf(content) => Some(content),
-      SnapshotContent::Pixels(_) => None,
+      _ => None,
+    }
+  }
+
+  /// The shared-memory buffer this snapshot shows for upload, if it is
+  /// one.
+  pub fn shm(&self) -> Option<&ShmContent> {
+    match &self.content {
+      SnapshotContent::Shm(content) => Some(content),
+      _ => None,
     }
   }
 }
@@ -1982,6 +2001,20 @@ impl Compositor {
   /// as in the headless backend, the compositor composites on the CPU.
   pub fn set_frame_capture(&mut self, enabled: bool) {
     self.state.screencopy.frame_capture = enabled;
+  }
+
+  /// Makes `wl_shm` commits keep the client's buffer instead of copying
+  /// it, for a frontend that uploads to the GPU (docs/design/dmabuf.md,
+  /// section 5). Each committed snapshot then carries a
+  /// [`SnapshotContent::Shm`], locked until the frontend has written it
+  /// into a texture and called [`ShmContent::release`]; the frontend
+  /// must do that for every surface it is told about in
+  /// [`Event::SurfaceCommitted`], drawn or not, or clients wait for their
+  /// buffers. Without it, as in the headless backend and for buffers
+  /// committed before it is turned on, shared-memory buffers are copied
+  /// into [`SnapshotContent::Pixels`] and released at commit.
+  pub fn set_shm_upload(&mut self, enabled: bool) {
+    self.state.shm_upload = enabled;
   }
 
   /// Answers [`Event::CaptureRequested`] `id` with `result`: the region

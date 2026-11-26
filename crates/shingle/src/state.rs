@@ -202,6 +202,9 @@ pub(crate) struct CompositorState {
   pub(crate) pending_maps: HashMap<WindowId, PendingMap>,
   pub(crate) delayed_maps: HashSet<WindowId>,
   pub(crate) frame_callbacks: Vec<FrameCallback>,
+  /// Whether shm commits keep their buffers for the frontend to upload
+  /// (`Compositor::set_shm_upload`).
+  pub(crate) shm_upload: bool,
   pub(crate) disconnected: Arc<Mutex<Vec<ClientId>>>,
   pub(crate) foreign_toplevels: crate::foreign_toplevel::ForeignToplevels,
   pub(crate) foreign: crate::foreign::ForeignHandles,
@@ -370,6 +373,7 @@ impl CompositorState {
       pending_maps: HashMap::new(),
       delayed_maps: HashSet::new(),
       frame_callbacks: Vec::new(),
+      shm_upload: false,
       disconnected,
       foreign_toplevels: Default::default(),
       foreign: Default::default(),
@@ -1416,7 +1420,9 @@ impl CompositorState {
       ));
       let offset_x = surface.pending.offset_x;
       let offset_y = surface.pending.offset_y;
-      match attachment.snapshot(damage, offset_x, offset_y, Some(lock)) {
+      let upload = self.shm_upload;
+      match attachment.snapshot(damage, offset_x, offset_y, Some(lock), upload)
+      {
         Ok(mut snapshot) => {
           snapshot.scale = scale;
           snapshot.transform = surface.pending.transform;
@@ -1457,7 +1463,7 @@ impl CompositorState {
       }
     }
     // The pixels are copied, so the buffer goes back to its client, unless
-    // a DMA-BUF's snapshot holds it.
+    // a DMA-BUF's snapshot or an shm buffer waiting for upload holds it.
     drop(attachment);
 
     if let Some(viewport) = crate::viewport::commit(self, object, scale)

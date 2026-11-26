@@ -386,6 +386,109 @@ mod tests {
     assert_eq!(shown_size(&compositor, &surface), Some((1, 1)));
   }
 
+  /// The buffer `surface` shows.
+  fn shown(
+    compositor: &crate::Compositor,
+    surface: &wayland_client::protocol::wl_surface::WlSurface,
+  ) -> crate::BufferSnapshot {
+    let object = object_of(compositor, surface);
+    compositor.state.surfaces[&object]
+      .buffer
+      .clone()
+      .expect("the surface shows a buffer")
+  }
+
+  #[test]
+  fn with_shm_upload_a_buffer_is_kept_until_the_frontend_releases_it() {
+    let (mut compositor, path) = test_compositor();
+    compositor.set_shm_upload(true);
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let wl_compositor = client.bind::<WlCompositor>(4);
+    let surface = wl_compositor.create_surface(&client.handle, ());
+    let shm = client.shm_buffer(4, 2);
+    surface.attach(Some(&shm), 0, 0);
+    surface.commit();
+    client.roundtrip(&mut compositor);
+    assert!(client.events.buffer_releases.is_empty());
+    let snapshot = shown(&compositor, &surface);
+    let content = snapshot.shm().expect("an shm buffer to upload").clone();
+    assert!(content.is_locked());
+    assert_eq!(content.fourcc(), u32::from_le_bytes(*b"AR24"));
+    assert!(!content.is_opaque());
+    assert_eq!(content.stride(), 16);
+    assert_eq!(content.read(<[u8]>::len), Ok(32));
+    // CPU readers convert on demand while it is locked.
+    assert_eq!(snapshot.rgba().map(|rgba| rgba.len()), Some(32));
+    content.release();
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.buffer_releases, [shm.id()]);
+    // Every clone shares the release, and the pixels are gone.
+    assert!(!snapshot.shm().unwrap().is_locked());
+    assert!(snapshot.rgba().is_none());
+    assert!(content.read(|_| ()).is_err());
+    // A commit without a new buffer keeps the released content.
+    surface.damage_buffer(0, 0, 1, 1);
+    surface.commit();
+    client.roundtrip(&mut compositor);
+    let again = shown(&compositor, &surface);
+    assert!(!again.shm().unwrap().is_locked());
+    assert_eq!(again.damage, [shingle_core::Rect::new(0, 0, 1, 1)]);
+    assert_eq!(client.events.buffer_releases, [shm.id()]);
+  }
+
+  #[test]
+  fn a_replaced_buffer_waiting_for_upload_is_released_by_its_successor() {
+    let (mut compositor, path) = test_compositor();
+    compositor.set_shm_upload(true);
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let wl_compositor = client.bind::<WlCompositor>(4);
+    let surface = wl_compositor.create_surface(&client.handle, ());
+    let first = client.shm_buffer(4, 4);
+    let second = client.shm_buffer(4, 4);
+    surface.attach(Some(&first), 0, 0);
+    surface.commit();
+    client.roundtrip(&mut compositor);
+    let first_content = shown(&compositor, &surface).shm().unwrap().clone();
+    surface.attach(Some(&second), 0, 0);
+    surface.commit();
+    client.roundtrip(&mut compositor);
+    // The frontend still holds the first commit's content, from its
+    // event, so the buffer waits for its upload.
+    assert!(client.events.buffer_releases.is_empty());
+    first_content.release();
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.buffer_releases, [first.id()]);
+    // Events hold snapshots too; a frontend drains them every turn.
+    compositor.drain_events();
+    surface.destroy();
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.buffer_releases, [first.id(), second.id()]);
+  }
+
+  #[test]
+  fn without_shm_upload_snapshots_copy_and_icons_always_do() {
+    let (mut compositor, path) = test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let wl_compositor = client.bind::<WlCompositor>(4);
+    let surface = wl_compositor.create_surface(&client.handle, ());
+    let shm = client.shm_buffer(4, 4);
+    surface.attach(Some(&shm), 0, 0);
+    surface.commit();
+    client.roundtrip(&mut compositor);
+    let snapshot = shown(&compositor, &surface);
+    assert!(snapshot.shm().is_none());
+    assert!(matches!(
+      snapshot.content,
+      crate::SnapshotContent::Pixels(_)
+    ));
+    let attachment = compositor.state.buffers.values().next().unwrap();
+    let lock = attachment.lock();
+    let icon = attachment.snapshot(Vec::new(), 0, 0, None, true).unwrap();
+    assert!(icon.shm().is_none());
+    let kept = attachment.snapshot(Vec::new(), 0, 0, Some(&lock), true);
+    assert!(kept.unwrap().shm().is_some());
+  }
+
   #[test]
   fn a_buffer_attached_again_before_its_commit_is_not_released() {
     let (mut compositor, path) = test_compositor();

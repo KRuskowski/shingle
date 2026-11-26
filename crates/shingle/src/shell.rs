@@ -683,14 +683,7 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
       && surface.buffer.as_ref().is_some_and(|buffer| {
         buffer.width == state.output.width
           && buffer.height == state.output.height
-          && match &buffer.content {
-            crate::SnapshotContent::Pixels(rgba) => {
-              rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255)
-            }
-            // The GPU content cannot be read on the CPU, so a DMA-BUF
-            // covering the output counts as ready, whatever its format.
-            crate::SnapshotContent::Dmabuf(_) => true,
-          }
+          && covers_opaquely(buffer)
       })
   });
   if ready {
@@ -699,6 +692,27 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
     state.emit_idle_changes();
     crate::input::sync_focus(state);
   }
+}
+
+/// Whether a lock surface's `buffer`, which covers the output, hides
+/// everything under it.
+fn covers_opaquely(buffer: &crate::BufferSnapshot) -> bool {
+  match &buffer.content {
+    crate::SnapshotContent::Pixels(rgba) => opaque(rgba),
+    // Still locked here, in the commit that showed it: an opaque format
+    // is ready, any other is read now.
+    crate::SnapshotContent::Shm(content) => {
+      content.is_opaque() || content.rgba().is_some_and(|rgba| opaque(&rgba))
+    }
+    // The GPU content cannot be read on the CPU, so a DMA-BUF covering
+    // the output counts as ready, whatever its format.
+    crate::SnapshotContent::Dmabuf(_) => true,
+  }
+}
+
+/// Whether every pixel of tightly packed RGBA rows is opaque.
+fn opaque(rgba: &[u8]) -> bool {
+  rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255)
 }
 
 /// Unmaps a toplevel that committed a null buffer while mapped or waiting
@@ -2622,6 +2636,38 @@ mod tests {
     state::{ClientDataImpl, CompositorState},
     test_client::TestClient,
   };
+
+  #[test]
+  fn a_lock_surface_buffer_covers_opaquely_by_format_or_alpha() {
+    use wayland_client::protocol::wl_compositor::WlCompositor;
+
+    use super::covers_opaquely;
+    let (mut compositor, path) = crate::tests::test_compositor();
+    compositor.set_shm_upload(true);
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let wl_compositor = client.bind::<WlCompositor>(4);
+    let surface = wl_compositor.create_surface(&client.handle, ());
+    // The test client's buffers are ARGB8888 and zeroed: transparent.
+    let buffer = client.shm_buffer(4, 4);
+    surface.attach(Some(&buffer), 0, 0);
+    surface.commit();
+    client.roundtrip(&mut compositor);
+    let shown = compositor
+      .state
+      .surfaces
+      .values()
+      .find_map(|surface| surface.buffer.clone())
+      .expect("a shown buffer");
+    let content = shown.shm().expect("an shm buffer to upload");
+    assert!(!covers_opaquely(&shown), "read while locked: transparent");
+    content.release();
+    assert!(!covers_opaquely(&shown), "unreadable after release");
+    let mut pixels = shown.clone();
+    pixels.content = crate::SnapshotContent::Pixels(vec![9, 9, 9, 255].into());
+    assert!(covers_opaquely(&pixels));
+    pixels.content = crate::SnapshotContent::Pixels(vec![9, 9, 9, 254].into());
+    assert!(!covers_opaquely(&pixels));
+  }
 
   /// Minimal wire-protocol client on one end of a socket pair.
   struct WireClient {
