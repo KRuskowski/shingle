@@ -344,12 +344,13 @@ mod tests {
       let config = ShingleConfig::parse(text, ConfigFormat::Wayfire).unwrap();
       assert_eq!(config.output_layout.unplug, UnplugPolicy::Return);
     }
-    let error = ShingleConfig::parse(
+    let warnings = crate::warnings_of(
       "[wsets]\nwset_0 = <super> KEY_F1\n",
       ConfigFormat::Wayfire,
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("from 1"), "{error}");
+    );
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].starts_with("line 2: [wsets] wset_0: "));
+    assert!(warnings[0].contains("from 1"), "{warnings:?}");
   }
 
   #[test]
@@ -397,9 +398,9 @@ mod tests {
       config.input_devices["1386:890:Wacom_Pen"].output.as_deref(),
       Some("DP-3")
     );
-    assert!(
-      ShingleConfig::parse("set $output_unplug keep\n", ConfigFormat::I3)
-        .is_err()
-    );
+    let warnings =
+      crate::warnings_of("set $output_unplug keep\n", ConfigFormat::I3);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].starts_with("line 1: set $output_unplug: "));
   }
 }

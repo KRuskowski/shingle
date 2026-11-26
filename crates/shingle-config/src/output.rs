@@ -824,12 +824,15 @@ mod tests {
     assert_eq!(config.output.size(), (800, 600));
     assert_eq!(config.output.scale, 2.0);
     assert!(config.outputs.is_empty());
-    let error = ShingleConfig::parse(
+    let (config, warnings) = ShingleConfig::parse_with_warnings(
       "[output:DP-1]\nmode = 1920x1080@59.94\n",
       ConfigFormat::Wayfire,
     )
-    .unwrap_err();
-    assert!(error.to_string().contains("line 2"), "{error}");
+    .unwrap();
+    assert!(config.outputs.is_empty());
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].line, Some(2));
+    assert!(warnings[0].message.contains("invalid output mode"));
   }
 
   #[test]
@@ -853,8 +856,13 @@ mod tests {
     assert_eq!(hdmi.mode, explicit(1920, 1080, 0));
     assert_eq!((hdmi.x, hdmi.transform.as_str()), (2560, "270"));
     assert_eq!(config.output_config("eDP-1").mode, OutputMode::Off);
-    assert!(
-      ShingleConfig::parse("output DP-1 mode big\n", ConfigFormat::I3).is_err()
+    let warnings = crate::warnings_of(
+      "output * scale 2\noutput DP-1 mode big\n",
+      ConfigFormat::I3,
+    );
+    assert_eq!(
+      warnings,
+      ["line 2: output DP-1: invalid output mode; keeping the default"]
     );
   }
 
@@ -878,12 +886,13 @@ mod tests {
     for name in ["DP-2", "DP-3"] {
       assert_eq!(wayfire.output_config(name).position, OutputPosition::Auto);
     }
-    assert!(
-      ShingleConfig::parse(
+    assert_eq!(
+      crate::warnings_of(
         "[output:DP-1]\nposition = left\n",
         ConfigFormat::Wayfire
       )
-      .is_err()
+      .len(),
+      1
     );
     let i3 = ShingleConfig::parse(
       "output DP-1 pos 1920 0\noutput DP-2 scale 2\n",

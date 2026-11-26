@@ -5,7 +5,11 @@
 //! [`ShingleConfig::load`] picks the syntax from the file name or contents
 //! ([`ConfigFormat`]), and every route into a `ShingleConfig` ends in
 //! [`ShingleConfig::validate`], so a value returned by this crate is always
-//! within the documented ranges. Most sections mirror a Wayfire plugin; field
+//! within the documented ranges. YAML is strict, but Wayfire and i3 files
+//! are read as Wayfire reads its own: a value Shingle cannot use keeps its
+//! default and becomes a [`ConfigWarning`], which
+//! [`ShingleConfig::load_with_warnings`] returns with the configuration.
+//! Most sections mirror a Wayfire plugin; field
 //! docs name the Wayfire option each one is imported from, and Wayfire's
 //! `metadata/*.xml` is the behavioural reference for those options.
 //!
@@ -17,8 +21,11 @@
 
 #![warn(missing_docs)]
 
+mod activator;
 mod config_watcher;
 mod i3;
+mod import;
+mod ini;
 mod layout;
 mod multi_output;
 mod output;
@@ -60,18 +67,23 @@ pub enum ConfigFormat {
   /// section rejects unknown fields, so a typo is an error rather than a
   /// silently ignored key.
   Yaml,
-  /// Wayfire's `wayfire.ini`. Recognised `[section] option` pairs are imported
-  /// and everything else, including whole plugins Shingle lacks, is ignored, so
-  /// an existing Wayfire config can be loaded as it is; only an unparsable
-  /// value for a recognised option is an error. Import starts from
-  /// [`ShingleConfig::default`], not from Wayfire's defaults; in particular the
-  /// workspace grid stays 10×1 unless `[core] vwidth` and `vheight` are set
-  /// (Wayfire defaults to 3×3).
+  /// Wayfire's `wayfire.ini`, read line by line as wf-config reads it: an
+  /// unescaped `#` starts a comment, `\#` is a literal `#` (WCM writes every
+  /// hex colour that way), a line ending in `\` continues on the next, and
+  /// names and values are trimmed. Recognised `[section] option` pairs are
+  /// imported; whole sections of plugins Shingle does not have are reported
+  /// once each, and other options are ignored. A value Shingle cannot use
+  /// keeps its default and is reported with its line, as wf-config does, so
+  /// any readable file loads. Import starts from [`ShingleConfig::default`],
+  /// not from Wayfire's defaults; in particular the workspace grid stays
+  /// 10×1 unless `[core] vwidth` and `vheight` are set (Wayfire defaults to
+  /// 3×3).
   ///
-  /// A `#` starts a comment when it begins the line or follows whitespace,
-  /// except where it introduces a 6 or 8 digit hex colour after `=`. Activators
-  /// are Wayfire's `<super> <shift> KEY_Q` form, and `|` separates alternatives
-  /// where the field takes a list.
+  /// Activators are Wayfire's `<super> <shift> KEY_Q` form with `|` between
+  /// alternatives. Keys and buttons are bound; a modifier alone, touch
+  /// gestures and hotspots are recognised and reported as not supported yet,
+  /// and never bound as keys. Where a field takes one binding, the first key
+  /// or button is used.
   Wayfire,
   /// An i3- or sway-style config. `bindsym`, `exec`, `gaps` and `output` are
   /// understood, Shingle-specific options are given as `set $option value` (for
@@ -81,6 +93,9 @@ pub enum ConfigFormat {
   /// such as `focus left`, `workspace 3`, `move container to workspace next`
   /// and `exec CMD`; any other `exec` binding becomes a [`CommandBinding`].
   /// `exec shingle-lock` binds the lock key instead.
+  ///
+  /// As with Wayfire files, a line whose value Shingle cannot use keeps the
+  /// default and is reported with its line number.
   I3,
 }
 
@@ -240,7 +255,20 @@ impl Default for ShingleConfig {
 
 impl ShingleConfig {
   /// Reads, parses and validates the configuration at `path`, or at
-  /// [`default_path`] when `path` is `None`.
+  /// [`default_path`] when `path` is `None`, dropping any warnings; see
+  /// [`ShingleConfig::load_with_warnings`].
+  ///
+  /// # Errors
+  ///
+  /// As [`ShingleConfig::load_with_warnings`].
+  pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
+    Self::load_with_warnings(path).map(|(config, _)| config)
+  }
+
+  /// Reads, parses and validates the configuration at `path`, or at
+  /// [`default_path`] when `path` is `None`, and returns it with the
+  /// warnings about what a Wayfire or i3 file held that Shingle could not
+  /// use.
   ///
   /// The format is chosen in this order: Wayfire when the extension is `.ini`
   /// or the first non-blank character is `[`, i3 when the extension is `.conf`
@@ -251,8 +279,10 @@ impl ShingleConfig {
   /// # Errors
   ///
   /// [`ConfigError::Read`] if the file cannot be read, otherwise whatever
-  /// [`ShingleConfig::parse`] returns.
-  pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
+  /// [`ShingleConfig::parse_with_warnings`] returns.
+  pub fn load_with_warnings(
+    path: Option<&Path>,
+  ) -> Result<(Self, Vec<ConfigWarning>), ConfigError> {
     let path = path.map(Path::to_owned).unwrap_or_else(default_path);
     let text = match fs::read_to_string(&path) {
       Ok(text) => text,
@@ -260,7 +290,7 @@ impl ShingleConfig {
         if error.kind() == io::ErrorKind::NotFound
           && path == default_path() =>
       {
-        return Ok(Self::default());
+        return Ok((Self::default(), Vec::new()));
       }
       Err(source) => {
         return Err(ConfigError::Read {
@@ -281,26 +311,41 @@ impl ShingleConfig {
     } else {
       ConfigFormat::Yaml
     };
-    Self::parse(&text, format)
+    Self::parse_with_warnings(&text, format)
   }
 
-  /// Parses `text` as `format` and validates the result.
+  /// Parses `text` as `format` and validates the result, dropping any
+  /// warnings; see [`ShingleConfig::parse_with_warnings`].
   ///
   /// # Errors
   ///
-  /// [`ConfigError::Yaml`] for malformed YAML, a wrong type or an unknown
-  /// field; [`ConfigError::Binding`] for an unparsable key binding;
-  /// [`ConfigError::Invalid`] for an unparsable INI or i3 value (the message
-  /// carries the line number), an invalid colour, matcher or window rule, or
-  /// any [`ShingleConfig::validate`] failure.
+  /// As [`ShingleConfig::parse_with_warnings`].
   pub fn parse(text: &str, format: ConfigFormat) -> Result<Self, ConfigError> {
-    let config = match format {
-      ConfigFormat::Yaml => serde_yaml::from_str::<Self>(text)?,
+    Self::parse_with_warnings(text, format).map(|(config, _)| config)
+  }
+
+  /// Parses `text` as `format`, validates the result and returns it with the
+  /// warnings, in line order. YAML never warns: anything it cannot use is an
+  /// error. Wayfire and i3 files warn instead (see [`ConfigFormat`]), so
+  /// they only fail on a bug.
+  ///
+  /// # Errors
+  ///
+  /// For YAML, [`ConfigError::Yaml`] for malformed YAML, a wrong type or an
+  /// unknown field; [`ConfigError::Binding`] for an unparsable key binding;
+  /// [`ConfigError::Invalid`] for an invalid colour, matcher or window rule,
+  /// or any [`ShingleConfig::validate`] failure.
+  pub fn parse_with_warnings(
+    text: &str,
+    format: ConfigFormat,
+  ) -> Result<(Self, Vec<ConfigWarning>), ConfigError> {
+    let (config, warnings) = match format {
+      ConfigFormat::Yaml => (serde_yaml::from_str::<Self>(text)?, Vec::new()),
       ConfigFormat::Wayfire => wayfire::parse(text)?,
       ConfigFormat::I3 => i3::parse(text)?,
     };
     config.validate()?;
-    Ok(config)
+    Ok((config, warnings))
   }
 
   /// Validates and serializes the configuration as native YAML. Matchers and
@@ -411,6 +456,14 @@ impl ShingleConfig {
   /// The first violated constraint, as [`ConfigError::Invalid`] with a message
   /// naming the field.
   pub fn validate(&self) -> Result<(), ConfigError> {
+    self.validate_fields()?;
+    self.validate_references()
+  }
+
+  /// Every check of [`ShingleConfig::validate`] that concerns one field or
+  /// fields set by the same option, which the importers run after each
+  /// option.
+  pub(crate) fn validate_fields(&self) -> Result<(), ConfigError> {
     if !(1..=20).contains(&self.extra_gestures.move_fingers)
       || !(1..=20).contains(&self.extra_gestures.close_fingers)
       || !(1..=10_000).contains(&self.extra_gestures.move_delay)
@@ -609,15 +662,6 @@ impl ShingleConfig {
         "workspaces.width and workspaces.height must be nonzero".into(),
       ));
     }
-    let workspace_count =
-      u64::from(self.workspaces.width) * u64::from(self.workspaces.height);
-    if self.expo.workspace_bindings.iter().any(|entry| {
-      entry.workspace == 0 || entry.workspace as u64 > workspace_count
-    }) {
-      return Err(ConfigError::Invalid(
-        "Expo workspace bindings must name a configured workspace".into(),
-      ));
-    }
     if !matches!(
       self.workspaces.wraparound.as_str(),
       "false" | "true" | "on_end"
@@ -625,15 +669,6 @@ impl ShingleConfig {
       return Err(ConfigError::Invalid(
         "workspaces.wraparound must be false, true, or on_end".into(),
       ));
-    }
-    for rule in &self.window_rules {
-      if let RuleAction::AssignWorkspace { x, y } = rule.action
-        && (x >= self.workspaces.width || y >= self.workspaces.height)
-      {
-        return Err(ConfigError::Invalid(format!(
-          "window rule workspace {x},{y} is outside the configured grid"
-        )));
-      }
     }
     if self.tiling.minimum_extent == 0 {
       return Err(ConfigError::Invalid(
@@ -647,6 +682,31 @@ impl ShingleConfig {
         "resize.corner_threshold must be between 0 and 0.5".into(),
       ));
     }
+    Ok(())
+  }
+
+  /// The constraints between fields: Expo workspace bindings and
+  /// `assign_workspace` window rules name a workspace inside the grid, and
+  /// `workspace_switch` and `workspace_move` hold ten bindings each.
+  fn validate_references(&self) -> Result<(), ConfigError> {
+    let workspace_count =
+      u64::from(self.workspaces.width) * u64::from(self.workspaces.height);
+    if self.expo.workspace_bindings.iter().any(|entry| {
+      entry.workspace == 0 || entry.workspace as u64 > workspace_count
+    }) {
+      return Err(ConfigError::Invalid(
+        "Expo workspace bindings must name a configured workspace".into(),
+      ));
+    }
+    for rule in &self.window_rules {
+      if let RuleAction::AssignWorkspace { x, y } = rule.action
+        && (x >= self.workspaces.width || y >= self.workspaces.height)
+      {
+        return Err(ConfigError::Invalid(format!(
+          "window rule workspace {x},{y} is outside the configured grid"
+        )));
+      }
+    }
     if self.keybindings.workspace_switch.len() != 10
       || self.keybindings.workspace_move.len() != 10
     {
@@ -659,9 +719,9 @@ impl ShingleConfig {
   }
 }
 
-/// Parses a colour in either of Wayfire's notations: `#RRGGBB` or `#RRGGBBAA`
-/// hex (alpha 1 when omitted), or four whitespace-separated numbers `r g b a`.
-/// Surrounding whitespace is ignored.
+/// Parses a colour in any of Wayfire's notations: `#RRGGBBAA` or `#RGBA` hex
+/// as wf-config reads them, `#RRGGBB` hex with alpha 1, or four
+/// whitespace-separated numbers `r g b a`. Surrounding whitespace is ignored.
 ///
 /// # Errors
 ///
@@ -671,14 +731,21 @@ pub fn parse_color(text: &str) -> Result<[f64; 4], ConfigError> {
   let invalid = || ConfigError::Invalid(format!("invalid color {text:?}"));
   let text = text.trim();
   let color = if let Some(hex) = text.strip_prefix('#') {
-    if hex.len() != 6 && hex.len() != 8 {
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
       return Err(invalid());
     }
+    let (digits, scale) = match hex.len() {
+      4 => (1, 15.0),
+      6 | 8 => (2, 255.0),
+      _ => return Err(invalid()),
+    };
     let mut color = [1.0; 4];
-    for (index, component) in color.iter_mut().enumerate().take(hex.len() / 2) {
-      let value = u8::from_str_radix(&hex[index * 2..][..2], 16)
-        .map_err(|_| invalid())?;
-      *component = f64::from(value) / 255.0;
+    for (component, chunk) in
+      color.iter_mut().zip(hex.as_bytes().chunks(digits))
+    {
+      let chunk = std::str::from_utf8(chunk).map_err(|_| invalid())?;
+      let value = u8::from_str_radix(chunk, 16).map_err(|_| invalid())?;
+      *component = f64::from(value) / scale;
     }
     color
   } else {
@@ -2328,6 +2395,28 @@ impl Modifiers {
   }
 }
 
+/// Something in a Wayfire or i3 file that Shingle read past: a value it
+/// cannot use, which kept its default, a part of a value it does not
+/// support, or a plugin section it does not have. Its `Display` form is
+/// `line N: MESSAGE`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigWarning {
+  /// The 1-based line the warning is about, or `None` for the whole file.
+  /// A value continued over several lines reports its first line.
+  pub line: Option<usize>,
+  /// What was left out and why, naming the section and option.
+  pub message: String,
+}
+
+impl std::fmt::Display for ConfigWarning {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self.line {
+      Some(line) => write!(formatter, "line {line}: {}", self.message),
+      None => formatter.write_str(&self.message),
+    }
+  }
+}
+
 /// Why a configuration could not be loaded, parsed, validated or saved.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -2350,8 +2439,9 @@ pub enum ConfigError {
   /// YAML syntax error, wrong type or unknown field.
   #[error("invalid YAML: {0}")]
   Yaml(#[from] serde_yaml::Error),
-  /// A value is malformed or outside its range. The message names the field, or
-  /// the line number for INI and i3 input.
+  /// A value is malformed or outside its range. The message names the field.
+  /// Wayfire and i3 imports report such values as [`ConfigWarning`]s
+  /// instead.
   #[error("invalid config: {0}")]
   Invalid(String),
   /// A key binding could not be parsed, for example an unknown modifier or a
@@ -2391,38 +2481,63 @@ fn resolve_default_path(
   }
 }
 
+/// The warnings of importing `text`, as `line N: MESSAGE`, for tests.
+#[cfg(test)]
+pub(crate) fn warnings_of(text: &str, format: ConfigFormat) -> Vec<String> {
+  ShingleConfig::parse_with_warnings(text, format)
+    .expect("the import succeeds")
+    .1
+    .iter()
+    .map(ToString::to_string)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
 
   #[test]
-  fn survey_claim_wcm_escaped_colour_is_refused() {
-    let error = ShingleConfig::parse(
-      "[core]\nbackground_color = \\#101010FF\n",
-      ConfigFormat::Wayfire,
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("invalid color"), "{error}");
-    for text in [
-      "[animate]\nenabled_for = (type equals \"toplevel\" | \
-       (type equals \"x-or\" & focusable equals true))\n",
-      "[animate]\nminimize_animation = squeezimize\n",
-      "[scale]\ntoggle = <super>\n",
-    ] {
-      assert!(ShingleConfig::parse(text, ConfigFormat::Wayfire).is_err());
+  fn the_survey_findings_b1_and_b2_are_fixed() {
+    // Each value the survey (docs/design/wayfire-gaps.md, B1 and B2) found
+    // refused or misread, in a file of its own.
+    let parse = |text: &str| {
+      ShingleConfig::parse_with_warnings(text, ConfigFormat::Wayfire).unwrap()
+    };
+    let (colour, warnings) = parse("[core]\nbackground_color = \\#101010FF\n");
+    assert_eq!(colour.background_color[0], 16.0 / 255.0);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (matcher, warnings) = parse(concat!(
+      "[animate]\nenabled_for = (type equals \"toplevel\" | ",
+      "(type equals \"x-or\" & focusable equals true))\n",
+    ));
+    assert!(matcher.animate.enabled_for.as_str().contains("x-or"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (animation, warnings) =
+      parse("[animate]\nminimize_animation = squeezimize\n");
+    assert_eq!(animation.animate.minimize_animation, "zoom");
+    assert_eq!(warnings.len(), 1);
+    let (modifier, warnings) = parse("[scale]\ntoggle = <super>\n");
+    assert_eq!(modifier.keybindings.scale_toggle, Binding::disabled());
+    assert!(warnings[0].message.contains("modifier-alone"));
+    let (pinch, warnings) =
+      parse("[scale]\ntoggle = <super> KEY_P | pinch in 4\n");
+    assert_eq!(String::from(pinch.keybindings.scale_toggle), "super+p");
+    assert!(warnings[0].message.contains("touch gesture"));
+    let (joined, warnings) = parse("[core]\nplugins = \\\n  preserve-output\n");
+    assert_eq!(joined.output_layout.unplug, UnplugPolicy::Park);
+    assert!(warnings.is_empty(), "{warnings:?}");
+  }
+
+  #[test]
+  fn colours_parse_in_every_wayfire_notation() {
+    let parse = |text| parse_color(text).unwrap();
+    assert_eq!(parse("#FF000080"), [1.0, 0.0, 0.0, 128.0 / 255.0]);
+    assert_eq!(parse(" #00ff00 "), [0.0, 1.0, 0.0, 1.0]);
+    assert_eq!(parse("#F00F"), [1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(parse("0.5 0.25 0 1"), [0.5, 0.25, 0.0, 1.0]);
+    for text in ["#F00", "#+1+1+1", "#ééé", "aéééb", "1 2 3", "#GG0000"] {
+      assert!(parse_color(text).is_err(), "{text}");
     }
-    let pinch = ShingleConfig::parse(
-      "[scale]\ntoggle = <super> KEY_P | pinch in 4\n",
-      ConfigFormat::Wayfire,
-    )
-    .unwrap();
-    assert_eq!(pinch.keybindings.scale_toggle.key, "4");
-    let joined = ShingleConfig::parse(
-      "[core]\nplugins = \\\n  preserve-output\n",
-      ConfigFormat::Wayfire,
-    )
-    .unwrap();
-    assert_eq!(joined.output_layout.unplug, UnplugPolicy::Return);
   }
 
   #[test]
@@ -2449,7 +2564,7 @@ mod tests {
         "[vswitch]\n",
         "duration = 250ms circle\n",
         "gap = 24\n",
-        "background = #11223380\n",
+        "background = \\#11223380\n",
       ),
       ConfigFormat::Wayfire,
     )
@@ -2485,7 +2600,7 @@ mod tests {
       concat!(
         "[expo]\n",
         "toggle = <super> KEY_E\n",
-        "background = #11223380\n",
+        "background = \\#11223380\n",
         "duration = 300ms circle\n",
         "transition_length = 200\n",
         "offset = 14\n",
@@ -2665,14 +2780,16 @@ mod tests {
 
   #[test]
   fn unknown_zoom_interpolation_names_its_line() {
-    let error = ShingleConfig::parse(
+    let warnings = warnings_of(
       "[zoom]\n\ninterpolation_method = 5\n",
       ConfigFormat::Wayfire,
-    )
-    .unwrap_err();
+    );
     assert_eq!(
-      error.to_string(),
-      "invalid config: line 3: unknown zoom interpolation"
+      warnings,
+      [concat!(
+        "line 3: [zoom] interpolation_method: unknown zoom interpolation; ",
+        "keeping the default"
+      )]
     );
   }
 
@@ -2698,8 +2815,8 @@ mod tests {
         "title_overlay = mouse\n",
         "title_font_size = 20\n",
         "title_position = bottom\n",
-        "bg_color = #11223380\n",
-        "text_color = #ddeeff\n",
+        "bg_color = \\#11223380\n",
+        "text_color = \\#ddeeff\n",
       ),
       ConfigFormat::Wayfire,
     )
@@ -2773,8 +2890,8 @@ mod tests {
         "share_filter = true\n",
         "overlay = false\n",
         "font_size = 32\n",
-        "bg_color = #11223380\n",
-        "text_color = #ddeeff\n",
+        "bg_color = \\#11223380\n",
+        "text_color = \\#ddeeff\n",
       ),
       ConfigFormat::Wayfire,
     )
@@ -3021,7 +3138,17 @@ mod tests {
       import("[core]\nxwayland = TRUE\n").unwrap().mode,
       XwaylandMode::Eager
     );
-    assert!(import("[core]\nxwayland = maybe\n").is_err());
+    assert_eq!(
+      import("[core]\nxwayland = maybe\n").unwrap().mode,
+      XwaylandMode::Eager
+    );
+    assert_eq!(
+      warnings_of("[core]\nxwayland = maybe\n", ConfigFormat::Wayfire),
+      [concat!(
+        "line 2: [core] xwayland: must be true, false or lazy, not ",
+        "\"maybe\"; keeping the default"
+      )]
+    );
     // Other sections' options of the same name are not XWayland's.
     assert_eq!(
       import("[other]\nxwayland = false\n").unwrap().mode,
@@ -3081,9 +3208,14 @@ mod tests {
       "touchpad_cursor_speed = -2",
     ] {
       let text = format!("[input]\n{line}\n");
-      assert!(
-        ShingleConfig::parse(&text, ConfigFormat::Wayfire).is_err(),
-        "{line}"
+      let (config, warnings) =
+        ShingleConfig::parse_with_warnings(&text, ConfigFormat::Wayfire)
+          .unwrap();
+      assert_eq!(warnings.len(), 1, "{line}");
+      assert_eq!(warnings[0].line, Some(2), "{line}");
+      assert_eq!(
+        config.input.mouse_accel_profile,
+        InputConfig::default().mouse_accel_profile
       );
     }
     let yaml = "input:\n  scroll_method: on-button-down\n";

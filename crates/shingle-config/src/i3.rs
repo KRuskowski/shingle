@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use crate::{
-  Binding, ConfigError, Modifier, ShingleConfig, wayfire::normalize_key,
+  Binding, ConfigError, ConfigWarning, Modifier, ShingleConfig,
+  import::{self, Import},
+  wayfire::normalize_key,
 };
 
 /// Reads the options of an `output NAME ...` line into `output`: `mode`
@@ -10,10 +12,8 @@ use crate::{
 fn output_line(
   output: &mut crate::OutputConfig,
   tokens: &[String],
-  line_number: usize,
 ) -> Result<(), ConfigError> {
-  let invalid =
-    |what: &str| ConfigError::Invalid(format!("line {line_number}: {what}"));
+  let invalid = |what: &str| ConfigError::Invalid(what.to_owned());
   let mut index = 0;
   while index < tokens.len() {
     let value = |at: usize, what: &str| {
@@ -35,20 +35,13 @@ fn output_line(
       }
       "pos" | "position" => {
         output.set_position(crate::OutputPosition::Fixed {
-          x: number(
-            value(index + 1, "incomplete output position")?,
-            line_number,
-          )?,
-          y: number(
-            value(index + 2, "incomplete output position")?,
-            line_number,
-          )?,
+          x: number(value(index + 1, "incomplete output position")?)?,
+          y: number(value(index + 2, "incomplete output position")?)?,
         });
         index += 3;
       }
       "scale" => {
-        output.scale =
-          number(value(index + 1, "missing output scale")?, line_number)?;
+        output.scale = number(value(index + 1, "missing output scale")?)?;
         index += 2;
       }
       "transform" => {
@@ -79,20 +72,47 @@ fn output_line(
   Ok(())
 }
 
-pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
-  let mut config = ShingleConfig::default();
+pub(crate) fn parse(
+  text: &str,
+) -> Result<(ShingleConfig, Vec<ConfigWarning>), ConfigError> {
+  let mut importer = Import::new(ShingleConfig::default());
   let mut variables = HashMap::new();
   for (index, original) in text.lines().enumerate() {
     let line_number = index + 1;
-    let tokens = tokenize(original)?;
+    let tokens = match tokenize(original) {
+      Ok(tokens) => tokens,
+      Err(_) => {
+        importer.warn(
+          Some(line_number),
+          "unterminated quote or escape; line ignored".into(),
+        );
+        continue;
+      }
+    };
     if tokens.is_empty() {
       continue;
     }
     let tokens = expand(tokens, &variables);
+    let context = tokens.iter().take(2).cloned().collect::<Vec<_>>().join(" ");
+    importer.option(line_number, &context, |config, notes| {
+      line(config, &mut variables, &tokens, notes)
+    });
+  }
+  importer.finish()
+}
+
+/// Applies one line, already split into `tokens` with variables expanded.
+fn line(
+  config: &mut ShingleConfig,
+  variables: &mut HashMap<String, String>,
+  tokens: &[String],
+  notes: &mut Vec<String>,
+) -> Result<(), ConfigError> {
+  {
     match tokens[0].as_str() {
       "set" => {
         if tokens.len() < 3 || !tokens[1].starts_with('$') {
-          continue;
+          return Ok(());
         }
         let name = tokens[1].clone();
         let value = tokens[2..].join(" ");
@@ -107,69 +127,63 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
             };
           }
           "$disable_on_fullscreen" => {
-            config.idle.disable_on_fullscreen = boolean(&value, line_number)?
+            config.idle.disable_on_fullscreen = boolean(&value)?
           }
           "$disable_initially" => {
-            config.idle.disable_initially = boolean(&value, line_number)?
+            config.idle.disable_initially = boolean(&value)?
           }
           "$idle_timeout" => {
-            config.idle.idle_seconds = optional_seconds(&value, line_number)?
+            config.idle.idle_seconds = optional_seconds(&value)?
           }
           "$dpms_timeout" => {
-            config.idle.dpms_seconds = optional_seconds(&value, line_number)?
+            config.idle.dpms_seconds = optional_seconds(&value)?
           }
           "$lock_timeout" => {
-            config.idle.lock_seconds = optional_seconds(&value, line_number)?
+            config.idle.lock_seconds = optional_seconds(&value)?
           }
-          "$session_restore" => {
-            config.session.restore = boolean(&value, line_number)?
-          }
+          "$session_restore" => config.session.restore = boolean(&value)?,
           "$session_path" => config.session.path = Some(value.into()),
           "$invert_preserve_hue" => {
-            config.effects.invert_preserve_hue = boolean(&value, line_number)?
+            config.effects.invert_preserve_hue = boolean(&value)?
           }
           "$animation_enabled_for" => {
             config.animate.enabled_for = value.try_into()?
           }
           "$open_animation" => {
-            config.animate.open_animation = value.to_lowercase()
+            config.animate.open_animation = import::animation(&value, notes)
           }
           "$close_animation" => {
-            config.animate.close_animation = value.to_lowercase()
+            config.animate.close_animation = import::animation(&value, notes)
           }
           "$minimize_animation" => {
-            config.animate.minimize_animation = value.to_lowercase()
+            config.animate.minimize_animation = import::animation(&value, notes)
           }
           "$open_animation_duration" => {
-            config.animate.duration_ms = number(&value, line_number)?
+            config.animate.duration_ms = number(&value)?
           }
           "$fast_switcher_inactive_alpha" => {
-            config.fast_switcher.inactive_alpha = number(&value, line_number)?
+            config.fast_switcher.inactive_alpha = number(&value)?
           }
           "$expo_background" => {
             config.expo.background = crate::parse_color(&value)?
           }
-          "$expo_duration_ms" => {
-            config.expo.duration_ms = number(&value, line_number)?
-          }
+          "$expo_duration_ms" => config.expo.duration_ms = number(&value)?,
           "$expo_transition_length_ms" => {
-            config.expo.transition_length_ms = number(&value, line_number)?
+            config.expo.transition_length_ms = number(&value)?
           }
-          "$expo_offset" => config.expo.offset = number(&value, line_number)?,
+          "$expo_offset" => config.expo.offset = number(&value)?,
           "$expo_keyboard_interaction" => {
-            config.expo.keyboard_interaction = boolean(&value, line_number)?
+            config.expo.keyboard_interaction = boolean(&value)?
           }
           "$expo_inactive_brightness" => {
-            config.expo.inactive_brightness = number(&value, line_number)?
+            config.expo.inactive_brightness = number(&value)?
           }
-          "$scale_duration_ms" => {
-            config.scale.duration_ms = number(&value, line_number)?
-          }
+          "$scale_duration_ms" => config.scale.duration_ms = number(&value)?,
           "$scale_title_overlay" => {
             config.scale.title_overlay = value.to_lowercase()
           }
           "$scale_title_font_size" => {
-            config.scale.title_font_size = number(&value, line_number)?
+            config.scale.title_font_size = number(&value)?
           }
           "$scale_title_position" => {
             config.scale.title_position = value.to_lowercase()
@@ -181,18 +195,16 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
             config.scale.title_text_color = crate::parse_color(&value)?
           }
           "$scale_filter_case_sensitive" => {
-            config.scale_title_filter.case_sensitive =
-              boolean(&value, line_number)?
+            config.scale_title_filter.case_sensitive = boolean(&value)?
           }
           "$scale_filter_share" => {
-            config.scale_title_filter.share_filter =
-              boolean(&value, line_number)?
+            config.scale_title_filter.share_filter = boolean(&value)?
           }
           "$scale_filter_overlay" => {
-            config.scale_title_filter.overlay = boolean(&value, line_number)?
+            config.scale_title_filter.overlay = boolean(&value)?
           }
           "$scale_filter_font_size" => {
-            config.scale_title_filter.font_size = number(&value, line_number)?
+            config.scale_title_filter.font_size = number(&value)?
           }
           "$scale_filter_bg_color" => {
             config.scale_title_filter.bg_color = crate::parse_color(&value)?
@@ -200,51 +212,41 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
           "$scale_filter_text_color" => {
             config.scale_title_filter.text_color = crate::parse_color(&value)?
           }
-          "$scale_spacing" => {
-            config.scale.spacing = number(&value, line_number)?
-          }
-          "$scale_outer_margin" => {
-            config.scale.outer_margin = number(&value, line_number)?
-          }
+          "$scale_spacing" => config.scale.spacing = number(&value)?,
+          "$scale_outer_margin" => config.scale.outer_margin = number(&value)?,
           "$scale_inactive_alpha" => {
-            config.scale.inactive_alpha = number(&value, line_number)?
+            config.scale.inactive_alpha = number(&value)?
           }
           "$scale_minimized_alpha" => {
-            config.scale.minimized_alpha = number(&value, line_number)?
+            config.scale.minimized_alpha = number(&value)?
           }
           "$scale_include_minimized" => {
-            config.scale.include_minimized = boolean(&value, line_number)?
+            config.scale.include_minimized = boolean(&value)?
           }
           "$scale_close_on_new_view" => {
-            config.scale.close_on_new_view = boolean(&value, line_number)?
+            config.scale.close_on_new_view = boolean(&value)?
           }
-          "$scale_allow_zoom" => {
-            config.scale.allow_zoom = boolean(&value, line_number)?
-          }
+          "$scale_allow_zoom" => config.scale.allow_zoom = boolean(&value)?,
           "$scale_middle_click_close" => {
-            config.scale.middle_click_close = boolean(&value, line_number)?
+            config.scale.middle_click_close = boolean(&value)?
           }
           "$alpha_modifier" => config.alpha.modifier = value.to_lowercase(),
-          "$alpha_min_value" => {
-            config.alpha.min_value = number(&value, line_number)?
-          }
+          "$alpha_min_value" => config.alpha.min_value = number(&value)?,
           "$zoom_modifier" => config.zoom.modifier = value.to_lowercase(),
-          "$zoom_speed" => config.zoom.speed = number(&value, line_number)?,
-          "$zoom_smoothing_ms" => {
-            config.zoom.smoothing_ms = number(&value, line_number)?
-          }
+          "$zoom_speed" => config.zoom.speed = number(&value)?,
+          "$zoom_smoothing_ms" => config.zoom.smoothing_ms = number(&value)?,
           "$zoom_interpolation" => {
             config.zoom.interpolation = value.to_lowercase()
           }
           "$placement_mode" => config.placement.mode = value.to_lowercase(),
           "$activation_check_surface" => {
-            config.activation.check_surface = boolean(&value, line_number)?
+            config.activation.check_surface = boolean(&value)?
           }
           "$activation_only_last_request" => {
-            config.activation.only_last_request = boolean(&value, line_number)?
+            config.activation.only_last_request = boolean(&value)?
           }
           "$activation_timeout" => {
-            config.activation.timeout_seconds = number(&value, line_number)?
+            config.activation.timeout_seconds = number(&value)?
           }
           "$shortcuts_inhibit_by_default" => {
             config.shortcuts.inhibit_by_default = value.try_into()?
@@ -253,7 +255,7 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
             config.shortcuts.ignore_views = value.try_into()?
           }
           "$focus_button_with_modifiers" => {
-            config.focus.button_with_modifiers = boolean(&value, line_number)?
+            config.focus.button_with_modifiers = boolean(&value)?
           }
           "$focus_buttons" => {
             config.focus.buttons = value
@@ -263,94 +265,75 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
               .collect::<Result<Vec<_>, _>>()?
           }
           "$focus_buttons_passthrough" => {
-            config.focus.buttons_passthrough = boolean(&value, line_number)?
+            config.focus.buttons_passthrough = boolean(&value)?
           }
-          "$enable_snap" => {
-            config.grid.enable_snap = boolean(&value, line_number)?
-          }
-          "$snap_threshold" => {
-            config.grid.snap_threshold = number(&value, line_number)?
-          }
+          "$enable_snap" => config.grid.enable_snap = boolean(&value)?,
+          "$snap_threshold" => config.grid.snap_threshold = number(&value)?,
           "$quarter_snap_threshold" => {
-            config.grid.quarter_snap_threshold = number(&value, line_number)?
+            config.grid.quarter_snap_threshold = number(&value)?
           }
-          "$enable_snap_off" => {
-            config.grid.enable_snap_off = boolean(&value, line_number)?
-          }
+          "$enable_snap_off" => config.grid.enable_snap_off = boolean(&value)?,
           "$snap_off_threshold" => {
-            config.grid.snap_off_threshold = number(&value, line_number)?
+            config.grid.snap_off_threshold = number(&value)?
           }
           "$workspace_switch_after" => {
-            config.grid.workspace_switch_after = number(&value, line_number)?
+            config.grid.workspace_switch_after = number(&value)?
           }
-          "$join_views" => {
-            config.grid.join_views = boolean(&value, line_number)?
-          }
+          "$join_views" => config.grid.join_views = boolean(&value)?,
           "$gesture_move_fingers" => {
-            config.extra_gestures.move_fingers = number(&value, line_number)?
+            config.extra_gestures.move_fingers = number(&value)?
           }
           "$gesture_move_delay" => {
-            config.extra_gestures.move_delay = number(&value, line_number)?
+            config.extra_gestures.move_delay = number(&value)?
           }
           "$gesture_close_fingers" => {
-            config.extra_gestures.close_fingers = number(&value, line_number)?
+            config.extra_gestures.close_fingers = number(&value)?
           }
           "$wrot_reset_radius" => {
-            config.effects.wrot_reset_radius = number(&value, line_number)?
+            config.effects.wrot_reset_radius = number(&value)?
           }
           "$all_dialogs_modal" => {
-            config.behavior.all_dialogs_modal = boolean(&value, line_number)?
+            config.behavior.all_dialogs_modal = boolean(&value)?
           }
           "$keep_last_toplevel_activated" => {
-            config.behavior.keep_last_toplevel_activated =
-              boolean(&value, line_number)?
+            config.behavior.keep_last_toplevel_activated = boolean(&value)?
           }
           "$discard_command_output" => {
-            config.behavior.discard_command_output =
-              boolean(&value, line_number)?
+            config.behavior.discard_command_output = boolean(&value)?
           }
           "$max_buffer_size" => {
-            config.behavior.max_buffer_size = number(&value, line_number)?
+            config.behavior.max_buffer_size = number(&value)?
           }
           "$preferred_decoration_mode" => {
             config.behavior.preferred_decoration_mode = value.to_lowercase()
           }
           "$force_preferred_decoration_mode" => {
-            config.behavior.force_preferred_decoration_mode =
-              boolean(&value, line_number)?
+            config.behavior.force_preferred_decoration_mode = boolean(&value)?
           }
           "$security_privileged_protocols" => {
             config.security_context.privileged_protocols = value
           }
           "$disable_primary_selection" => {
-            config.behavior.disable_primary_selection =
-              boolean(&value, line_number)?
+            config.behavior.disable_primary_selection = boolean(&value)?
           }
           "$focus_main_surface_instead_of_popup" => {
             config.behavior.focus_main_surface_instead_of_popup =
-              boolean(&value, line_number)?
+              boolean(&value)?
           }
           "$auto_reload_config" => {
-            config.behavior.auto_reload = boolean(&value, line_number)?
+            config.behavior.auto_reload = boolean(&value)?
           }
           "$config_reload_delay" => {
-            config.behavior.config_reload_delay = number(&value, line_number)?
+            config.behavior.config_reload_delay = number(&value)?
           }
-          "$minimum_extent" => {
-            config.tiling.minimum_extent = number(&value, line_number)?
-          }
-          "$resize_min_width" => {
-            config.resize.min_width = number(&value, line_number)?
-          }
-          "$resize_min_height" => {
-            config.resize.min_height = number(&value, line_number)?
-          }
+          "$minimum_extent" => config.tiling.minimum_extent = number(&value)?,
+          "$resize_min_width" => config.resize.min_width = number(&value)?,
+          "$resize_min_height" => config.resize.min_height = number(&value)?,
           "$resize_corner_threshold" => {
-            config.resize.corner_threshold = number(&value, line_number)?
+            config.resize.corner_threshold = number(&value)?
           }
           "$keep_fullscreen_on_adjacent" => {
-            config.tiling.keep_fullscreen_on_adjacent =
-              boolean(&value, line_number)?
+            config.tiling.keep_fullscreen_on_adjacent = boolean(&value)?
           }
           "$tile_by_default" => {
             config.tiling.tile_by_default = value.try_into()?
@@ -359,15 +342,15 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
             config.background_color = crate::parse_color(&value)?
           }
           "$vswitch_duration_ms" => {
-            config.vswitch.duration_ms = number(&value, line_number)?
+            config.vswitch.duration_ms = number(&value)?
           }
-          "$vswitch_gap" => config.vswitch.gap = number(&value, line_number)?,
+          "$vswitch_gap" => config.vswitch.gap = number(&value)?,
           "$vswitch_background" => {
             config.vswitch.background = crate::parse_color(&value)?
           }
           "$workspace_wraparound" => config.workspaces.wraparound = value,
           "$animation_duration" => {
-            config.tiling.animation_duration = number(&value, line_number)?
+            config.tiling.animation_duration = number(&value)?
           }
           "$preview_base_color" => {
             config.tiling.preview_base_color = crate::parse_color(&value)?
@@ -376,61 +359,57 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
             config.tiling.preview_border_color = crate::parse_color(&value)?
           }
           "$preview_border_width" => {
-            config.tiling.preview_border_width = number(&value, line_number)?
+            config.tiling.preview_border_width = number(&value)?
           }
           "$xkb_rules" => config.input.rules = value,
           "$xkb_file" => config.input.xkb_file = value,
           "$kb_numlock_default_state" => {
-            config.input.numlock_default = boolean(&value, line_number)?
+            config.input.numlock_default = boolean(&value)?
           }
           "$kb_capslock_default_state" => {
-            config.input.capslock_default = boolean(&value, line_number)?
+            config.input.capslock_default = boolean(&value)?
           }
           "$xkb_model" => config.input.model = value,
           "$xkb_layout" => config.input.layout = value,
           "$xkb_variant" => config.input.variant = value,
           "$xkb_options" => config.input.options = value,
           "$mouse_scroll_speed" => {
-            config.input.mouse_scroll_speed = number(&value, line_number)?
+            config.input.mouse_scroll_speed = number(&value)?
           }
           "$mouse_natural_scroll" => {
-            config.input.mouse_natural_scroll = boolean(&value, line_number)?
+            config.input.mouse_natural_scroll = boolean(&value)?
           }
           "$left_handed_mode" => {
-            config.input.left_handed_mode = boolean(&value, line_number)?
+            config.input.left_handed_mode = boolean(&value)?
           }
           "$middle_emulation" => {
-            config.input.middle_emulation = boolean(&value, line_number)?
+            config.input.middle_emulation = boolean(&value)?
           }
           "$cursor_theme" => config.input.cursor_theme = value,
           "$enable_text_input_v3" => {
-            config.input.enable_text_input_v3 = boolean(&value, line_number)?
+            config.input.enable_text_input_v3 = boolean(&value)?
           }
-          "$cursor_size" => {
-            config.input.cursor_size = number(&value, line_number)?
-          }
+          "$cursor_size" => config.input.cursor_size = number(&value)?,
           "$output_unplug" => {
             config.output_layout.unplug = match value.as_str() {
               "move" => crate::UnplugPolicy::Move,
               "park" => crate::UnplugPolicy::Park,
               "return" => crate::UnplugPolicy::Return,
               _ => {
-                return Err(ConfigError::Invalid(format!(
-                  "line {line_number}: $output_unplug must be move, park \
-                   or return"
-                )));
+                return Err(ConfigError::Invalid(
+                  "$output_unplug must be move, park or return".into(),
+                ));
               }
             }
           }
           "$last_output_focus_timeout" => {
-            config.output_layout.last_output_focus_timeout =
-              number(&value, line_number)?
+            config.output_layout.last_output_focus_timeout = number(&value)?
           }
           "$remove_output_limits" => {
-            config.behavior.remove_output_limits = boolean(&value, line_number)?
+            config.behavior.remove_output_limits = boolean(&value)?
           }
           "$wsets_label_duration" => {
-            config.wsets.label_duration = number(&value, line_number)?
+            config.wsets.label_duration = number(&value)?
           }
           _ => {
             variables.insert(name, value);
@@ -439,9 +418,9 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
       }
       "gaps" => {
         if tokens.len() != 3 {
-          continue;
+          return Ok(());
         }
-        let gap = number(&tokens[2], line_number)?;
+        let gap = number(&tokens[2])?;
         match tokens[1].as_str() {
           "inner" => config.tiling.gaps.inner = gap,
           "outer" => {
@@ -475,21 +454,19 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
       }
       "bindsym" => {
         if tokens.len() < 3 {
-          continue;
+          return Ok(());
         }
         let binding = binding(&tokens[1])?;
         let command = tokens[2..].join(" ");
         if let Some(workspace) = command.strip_prefix("expo select ") {
           let workspace = workspace.parse().map_err(|_| {
-            ConfigError::Invalid(format!(
-              "line {line_number}: invalid Expo workspace"
-            ))
+            ConfigError::Invalid("invalid Expo workspace".into())
           })?;
           config
             .expo
             .workspace_bindings
             .push(crate::ExpoWorkspaceBinding { workspace, binding });
-          continue;
+          return Ok(());
         }
         match command.as_str() {
           "snap top_left" => {
@@ -624,14 +601,14 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
               config.keybindings.workspace_move[index] = binding;
             } else if let Some(wset) = command.strip_prefix("wset ") {
               config.wsets.wsets_bindings.push(crate::WsetBinding {
-                wset: number(wset, line_number)?,
+                wset: number(wset)?,
                 binding,
               });
             } else if let Some(wset) =
               command.strip_prefix("move container to wset ")
             {
               config.wsets.send_window_bindings.push(crate::WsetBinding {
-                wset: number(wset, line_number)?,
+                wset: number(wset)?,
                 binding,
               });
             } else if command == "exec shingle-lock"
@@ -663,20 +640,17 @@ pub(crate) fn parse(text: &str) -> Result<ShingleConfig, ConfigError> {
       "output" => {
         let output = match tokens.get(1).map(String::as_str) {
           None => {
-            return Err(ConfigError::Invalid(format!(
-              "line {line_number}: missing output name"
-            )));
+            return Err(ConfigError::Invalid("missing output name".into()));
           }
           Some("*") => &mut config.output,
           Some(name) => config.named_output(name),
         };
-        output_line(output, &tokens[2..], line_number)?;
+        output_line(output, &tokens[2..])?;
       }
       _ => {}
     }
   }
-  config.validate()?;
-  Ok(config)
+  Ok(())
 }
 
 fn workspace_index(value: &str) -> Option<usize> {
@@ -773,29 +747,59 @@ fn tokenize(line: &str) -> Result<Vec<String>, ConfigError> {
   Ok(tokens)
 }
 
-fn optional_seconds(
-  value: &str,
-  line: usize,
-) -> Result<Option<u64>, ConfigError> {
-  let seconds: i64 = number(value, line)?;
+fn optional_seconds(value: &str) -> Result<Option<u64>, ConfigError> {
+  let seconds: i64 = number(value)?;
   Ok((seconds >= 0).then_some(seconds as u64))
 }
 
-fn number<T: std::str::FromStr>(
-  value: &str,
-  line: usize,
-) -> Result<T, ConfigError> {
-  value.parse().map_err(|_| {
-    ConfigError::Invalid(format!("line {line}: invalid number {value:?}"))
-  })
+fn number<T: std::str::FromStr>(value: &str) -> Result<T, ConfigError> {
+  value
+    .parse()
+    .map_err(|_| ConfigError::Invalid(format!("invalid number {value:?}")))
 }
 
-fn boolean(value: &str, line: usize) -> Result<bool, ConfigError> {
+fn boolean(value: &str) -> Result<bool, ConfigError> {
   match value.to_lowercase().as_str() {
     "true" | "yes" | "on" | "1" => Ok(true),
     "false" | "no" | "off" | "0" => Ok(false),
-    _ => Err(ConfigError::Invalid(format!(
-      "line {line}: invalid boolean {value:?}"
-    ))),
+    _ => Err(ConfigError::Invalid(format!("invalid boolean {value:?}"))),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::{ConfigFormat, ShingleConfig, warnings_of};
+
+  #[test]
+  fn a_bad_line_keeps_the_default_and_the_rest_imports() {
+    let text = concat!(
+      "set $scale_spacing many\n",
+      "gaps inner 6\n",
+      "set $open_animation spin\n",
+      "bindsym Mod4+\"q kill\n",
+      "bindsym Mod4+Ctrl+x exec run-x\n",
+      "bindsym Mod4+2 expo select 20\n",
+    );
+    let config = ShingleConfig::parse(text, ConfigFormat::I3).unwrap();
+    let defaults = ShingleConfig::default();
+    assert_eq!(config.scale.spacing, defaults.scale.spacing);
+    assert_eq!(config.tiling.gaps.inner, 6);
+    assert_eq!(config.animate.open_animation, "fade");
+    assert_eq!(config.commands.len(), 1);
+    assert!(config.expo.workspace_bindings.is_empty());
+    assert_eq!(
+      warnings_of(text, ConfigFormat::I3),
+      [
+        concat!(
+          "line 1: set $scale_spacing: invalid number \"many\"; keeping ",
+          "the default"
+        ),
+        "line 3: set $open_animation: Shingle has no \"spin\" animation \
+         yet; using \"fade\"",
+        "line 4: unterminated quote or escape; line ignored",
+        "line 6: Expo workspace 20 is outside the 10x1 workspace grid; the \
+         binding is ignored",
+      ]
+    );
   }
 }
