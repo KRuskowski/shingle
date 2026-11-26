@@ -190,10 +190,14 @@ def decoration_checks(results, binary, wl_probe, captures):
         'it as base-geometry, and the client is configured to that size',
         ssd is not None and ssd['base-geometry'] == content and configured,
         f'{json.dumps(ssd)}, configured {last_configure(ssd_client)}')
+    # Configures go out once per turn, so the client may get its size a
+    # moment after IPC already reports it.
+    csd_configured = xw.wait_for(
+        lambda: last_configure(csd_client) == (400, 300), timeout=10)
     results.check(
         'decoration: a client-side window\'s geometry is its client',
         csd is not None and csd['base-geometry'] == CSD_GEOMETRY
-        and last_configure(csd_client) == (400, 300),
+        and csd_configured,
         f'{json.dumps(csd)}, configured {last_configure(csd_client)}')
     if ssd is None or csd is None:
       return
