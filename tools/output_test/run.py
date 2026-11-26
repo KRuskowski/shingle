@@ -54,6 +54,17 @@ again. For the unlock a private `/etc/pam.d` with a permit-all `shingle`
 service is bind-mounted in the namespace, so any typed password passes;
 the host's PAM files are not touched.
 
+The MO-4 checks (docs/design/multi-output.md) run focus and moving
+windows between two outputs, `HEADLESS-2` at 1024x768, with `wl_probe
+--report-outputs` windows: `stipc/move_cursor` onto `HEADLESS-2` leaves
+the active output alone and `stipc/feed_button` there makes it active
+and focuses its window; `stipc/feed_key` with oswitch's `super+o` and
+`super+shift+o` moves focus and the focused window; `configure-view`
+with `output_id` moves a tiled, a floating and a fullscreen window with
+Wayfire's geometry; and `wsets/set-output-wset` swaps the two outputs'
+sets in two calls. IPC watchers see `output-gain-focus`,
+`view-set-output`, `view-wset-changed` and `output-wset-changed`.
+
 Signals go only to Shingle, wl_probe and shingle-lock, through
 `signal_checked`. The pure helpers are tested by `python3 -m unittest`
 in this directory (test_run.py).
@@ -637,8 +648,9 @@ def auto_layout_checks(results, binary):
                      backend=('--headless', '--outputs', '2'))
   try:
     methods = shingle.ipc.call('list-methods').get('methods', [])
-    results.check('MO-2: list-methods returns 81 methods',
-                  len(methods) == 81, str(len(methods)))
+    # 81 after MO-2; MO-4 added the two wsets methods.
+    results.check('MO-4: list-methods returns 83 methods',
+                  len(methods) == 83, str(len(methods)))
     positions = shingle.positions()
     results.check('MO-2: wlr-randr lists both outputs at auto positions',
                   positions == {'HEADLESS-1': (0, 0),
@@ -1007,6 +1019,235 @@ def protocol_checks(results, binary, wl_probe, lock_binary):
                 status == 0, str(status))
   return shingle.log_text()
 
+def focus_config():
+  """Two outputs, HEADLESS-2 at 1024x768, with Xwayland off."""
+  return multi_config([{'name': 'HEADLESS-2', 'mode': '1024x768@60'}])
+
+def view_info(shingle, view_id):
+  """IPC `view-info` of `view_id`, or {}."""
+  return shingle.ipc.call('window-rules/view-info',
+                          {'id': view_id}).get('info') or {}
+
+def focused_output(shingle):
+  """The name of the output `get-focused-output` reports."""
+  return shingle.ipc.call('window-rules/get-focused-output').get(
+      'info', {}).get('name')
+
+def focused_view_id(shingle):
+  """The id of the view `get-focused-view` reports, or None."""
+  info = shingle.ipc.call('window-rules/get-focused-view').get('info')
+  return info.get('id') if info else None
+
+def stipc_tap(shingle, key, held=()):
+  """Taps `key` through STIPC with the `held` keys held."""
+  for name in [*held, key]:
+    shingle.ipc.call('stipc/feed_key', {'key': name, 'state': True})
+  for name in [key, *reversed(held)]:
+    shingle.ipc.call('stipc/feed_key', {'key': name, 'state': False})
+
+def drain(watcher):
+  """The events a watcher received until it has been quiet for a moment."""
+  events = []
+  try:
+    while True:
+      events.append(watcher.receive(timeout=0.5))
+  except (TimeoutError, ConnectionError):
+    pass
+  return events
+
+def map_probe(shingle, wl_probe, app_id):
+  """A `wl_probe --report-outputs` window and its IPC view id."""
+  probe = shingle.client([wl_probe, app_id, '--report-outputs'], 'wl_probe')
+  probe.wait_event('configure')
+  view = wait_for(lambda: shingle.views().get(app_id))
+  return probe, view['id'] if view else None
+
+def geometry_of(info):
+  """A view's IPC geometry as (x, y, width, height)."""
+  value = info.get('geometry', {})
+  return tuple(value.get(key) for key in ('x', 'y', 'width', 'height'))
+
+def click_checks(results, shingle, probes):
+  """Motion alone leaves the active output, a click focuses another."""
+  left, right = probes['left'], probes['right']
+  shingle.ipc.call('window-rules/focus-view', {'id': left[1]})
+  watcher = watch(shingle, ['output-gain-focus'])
+  shingle.ipc.call('stipc/move_cursor', {'x': 1800, 'y': 300})
+  results.check('MO-4: stipc/move_cursor onto HEADLESS-2 alone keeps '
+                'HEADLESS-1 active', focused_output(shingle) == 'HEADLESS-1',
+                str(focused_output(shingle)))
+  mark = len(right[0].events())
+  shingle.ipc.call('stipc/feed_button', {'combo': 'BTN_LEFT', 'mode': 'full'})
+  gained = next_event(watcher, 'output-gain-focus')
+  entered = right[0].wait_event('enter', after=mark)
+  results.check('MO-4: stipc/feed_button there makes HEADLESS-2 active',
+                focused_output(shingle) == 'HEADLESS-2' and gained
+                and gained['output']['name'] == 'HEADLESS-2'
+                and gained['output']['id'] == 2, str(gained))
+  results.check('MO-4: and focuses its window, which gets the keyboard',
+                focused_view_id(shingle) == right[1] and entered is not None,
+                f'{focused_view_id(shingle)} {right[0].events()[mark:]}')
+  watcher.close()
+
+def oswitch_checks(results, shingle, probes):
+  """super+o moves focus to the next output, super+shift+o takes the
+  focused window along."""
+  left = probes['left']
+  mark = len(left[0].events())
+  stipc_tap(shingle, 'KEY_O', ['KEY_LEFTMETA'])
+  entered = left[0].wait_event('enter', after=mark)
+  results.check('MO-4: super+o through STIPC focuses HEADLESS-1 and its '
+                'window', focused_output(shingle) == 'HEADLESS-1'
+                and focused_view_id(shingle) == left[1]
+                and entered is not None,
+                f'{focused_output(shingle)} {focused_view_id(shingle)}')
+  watcher = watch(shingle, ['view-set-output', 'view-wset-changed'])
+  mark = len(left[0].events())
+  stipc_tap(shingle, 'KEY_O', ['KEY_LEFTMETA', 'KEY_LEFTSHIFT'])
+  moved = left[0].wait_event('output-enter', after=mark, output='HEADLESS-2')
+  configure = left[0].wait_event('configure', after=mark, width=512)
+  events = drain(watcher)
+  names = [event.get('event') for event in events]
+  info = view_info(shingle, left[1])
+  results.check('MO-4: super+shift+o takes the focused window to '
+                'HEADLESS-2', focused_output(shingle) == 'HEADLESS-2'
+                and focused_view_id(shingle) == left[1]
+                and info.get('output-name') == 'HEADLESS-2'
+                and moved is not None,
+                f'{info.get("output-name")} {left[0].events()[mark:]}')
+  results.check('MO-4: where it tiles beside the window there (512 wide)',
+                configure is not None and configure['height'] == 768,
+                str(left[0].events()[mark:]))
+  set_output = next((event for event in events
+                     if event.get('event') == 'view-set-output'), {})
+  results.check('MO-4: watchers get view-set-output and view-wset-changed',
+                'view-wset-changed' in names
+                and set_output.get('output', {}).get('name') == 'HEADLESS-2'
+                and set_output.get('view', {}).get('id') == left[1], str(names))
+  watcher.close()
+
+def configure_view_checks(results, shingle, probes):
+  """configure-view with output_id moves a fullscreen, a floating and a
+  tiled window with Wayfire's geometry."""
+  left, floater, full = probes['left'], probes['floater'], probes['full']
+  shingle.ipc.call('wm-actions/set-fullscreen', {'view_id': full[1],
+                                                 'state': True})
+  full[0].wait_event('configure', width=1280, height=720)
+  mark = len(full[0].events())
+  reply = shingle.ipc.call('window-rules/configure-view',
+                           {'id': full[1], 'output_id': 2})
+  configure = full[0].wait_event('configure', after=mark, width=1024,
+                                 height=768)
+  info = view_info(shingle, full[1])
+  results.check('MO-4: a fullscreen window fills HEADLESS-2 (1024x768)',
+                reply == {'result': 'ok'} and configure is not None
+                and info.get('fullscreen') is True
+                and geometry_of(info) == (1280, 0, 1024, 768),
+                f'{reply} {geometry_of(info)} {full[0].events()[mark:]}')
+  # floater floats at 100,50 on HEADLESS-1; it is scaled by 1024/1280 and
+  # 768/720 from HEADLESS-2's corner.
+  shingle.ipc.call('window-rules/configure-view', {
+      'id': floater[1],
+      'geometry': {'x': 100, 'y': 50, 'width': 300, 'height': 200}})
+  reply = shingle.ipc.call('window-rules/configure-view',
+                           {'id': floater[1], 'output_id': 2})
+  info = wait_for(lambda: (lambda value: value if geometry_of(value)
+                           == (1360, 53, 300, 200) else None)(
+                               view_info(shingle, floater[1])))
+  results.check('MO-4: a floating window is scaled into HEADLESS-2 '
+                '(100,50 to 1360,53)', reply == {'result': 'ok'}
+                and bool(info) and info.get('output-name') == 'HEADLESS-2'
+                and floater[0].wait_event('output-enter',
+                                          output='HEADLESS-2') is not None,
+                f'{reply} {geometry_of(view_info(shingle, floater[1]))}')
+  # left is tiled on HEADLESS-2 beside right; HEADLESS-1 is empty now.
+  mark = len(left[0].events())
+  reply = shingle.ipc.call('window-rules/configure-view',
+                           {'id': left[1], 'output_id': 1})
+  configure = left[0].wait_event('configure', after=mark, width=1280,
+                                 height=720)
+  results.check('MO-4: a tiled window joins HEADLESS-1\'s tree (1280x720)',
+                reply == {'result': 'ok'} and configure is not None
+                and view_info(shingle, left[1]).get('output-name')
+                == 'HEADLESS-1', f'{reply} {left[0].events()[mark:]}')
+  missing = shingle.ipc.call('window-rules/configure-view',
+                             {'id': full[1], 'output_id': 9})
+  results.check('MO-4: configure-view refuses an unknown output',
+                missing.get('error') == 'output not found', str(missing))
+
+def wset_indices(shingle):
+  """{output name: wset-index} from list-outputs."""
+  return {output['name']: output['wset-index']
+          for output in shingle.ipc.call('window-rules/list-outputs')}
+
+def wsets_checks(results, shingle, probes):
+  """wsets/set-output-wset swaps the two outputs' sets in two calls."""
+  left, right = probes['left'], probes['right']
+  before = wset_indices(shingle)
+  watcher = watch(shingle, ['output-wset-changed'])
+  mark = len(right[0].events())
+  first = shingle.ipc.call(
+      'wsets/set-output-wset',
+      {'output-id': 1, 'wset-index': before['HEADLESS-2']})
+  after_first = wset_indices(shingle)
+  second = shingle.ipc.call(
+      'wsets/set-output-wset',
+      {'output-id': 2, 'wset-index': before['HEADLESS-1']})
+  after = wset_indices(shingle)
+  events = drain(watcher)
+  results.check('MO-4: set-output-wset gives HEADLESS-1 the set of '
+                'HEADLESS-2, which gets a new one', first == {'result': 'ok'}
+                and after_first == {'HEADLESS-1': 2, 'HEADLESS-2': 3},
+                f'{before} {first} {after_first}')
+  results.check('MO-4: and a second call swaps the sets',
+                second == {'result': 'ok'}
+                and after == {'HEADLESS-1': 2, 'HEADLESS-2': 1}
+                and len(shingle.ipc.call('window-rules/list-wsets')) == 2,
+                f'{second} {after}')
+  entered = right[0].wait_event('output-enter', after=mark,
+                                output='HEADLESS-1')
+  results.check('MO-4: their windows change outputs with them',
+                view_info(shingle, right[1]).get('output-name') == 'HEADLESS-1'
+                and view_info(shingle, left[1]).get('output-name')
+                == 'HEADLESS-2' and entered is not None,
+                f'{right[0].events()[mark:]}')
+  results.check('MO-4: watchers get output-wset-changed for each output',
+                [event.get('output') for event in events
+                 if event.get('event') == 'output-wset-changed']
+                == [1, 2, 2],
+                str(events))
+  watcher.close()
+
+def focus_checks(results, binary, wl_probe):
+  """MO-4's focus and moving windows against two outputs."""
+  shingle = Headless(binary, 'focus', focus_config(), 'yaml',
+                     backend=('--headless', '--outputs', '2'),
+                     extra_environment={NAMESPACE_VARIABLE: '1'})
+  probes = {}
+  try:
+    for name in ('right', 'floater', 'full', 'left'):
+      probes[name] = map_probe(shingle, wl_probe, f'mo4-{name}')
+    results.check('MO-4: four probes map on HEADLESS-1',
+                  all(view_id for _, view_id in probes.values()),
+                  str({name: view for name, (_, view) in probes.items()}))
+    reply = shingle.ipc.call('window-rules/configure-view',
+                             {'id': probes['right'][1], 'output_id': 2})
+    results.check('MO-4: configure-view puts the right probe on '
+                  'HEADLESS-2', reply == {'result': 'ok'}
+                  and probes['right'][0].wait_event(
+                      'output-enter', output='HEADLESS-2') is not None,
+                  f'{reply} {probes["right"][0].events()}')
+    for checks in (click_checks, oswitch_checks, configure_view_checks,
+                   wsets_checks):
+      checks(results, shingle, probes)
+  finally:
+    for probe, _ in probes.values():
+      probe.stop()
+    status = shingle.stop()
+  results.check('MO-4: SIGTERM exits with status 0 (focus)', status == 0,
+                str(status))
+  return shingle.log_text()
+
 def private_pam(work):
   """Bind-mounts a private /etc/pam.d whose `shingle` service permits
   everything, for shingle-lock's unlock; only this namespace sees it."""
@@ -1041,7 +1282,10 @@ def inner(binary):
 
     def mo3_protocol_checks(results, binary):
       return protocol_checks(results, binary, wl_probe, lock_binary)
-    multi += [restored_session_checks, mo3_protocol_checks]
+
+    def mo4_focus_checks(results, binary):
+      return focus_checks(results, binary, wl_probe)
+    multi += [restored_session_checks, mo3_protocol_checks, mo4_focus_checks]
   for checks in (randr_checks, configured_checks, wayfire_checks,
                  nested_checks, *multi):
     try:
