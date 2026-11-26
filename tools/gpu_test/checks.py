@@ -60,6 +60,9 @@ OUTER_GAPS = {'tiling': {'gaps': {'top': 30, 'right': 50, 'bottom': 40,
 INNER_GAPS = {'tiling': {'gaps': {'top': 20, 'right': 10, 'bottom': 15,
                                   'left': 25, 'inner': 0}}}
 OUTPUT = (1280, 720)
+# The default `background_color`, 0.1 0.1 0.1, as the bytes Wayfire
+# writes: 0.1 * 255 = 25.5, which the GPU may round either way.
+BACKGROUND = (26, 26, 26)
 # The quadrants of `wl_probe --pattern` and what inversion makes of them.
 PATTERN = (('red', 'green'), ('blue', 'white'))
 INVERTED = {'red': 'cyan', 'green': 'magenta', 'blue': 'yellow',
@@ -143,9 +146,10 @@ def with_gaps(gaps):
   return config
 
 def background_at(shot, x, y):
-  """Whether (x, y) of `shot` shows the default background, 0.1 linear
-  or 89 in sRGB, rather than client content."""
-  return all(abs(value - 89) <= 3 for value in shot.pixel(x, y))
+  """Whether (x, y) of `shot` shows the default background, BACKGROUND,
+  rather than client content."""
+  return all(abs(value - expected) <= 3
+             for value, expected in zip(shot.pixel(x, y), BACKGROUND))
 
 def summary_lines(text):
   """The lines of `text` that name a driver (`*_RENDERER`, `*_VENDOR`,
@@ -752,8 +756,10 @@ def all_checks():
   """DB-2's and DB-3's groups here, DB-4's and DB-5's
   (dmabuf_checks.py), MO-5's (output_checks.py), MO-6's
   (nested_output_checks.py), WG-2's (wayfire_checks.py), WG-5's
-  (vswipe_checks.py), WG-6's (decoration_checks.py) and WG-7's
-  (switcher_checks.py)."""
+  (vswipe_checks.py), WG-6's (decoration_checks.py), WG-7's
+  (switcher_checks.py), and the Wayfire comparison of configured
+  colours (colour_checks.py)."""
+  import colour_checks
   import decoration_checks
   import dmabuf_checks
   import nested_output_checks
@@ -764,7 +770,7 @@ def all_checks():
   return {**CHECKS, **dmabuf_checks.CHECKS, **output_checks.CHECKS,
           **nested_output_checks.CHECKS, **wayfire_checks.CHECKS,
           **vswipe_checks.CHECKS, **decoration_checks.CHECKS,
-          **switcher_checks.CHECKS}
+          **switcher_checks.CHECKS, **colour_checks.CHECKS}
 
 def run_checks(groups, binary, wl_probe, captures_directory=None):
   """Runs the check `groups` in order; returns 0 when all passed."""

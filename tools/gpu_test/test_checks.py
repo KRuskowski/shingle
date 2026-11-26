@@ -88,7 +88,7 @@ class ColourTest(unittest.TestCase):
 
   def test_ambiguous_colours_have_no_name(self):
     self.assertIsNone(checks.classify(128, 0, 0))
-    # The default background, 0.1 linear, is 89 in sRGB.
+    # Between the thresholds: neither saturated nor grey.
     self.assertIsNone(checks.classify(89, 89, 89))
 
   def test_inversion_of_the_pattern(self):
@@ -159,7 +159,7 @@ class PatternTest(unittest.TestCase):
                   checks.pattern_mismatches(small, self.geometry))
 
   def test_background(self):
-    shot = FakeShot(4, 4, lambda x, y: (89, 90, 87) if x else (0, 0, 0))
+    shot = FakeShot(4, 4, lambda x, y: (26, 27, 24) if x else (0, 0, 0))
     self.assertTrue(checks.background_at(shot, 1, 1))
     self.assertFalse(checks.background_at(shot, 0, 1))
 
@@ -187,6 +187,7 @@ class PatternTest(unittest.TestCase):
   def test_every_group_has_a_check(self):
     import decoration_checks
     import dmabuf_checks
+    import colour_checks
     import nested_output_checks
     import output_checks
     import switcher_checks
@@ -202,11 +203,12 @@ class PatternTest(unittest.TestCase):
     self.assertEqual(set(decoration_checks.GROUPS),
                      set(decoration_checks.CHECKS))
     self.assertEqual(set(switcher_checks.GROUPS), set(switcher_checks.CHECKS))
+    self.assertEqual(set(colour_checks.GROUPS), set(colour_checks.CHECKS))
     self.assertEqual(
         checks.GROUPS + dmabuf_checks.GROUPS + output_checks.GROUPS
         + nested_output_checks.GROUPS + wayfire_checks.GROUPS
         + vswipe_checks.GROUPS + decoration_checks.GROUPS
-        + switcher_checks.GROUPS,
+        + switcher_checks.GROUPS + colour_checks.GROUPS,
         checks.run.CHECK_GROUPS)
     # Every DB-4 and DB-5 group runs NVIDIA Vulkan clients but `syncobj`.
     self.assertEqual(tuple(group for group in dmabuf_checks.GROUPS

@@ -268,7 +268,7 @@ def syncobj_global_check(results, mode, group, shingle, text):
                   version is None and 'SHINGLE_SYNCOBJ=0' in log,
                   f'version {version}, {checks.tail(log, 3)}')
 
-def drawn(shot, geometry, background=(89, 89, 89), step=8):
+def drawn(shot, geometry, background=checks.BACKGROUND, step=8):
   """The share of sampled pixels in `geometry` that are not the
   `background`."""
   if shot is None or geometry is None:

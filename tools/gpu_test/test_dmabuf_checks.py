@@ -157,7 +157,7 @@ class PixelTest(unittest.TestCase):
 
   def test_drawn_counts_what_is_not_background(self):
     half = FakeShot(64, 64, lambda x, y: (255, 0, 0) if x < 32 else
-                    (89, 89, 89))
+                    (26, 26, 26))
     self.assertAlmostEqual(dmabuf_checks.drawn(half, self.GEOMETRY), 0.5)
     self.assertEqual(dmabuf_checks.drawn(None, self.GEOMETRY), 0.0)
     self.assertEqual(dmabuf_checks.drawn(half, None), 0.0)

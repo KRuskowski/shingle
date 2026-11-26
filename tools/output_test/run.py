@@ -384,9 +384,9 @@ PAM_PERMIT = ('auth sufficient pam_permit.so\n'
               'account sufficient pam_permit.so\n')
 
 def grey(pixel):
-  """Whether an (r, g, b) pixel is the default background, 0.1 linear or
-  89 in sRGB."""
-  return all(abs(channel - 89) <= 3 for channel in pixel)
+  """Whether an (r, g, b) pixel is the default background, 0.1 0.1 0.1,
+  whose bytes Wayfire writes: 26, or 25 where the GPU rounds 25.5 down."""
+  return all(abs(channel - 26) <= 3 for channel in pixel)
 
 def white(pixel):
   """Whether an (r, g, b) pixel is white."""

@@ -128,7 +128,7 @@ class GrimTest(unittest.TestCase):
     self.assertEqual(run.grim_scale(outputs, (5000, 0, 1, 1)), 1)
 
   def test_colours(self):
-    self.assertTrue(run.grey((89, 90, 88)))
+    self.assertTrue(run.grey((26, 25, 27)))
     self.assertFalse(run.grey((255, 255, 255)))
     self.assertTrue(run.white((255, 255, 255)))
     self.assertTrue(run.red((255, 0, 0)))
