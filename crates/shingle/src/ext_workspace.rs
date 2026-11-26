@@ -1,5 +1,12 @@
+//! ext-workspace-v1: one workspace group per output, holding the
+//! workspaces of the workspace set it shows (docs/design/multi-output.md,
+//! section 8). Workspace ids carry the output name, so a renamed output
+//! gets new workspaces, as a replaced output does in Wayfire; when an
+//! output shows another set, its group's workspaces are made again.
+
 use std::collections::{HashMap, HashSet};
 
+use shingle_core::{OutputId, WsetId};
 use wayland_protocols::ext::workspace::v1::server::{
   ext_workspace_group_handle_v1::{self, ExtWorkspaceGroupHandleV1},
   ext_workspace_handle_v1::{self, ExtWorkspaceHandleV1},
@@ -20,22 +27,27 @@ const ACTIVE_STATE: ext_workspace_handle_v1::State =
 
 struct Manager {
   resource: ExtWorkspaceManagerV1,
-  pending_activation: Option<usize>,
+  /// The workspace to show at the next commit: its output and index.
+  pending_activation: Option<(OutputId, usize)>,
   grid: (u32, u32),
-  /// The output name in the workspace ids sent so far.
-  output_name: String,
   stopped: bool,
 }
 
 struct Group {
   resource: ExtWorkspaceGroupHandleV1,
   manager: ObjectId,
-  outputs: HashSet<ObjectId>,
+  /// The output whose workspaces the group holds.
+  output: OutputId,
+  /// The workspace set the output showed when the workspaces were made.
+  wset: Option<WsetId>,
+  /// The `wl_output`s the group entered.
+  outputs: HashMap<ObjectId, WlOutput>,
 }
 
 struct Workspace {
   resource: ExtWorkspaceHandleV1,
   manager: ObjectId,
+  group: ObjectId,
   index: usize,
   active: bool,
 }
@@ -51,9 +63,9 @@ pub(crate) fn create_global(handle: &DisplayHandle) {
   handle.create_global::<CompositorState, ExtWorkspaceManagerV1, ()>(1, ());
 }
 
-/// Synchronizes active state, output membership, and configured grid changes.
+/// Synchronizes groups with the outputs, their workspace sets and the
+/// client's bindings, active state, and grid changes.
 pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {
-  let current = current_workspace(state);
   let grid = (state.workspace_width, state.workspace_height);
   let managers = state
     .ext_workspaces
@@ -61,54 +73,67 @@ pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {
     .keys()
     .cloned()
     .collect::<Vec<_>>();
-  let mut dirty = HashSet::new();
-  let mut rebuilt = HashSet::new();
   for manager_id in managers {
-    if state
-      .ext_workspaces
-      .managers
-      .get(&manager_id)
-      .is_none_or(|manager| manager.stopped)
-    {
+    let Some(manager) = state.ext_workspaces.managers.get(&manager_id) else {
+      continue;
+    };
+    if manager.stopped {
       continue;
     }
-    let manager = &state.ext_workspaces.managers[&manager_id];
-    // Workspace ids carry the output name, so a renamed output gets new
-    // workspaces, as a replaced output does in Wayfire.
-    if manager.grid != grid || manager.output_name != state.primary().info.name
-    {
-      rebuild_manager(state, handle, &manager_id);
-      rebuilt.insert(manager_id);
-      continue;
+    let mut dirty = false;
+    if manager.grid != grid {
+      let groups = groups_of(state, &manager_id);
+      for group in groups {
+        remove_group(state, &group);
+      }
+      if let Some(manager) = state.ext_workspaces.managers.get_mut(&manager_id)
+      {
+        manager.grid = grid;
+      }
+      dirty = true;
     }
-    dirty.extend(sync_outputs(state, &manager_id));
-    let workspace_ids = state
-      .ext_workspaces
-      .workspaces
-      .values()
-      .filter(|workspace| workspace.manager == manager_id)
-      .map(|workspace| Resource::id(&workspace.resource))
-      .collect::<Vec<_>>();
-    for workspace_id in workspace_ids {
-      let Some(workspace) =
-        state.ext_workspaces.workspaces.get_mut(&workspace_id)
-      else {
+    // Groups of outputs that are gone or show another set.
+    for group_id in groups_of(state, &manager_id) {
+      let Some(group) = state.ext_workspaces.groups.get(&group_id) else {
         continue;
       };
-      let active = workspace.index == current;
-      if workspace.active != active {
-        workspace.active = active;
-        workspace.resource.state(if active {
-          ACTIVE_STATE
-        } else {
-          ext_workspace_handle_v1::State::empty()
-        });
-        dirty.insert(manager_id.clone());
+      let Some(_) = state.outputs.get(&group.output) else {
+        remove_group(state, &group_id);
+        dirty = true;
+        continue;
+      };
+      let wset = state.core.wset_of(&group.output);
+      if group.wset != wset {
+        remove_workspaces(state, &group_id);
+        create_workspaces(state, handle, &manager_id, &group_id);
+        if let Some(group) = state.ext_workspaces.groups.get_mut(&group_id) {
+          group.wset = wset;
+        }
+        dirty = true;
       }
     }
-  }
-  for manager_id in dirty.difference(&rebuilt) {
-    if let Some(manager) = state.ext_workspaces.managers.get(manager_id) {
+    // Outputs without a group.
+    let outputs = state
+      .outputs
+      .iter()
+      .map(|output| output.id.clone())
+      .collect::<Vec<_>>();
+    for output in outputs {
+      let has_group = state
+        .ext_workspaces
+        .groups
+        .values()
+        .any(|group| group.manager == manager_id && group.output == output);
+      if !has_group {
+        create_group(state, handle, &manager_id, &output);
+        dirty = true;
+      }
+    }
+    dirty |= sync_outputs(state, &manager_id);
+    dirty |= sync_active(state, &manager_id);
+    if dirty
+      && let Some(manager) = state.ext_workspaces.managers.get(&manager_id)
+    {
       manager.resource.done();
     }
   }
@@ -118,7 +143,7 @@ pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {
 pub(crate) fn output_removed(state: &mut CompositorState, output: &WlOutput) {
   let mut dirty = HashSet::new();
   for group in state.ext_workspaces.groups.values_mut() {
-    if group.outputs.remove(&output.id()) {
+    if group.outputs.remove(&output.id()).is_some() {
       group.resource.output_leave(output);
       dirty.insert(group.manager.clone());
     }
@@ -130,89 +155,142 @@ pub(crate) fn output_removed(state: &mut CompositorState, output: &WlOutput) {
   }
 }
 
-fn sync_outputs(
-  state: &mut CompositorState,
-  manager_id: &ObjectId,
-) -> HashSet<ObjectId> {
-  let mut dirty = HashSet::new();
-  let Some(manager) = state.ext_workspaces.managers.get(manager_id) else {
-    return dirty;
-  };
-  let Some(client) = manager.resource.client() else {
-    return dirty;
-  };
-  // Until each output has its own group (MO-3), the group is the first
-  // output's.
-  let outputs = state
-    .primary()
-    .bound
+/// The groups of manager `manager_id`.
+fn groups_of(state: &CompositorState, manager_id: &ObjectId) -> Vec<ObjectId> {
+  state
+    .ext_workspaces
+    .groups
     .iter()
-    .filter(|(_, output)| {
-      output
-        .client()
-        .is_some_and(|owner| owner.id() == client.id())
-    })
-    .map(|(id, output)| (id.clone(), output.clone()))
-    .collect::<Vec<_>>();
-  for group in state.ext_workspaces.groups.values_mut() {
-    if &group.manager != manager_id {
+    .filter(|(_, group)| &group.manager == manager_id)
+    .map(|(id, _)| id.clone())
+    .collect()
+}
+
+/// Sends each group of `manager_id` `output_enter` for the client's
+/// bindings of its output, and `output_leave` for those that went.
+fn sync_outputs(state: &mut CompositorState, manager_id: &ObjectId) -> bool {
+  let Some(client) = state
+    .ext_workspaces
+    .managers
+    .get(manager_id)
+    .and_then(|manager| manager.resource.client())
+  else {
+    return false;
+  };
+  let mut dirty = false;
+  for group_id in groups_of(state, manager_id) {
+    let Some(group) = state.ext_workspaces.groups.get(&group_id) else {
       continue;
-    }
-    for (id, output) in &outputs {
-      if group.outputs.insert(id.clone()) {
-        group.resource.output_enter(output);
-        dirty.insert(manager_id.clone());
+    };
+    let bound = state
+      .outputs
+      .get(&group.output)
+      .into_iter()
+      .flat_map(|output| output.bound.iter())
+      .filter(|(_, output)| {
+        output
+          .client()
+          .is_some_and(|owner| owner.id() == client.id())
+      })
+      .map(|(id, output)| (id.clone(), output.clone()))
+      .collect::<HashMap<_, _>>();
+    let Some(group) = state.ext_workspaces.groups.get_mut(&group_id) else {
+      continue;
+    };
+    group.outputs.retain(|id, output| {
+      if bound.contains_key(id) {
+        return true;
+      }
+      if output.is_alive() {
+        group.resource.output_leave(output);
+      }
+      dirty = true;
+      false
+    });
+    for (id, output) in bound {
+      if let std::collections::hash_map::Entry::Vacant(entry) =
+        group.outputs.entry(id)
+      {
+        group.resource.output_enter(&output);
+        entry.insert(output);
+        dirty = true;
       }
     }
   }
   dirty
 }
 
-fn rebuild_manager(
-  state: &mut CompositorState,
-  handle: &DisplayHandle,
-  manager_id: &ObjectId,
-) {
-  let workspace_ids = state
-    .ext_workspaces
-    .workspaces
-    .values()
-    .filter(|workspace| &workspace.manager == manager_id)
-    .map(|workspace| Resource::id(&workspace.resource))
-    .collect::<Vec<_>>();
-  for workspace_id in workspace_ids {
-    if let Some(workspace) =
-      state.ext_workspaces.workspaces.remove(&workspace_id)
-    {
-      for group in state.ext_workspaces.groups.values() {
-        if &group.manager == manager_id {
-          group.resource.workspace_leave(&workspace.resource);
-        }
-      }
-      workspace.resource.removed();
-    }
-  }
-  let group_ids = state
+/// Sends each workspace of `manager_id` whether it is its output's
+/// current one.
+fn sync_active(state: &mut CompositorState, manager_id: &ObjectId) -> bool {
+  let mut dirty = false;
+  let current = state
     .ext_workspaces
     .groups
-    .values()
-    .filter(|group| &group.manager == manager_id)
-    .map(|group| Resource::id(&group.resource))
-    .collect::<Vec<_>>();
-  for group_id in group_ids {
-    if let Some(group) = state.ext_workspaces.groups.remove(&group_id) {
-      group.resource.removed();
+    .iter()
+    .filter(|(_, group)| &group.manager == manager_id)
+    .map(|(id, group)| (id.clone(), current_workspace(state, &group.output)))
+    .collect::<HashMap<_, _>>();
+  for workspace in state.ext_workspaces.workspaces.values_mut() {
+    let Some(current) = current.get(&workspace.group) else {
+      continue;
+    };
+    let active = workspace.index == *current;
+    if workspace.active != active {
+      workspace.active = active;
+      workspace.resource.state(if active {
+        ACTIVE_STATE
+      } else {
+        ext_workspace_handle_v1::State::empty()
+      });
+      dirty = true;
     }
   }
-  create_manager_contents(state, handle, manager_id);
+  dirty
 }
 
-fn create_manager_contents(
+/// Removes the workspaces of group `group_id`.
+fn remove_workspaces(state: &mut CompositorState, group_id: &ObjectId) {
+  let Some(group) = state
+    .ext_workspaces
+    .groups
+    .get(group_id)
+    .map(|group| group.resource.clone())
+  else {
+    return;
+  };
+  state.ext_workspaces.workspaces.retain(|_, workspace| {
+    if &workspace.group != group_id {
+      return true;
+    }
+    group.workspace_leave(&workspace.resource);
+    workspace.resource.removed();
+    false
+  });
+}
+
+/// Removes group `group_id` with its workspaces.
+fn remove_group(state: &mut CompositorState, group_id: &ObjectId) {
+  remove_workspaces(state, group_id);
+  if let Some(group) = state.ext_workspaces.groups.remove(group_id) {
+    for output in group.outputs.values() {
+      if output.is_alive() {
+        group.resource.output_leave(output);
+      }
+    }
+    group.resource.removed();
+  }
+}
+
+/// Announces a group for `output` to manager `manager_id`, with its
+/// workspaces. Its outputs follow in [`sync_outputs`].
+fn create_group(
   state: &mut CompositorState,
   handle: &DisplayHandle,
   manager_id: &ObjectId,
+  output: &OutputId,
 ) {
-  let Some(manager_resource) = state
+  let Some(manager) = state
     .ext_workspaces
     .managers
     .get(manager_id)
@@ -220,68 +298,74 @@ fn create_manager_contents(
   else {
     return;
   };
-  let Some(client) = manager_resource.client() else {
+  let Some(client) = manager.client() else {
     return;
   };
-  let grid = (state.workspace_width, state.workspace_height);
-  let name = state.primary().info.name.clone();
-  if let Some(manager) = state.ext_workspaces.managers.get_mut(manager_id) {
-    manager.grid = grid;
-    manager.output_name = name;
-  }
   let Ok(group) = client
     .create_resource::<ExtWorkspaceGroupHandleV1, (), CompositorState>(
       handle,
-      manager_resource.version(),
+      manager.version(),
       (),
     )
   else {
     return;
   };
-  manager_resource.workspace_group(&group);
+  manager.workspace_group(&group);
   group.capabilities(ext_workspace_group_handle_v1::GroupCapabilities::empty());
-  // Until each output has its own group (MO-3), the group is the first
-  // output's.
-  let outputs = state
-    .primary()
-    .bound
-    .iter()
-    .filter(|(_, output)| {
-      output
-        .client()
-        .is_some_and(|owner| owner.id() == client.id())
-    })
-    .map(|(id, output)| (id.clone(), output.clone()))
-    .collect::<Vec<_>>();
-  let mut group_outputs = HashSet::new();
-  for (id, output) in outputs {
-    group.output_enter(&output);
-    group_outputs.insert(id);
-  }
+  let group_id = Resource::id(&group);
   state.ext_workspaces.groups.insert(
-    Resource::id(&group),
+    group_id.clone(),
     Group {
-      resource: group.clone(),
+      resource: group,
       manager: manager_id.clone(),
-      outputs: group_outputs,
+      output: output.clone(),
+      wset: state.core.wset_of(output),
+      outputs: HashMap::new(),
     },
   );
+  create_workspaces(state, handle, manager_id, &group_id);
+}
+
+/// Announces the workspaces of the grid in group `group_id`.
+fn create_workspaces(
+  state: &mut CompositorState,
+  handle: &DisplayHandle,
+  manager_id: &ObjectId,
+  group_id: &ObjectId,
+) {
+  let grid = (state.workspace_width, state.workspace_height);
   for index in 0..grid.0 as usize * grid.1 as usize {
-    create_workspace(state, handle, &client, manager_id, &group, index, grid);
+    create_workspace(state, handle, manager_id, group_id, index, grid);
   }
-  manager_resource.done();
 }
 
 fn create_workspace(
   state: &mut CompositorState,
   handle: &DisplayHandle,
-  client: &Client,
   manager_id: &ObjectId,
-  group: &ExtWorkspaceGroupHandleV1,
+  group_id: &ObjectId,
   index: usize,
   grid: (u32, u32),
 ) {
-  let current = current_workspace(state);
+  let Some(manager) = state
+    .ext_workspaces
+    .managers
+    .get(manager_id)
+    .map(|manager| manager.resource.clone())
+  else {
+    return;
+  };
+  let Some((group, output)) = state
+    .ext_workspaces
+    .groups
+    .get(group_id)
+    .map(|group| (group.resource.clone(), group.output.clone()))
+  else {
+    return;
+  };
+  let Some(client) = manager.client() else {
+    return;
+  };
   let Ok(workspace) = client
     .create_resource::<ExtWorkspaceHandleV1, (), CompositorState>(
       handle,
@@ -291,14 +375,11 @@ fn create_workspace(
   else {
     return;
   };
-  let Some(manager) = state.ext_workspaces.managers.get(manager_id) else {
-    return;
-  };
   let x = index as u32 % grid.0;
   let y = index as u32 / grid.0;
-  let id = format!("{}:workspace-{x}-{y}", state.primary().info.name);
-  manager.resource.workspace(&workspace);
-  workspace.id(id.clone());
+  let id = format!("{}:workspace-{x}-{y}", output.as_str());
+  manager.workspace(&workspace);
+  workspace.id(id);
   workspace.name(format!("Workspace {}", index + 1));
   workspace.coordinates(
     [x, y]
@@ -306,7 +387,7 @@ fn create_workspace(
       .flat_map(u32::to_ne_bytes)
       .collect::<Vec<_>>(),
   );
-  let active = index == current;
+  let active = index == current_workspace(state, &output);
   workspace.state(if active {
     ACTIVE_STATE
   } else {
@@ -319,16 +400,18 @@ fn create_workspace(
     Workspace {
       resource: workspace,
       manager: manager_id.clone(),
+      group: group_id.clone(),
       index,
       active,
     },
   );
 }
 
-fn current_workspace(state: &CompositorState) -> usize {
+/// The index, row by row, of `output`'s current workspace.
+fn current_workspace(state: &CompositorState, output: &OutputId) -> usize {
   state
     .core
-    .current_workspace(&state.active_output)
+    .current_workspace(output)
     .map(|workspace| {
       workspace.y as usize * state.workspace_width as usize
         + workspace.x as usize
@@ -354,12 +437,11 @@ impl GlobalDispatch<ExtWorkspaceManagerV1, ()> for CompositorState {
       Manager {
         resource: manager,
         pending_activation: None,
-        grid: (0, 0),
-        output_name: String::new(),
+        grid: (state.workspace_width, state.workspace_height),
         stopped: false,
       },
     );
-    create_manager_contents(state, handle, &id);
+    sync(state, handle);
   }
 }
 
@@ -380,8 +462,8 @@ impl Dispatch<ExtWorkspaceManagerV1, ()> for CompositorState {
           .managers
           .get_mut(&Resource::id(resource))
           .and_then(|manager| manager.pending_activation.take());
-        if let Some(index) = activation
-          && let Err(error) = state.switch_workspace(index)
+        if let Some((output, index)) = activation
+          && let Err(error) = state.switch_workspace_on(&output, index)
         {
           eprintln!("shingle: workspace activation failed: {error}");
         }
@@ -429,13 +511,20 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for CompositorState {
         .ext_workspaces
         .workspaces
         .get(&Resource::id(resource))
-        .map(|workspace| (workspace.manager.clone(), workspace.index));
-      if let Some((manager_id, index)) = activation
+        .and_then(|workspace| {
+          let group = state.ext_workspaces.groups.get(&workspace.group)?;
+          Some((
+            workspace.manager.clone(),
+            group.output.clone(),
+            workspace.index,
+          ))
+        });
+      if let Some((manager_id, output, index)) = activation
         && let Some(manager) =
           state.ext_workspaces.managers.get_mut(&manager_id)
         && !manager.stopped
       {
-        manager.pending_activation = Some(index);
+        manager.pending_activation = Some((output, index));
       }
     }
   }

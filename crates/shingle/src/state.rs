@@ -457,6 +457,16 @@ impl CompositorState {
     &mut self,
     index: usize,
   ) -> Result<(), crate::Error> {
+    let output = self.active_output.clone();
+    self.switch_workspace_on(&output, index)
+  }
+
+  /// Shows workspace `index` (row by row from 0) on output `output`.
+  pub(crate) fn switch_workspace_on(
+    &mut self,
+    output: &OutputId,
+    index: usize,
+  ) -> Result<(), crate::Error> {
     if index >= self.workspace_width as usize * self.workspace_height as usize {
       return Err(crate::Error::InvalidWorkspace(index));
     }
@@ -464,26 +474,29 @@ impl CompositorState {
       index as u32 % self.workspace_width,
       index as u32 / self.workspace_width,
     );
-    self.core.ensure_workspace(&self.active_output, workspace)?;
-    let previous = self.core.current_workspace(&self.active_output)?;
+    self.core.ensure_workspace(output, workspace)?;
+    let previous = self.core.current_workspace(output)?;
     if previous == workspace {
       // A request for the current workspace does nothing, as vswitch's
       // on_set_workspace_request (plugins/vswitch/vswitch.cpp) carries it
       // out without a change.
       return Ok(());
     }
-    shell::disable_show_desktop(self);
-    self.last_workspace = Some(previous);
-    self
-      .core
-      .set_current_workspace(&self.active_output, workspace)?;
-    self.input.keyboard_focus = None;
+    let active = *output == self.active_output;
+    if active {
+      shell::disable_show_desktop(self);
+      self.last_workspace = Some(previous);
+    }
+    self.core.set_current_workspace(output, workspace)?;
+    if active {
+      self.input.keyboard_focus = None;
+    }
     crate::input::sync_focus(self);
     shell::reconfigure_all(self);
     self.events.push(crate::Event::WorkspaceChanged {
       workspace: index as u32 + 1,
       previous: previous.y * self.workspace_width + previous.x + 1,
-      output: crate::OutputHandle::from(&self.active_output),
+      output: crate::OutputHandle::from(output),
     });
     Ok(())
   }

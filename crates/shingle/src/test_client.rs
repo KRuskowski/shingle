@@ -24,6 +24,11 @@ use wayland_protocols::{
     ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
     ext_session_lock_v1::{self, ExtSessionLockV1},
   },
+  ext::workspace::v1::client::{
+    ext_workspace_group_handle_v1::{self, ExtWorkspaceGroupHandleV1},
+    ext_workspace_handle_v1::{self, ExtWorkspaceHandleV1},
+    ext_workspace_manager_v1::{self, ExtWorkspaceManagerV1},
+  },
   wp::{
     commit_timing::v1::client::{
       wp_commit_timer_v1, wp_commit_timing_manager_v1,
@@ -177,6 +182,11 @@ pub(crate) struct Events {
   pub(crate) power: Vec<(ObjectId, &'static str)>,
   /// wlr-gamma-control events: the control and `size` or `failed`.
   pub(crate) gamma: Vec<(ObjectId, &'static str)>,
+  /// ext-workspace groups as announced, by object.
+  pub(crate) workspace_groups: std::collections::HashMap<ObjectId, GroupSeen>,
+  /// ext-workspace workspaces as announced, by object.
+  pub(crate) workspaces:
+    std::collections::HashMap<ObjectId, (ExtWorkspaceHandleV1, WorkspaceSeen)>,
   synced: bool,
 }
 
@@ -193,6 +203,24 @@ impl Events {
       .find(|(id, ..)| *id == toplevel.id())
       .map(|(_, width, height)| (*width, *height))
   }
+}
+
+/// What an ext-workspace group said about itself.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct GroupSeen {
+  /// The `wl_output`s it is on now.
+  pub(crate) outputs: Vec<ObjectId>,
+  /// The workspaces in it now.
+  pub(crate) workspaces: Vec<ObjectId>,
+  pub(crate) removed: bool,
+}
+
+/// What an ext-workspace workspace said about itself.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct WorkspaceSeen {
+  pub(crate) id: String,
+  pub(crate) active: bool,
+  pub(crate) removed: bool,
 }
 
 /// What an output-management mode said about itself.
@@ -1176,6 +1204,94 @@ impl Dispatch<ZwlrGammaControlV1, ()> for Events {
       _ => return,
     };
     events.gamma.push((control.id(), seen));
+  }
+}
+
+impl Dispatch<ExtWorkspaceManagerV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ExtWorkspaceManagerV1,
+    event: ext_workspace_manager_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      ext_workspace_manager_v1::Event::WorkspaceGroup { workspace_group } => {
+        events
+          .workspace_groups
+          .insert(workspace_group.id(), GroupSeen::default());
+      }
+      ext_workspace_manager_v1::Event::Workspace { workspace } => {
+        events
+          .workspaces
+          .insert(workspace.id(), (workspace, WorkspaceSeen::default()));
+      }
+      _ => {}
+    }
+  }
+
+  wayland_client::event_created_child!(Events, ExtWorkspaceManagerV1, [
+    ext_workspace_manager_v1::EVT_WORKSPACE_GROUP_OPCODE
+      => (ExtWorkspaceGroupHandleV1, ()),
+    ext_workspace_manager_v1::EVT_WORKSPACE_OPCODE
+      => (ExtWorkspaceHandleV1, ()),
+  ]);
+}
+
+impl Dispatch<ExtWorkspaceGroupHandleV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    group: &ExtWorkspaceGroupHandleV1,
+    event: ext_workspace_group_handle_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    let Some(seen) = events.workspace_groups.get_mut(&group.id()) else {
+      return;
+    };
+    match event {
+      ext_workspace_group_handle_v1::Event::OutputEnter { output } => {
+        seen.outputs.push(output.id());
+      }
+      ext_workspace_group_handle_v1::Event::OutputLeave { output } => {
+        seen.outputs.retain(|id| *id != output.id());
+      }
+      ext_workspace_group_handle_v1::Event::WorkspaceEnter { workspace } => {
+        seen.workspaces.push(workspace.id());
+      }
+      ext_workspace_group_handle_v1::Event::WorkspaceLeave { workspace } => {
+        seen.workspaces.retain(|id| *id != workspace.id());
+      }
+      ext_workspace_group_handle_v1::Event::Removed => seen.removed = true,
+      _ => {}
+    }
+  }
+}
+
+impl Dispatch<ExtWorkspaceHandleV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    workspace: &ExtWorkspaceHandleV1,
+    event: ext_workspace_handle_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    let Some((_, seen)) = events.workspaces.get_mut(&workspace.id()) else {
+      return;
+    };
+    match event {
+      ext_workspace_handle_v1::Event::Id { id } => seen.id = id,
+      ext_workspace_handle_v1::Event::State {
+        state: WEnum::Value(state),
+      } => {
+        seen.active = state.contains(ext_workspace_handle_v1::State::Active);
+      }
+      ext_workspace_handle_v1::Event::Removed => seen.removed = true,
+      _ => {}
+    }
   }
 }
 

@@ -16,6 +16,7 @@ use wayland_client::{
 };
 use wayland_protocols::{
   ext::session_lock::v1::client::ext_session_lock_manager_v1 as lock_manager,
+  ext::workspace::v1::client::ext_workspace_manager_v1 as workspaces,
   wp::{
     fifo::v1::client::wp_fifo_manager_v1::WpFifoManagerV1,
     fractional_scale::v1::client::wp_fractional_scale_manager_v1 as scales,
@@ -857,5 +858,116 @@ fn every_output_has_a_gamma_ramp_of_its_own() {
     .filter(|(id, _)| *id == second.id())
     .count();
   assert_eq!(seen, 2, "size, then failed");
+  let _ = std::fs::remove_file(path);
+}
+
+/// The live workspace groups a client sees: each one's output name and
+/// its workspaces' ids, sorted, with the active one marked by a `*`.
+fn workspace_groups(
+  client: &TestClient,
+  outputs: &HashMap<String, WlOutput>,
+) -> BTreeMap<String, Vec<String>> {
+  client
+    .events
+    .workspace_groups
+    .values()
+    .filter(|group| !group.removed)
+    .map(|group| {
+      let output = group
+        .outputs
+        .iter()
+        .filter_map(|id| {
+          outputs
+            .iter()
+            .find(|(_, output)| output.id() == *id)
+            .map(|(name, _)| name.clone())
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+      let mut workspaces = group
+        .workspaces
+        .iter()
+        .map(|id| {
+          let (_, seen) = &client.events.workspaces[id];
+          format!("{}{}", seen.id, if seen.active { "*" } else { "" })
+        })
+        .collect::<Vec<_>>();
+      workspaces.sort();
+      (output, workspaces)
+    })
+    .collect()
+}
+
+#[test]
+fn every_output_has_a_workspace_group_of_its_own() {
+  let config = Config {
+    workspace_width: 2,
+    workspace_height: 1,
+    ..Config::default()
+  };
+  let (mut compositor, path) = test_compositor_with(config);
+  compositor
+    .add_output(
+      OutputInfo {
+        name: "HEADLESS-2".into(),
+        ..OutputInfo::default()
+      },
+      (800, 600),
+    )
+    .unwrap();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let manager = client.bind::<workspaces::ExtWorkspaceManagerV1>(1);
+  client.roundtrip(&mut compositor);
+  client.roundtrip(&mut compositor);
+  let expected = |second: [&str; 2]| {
+    BTreeMap::from([
+      (
+        "HEADLESS-1".to_owned(),
+        vec![
+          "HEADLESS-1:workspace-0-0*".to_owned(),
+          "HEADLESS-1:workspace-1-0".to_owned(),
+        ],
+      ),
+      (
+        "HEADLESS-2".to_owned(),
+        second.iter().map(|id| (*id).to_owned()).collect(),
+      ),
+    ])
+  };
+  assert_eq!(
+    workspace_groups(&client, &outputs),
+    expected(["HEADLESS-2:workspace-0-0*", "HEADLESS-2:workspace-1-0"])
+  );
+  let (handle, _) = client
+    .events
+    .workspaces
+    .values()
+    .find(|(_, seen)| seen.id == "HEADLESS-2:workspace-1-0")
+    .unwrap()
+    .clone();
+  handle.activate();
+  manager.commit();
+  client.roundtrip(&mut compositor);
+  client.roundtrip(&mut compositor);
+  assert_eq!(
+    workspace_groups(&client, &outputs),
+    expected(["HEADLESS-2:workspace-0-0", "HEADLESS-2:workspace-1-0*"]),
+    "only HEADLESS-2 switched"
+  );
+  assert_eq!(
+    compositor
+      .core()
+      .current_workspace(&id("HEADLESS-1"))
+      .unwrap(),
+    WorkspaceId::ORIGIN
+  );
+  compositor
+    .remove_output(&OutputHandle::new("HEADLESS-2"))
+    .unwrap();
+  client.roundtrip(&mut compositor);
+  client.roundtrip(&mut compositor);
+  let groups = workspace_groups(&client, &outputs);
+  assert_eq!(groups.keys().collect::<Vec<_>>(), ["HEADLESS-1"]);
   let _ = std::fs::remove_file(path);
 }
