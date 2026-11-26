@@ -257,6 +257,12 @@ pub(crate) struct CompositorState {
   pub(crate) input_methods_v2: crate::input_method_v2::InputMethods,
   pub(crate) icons: crate::toplevel_icon::Icons,
   pub(crate) enable_text_input_v3: bool,
+  /// Whether views tile (`Config::tiling`).
+  pub(crate) tiling: bool,
+  /// Which protocol plugins' globals `create_globals` creates.
+  pub(crate) protocol_plugins: crate::ProtocolPlugins,
+  /// What a Wayfire file set, for `wayfire/get-config-option`.
+  pub(crate) wayfire_values: shingle_config::WayfireValues,
   pub(crate) focus_recency: HashMap<shingle_core::WindowId, u64>,
   pub(crate) view_properties:
     HashMap<shingle_core::WindowId, HashMap<String, crate::ipc::ViewProperty>>,
@@ -434,6 +440,9 @@ impl CompositorState {
       input_methods_v2: Default::default(),
       icons: Default::default(),
       enable_text_input_v3: config.enable_text_input_v3,
+      tiling: config.tiling,
+      protocol_plugins: config.protocol_plugins,
+      wayfire_values: config.wayfire_values,
       focus_recency: HashMap::new(),
       view_properties: HashMap::new(),
       runtime_bindings: Default::default(),
@@ -659,11 +668,20 @@ impl CompositorState {
 
   pub(crate) fn create_globals(&mut self, handle: &DisplayHandle) {
     self.display = Some(handle.clone());
-    crate::activation::create_global(handle);
+    let plugins = self.protocol_plugins;
+    if plugins.xdg_activation {
+      crate::activation::create_global(handle);
+    }
     crate::foreign::create_globals(handle);
-    crate::foreign_toplevel::create_global(handle);
-    crate::ext_toplevel::create_global(handle);
-    crate::ext_workspace::create_global(handle);
+    if plugins.foreign_toplevel {
+      crate::foreign_toplevel::create_global(handle);
+    }
+    if plugins.ext_toplevel {
+      crate::ext_toplevel::create_global(handle);
+    }
+    if plugins.ext_workspace {
+      crate::ext_workspace::create_global(handle);
+    }
     crate::xdg_output::create_global(handle);
     handle.create_global::<CompositorState, WlCompositor, ()>(6, ());
     handle.create_global::<CompositorState, WlShm, ()>(2, ());
@@ -677,7 +695,9 @@ impl CompositorState {
     }
     crate::output_power::create_global(handle);
     crate::output_management::create_global(handle);
-    crate::security_context::create_global(handle);
+    if plugins.security_context {
+      crate::security_context::create_global(handle);
+    }
     crate::alpha_modifier::create_global(handle);
     crate::tearing::create_global(handle);
     crate::fifo::create_global(handle);
@@ -703,7 +723,9 @@ impl CompositorState {
       crate::primary_selection::create_global(handle);
     }
     crate::screencopy::create_global(handle);
-    crate::shortcuts::create_global(handle);
+    if plugins.shortcuts_inhibit {
+      crate::shortcuts::create_global(handle);
+    }
     crate::single_pixel_buffer::create_global(handle);
     crate::toplevel_icon::create_global(handle);
     crate::subsurface::create_global(handle);
@@ -711,7 +733,7 @@ impl CompositorState {
     crate::virtual_pointer::create_global(handle);
     crate::virtual_keyboard::create_global(handle);
     crate::fractional_scale::create_global(handle);
-    shell::create_globals(handle);
+    shell::create_globals(handle, plugins.session_lock);
   }
 
   pub(crate) fn now(&self) -> Duration {

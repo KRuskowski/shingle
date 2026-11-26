@@ -216,9 +216,13 @@ pub(crate) struct PopupRole {
   pub(crate) relative: Rect,
 }
 
-pub(crate) fn create_globals(handle: &DisplayHandle) {
+/// The shell globals; `ext_session_lock_manager_v1` only with
+/// `session_lock`, Wayfire's `session-lock` plugin.
+pub(crate) fn create_globals(handle: &DisplayHandle, session_lock: bool) {
   handle.create_global::<CompositorState, XdgWmBase, ()>(6, ());
-  handle.create_global::<CompositorState, ExtSessionLockManagerV1, ()>(1, ());
+  if session_lock {
+    handle.create_global::<CompositorState, ExtSessionLockManagerV1, ()>(1, ());
+  }
   crate::dialog::create_global(handle);
   crate::layer_shell::create_global(handle);
   crate::xwayland::shell::create_global(handle);
@@ -666,7 +670,8 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
     if created {
       let properties =
         crate::window_rules::view_properties(state, window, &identity);
-      if !state.tile_by_default.matches_view(&properties) {
+      // Without simple-tile nothing tiles, as in Wayfire.
+      if !state.tiling || !state.tile_by_default.matches_view(&properties) {
         let _ = toggle_tiling(state, window);
       } else if !crate::xwayland::requests::can_tile(state, object) {
         crate::xwayland::requests::float(state, object, window);
@@ -674,6 +679,9 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
       crate::placement::place(state, window);
       crate::window_rules::apply_created(state, window, &identity);
       crate::xwayland::requests::mapped(state, object, window);
+    } else if !state.tiling {
+      // A restored window claims its saved tile.
+      float_if_tiled(state, window);
     }
     reconfigure_all(state);
     if state
@@ -1817,6 +1825,29 @@ pub(crate) fn set_floating_geometry(
   Ok(())
 }
 
+/// Floats `window` if it is tiled.
+fn float_if_tiled(state: &mut CompositorState, window: WindowId) {
+  if state
+    .core
+    .window_info(window)
+    .is_ok_and(|info| info.state.floating.is_none())
+  {
+    let _ = toggle_tiling(state, window);
+  }
+}
+
+/// Floats every tiled window, where its tile was, as Wayfire's simple-tile
+/// leaves its views when it is unloaded.
+pub(crate) fn float_tiled(state: &mut CompositorState) {
+  let windows = state.core.window_ids().collect::<Vec<_>>();
+  for window in windows {
+    float_if_tiled(state, window);
+  }
+}
+
+/// Moves `window` between the tiling tree and floating. Without
+/// simple-tile (`state.tiling` false) a floating window cannot tile, and
+/// this fails with [`crate::Error::TilingDisabled`].
 pub(crate) fn toggle_tiling(
   state: &mut CompositorState,
   window: WindowId,
@@ -1833,6 +1864,9 @@ pub(crate) fn toggle_tiling(
   else {
     return Err(shingle_core::ShingleError::WindowNotFound(window.0).into());
   };
+  if !tiled && !state.tiling {
+    return Err(crate::Error::TilingDisabled);
+  }
   let geometry = if tiled {
     let info = state.core.window_info(window)?;
     // A held view has no tile yet, so it floats at its configured size.
@@ -3242,6 +3276,82 @@ mod tests {
     assert!(layout_tiles(&mut compositor.state).is_empty());
     let info = compositor.state.core.window_info(window).unwrap();
     assert_eq!(info.state.floating, floating.state.floating);
+  }
+
+  #[test]
+  fn without_simple_tile_views_float_and_cannot_tile() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    compositor.state.tiling = false;
+    compositor.state.placement_mode = "none".into();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let view = client.toplevel(&mut compositor, "float");
+    client.attach_buffer(&mut compositor, &view.surface, 200, 100);
+    let window = windows_with(&compositor.state, "float")[0];
+    assert!(layout_tiles(&mut compositor.state).is_empty());
+    let info = compositor.state.core.window_info(window).unwrap();
+    let workarea = compositor.state.active().rect;
+    // Without place, at the top left of the workarea.
+    assert_eq!(
+      info.state.floating.map(|rect| (rect.x, rect.y, rect.width)),
+      Some((workarea.x, workarea.y, 200))
+    );
+    assert!(matches!(
+      super::toggle_tiling(&mut compositor.state, window),
+      Err(crate::Error::TilingDisabled)
+    ));
+    assert!(layout_tiles(&mut compositor.state).is_empty());
+  }
+
+  #[test]
+  fn a_restored_tile_floats_without_simple_tile() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    compositor.state.tiling = false;
+    let output = compositor.state.active_output.clone();
+    let placeholder = compositor
+      .state
+      .core
+      .attach_window(&output, LaunchIdentity::new("restore.test"))
+      .unwrap();
+    compositor
+      .state
+      .core
+      .reconcile_unmapped(placeholder)
+      .unwrap();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let restored = client.toplevel(&mut compositor, "restore.test");
+    client.attach_buffer(&mut compositor, &restored.surface, 64, 64);
+    assert_eq!(
+      windows_with(&compositor.state, "restore.test"),
+      [placeholder]
+    );
+    assert!(layout_tiles(&mut compositor.state).is_empty());
+  }
+
+  #[test]
+  fn a_reload_without_simple_tile_floats_the_tiles() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let view = client.toplevel(&mut compositor, "tiled");
+    client.attach_buffer(&mut compositor, &view.surface, 64, 64);
+    assert_eq!(layout_tiles(&mut compositor.state).len(), 1);
+    compositor
+      .apply_config(crate::Config {
+        tiling: false,
+        ..crate::Config::default()
+      })
+      .unwrap();
+    assert!(layout_tiles(&mut compositor.state).is_empty());
+    let window = windows_with(&compositor.state, "tiled")[0];
+    assert!(
+      compositor
+        .state
+        .core
+        .window_info(window)
+        .unwrap()
+        .state
+        .floating
+        .is_some()
+    );
   }
 
   #[test]

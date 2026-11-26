@@ -79,6 +79,13 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
     "cascade" => cascade(state, current, workarea),
     "random" => random(current, workarea),
     "pointer" => pointer(state, current, workarea),
+    // Wayfire without its place plugin clamps the view's own position,
+    // which starts at the origin, to the workarea.
+    "none" => Some(Rect {
+      x: workarea.x,
+      y: workarea.y,
+      ..current
+    }),
     _ => center(current, workarea),
   };
   let Some(geometry) = placed.and_then(|geometry| geometry.validate().ok())

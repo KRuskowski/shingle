@@ -209,9 +209,9 @@ pub enum WorkspaceWraparound {
 ///
 /// [`Compositor::apply_config`] re-applies most fields at runtime. The
 /// exceptions are only read at startup: `enable_text_input_v3`,
-/// `initial_locked_modifiers`, `disable_primary_selection`,
-/// `security_privileged_protocols` and everything in `xwayland` except the
-/// startup script.
+/// `protocol_plugins`, `initial_locked_modifiers`,
+/// `disable_primary_selection`, `security_privileged_protocols` and
+/// everything in `xwayland` except the startup script.
 #[derive(Clone, Debug)]
 pub struct Config {
   /// Logical size before the output transform, so a quarter-turn
@@ -334,6 +334,59 @@ pub struct Config {
   /// `From<ShingleConfig>` takes `xwayland` from the configuration, whose
   /// default is `lazy`.
   pub xwayland: XwaylandSettings,
+  /// Whether views tile, which needs Wayfire's `simple-tile` plugin
+  /// (`ShingleConfig::plugin_enabled`). Without it every view floats, a
+  /// reload that turns it off floats the tiled ones, and
+  /// `simple-tile/set-layout` refuses.
+  pub tiling: bool,
+  /// Which of Wayfire's protocol plugins are loaded, and so which of their
+  /// globals Shingle creates. Read only when the globals are created.
+  pub protocol_plugins: ProtocolPlugins,
+  /// The options a Wayfire file set, which `wayfire/get-config-option`
+  /// and `list-config-options` report where Shingle has no live value.
+  pub wayfire_values: shingle_config::WayfireValues,
+}
+
+/// The globals of Wayfire's protocol plugins, each created only when its
+/// plugin is in `[core] plugins` (all of them without a Wayfire file).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProtocolPlugins {
+  /// `xdg_activation_v1` (`xdg-activation`).
+  pub xdg_activation: bool,
+  /// `zwlr_foreign_toplevel_manager_v1` (`foreign-toplevel`).
+  pub foreign_toplevel: bool,
+  /// `ext_foreign_toplevel_list_v1` (`ext-toplevel`).
+  pub ext_toplevel: bool,
+  /// `ext_workspace_manager_v1` (`ext-workspace`).
+  pub ext_workspace: bool,
+  /// `wp_security_context_manager_v1` (`security-context-v1`).
+  pub security_context: bool,
+  /// `ext_session_lock_manager_v1` (`session-lock`).
+  pub session_lock: bool,
+  /// `zwp_keyboard_shortcuts_inhibit_manager_v1` (`shortcuts-inhibit`).
+  pub shortcuts_inhibit: bool,
+}
+
+impl Default for ProtocolPlugins {
+  fn default() -> Self {
+    Self::from_config(&shingle_config::ShingleConfig::default())
+  }
+}
+
+impl ProtocolPlugins {
+  /// The protocol plugins `config` loads.
+  pub fn from_config(config: &shingle_config::ShingleConfig) -> Self {
+    let on = |name| config.plugin_enabled(name);
+    Self {
+      xdg_activation: on("xdg-activation"),
+      foreign_toplevel: on("foreign-toplevel"),
+      ext_toplevel: on("ext-toplevel"),
+      ext_workspace: on("ext-workspace"),
+      security_context: on("security-context-v1"),
+      session_lock: on("session-lock"),
+      shortcuts_inhibit: on("shortcuts-inhibit"),
+    }
+  }
 }
 
 impl Default for Config {
@@ -383,12 +436,15 @@ impl Default for Config {
       ),
       window_rules: Vec::new(),
       xwayland: XwaylandSettings::default(),
+      tiling: true,
+      protocol_plugins: ProtocolPlugins::default(),
+      wayfire_values: shingle_config::WayfireValues::default(),
     }
   }
 }
 
 impl From<shingle_config::ShingleConfig> for Config {
-  fn from(config: shingle_config::ShingleConfig) -> Self {
+  fn from(mut config: shingle_config::ShingleConfig) -> Self {
     let output_placements = config
       .outputs
       .iter()
@@ -398,6 +454,9 @@ impl From<shingle_config::ShingleConfig> for Config {
       })
       .collect();
     let (width, height) = output::configured_size(&config.output);
+    let tiling = config.plugin_enabled("simple-tile");
+    let protocol_plugins = ProtocolPlugins::from_config(&config);
+    let wayfire_values = std::mem::take(&mut config.wayfire_values);
     Self {
       output: Rect::new(config.output.x, config.output.y, width, height),
       output_refresh_mhz: output::explicit_refresh(&config.output),
@@ -465,6 +524,9 @@ impl From<shingle_config::ShingleConfig> for Config {
         discard_script_output: config.behavior.discard_command_output,
         ..XwaylandSettings::default()
       },
+      tiling,
+      protocol_plugins,
+      wayfire_values,
     }
   }
 }
@@ -1099,6 +1161,10 @@ pub enum Error {
   /// `wp_linux_drm_syncobj_manager_v1` could not be offered.
   #[error("syncobj error: {0}")]
   Syncobj(String),
+  /// A window cannot tile because Wayfire's `simple-tile` plugin is not
+  /// in `[core] plugins` ([`Config::tiling`]).
+  #[error("simple-tile is not loaded, so nothing tiles")]
+  TilingDisabled,
 }
 
 /// A Wayland compositor with one or more outputs, run by a host frontend;
@@ -1775,6 +1841,9 @@ impl Compositor {
     self.state.background_color = config.background_color;
     self.state.workspace_wraparound = config.workspace_wraparound;
     self.state.tile_by_default = config.tile_by_default;
+    let untile = self.state.tiling && !config.tiling;
+    self.state.tiling = config.tiling;
+    self.state.wayfire_values = config.wayfire_values;
     self.state.placement_mode = config.placement_mode;
     self.state.focus = config.focus;
     self.state.resize = config.resize;
@@ -1832,6 +1901,9 @@ impl Compositor {
         output.position = placement.position;
       }
       self.state.set_rect_of(&id, rect, false)?;
+    }
+    if untile {
+      shell::float_tiled(&mut self.state);
     }
     shell::reconfigure_all(&mut self.state);
     Ok(())
@@ -3938,6 +4010,52 @@ pub(crate) mod tests {
       Compositor::with_socket(config, Shingle::new(), socket, name.into())
         .expect("the config builds a compositor");
     (compositor, path)
+  }
+
+  #[test]
+  fn protocol_plugins_left_out_have_no_global() {
+    let names = |config: Config| {
+      let (mut compositor, path) = test_compositor_with(config);
+      let client =
+        crate::test_client::TestClient::connect(&mut compositor, &path);
+      client
+        .events
+        .globals
+        .iter()
+        .map(|(_, interface, _)| interface.clone())
+        .collect::<Vec<_>>()
+    };
+    let gated = [
+      "xdg_activation_v1",
+      "zwlr_foreign_toplevel_manager_v1",
+      "ext_foreign_toplevel_list_v1",
+      "ext_workspace_manager_v1",
+      "wp_security_context_manager_v1",
+      "ext_session_lock_manager_v1",
+      "zwp_keyboard_shortcuts_inhibit_manager_v1",
+    ];
+    let all = names(Config::default());
+    for interface in gated {
+      assert!(all.iter().any(|name| name == interface), "{interface}");
+    }
+    let wayfire = shingle_config::ShingleConfig::parse(
+      "[core]\nplugins = foreign-toplevel\n",
+      shingle_config::ConfigFormat::Wayfire,
+    )
+    .unwrap();
+    let config = Config {
+      protocol_plugins: ProtocolPlugins::from_config(&wayfire),
+      ..Config::default()
+    };
+    let some = names(config);
+    for interface in gated {
+      assert_eq!(
+        some.iter().any(|name| name == interface),
+        interface == "zwlr_foreign_toplevel_manager_v1",
+        "{interface}"
+      );
+    }
+    assert!(some.iter().any(|name| name == "xdg_wm_base"));
   }
 
   #[test]
