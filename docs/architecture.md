@@ -31,6 +31,9 @@
 | Protocol timestamps (`CLOCK_MONOTONIC`) | `crates/shingle/src/clock.rs` |
 | In-process Wayland test client | `crates/shingle/src/test_client.rs` |
 | Shared state and workspace transitions | `crates/shingle/src/state.rs` |
+| Client buffers: content (`BufferContent`), shm pools, CPU copies | `crates/shingle/src/buffer.rs` |
+| Buffer locks and `wl_buffer.release` (`BufferLock`, `ReleaseQueue`) | `crates/shingle/src/buffer_lock.rs` |
+| Per-surface commit queue and its blocker interface | `crates/shingle/src/commit_queue.rs` |
 | Keymap sent to clients, focus, input routing | `crates/shingle/src/input.rs` |
 | Seat device registry, per-device holds and gating, `input/*` IPC | `crates/shingle/src/input_device.rs` |
 | XDG roles, the shell-neutral toplevel role (`ToplevelRole`, `ToplevelHandle`), map lifecycle, geometry, window rules | `crates/shingle/src/shell.rs` |
@@ -58,7 +61,7 @@
 | Headless backend | `crates/shingle-bin/src/headless.rs` |
 | Offscreen backend: the frontend on the GPU without a display, frame pacing, presentation | `crates/shingle-bin/src/offscreen.rs` |
 | Screencopy: CPU composite, or frame capture answered by the frontend (`set_frame_capture`, `finish_capture`) | `crates/shingle/src/screencopy.rs`; the frontend's capture draw in `crates/shingle-frontend/src/frontend/scene.rs` (`answer_captures`), `shingle_render::capture_frame` in `crates/shingle-render/src/target.rs` |
-| GPU namespace and DB-2's real-client checks (offscreen, nested, baseline) | `tools/gpu_test/run.py`, `tools/gpu_test/checks.py` |
+| GPU namespace and DB-2's and DB-3's real-client checks (offscreen, nested, baseline, buffers) | `tools/gpu_test/run.py`, `tools/gpu_test/checks.py` |
 | winit host: window, input translation, button emulation | `crates/shingle-nested/src/lib.rs` |
 | Native seat: `Session`, libseat, startup checks (SSH, enable timeout, backend) | `crates/shingle-native/src/session.rs` |
 | libinput events, translation to `InputEvent`, device options | `crates/shingle-native/src/input.rs`, `input/libinput.rs` |

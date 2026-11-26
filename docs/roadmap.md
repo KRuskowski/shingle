@@ -39,7 +39,7 @@ In short:
 
 The work is split into seven workspaces, DB-1 to DB-7, each with acceptance criteria in the design: Vulkan setup, offscreen backend and GPU harness, buffer lifetime, `zwp_linux_dmabuf_v1`, `linux-drm-syncobj-v1`, shm uploads without copies, and later direct scanout of client buffers. NB-8 builds on DB-1.
 
-DB-1 `shingle-gpu-dmabuf` is done ([status.md](status.md#compositor-and-renderer), [design/dmabuf.md](design/dmabuf.md#db-1-as-built)). DB-2 `shingle-offscreen-backend` is done too ([status.md](status.md#the-shingle-binary), [design/dmabuf.md](design/dmabuf.md#db-2-as-built)): `shingle --backend offscreen`, screencopy from drawn frames, and `tools/gpu_test/run.py --checks`, which records that without linux-dmabuf NVIDIA's Vulkan WSI cannot present and its EGL is not used. DB-3 is next; DB-4 needs it.
+DB-1 `shingle-gpu-dmabuf` is done ([status.md](status.md#compositor-and-renderer), [design/dmabuf.md](design/dmabuf.md#db-1-as-built)). DB-2 `shingle-offscreen-backend` is done too ([status.md](status.md#the-shingle-binary), [design/dmabuf.md](design/dmabuf.md#db-2-as-built)): `shingle --backend offscreen`, screencopy from drawn frames, and `tools/gpu_test/run.py --checks`, which records that without linux-dmabuf NVIDIA's Vulkan WSI cannot present and its EGL is not used. DB-3 `shingle-buffer-lifetime` is done ([status.md](status.md#compositor-and-renderer), [design/dmabuf.md](design/dmabuf.md#db-3-as-built)): buffer content, reference-counted buffer locks with release on the last drop, the per-surface commit queue with its blocker interface, and the fix for buffers replaced behind a FIFO barrier, a commit-timing deadline or a synchronized parent, which were never released. DB-4 is next; DB-6 can start too.
 
 ## 4. XWayland
 
