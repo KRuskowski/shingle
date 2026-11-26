@@ -54,17 +54,6 @@ fn plan(
     }
   };
   match backend::select(options.backend, &env) {
-    // Native gets several outputs with MO-7.
-    Ok(selection)
-      if options.outputs.is_some() && selection.backend == Backend::Native =>
-    {
-      Plan::Fail(
-        "shingle: --outputs needs the headless, offscreen or nested \
-         backend, not native\n"
-          .to_owned(),
-        USAGE_STATUS,
-      )
-    }
     Ok(selection) if selection.backend == Backend::Native => {
       // Refuse an SSH login before libseat is even opened.
       match shingle_native::preflight(&env) {
@@ -167,6 +156,9 @@ fn start(
       options.spawn,
       shingle_native::Options {
         allow_builtin_seat: options.allow_builtin_seat,
+        // The monitors are the outputs; --outputs caps how many are lit.
+        // WLR_HEADLESS_OUTPUTS and WLR_WL_OUTPUTS do not apply.
+        max_outputs: options.outputs,
       },
     ),
   }
@@ -302,7 +294,7 @@ mod tests {
   // These tests only plan: no seat, device or VT is touched.
 
   #[test]
-  fn outputs_need_the_headless_offscreen_or_nested_backend() {
+  fn outputs_count_outputs_or_cap_the_monitors_lit() {
     let (backend, options) =
       started(planned(&["--headless", "--outputs", "2"], &[]));
     assert_eq!((backend, options.outputs), (Backend::Headless, Some(2)));
@@ -321,11 +313,9 @@ mod tests {
       &["--backend", "native", "--outputs", "2"][..],
       &["--outputs", "2", "--allow-builtin-seat"],
     ] {
-      assert!(matches!(
-        planned(arguments, &[("TERM", "linux"), ("XDG_SEAT", "seat0")]),
-        Plan::Fail(text, USAGE_STATUS)
-          if text.contains("--outputs") && text.contains("not native")
-      ));
+      let seat = [("TERM", "linux"), ("XDG_SEAT", "seat0")];
+      let (backend, options) = started(planned(arguments, &seat));
+      assert_eq!((backend, options.outputs), (Backend::Native, Some(2)));
     }
   }
 

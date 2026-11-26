@@ -77,6 +77,8 @@ pub struct Options {
   /// `--allow-builtin-seat`: run on a libseat backend that cannot switch
   /// VT.
   pub allow_builtin_seat: bool,
+  /// `--outputs N`: light at most this many monitors.
+  pub max_outputs: Option<u32>,
 }
 
 /// A prepared display, its card's PCI slot and its device node.
@@ -84,14 +86,16 @@ pub type Prepared = (display::Display, Option<String>, PathBuf);
 
 /// Opens the first card in `cards` that the seat lets Shingle open, as
 /// `open` makes a [`KmsDevice`] of its descriptor, and prepares its
-/// display ([`display::Display::prepare`]) with the configured modes of
-/// `policy`. Returns the display, the card's PCI slot, for the renderer,
-/// and its device node, for the hotplug monitor. Cards that cannot be
-/// opened are skipped; if none can, the error names each one tried.
+/// display ([`display::Display::prepare_limited`]) with the configured
+/// modes of `policy`, lighting at most `max_outputs` monitors. Returns the
+/// display, the card's PCI slot, for the renderer, and its device node,
+/// for the hotplug monitor. Cards that cannot be opened are skipped; if
+/// none can, the error names each one tried.
 pub fn open_display(
   session: &mut dyn Session,
   cards: &[Card],
   policy: &OutputPolicy,
+  max_outputs: Option<usize>,
   open: &mut dyn FnMut(OwnedFd) -> io::Result<Box<dyn KmsDevice>>,
 ) -> Result<Prepared, StartError> {
   let mut tried = Vec::new();
@@ -104,7 +108,8 @@ pub fn open_display(
       }
     };
     diagnostics::log(&format!("using {}", card.devnode.display()));
-    let display = display::Display::prepare(device, policy.clone())?;
+    let display =
+      display::Display::prepare_limited(device, policy.clone(), max_outputs)?;
     return Ok((display, card.pci_slot.clone(), card.devnode.clone()));
   }
   Err(StartError::NoDrmDevice(tried))
@@ -193,9 +198,13 @@ pub fn run(
   let policy = OutputPolicy::from_config(&config);
   let (display, rendering, (frontend, input), devnode) = startup(
     || {
-      open_display(&mut *session.borrow_mut(), &cards, &policy, &mut |fd| {
-        Ok(Box::new(DrmDevice::new(fd)?))
-      })
+      open_display(
+        &mut *session.borrow_mut(),
+        &cards,
+        &policy,
+        options.max_outputs.map(|max| max as usize),
+        &mut |fd| Ok(Box::new(DrmDevice::new(fd)?)),
+      )
     },
     gpu_rendering,
     || {
@@ -359,7 +368,7 @@ mod tests {
     let fake = FakeKms::single_output().shared();
     let policy = OutputPolicy::default();
     let (display, pci, devnode) =
-      open_display(&mut session, &cards, &policy, &mut |_fd| {
+      open_display(&mut session, &cards, &policy, None, &mut |_fd| {
         Ok(Box::new(Rc::clone(&fake)) as Box<dyn KmsDevice>)
       })
       .expect("the second card works");
@@ -380,6 +389,7 @@ mod tests {
       &mut session,
       &cards,
       &OutputPolicy::default(),
+      None,
       &mut |_fd| Ok(Box::new(FakeKms::single_output()) as Box<dyn KmsDevice>),
     ) else {
       panic!("no card opens");
@@ -387,11 +397,13 @@ mod tests {
     let message = error.to_string();
     assert!(message.starts_with("no DRM device: tried /dev/dri/card1 ("));
     assert!(message.contains(", /dev/dri/card0 ("), "{message}");
-    let Err(error) =
-      open_display(&mut session, &[], &OutputPolicy::default(), &mut |_fd| {
-        Ok(Box::new(FakeKms::single_output()) as Box<dyn KmsDevice>)
-      })
-    else {
+    let Err(error) = open_display(
+      &mut session,
+      &[],
+      &OutputPolicy::default(),
+      None,
+      &mut |_fd| Ok(Box::new(FakeKms::single_output()) as Box<dyn KmsDevice>),
+    ) else {
       panic!("there is no card");
     };
     assert!(

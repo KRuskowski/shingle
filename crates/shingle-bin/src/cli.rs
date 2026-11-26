@@ -21,7 +21,8 @@ Options:
   --outputs N        start with N outputs, HEADLESS-1 to HEADLESS-N
                      (headless, offscreen and nested, which opens a
                      window for each; default WLR_HEADLESS_OUTPUTS,
-                     for nested WLR_WL_OUTPUTS, else 1)
+                     for nested WLR_WL_OUTPUTS, else 1); native lights
+                     at most N of the connected monitors
   --spawn PROGRAM [ARG]...
                      start PROGRAM as a client; every later argument
                      is passed to it
