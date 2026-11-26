@@ -265,6 +265,10 @@ pub(crate) struct CompositorState {
   /// Whether `stipc/feed_key` hands keys to the frontend as
   /// [`Event::StipcKey`] instead of handling them itself.
   pub(crate) stipc_key_events: bool,
+  /// Whether `stipc/move_cursor` and `stipc/feed_button` hand pointer
+  /// input to the frontend as [`Event::StipcPointerMotion`] and
+  /// [`Event::StipcButton`].
+  pub(crate) stipc_pointer_events: bool,
   pub(crate) focus_sequence: u64,
   pub(crate) dispatch_pending: bool,
   pub(crate) accept_pending: bool,
@@ -431,6 +435,7 @@ impl CompositorState {
       view_properties: HashMap::new(),
       runtime_bindings: Default::default(),
       stipc_key_events: false,
+      stipc_pointer_events: false,
       focus_sequence: 0,
       dispatch_pending: true,
       accept_pending: false,

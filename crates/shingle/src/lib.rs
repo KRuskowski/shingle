@@ -986,6 +986,29 @@ pub enum Event {
     /// Press or release.
     pressed: bool,
   },
+  /// `stipc/move_cursor` moved the STIPC pointer `device` to (`x`, `y`)
+  /// in layout logical pixels. Only emitted after
+  /// [`Compositor::set_stipc_pointer_events`]; the frontend handles it as
+  /// absolute motion of that device.
+  StipcPointerMotion {
+    /// The pointer STIPC feeds.
+    device: InputDeviceId,
+    /// Horizontal position in the layout.
+    x: f64,
+    /// Vertical position in the layout.
+    y: f64,
+  },
+  /// `stipc/feed_button` pressed or released button `code` of the STIPC
+  /// pointer `device`. Only emitted after
+  /// [`Compositor::set_stipc_pointer_events`].
+  StipcButton {
+    /// The pointer STIPC feeds.
+    device: InputDeviceId,
+    /// The evdev button code.
+    code: u32,
+    /// Press or release.
+    pressed: bool,
+  },
   /// A wlr-screencopy client asked for `region` of `output`, and frame
   /// capture is on ([`Compositor::set_frame_capture`]). The frontend
   /// draws that output's frame as it shows it and answers with
@@ -2120,6 +2143,19 @@ impl Compositor {
   /// session is inactive or no keyboard is registered.
   pub fn set_stipc_key_events(&mut self, enabled: bool) {
     self.state.stipc_key_events = enabled;
+  }
+
+  /// Makes `stipc/move_cursor` and `stipc/feed_button` emit
+  /// [`Event::StipcPointerMotion`] and [`Event::StipcButton`] instead of
+  /// moving the pointer and pressing buttons themselves, so that a
+  /// frontend's pointer bindings, drags and overviews see STIPC pointer
+  /// input as Wayfire's plugins see its headless pointer. With
+  /// [`Compositor::set_stipc_key_events`] too, the `S-` prefix of a
+  /// button combo presses Super as [`Event::StipcKey`]. Pointer input is
+  /// still dropped while the session is inactive or no pointer is
+  /// registered.
+  pub fn set_stipc_pointer_events(&mut self, enabled: bool) {
+    self.state.stipc_pointer_events = enabled;
   }
 
   /// Offers `zwp_linux_dmabuf_v1` version 5 with `feedback` to clients,

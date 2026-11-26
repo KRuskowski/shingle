@@ -406,6 +406,8 @@ impl Frontend {
     compositor.set_keymap(&keymap)?;
     // STIPC keys take the path of real keys, so configured bindings fire.
     compositor.set_stipc_key_events(true);
+    // And STIPC pointer input that of a real pointer, so drags see it.
+    compositor.set_stipc_pointer_events(true);
     // Screencopy shows the frames drawn here, not a CPU composite.
     compositor.set_frame_capture(true);
     compositor.set_repeat(config.input.repeat_rate, config.input.repeat_delay);
@@ -714,6 +716,20 @@ impl Frontend {
           code,
           pressed,
         } => self.key_event(host, device, code, pressed),
+        Event::StipcPointerMotion { device, x, y } => self.dispatch_input(
+          host,
+          device,
+          InputEvent::PointerMotionAbsolute { x, y, output: None },
+        ),
+        Event::StipcButton {
+          device,
+          code,
+          pressed,
+        } => self.dispatch_input(
+          host,
+          device,
+          InputEvent::PointerButton { code, pressed },
+        ),
         Event::DpmsChanged(_)
         | Event::OpacityChanged { .. }
         | Event::Idle

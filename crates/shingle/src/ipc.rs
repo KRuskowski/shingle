@@ -1931,17 +1931,43 @@ fn feed_button(state: &mut CompositorState, data: &Value) -> Value {
   let Some(pointer) = stipc_device(state, InputDeviceKind::Pointer) else {
     return json_ok();
   };
+  // A frontend takes the button, and with STIPC keys also Super, as
+  // events, so that its pointer bindings and drags see them.
+  let events = state.stipc_pointer_events;
+  if events && !input_device::session_active(state) {
+    return json_ok();
+  }
   let super_key = |state: &mut CompositorState, pressed| {
-    if let Some(keyboard) = keyboard.filter(|_| super_modifier) {
+    let Some(keyboard) = keyboard.filter(|_| super_modifier) else {
+      return;
+    };
+    if events && state.stipc_key_events {
+      state.events.push(crate::Event::StipcKey {
+        device: keyboard,
+        code: 125,
+        pressed,
+      });
+    } else {
       input_device::keyboard_key(state, keyboard, 125, pressed);
+    }
+  };
+  let press = |state: &mut CompositorState, pressed| {
+    if events {
+      state.events.push(crate::Event::StipcButton {
+        device: pointer,
+        code: button,
+        pressed,
+      });
+    } else {
+      input_device::pointer_button(state, pointer, button, pressed);
     }
   };
   if matches!(mode, "press" | "full") {
     super_key(state, true);
-    input_device::pointer_button(state, pointer, button, true);
+    press(state, true);
   }
   if matches!(mode, "release" | "full") {
-    input_device::pointer_button(state, pointer, button, false);
+    press(state, false);
     super_key(state, false);
   }
   json_ok()
@@ -1954,8 +1980,17 @@ fn move_cursor(state: &mut CompositorState, data: &Value) -> Value {
   let Some(y) = data.get("y").and_then(Value::as_f64) else {
     return json_error("missing or invalid y coordinate");
   };
-  if let Some(pointer) = stipc_device(state, InputDeviceKind::Pointer) {
+  let Some(pointer) = stipc_device(state, InputDeviceKind::Pointer) else {
+    return json_ok();
+  };
+  if !state.stipc_pointer_events {
     input_device::pointer_motion(state, pointer, x, y);
+  } else if input_device::session_active(state) {
+    state.events.push(crate::Event::StipcPointerMotion {
+      device: pointer,
+      x,
+      y,
+    });
   }
   json_ok()
 }
@@ -3320,6 +3355,56 @@ mod tests {
     assert!(keys(&mut state).is_empty(), "dropped while inactive");
     let reply = call(&mut state, "stipc/feed_key", json!({"key": "KEY_NOPE"}));
     assert_eq!(reply, json!({"error": "failed to parse evdev key"}));
+  }
+
+  #[test]
+  fn stipc_pointer_input_becomes_events_for_a_frontend() {
+    let mut state = test_state();
+    state.stipc_key_events = true;
+    state.stipc_pointer_events = true;
+    state.drain_events();
+    call(
+      &mut state,
+      "stipc/move_cursor",
+      json!({"x": 1500.0, "y": 20.0}),
+    );
+    call(
+      &mut state,
+      "stipc/feed_button",
+      json!({"combo": "S-BTN_LEFT", "mode": "full"}),
+    );
+    let events = state
+      .drain_events()
+      .into_iter()
+      .filter_map(|event| match event {
+        crate::Event::StipcPointerMotion { x, y, .. } => {
+          Some(format!("motion {x} {y}"))
+        }
+        crate::Event::StipcButton { code, pressed, .. } => {
+          Some(format!("button {code} {pressed}"))
+        }
+        crate::Event::StipcKey { code, pressed, .. } => {
+          Some(format!("key {code} {pressed}"))
+        }
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(
+      events,
+      [
+        "motion 1500 20",
+        "key 125 true",
+        "button 272 true",
+        "button 272 false",
+        "key 125 false",
+      ]
+    );
+    // The compositor itself moved nothing.
+    assert!(state.input.pointer_x < 1500.0);
+    crate::input_device::set_session_active(&mut state, false);
+    state.drain_events();
+    call(&mut state, "stipc/move_cursor", json!({"x": 1.0, "y": 2.0}));
+    assert!(state.drain_events().is_empty(), "dropped while inactive");
   }
 
   #[test]
