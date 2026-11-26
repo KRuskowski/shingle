@@ -1027,3 +1027,30 @@ fn outputs_at_negative_positions_are_warned_about_for_x() {
     ["HEADLESS-2 is at -800,0; X windows cannot be shown there"]
   );
 }
+
+#[test]
+fn the_first_output_turned_off_and_on_is_first_again() {
+  let (mut compositor, path) = two_outputs();
+  let (mut client, manager) = manager_client(&mut compositor, &path);
+  let result =
+    apply(&mut compositor, &mut client, &manager, &["HEADLESS-1"], &[]);
+  assert_eq!(result, "succeeded");
+  assert_eq!(compositor.primary_output(), OutputHandle::new("HEADLESS-2"));
+  let result = apply(&mut compositor, &mut client, &manager, &[], &[]);
+  assert_eq!(result, "succeeded");
+  assert_eq!(output_names(&compositor), ["HEADLESS-1", "HEADLESS-2"]);
+  let rects = compositor
+    .outputs()
+    .into_iter()
+    .map(|output| output.rect)
+    .collect::<Vec<_>>();
+  assert_eq!(
+    rects,
+    [
+      shingle_core::Rect::new(0, 0, 1280, 720),
+      shingle_core::Rect::new(1280, 0, 800, 600)
+    ],
+    "automatic positions as before"
+  );
+  let _ = std::fs::remove_file(path);
+}

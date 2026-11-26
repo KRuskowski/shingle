@@ -79,12 +79,16 @@ pub(crate) struct DisabledOutput {
   pub(crate) scale: f64,
   /// Its transform.
   pub(crate) transform: wl_output::Transform,
+  /// Its place in the add order, which it takes again when it is turned
+  /// on, so the first output stays first.
+  pub(crate) index: usize,
 }
 
 impl DisabledOutput {
-  /// What turning `output` off keeps of it.
-  pub(crate) fn new(output: &OutputState) -> Self {
+  /// What turning `output`, at `index` in the add order, off keeps of it.
+  pub(crate) fn new(output: &OutputState, index: usize) -> Self {
     Self {
+      index,
       info: output.info.clone(),
       physical: output.physical_size(),
       kind: output.kind,
@@ -344,6 +348,21 @@ impl Outputs {
       .max(self.last_headless);
     self.last_headless = highest + 1;
     format!("HEADLESS-{}", self.last_headless)
+  }
+
+  /// Where output `id` is in the add order.
+  pub(crate) fn index_of(&self, id: &OutputId) -> Option<usize> {
+    self.list.iter().position(|output| output.id == *id)
+  }
+
+  /// Moves output `id` to `index` in the add order, or to the end.
+  pub(crate) fn move_to(&mut self, id: &OutputId, index: usize) {
+    let Some(from) = self.index_of(id) else {
+      return;
+    };
+    let output = self.list.remove(from);
+    let index = index.min(self.list.len());
+    self.list.insert(index, output);
   }
 
   /// The output called `id` that output management turned off.

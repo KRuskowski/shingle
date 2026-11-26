@@ -875,10 +875,12 @@ fn apply_locally(
   }
   let mut ok = true;
   for id in &toggles.turn_off {
-    let Some(output) = state.outputs.get(id) else {
+    let (Some(output), Some(index)) =
+      (state.outputs.get(id), state.outputs.index_of(id))
+    else {
       continue;
     };
-    let off = crate::output::DisabledOutput::new(output);
+    let off = crate::output::DisabledOutput::new(output, index);
     state.outputs.disabled.push(off);
     ok &= crate::output::remove(state, id).is_ok();
   }
@@ -893,7 +895,13 @@ fn apply_locally(
       }
     }
     match crate::output::add(state, info, physical, off.kind) {
-      Ok(_) => placed.push((change.output, change.placement, physical)),
+      Ok(id) => {
+        // Back at its place in the add order, so the first output stays
+        // first and automatic positions are as before.
+        state.outputs.move_to(&id, off.index);
+        crate::output::relayout_and_notify(state);
+        placed.push((change.output, change.placement, physical));
+      }
       Err(error) => {
         eprintln!("shingle: turning an output on failed: {error}");
         ok = false;
