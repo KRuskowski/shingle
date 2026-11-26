@@ -1617,6 +1617,11 @@ impl CompositorState {
       return;
     };
     self.surface_ids.remove(&surface.id);
+    // A hidden surface's callbacks wait for a frame that shows it; once it
+    // is gone, none will.
+    self
+      .frame_callbacks
+      .retain(|callback| callback.surface != surface.id);
     crate::commit_queue::surface_destroyed(self, object);
     crate::linux_drm_syncobj::surface_destroyed(self, object);
     crate::fifo::surface_destroyed(self, object);

@@ -113,6 +113,27 @@ mod tests {
   }
 
   #[test]
+  fn frame_callbacks_of_hidden_surfaces_go_with_the_surface() {
+    use wayland_client::protocol::wl_compositor::WlCompositor;
+    let (mut compositor, path) = test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    // A surface without a role is never drawn, so its callback waits, as
+    // one of a window on a hidden output or workspace does.
+    let surface = client
+      .bind::<WlCompositor>(4)
+      .create_surface(&client.handle, ());
+    surface.frame(&client.handle, crate::test_client::Frame);
+    surface.commit();
+    client.roundtrip(&mut compositor);
+    compositor.frame();
+    assert_eq!(counts(&mut compositor)["frame_callbacks"], 1);
+    surface.destroy();
+    client.roundtrip(&mut compositor);
+    compositor.frame();
+    assert_eq!(counts(&mut compositor)["frame_callbacks"], 0);
+  }
+
+  #[test]
   fn the_frontend_counts_are_reported_as_last_set() {
     let (mut compositor, _path) = test_compositor();
     compositor.set_frontend_counts(&[("textures", 3), ("dmabuf_textures", 1)]);

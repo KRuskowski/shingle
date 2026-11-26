@@ -1713,7 +1713,7 @@ impl Compositor {
     for callback in pending {
       if visible.contains(&callback.surface) {
         callback.resource.done(time);
-      } else {
+      } else if wayland_server::Resource::is_alive(&callback.resource) {
         hidden.push(callback);
       }
     }
