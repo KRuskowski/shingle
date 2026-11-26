@@ -9,6 +9,9 @@
 //! logout and login. [`launch_autostart`] then runs the configured autostart
 //! commands, skipping those the session already relaunched.
 //!
+//! [`SessionWriter`] saves snapshots on a thread of its own, so that a
+//! slow disk never stalls the compositor while it runs.
+//!
 //! Every process Shingle starts, here or elsewhere, gets its environment
 //! from one [`ClientEnvironment`].
 //!
@@ -18,6 +21,7 @@
 #![warn(missing_docs)]
 
 mod environment;
+mod writer;
 
 use std::{
   collections::{BTreeMap, BTreeSet},
@@ -29,6 +33,7 @@ use std::{
 
 pub use environment::ClientEnvironment;
 pub use shingle_core::SessionSnapshot;
+pub use writer::{ReportFn, SessionWriter, WriteFn};
 
 use shingle_core::{
   LaunchIdentity, NodeSnapshot, Shingle, ShingleError, WindowId,
