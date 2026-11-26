@@ -134,5 +134,30 @@ class GrimTest(unittest.TestCase):
     self.assertTrue(run.red((255, 0, 0)))
     self.assertFalse(run.red((89, 89, 89)))
 
+
+class ConfigWarningTest(unittest.TestCase):
+  """config_warnings, warning_line and close_colour."""
+
+  def test_warnings_of_the_config_path_only(self):
+    log = '\n'.join([
+        'WAYLAND_DISPLAY=wayland-1',
+        'shingle: /tmp/a/shingle.ini: line 3: [core] x: bad; keeping it',
+        'shingle: /tmp/b/shingle.ini: line 4: [core] y: other file',
+        'shingle: /tmp/a/shingle.ini: not a line warning',
+        'shingle: /tmp/a/shingle.ini: line 12: [blur] belongs to a plugin',
+    ])
+    warnings = run.config_warnings(log, '/tmp/a/shingle.ini')
+    self.assertEqual(warnings, ['line 3: [core] x: bad; keeping it',
+                                'line 12: [blur] belongs to a plugin'])
+    self.assertEqual([run.warning_line(w) for w in warnings], [3, 12])
+
+  def test_close_colour(self):
+    self.assertTrue(run.close_colour('0.101960786 0.16862746 0.23529412 1',
+                                     (26 / 255, 43 / 255, 60 / 255, 1.0)))
+    self.assertFalse(run.close_colour('0.1 0.1 0.1 1', (0.2, 0.1, 0.1, 1)))
+    self.assertFalse(run.close_colour('0.1 0.1 0.1', (0.1, 0.1, 0.1, 1)))
+    self.assertFalse(run.close_colour(None, (0, 0, 0, 0)))
+    self.assertFalse(run.close_colour('a b c d', (0, 0, 0, 0)))
+
 if __name__ == '__main__':
   unittest.main()

@@ -25,7 +25,12 @@ the parts of NB-9 (docs/design/native-backend.md) that are not
 device-specific: the mode list and current mode clients see, custom
 modes, tests that change nothing, placement, refusing to turn the only
 output off, explicit configured modes with their refresh rate, Wayfire
-`[output:NAME]` sections kept apart, and named YAML entries. Headless
+`[output:NAME]` sections kept apart, and named YAML entries. WG-1
+(docs/design/wayfire-gaps.md) adds a start with the WCM-style
+crates/shingle-config/testdata/wayfire-wcm.ini: Shingle starts, logs
+each of its warnings once with its line, and `wayfire/get-config-option`
+returns the imported `core/background_color` and
+`simple-tile/inner_gap_size`. Headless
 Shingle does not reload its config, so a nested Shingle on lavapipe,
 running as a client of a headless one inside the namespace, checks the
 configured refresh rate and that a reload applies.
@@ -80,6 +85,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 def _load_xwayland_harness():
   """tools/xwayland_test/run.py, for its IPC client, results and the
@@ -609,6 +615,64 @@ def wayfire_checks(results, binary):
   finally:
     status = shingle.stop()
   results.check('SIGTERM exits with status 0 (Wayfire config)', status == 0,
+                str(status))
+  return shingle.log_text()
+
+WCM_FIXTURE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..', 'crates',
+    'shingle-config', 'testdata', 'wayfire-wcm.ini')
+# The warnings Shingle gives for WCM_FIXTURE, by line, as the unit test
+# a_wcm_written_file_imports_with_the_expected_warnings expects them.
+WCM_WARNING_LINES = (14, 24, 40, 61, 93, 110, 141, 154, 175, 305, 332, 376,
+                     412, 417, 430)
+
+def config_warnings(log, path):
+  """The `line N: ...` config warnings `log` holds for `path`, in order."""
+  prefix = f'shingle: {path}: '
+  return [line[len(prefix):] for line in log.splitlines()
+          if line.startswith(prefix + 'line ')]
+
+def warning_line(warning):
+  """The line number of a `line N: ...` warning."""
+  return int(warning.split(':', 1)[0].split()[1])
+
+def close_colour(text, expected, tolerance=1e-4):
+  """Whether `text`, four numbers, is `expected` within `tolerance`."""
+  try:
+    values = [float(part) for part in text.split()]
+  except (AttributeError, ValueError):
+    return False
+  return (len(values) == len(expected)
+          and all(abs(a - b) <= tolerance for a, b in zip(values, expected)))
+
+def wcm_ini_checks(results, binary):
+  """WG-1: a WCM-style wayfire.ini loads, warns once per problem and its
+  values reach IPC."""
+  with open(WCM_FIXTURE) as file:
+    ini = file.read()
+  shingle = Headless(binary, 'wcm-ini', ini, 'ini')
+  try:
+    # Shingle has started and serves IPC, so the file loaded.
+    results.check('headless Shingle starts with the WCM-style fixture', True)
+    background = shingle.ipc.call('wayfire/get-config-option',
+                                  {'option': 'core/background_color'})
+    results.check('core/background_color is the escaped \\#1A2B3CFF',
+                  close_colour(background.get('value'),
+                               (26 / 255, 43 / 255, 60 / 255, 1.0)),
+                  str(background))
+    gap = shingle.ipc.call('wayfire/get-config-option',
+                           {'option': 'simple-tile/inner_gap_size'})
+    results.check('simple-tile/inner_gap_size is 7', gap.get('value') == '7',
+                  str(gap))
+    # Wait past auto_reload_config's delay: a reload would warn again.
+    time.sleep(1)
+    warnings = config_warnings(shingle.log_text(), shingle.config_path)
+    lines = tuple(warning_line(warning) for warning in warnings)
+    results.check('each fixture warning is logged once, with its line',
+                  lines == WCM_WARNING_LINES, f'{lines}')
+  finally:
+    status = shingle.stop()
+  results.check('SIGTERM exits with status 0 (WCM-style config)', status == 0,
                 str(status))
   return shingle.log_text()
 
@@ -1293,7 +1357,7 @@ def inner(binary):
       return focus_checks(results, binary, wl_probe)
     multi += [restored_session_checks, mo3_protocol_checks, mo4_focus_checks]
   for checks in (randr_checks, configured_checks, wayfire_checks,
-                 nested_checks, *multi):
+                 wcm_ini_checks, nested_checks, *multi):
     try:
       log = checks(results, binary)
     except Exception as error:  # pylint: disable=broad-except
