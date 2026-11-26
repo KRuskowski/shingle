@@ -14,6 +14,12 @@ These are DB-2's and DB-3's checks (docs/design/dmabuf.md, section 11):
 - `buffers` (DB-3): a `wl_probe --fifo` client commits buffer `a` with a
   FIFO barrier and then `b` and `c` behind it in one flush; `b` is
   replaced before it is shown, and both `b` and `c` must be released.
+- `shm` (DB-6): a `wl_probe --damage` client commits a 1000x1000 buffer
+  from a sealed pool, then damages 10x10 pixels of it; Shingle's buffer
+  trace must show the full upload and then 400 bytes, not 4 MB, and the
+  probe must get the buffer back both times. A `wl_probe --animate`
+  client then draws full-output frames, and the CPU time offscreen
+  Shingle spent on them is recorded (`INFO`), not judged.
 
 Only run.py imports this, after it has built the namespace, so every
 process started here sees only the private /dev, /tmp and runtime
@@ -34,7 +40,12 @@ import run
 LAVAPIPE = '/usr/share/vulkan/icd.d/lvp_icd.json'
 NVIDIA_ICD = '/etc/vulkan/icd.d/nvidia_icd.json'
 NAMESPACE_VARIABLE = 'SHINGLE_GPU_TEST_NAMESPACE'
-GROUPS = ('offscreen', 'nested', 'baseline', 'buffers')
+GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm')
+# `wl_probe --damage`'s buffer and square (crates/shingle/examples).
+DAMAGE_FULL_BYTES = 1000 * 1000 * 4
+DAMAGE_SQUARE_BYTES = 10 * 10 * 4
+# Frames `wl_probe --animate` draws for the CPU measurement.
+ANIMATE_FRAMES = 600
 # What every Shingle here runs with: no X display, one workspace, no
 # session restore or config reload.
 BASE_CONFIG = {
@@ -158,6 +169,77 @@ def released_buffers(output):
     if isinstance(event, dict) and event.get('event') == 'release':
       released.add(event.get('buffer'))
   return released
+
+def upload_sizes(log, surface=None):
+  """[(surface, bytes)] of every `shm upload N bytes surface=S` line of
+  Shingle's buffer trace in `log`, in order, for `surface` only if
+  given."""
+  uploads = []
+  for line in log.splitlines():
+    words = line.split()
+    if 'upload' not in words or 'bytes' not in words:
+      continue
+    index = words.index('upload')
+    if index == 0 or words[index - 1] != 'shm':
+      continue
+    try:
+      size = int(words[index + 1])
+      found = next(word.split('=', 1)[1] for word in words
+                   if word.startswith('surface='))
+    except (IndexError, ValueError, StopIteration):
+      continue
+    if surface is None or found == surface:
+      uploads.append((found, size))
+  return uploads
+
+def damage_uploads(log):
+  """The bytes of the upload after the first `DAMAGE_FULL_BYTES` one of
+  the same surface in `log`: (full, next), with None for what is
+  missing."""
+  uploads = upload_sizes(log)
+  for index, (surface, size) in enumerate(uploads):
+    if size != DAMAGE_FULL_BYTES:
+      continue
+    later = [bytes_ for found, bytes_ in uploads[index + 1:]
+             if found == surface]
+    return size, (later[0] if later else None)
+  return None, None
+
+def buffer_point(geometry, point, size=1000):
+  """Where pixel `point` of a `size`-pixel square buffer drawn at the
+  view `geometry` lands on the output."""
+  return (geometry['x'] + point[0] * geometry['width'] // size,
+          geometry['y'] + point[1] * geometry['height'] // size)
+
+def cpu_seconds(stat, ticks_per_second):
+  """User plus system CPU seconds from the text of /proc/PID/stat."""
+  # The command may contain spaces; the fields after it are fixed.
+  fields = stat.rsplit(')', 1)[1].split()
+  # utime and stime are fields 14 and 15, the 12th and 13th after ')'.
+  return (int(fields[11]) + int(fields[12])) / ticks_per_second
+
+def process_cpu_seconds(pid):
+  """`cpu_seconds` of process `pid`, inside this PID namespace."""
+  with open(f'/proc/{pid}/stat') as file:
+    return cpu_seconds(file.read(), os.sysconf('SC_CLK_TCK'))
+
+def probe_events(output, name):
+  """The JSON events called `name` that a `wl_probe` printed."""
+  events = []
+  for line in output.splitlines():
+    try:
+      event = json.loads(line)
+    except ValueError:
+      continue
+    if isinstance(event, dict) and event.get('event') == name:
+      events.append(event)
+  return events
+
+def same_pixels(first, second):
+  """Whether two captures, either of which may be None, are the same."""
+  return (first is not None and second is not None
+          and (first.width, first.height, first.pixels)
+          == (second.width, second.height, second.pixels))
 
 def tail(text, lines=6):
   """The last `lines` lines of `text`, joined by ' | '."""
@@ -340,14 +422,20 @@ class Captures:
     parsed = xw.parse_ppm(done.stdout) if done.returncode == 0 else None
     return xw.Capture(*parsed) if parsed else None
 
-  def settled(self, shingle, predicate, timeout=15.0):
+  def settled(self, shingle, predicate, timeout=15.0, stable=False):
     """Captures until `predicate(shot)` holds or time runs out; returns
-    the last capture and saves it when a directory was given."""
+    the last capture and saves it when a directory was given. With
+    `stable`, also until two captures in a row are the same, so that an
+    open animation has ended: saved captures of static content are then
+    comparable pixel for pixel between runs (DB-6)."""
     last = [None]
+    previous = [None]
 
     def attempt():
-      last[0] = self.take(shingle)
-      return last[0] is not None and predicate(last[0])
+      previous[0], last[0] = last[0], self.take(shingle)
+      if last[0] is None or not predicate(last[0]):
+        return False
+      return not stable or same_pixels(previous[0], last[0])
     xw.wait_for(attempt, timeout=timeout, interval=0.3)
     if self.directory and last[0] is not None:
       os.makedirs(self.directory, exist_ok=True)
@@ -379,7 +467,8 @@ def offscreen_checks(results, binary, wl_probe, captures):
       return outer.stop()
     geometry = view['geometry']
     shot = captures.settled(
-        outer, lambda shot: not pattern_mismatches(shot, geometry))
+        outer, lambda shot: not pattern_mismatches(shot, geometry),
+        stable=True)
     results.check(
         'offscreen: grim shows the probe\'s quadrants at its view geometry',
         shot is not None and (shot.width, shot.height) == OUTPUT
@@ -395,7 +484,8 @@ def offscreen_checks(results, binary, wl_probe, captures):
     outer.call('invert/toggle')
     shot = captures.settled(
         outer,
-        lambda shot: not pattern_mismatches(shot, geometry, inverted=True))
+        lambda shot: not pattern_mismatches(shot, geometry, inverted=True),
+        stable=True)
     results.check(
         'offscreen: after invert/toggle the capture shows the quadrants '
         'inverted',
@@ -445,7 +535,8 @@ def nested_checks(results, binary, wl_probe, captures):
 
       def wrong(shot):
         return pattern_mismatches(shot, geometry, offset=offset)
-      shot = captures.settled(outer, lambda shot: not wrong(shot))
+      shot = captures.settled(outer, lambda shot: not wrong(shot),
+                              stable=True)
       results.check(
           'nested: captures of the outer output show the nested client\'s '
           'quadrants',
@@ -556,7 +647,8 @@ def buffer_checks(results, binary, wl_probe, captures):
     if view is not None:
       geometry = view['geometry']
       shot = captures.settled(
-          outer, lambda shot: not pattern_mismatches(shot, geometry))
+          outer, lambda shot: not pattern_mismatches(shot, geometry),
+          stable=True)
       results.check(
           'buffers: the capture shows the last buffer\'s quadrants',
           shot is not None and not pattern_mismatches(shot, geometry),
@@ -567,11 +659,86 @@ def buffer_checks(results, binary, wl_probe, captures):
   results.check('buffers: SIGTERM exits offscreen Shingle with status 0',
                 status == 0, f'status {status}, {tail(outer.log_text())}')
 
+def shm_checks(results, binary, wl_probe, captures):
+  """Damage-limited shm uploads and the CPU cost of shm frames (DB-6)."""
+  outer = Shingle(binary, 'shm', with_gaps(OUTER_GAPS),
+                  extra_environment={'SHINGLE_TRACE_BUFFERS': '1'})
+  probe = Client(outer, [wl_probe, 'damage', '--damage'], 'wl_probe')
+  try:
+    view = xw.wait_for(lambda: outer.view('damage'), timeout=15)
+    results.check('shm: the wl_probe --damage client maps',
+                  view is not None, tail(probe.output()))
+
+    def done():
+      steps = [event.get('step')
+               for event in probe_events(probe.output(), 'damage')]
+      releases = [event for event in probe_events(probe.output(), 'release')
+                  if event.get('buffer') == 'damage']
+      return 'square' in steps and len(releases) >= 2
+    finished = xw.wait_for(done, timeout=15)
+    full, square = damage_uploads(outer.log_text())
+    print(f'INFO shm: the 1000x1000 buffer uploaded {full} bytes, then '
+          f'{square} bytes for its 10x10 damage', flush=True)
+    results.check('shm: the probe got its buffer back after each commit',
+                  finished, tail(probe.output()))
+    results.check('shm: the first commit uploads the whole buffer',
+                  full == DAMAGE_FULL_BYTES, f'{full} bytes')
+    results.check('shm: a 10x10 damage uploads 400 bytes, not 4 MB',
+                  square == DAMAGE_SQUARE_BYTES, f'{square} bytes')
+    if view is not None:
+      # The buffer is drawn at the view's size: the square's centre and a
+      # point of the white rest, in buffer pixels, scaled to the view.
+      points = [(buffer_point(view['geometry'], point), colour)
+                for point, colour in (((505, 505), 'red'),
+                                      ((250, 250), 'white'))]
+
+      def shows(shot):
+        return all(classify(*shot.pixel(*point)) == colour
+                   for point, colour in points)
+      shot = captures.settled(outer, shows, stable=True)
+      results.check(
+          'shm: the capture shows the damaged square red on white',
+          shot is not None and shows(shot),
+          f'{[(point, shot.pixel(*point)) for point, _ in points]}'
+          if shot else 'no capture')
+  finally:
+    probe.stop()
+  status = outer.stop()
+  results.check('shm: SIGTERM exits offscreen Shingle with status 0',
+                status == 0, f'status {status}, {tail(outer.log_text())}')
+  # The CPU measurement, without the trace and without gaps, so that the
+  # frames cover the whole output.
+  outer = Shingle(binary, 'shm-cpu', BASE_CONFIG)
+  probe = Client(outer, [wl_probe, 'animate', '--animate',
+                         str(ANIMATE_FRAMES)], 'wl_probe')
+  try:
+    view = xw.wait_for(lambda: outer.view('animate'), timeout=15)
+    before = process_cpu_seconds(outer.process.pid)
+    started = time.monotonic()
+    animated = xw.wait_for(
+        lambda: probe_events(probe.output(), 'animated'), timeout=120)
+    elapsed = time.monotonic() - started
+    after = process_cpu_seconds(outer.process.pid)
+    geometry = view['geometry'] if view else {}
+    used = after - before
+    print(f'INFO shm: {ANIMATE_FRAMES} frames of '
+          f'{geometry.get("width")}x{geometry.get("height")} in '
+          f'{elapsed:.2f} s; offscreen Shingle used {used:.2f} s CPU, '
+          f'{used * 1000 / ANIMATE_FRAMES:.2f} ms a frame', flush=True)
+    results.check('shm: the wl_probe --animate client drew its frames',
+                  bool(animated), tail(probe.output()))
+  finally:
+    probe.stop()
+  status = outer.stop()
+  results.check('shm: SIGTERM exits the measured Shingle with status 0',
+                status == 0, f'status {status}, {tail(outer.log_text())}')
+
 CHECKS = {
     'offscreen': offscreen_checks,
     'nested': nested_checks,
     'baseline': baseline_checks,
     'buffers': buffer_checks,
+    'shm': shm_checks,
 }
 
 def all_checks():

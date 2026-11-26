@@ -11,6 +11,7 @@
 //!
 //! ```text
 //! wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern] [--fifo]
+//!          [--damage] [--animate FRAMES]
 //! ```
 //!
 //! With `--pattern` the buffer is not white but four quadrants: red top
@@ -26,6 +27,21 @@
 //! it has sent them and `release` (buffer) for each buffer given back
 //! (docs/design/dmabuf.md, DB-3).
 //!
+//! With `--damage`, once the toplevel is mapped the probe commits a
+//! 1000x1000 buffer (`damage`) from a pool sealed against shrinking,
+//! fully damaged, waits for its release, draws a 10x10 red square at
+//! (500, 500) into it and commits it again with only that square
+//! damaged. It reports `damage` (step `full`, then `square`) after each
+//! commit, and `release` for each release, so that the harness can read
+//! from Shingle's buffer trace how many bytes each commit uploaded
+//! (docs/design/dmabuf.md, DB-6).
+//!
+//! With `--animate FRAMES`, once mapped the probe draws FRAMES full-size
+//! frames at the size last drawn, each a different grey, fully damaged,
+//! from two buffers of a sealed pool, one per frame callback and each
+//! only once it was released. It then reports `animated` (frames,
+//! milliseconds), for the harness's CPU measurement (DB-6).
+//!
 //! With `--copy`, the probe also makes a `wl_data_source` offering
 //! `text/plain;charset=utf-8` the clipboard, and answers each `send` with
 //! TEXT after waiting N milliseconds on a thread of its own, so that the
@@ -34,19 +50,23 @@
 //!
 //! Events: `configure` (width, height, activated), `enter`, `leave`,
 //! `key` (key, pressed), `copied`, `send` (mime), `sent`, `cancelled`,
-//! `fifo`, `release` (buffer), `close` and `error`.
+//! `fifo`, `release` (buffer), `damage` (step), `animated` (frames,
+//! milliseconds), `close` and `error`.
 
 use std::{
   io::Write,
-  os::fd::{AsFd, OwnedFd},
+  os::{
+    fd::{AsFd, OwnedFd},
+    unix::fs::FileExt,
+  },
 };
 
 use wayland_client::{
   Connection, Dispatch, QueueHandle, WEnum,
   protocol::{
-    wl_buffer, wl_compositor, wl_data_device, wl_data_device_manager,
-    wl_data_offer, wl_data_source, wl_keyboard, wl_registry, wl_seat, wl_shm,
-    wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_data_device,
+    wl_data_device_manager, wl_data_offer, wl_data_source, wl_keyboard,
+    wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
   },
 };
 use wayland_protocols::{
@@ -66,6 +86,15 @@ const DEFAULT_SIZE: (i32, i32) = (320, 240);
 /// The labels of the buffers `--fifo` commits, in order.
 const FIFO_BUFFERS: [&str; 3] = ["a", "b", "c"];
 
+/// The size of `--damage`'s buffer.
+const DAMAGE_SIZE: i32 = 1000;
+
+/// `--damage`'s square: x, y and side.
+const DAMAGE_SQUARE: (i32, i32, i32) = (500, 500, 10);
+
+/// The labels of `--animate`'s two buffers.
+const ANIMATE_BUFFERS: [&str; 2] = ["animate-0", "animate-1"];
+
 /// The MIME type the probe's selection offers.
 const COPY_TYPE: &str = "text/plain;charset=utf-8";
 
@@ -81,6 +110,10 @@ struct Options {
   pattern: bool,
   /// Commits two buffers behind a FIFO barrier once mapped.
   fifo: bool,
+  /// Commits a large buffer and then a small damage of it once mapped.
+  damage: bool,
+  /// Draws this many full-size frames once mapped.
+  animate: Option<u32>,
 }
 
 /// The XRGB8888 bytes (B, G, R, X) of pixel (`x`, `y`) of a `width` by
@@ -108,7 +141,7 @@ fn buffer_bytes(width: i32, height: i32, pattern: bool) -> Vec<u8> {
 }
 
 /// Parses `wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern]
-/// [--fifo]`.
+/// [--fifo] [--damage] [--animate FRAMES]`.
 fn parse(arguments: &[String]) -> Result<Options, String> {
   let mut options = Options::default();
   let mut arguments = arguments.iter();
@@ -126,6 +159,15 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
       }
       "--pattern" => options.pattern = true,
       "--fifo" => options.fifo = true,
+      "--damage" => options.damage = true,
+      "--animate" => {
+        let value = arguments.next().ok_or("--animate needs a number")?;
+        options.animate = Some(
+          value
+            .parse()
+            .map_err(|_| format!("bad --animate {value:?}"))?,
+        );
+      }
       other if other.starts_with("--") => {
         return Err(format!("unknown option {other}"));
       }
@@ -175,6 +217,10 @@ struct Probe {
   /// Whether the pending configure says activated.
   activated: bool,
   closed: bool,
+  /// Labelled buffers released since they were last committed.
+  released: Vec<&'static str>,
+  /// Whether the last frame callback is done.
+  frame_done: bool,
 }
 
 impl Probe {
@@ -202,6 +248,30 @@ impl Probe {
       let _ = file.write_all(&bytes);
     }
     Some(shm.create_pool(file.as_fd(), width * height * 4 * count, handle, ()))
+  }
+
+  /// A pool of `size` bytes in a memfd sealed against shrinking, and the
+  /// file to draw into it through.
+  fn sealed_pool(
+    &self,
+    handle: &QueueHandle<Self>,
+    size: i32,
+  ) -> Result<(wl_shm_pool::WlShmPool, std::fs::File), String> {
+    let shm = self.shm.as_ref().ok_or("wl_shm is missing")?;
+    let fd = rustix::fs::memfd_create(
+      "wl-probe-sealed",
+      rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
+    )
+    .map_err(|error| error.to_string())?;
+    rustix::fs::ftruncate(&fd, size as u64)
+      .map_err(|error| error.to_string())?;
+    rustix::fs::fcntl_add_seals(
+      &fd,
+      rustix::fs::SealFlags::SHRINK | rustix::fs::SealFlags::GROW,
+    )
+    .map_err(|error| error.to_string())?;
+    let pool = shm.create_pool(fd.as_fd(), size, handle, ());
+    Ok((pool, std::fs::File::from(fd)))
   }
 
   /// Attaches and commits a white or patterned buffer of `width` by
@@ -471,7 +541,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for Probe {
 
 impl Dispatch<wl_buffer::WlBuffer, &'static str> for Probe {
   fn event(
-    _: &mut Self,
+    probe: &mut Self,
     _: &wl_buffer::WlBuffer,
     event: wl_buffer::Event,
     label: &&'static str,
@@ -479,9 +549,167 @@ impl Dispatch<wl_buffer::WlBuffer, &'static str> for Probe {
     _: &QueueHandle<Self>,
   ) {
     if let wl_buffer::Event::Release = event {
-      report("release", &[("buffer", format!("{label:?}"))]);
+      probe.released.push(label);
+      // Animation frames would be hundreds of lines.
+      if !ANIMATE_BUFFERS.contains(label) {
+        report("release", &[("buffer", format!("{label:?}"))]);
+      }
     }
   }
+}
+
+impl Dispatch<wl_callback::WlCallback, ()> for Probe {
+  fn event(
+    probe: &mut Self,
+    _: &wl_callback::WlCallback,
+    event: wl_callback::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wl_callback::Event::Done { .. } = event {
+      probe.frame_done = true;
+    }
+  }
+}
+
+/// Dispatches until `done(probe)` holds or the toplevel is closed.
+fn dispatch_until(
+  queue: &mut wayland_client::EventQueue<Probe>,
+  probe: &mut Probe,
+  done: impl Fn(&Probe) -> bool,
+) -> Result<(), String> {
+  while !done(probe) && !probe.closed {
+    queue
+      .blocking_dispatch(probe)
+      .map_err(|error| error.to_string())?;
+  }
+  Ok(())
+}
+
+/// Waits until the toplevel is mapped and drawn at its final size: the
+/// first draw, then round trips until one brings no new configure.
+fn wait_mapped(
+  queue: &mut wayland_client::EventQueue<Probe>,
+  probe: &mut Probe,
+) -> Result<(), String> {
+  dispatch_until(queue, probe, |probe| probe.drawn.is_some())?;
+  loop {
+    let draws = probe.draws;
+    queue.roundtrip(probe).map_err(|error| error.to_string())?;
+    if probe.draws == draws {
+      return Ok(());
+    }
+  }
+}
+
+/// `--damage`: a full commit of a 1000x1000 buffer, then a 10x10 one.
+fn damage_commits(
+  queue: &mut wayland_client::EventQueue<Probe>,
+  probe: &mut Probe,
+) -> Result<(), String> {
+  let handle = queue.handle();
+  let surface = probe.surface.clone().ok_or("no surface")?;
+  let size = DAMAGE_SIZE * DAMAGE_SIZE * 4;
+  let (pool, file) = probe.sealed_pool(&handle, size)?;
+  file
+    .write_all_at(&vec![0xff; size as usize], 0)
+    .map_err(|error| error.to_string())?;
+  let buffer = pool.create_buffer(
+    0,
+    DAMAGE_SIZE,
+    DAMAGE_SIZE,
+    DAMAGE_SIZE * 4,
+    wl_shm::Format::Xrgb8888,
+    &handle,
+    "damage",
+  );
+  probe.released.clear();
+  surface.attach(Some(&buffer), 0, 0);
+  surface.damage_buffer(0, 0, DAMAGE_SIZE, DAMAGE_SIZE);
+  surface.commit();
+  queue.flush().map_err(|error| error.to_string())?;
+  report("damage", &[("step", "\"full\"".into())]);
+  dispatch_until(queue, probe, |probe| probe.released.contains(&"damage"))?;
+  probe.released.clear();
+  let (x, y, side) = DAMAGE_SQUARE;
+  let red = [0, 0, 0xff, 0xff].repeat(side as usize);
+  for row in y..y + side {
+    let offset = (row * DAMAGE_SIZE + x) * 4;
+    file
+      .write_all_at(&red, offset as u64)
+      .map_err(|error| error.to_string())?;
+  }
+  surface.attach(Some(&buffer), 0, 0);
+  surface.damage_buffer(x, y, side, side);
+  surface.commit();
+  queue.flush().map_err(|error| error.to_string())?;
+  report("damage", &[("step", "\"square\"".into())]);
+  dispatch_until(queue, probe, |probe| probe.released.contains(&"damage"))?;
+  pool.destroy();
+  Ok(())
+}
+
+/// `--animate FRAMES`: full-size frames, one per frame callback.
+fn animate(
+  queue: &mut wayland_client::EventQueue<Probe>,
+  probe: &mut Probe,
+  frames: u32,
+) -> Result<(), String> {
+  let handle = queue.handle();
+  let surface = probe.surface.clone().ok_or("no surface")?;
+  let (width, height) = probe.drawn.ok_or("nothing was drawn")?;
+  let frame_size = width * height * 4;
+  let (pool, file) = probe.sealed_pool(&handle, frame_size * 2)?;
+  let buffers = ANIMATE_BUFFERS
+    .iter()
+    .enumerate()
+    .map(|(index, label)| {
+      pool.create_buffer(
+        frame_size * index as i32,
+        width,
+        height,
+        width * 4,
+        wl_shm::Format::Xrgb8888,
+        &handle,
+        *label,
+      )
+    })
+    .collect::<Vec<_>>();
+  probe.released = ANIMATE_BUFFERS.to_vec();
+  probe.frame_done = true;
+  let started = std::time::Instant::now();
+  let mut pixels = vec![0; frame_size as usize];
+  for frame in 0..frames {
+    dispatch_until(queue, probe, |probe| {
+      probe.frame_done && !probe.released.is_empty()
+    })?;
+    if probe.closed {
+      break;
+    }
+    let label = probe.released.remove(0);
+    let index = ANIMATE_BUFFERS.iter().position(|name| *name == label);
+    let index = index.ok_or("an unknown buffer was released")?;
+    pixels.fill((frame % 200) as u8 + 30);
+    file
+      .write_all_at(&pixels, (frame_size * index as i32) as u64)
+      .map_err(|error| error.to_string())?;
+    probe.frame_done = false;
+    surface.frame(&handle, ());
+    surface.attach(Some(&buffers[index]), 0, 0);
+    surface.damage_buffer(0, 0, width, height);
+    surface.commit();
+    queue.flush().map_err(|error| error.to_string())?;
+  }
+  report(
+    "animated",
+    &[
+      ("frames", frames.to_string()),
+      ("milliseconds", started.elapsed().as_millis().to_string()),
+    ],
+  );
+  pool.destroy();
+  Ok(())
 }
 
 /// Objects whose events the probe ignores.
@@ -551,27 +779,21 @@ fn run(options: &Options) -> Result<(), String> {
       .clone()
       .ok_or("wp_fifo_manager_v1 is missing")?;
     let fifo = manager.get_fifo(&surface, &handle, ());
-    while probe.drawn.is_none() && !probe.closed {
-      queue
-        .blocking_dispatch(&mut probe)
-        .map_err(|error| error.to_string())?;
-    }
     // Mapping may bring a configure with the tiled size, which is drawn
-    // too. A round trip that brings none means the toplevel is mapped at
-    // its size, so no draw can follow the FIFO commits.
-    loop {
-      let draws = probe.draws;
-      queue
-        .roundtrip(&mut probe)
-        .map_err(|error| error.to_string())?;
-      if probe.draws == draws {
-        break;
-      }
-    }
+    // too, so no draw can follow the FIFO commits.
+    wait_mapped(&mut queue, &mut probe)?;
     probe.fifo_commits(&handle, &fifo)?;
     queue.flush().map_err(|error| error.to_string())?;
     report("fifo", &[]);
     _fifo = Some(fifo);
+  }
+  if options.damage {
+    wait_mapped(&mut queue, &mut probe)?;
+    damage_commits(&mut queue, &mut probe)?;
+  }
+  if let Some(frames) = options.animate {
+    wait_mapped(&mut queue, &mut probe)?;
+    animate(&mut queue, &mut probe, frames)?;
   }
   // Kept alive for as long as the probe runs.
   let mut _selection = None;
@@ -644,6 +866,8 @@ mod tests {
         delay_ms: 1500,
         pattern: false,
         fifo: false,
+        damage: false,
+        animate: None,
       }
     );
     assert!(parse(&arguments(&["--copy"])).is_err());
@@ -651,6 +875,13 @@ mod tests {
     assert!(parse(&arguments(&["--paste"])).is_err());
     assert!(parse(&arguments(&["--pattern"])).unwrap().pattern);
     assert!(parse(&arguments(&["--fifo"])).unwrap().fifo);
+    assert!(parse(&arguments(&["--damage"])).unwrap().damage);
+    assert_eq!(
+      parse(&arguments(&["--animate", "60"])).unwrap().animate,
+      Some(60)
+    );
+    assert!(parse(&arguments(&["--animate", "many"])).is_err());
+    assert!(parse(&arguments(&["--animate"])).is_err());
     assert!(parse(&arguments(&["a", "b"])).is_err());
   }
 

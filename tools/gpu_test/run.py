@@ -80,9 +80,9 @@ PRIVATE_ENTRIES = ('pts', 'ptmx', 'shm', 'fd', 'stdin', 'stdout', 'stderr')
 SAMPLE_INTERVAL = 0.05
 # checks.GROUPS and dmabuf_checks.GROUPS, kept here so that `--help` works
 # without importing them.
-CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'dmabuf',
-                'browsers', 'xwayland', 'nested-gpu', 'nodmabuf', 'weston',
-                'syncobj', 'nosyncobj')
+CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
+                'dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
+                'weston', 'syncobj', 'nosyncobj')
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset; `syncobj` runs no Vulkan client.
 MODESET_GROUPS = ('dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',

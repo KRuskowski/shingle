@@ -23,6 +23,59 @@ class SafeBackendTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       checks.Shingle('/nonexistent/shingle', 'x', {}, backend=())
 
+class ShmTraceTest(unittest.TestCase):
+  """Upload sizes from Shingle's buffer trace, and CPU time."""
+
+  LOG = '\n'.join([
+      'shingle: buffer: shm upload 3042000 bytes surface=3',
+      'shingle: buffer: release wl_buffer@20',
+      'shingle: buffer: shm upload 4000000 bytes surface=3',
+      'shingle: buffer: shm upload 16 bytes surface=7',
+      'shingle: buffer: dmabuf cached dmabuf=1 surface=3',
+      'shingle: buffer: shm upload 400 bytes surface=3',
+      'something else: upload 5 bytes surface=3',
+  ])
+
+  def test_uploads_are_read_in_order(self):
+    self.assertEqual(checks.upload_sizes(self.LOG),
+                     [('3', 3042000), ('3', 4000000), ('7', 16),
+                      ('3', 400)])
+    self.assertEqual(checks.upload_sizes(self.LOG, '7'), [('7', 16)])
+
+  def test_the_damage_upload_follows_the_full_one(self):
+    self.assertEqual(checks.damage_uploads(self.LOG), (4000000, 400))
+    self.assertEqual(checks.damage_uploads(''), (None, None))
+    self.assertEqual(
+        checks.damage_uploads('shm upload 4000000 bytes surface=1'),
+        (4000000, None))
+
+  def test_cpu_seconds_skip_a_command_with_spaces(self):
+    stat = ('42 (shingle (x) y) S 1 42 42 0 -1 4194560 100 0 0 0 '
+            '250 50 0 0 20 0 3 0 100 0 0')
+    self.assertEqual(checks.cpu_seconds(stat, 100), 3.0)
+
+  def test_buffer_points_scale_to_the_view(self):
+    geometry = {'x': 60, 'y': 30, 'width': 1170, 'height': 650}
+    self.assertEqual(checks.buffer_point(geometry, (505, 505)), (650, 358))
+    self.assertEqual(checks.buffer_point(geometry, (0, 0)), (60, 30))
+
+  def test_probe_events_by_name(self):
+    output = '{"event": "damage", "step": "full"}\nnot json\n[1]\n'
+    self.assertEqual(checks.probe_events(output, 'damage'),
+                     [{'event': 'damage', 'step': 'full'}])
+    self.assertEqual(checks.probe_events(output, 'release'), [])
+
+class SamePixelsTest(unittest.TestCase):
+  """Captures compare by size and pixels."""
+
+  def test_same_and_different(self):
+    capture = checks.xw.Capture
+    self.assertTrue(checks.same_pixels(capture(1, 1, b'abc'),
+                                       capture(1, 1, b'abc')))
+    self.assertFalse(checks.same_pixels(capture(1, 1, b'abc'),
+                                        capture(1, 1, b'abd')))
+    self.assertFalse(checks.same_pixels(None, capture(1, 1, b'abc')))
+
 class ColourTest(unittest.TestCase):
   """Pixel colours by name."""
 
