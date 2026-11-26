@@ -19,8 +19,8 @@ use std::{
 
 use shingle_render::{
   GpuContext, GpuOptions, GpuTexture, OffscreenRenderer, OffscreenTarget,
-  RenderError, RenderRect, RenderState, RenderTile, TextureFilter,
-  TextureTransform, draw,
+  RenderError, RenderRect, RenderState, RenderTile, ShmImage, TextureFilter,
+  TextureTransform, dmabuf, draw,
 };
 
 const WIDTH: u32 = 96;
@@ -304,4 +304,121 @@ fn zero_sized_targets_are_rejected() {
     pollster::block_on(OffscreenRenderer::new(4, 0)),
     Err(RenderError::EmptyTexture)
   ));
+}
+
+/// `rgba` (tightly packed RGBA rows of a `width`-pixel image) as `fourcc`
+/// bytes in rows `stride` bytes apart, with `alpha` in every pixel of an
+/// X format and 0xee in the padding.
+fn shm_bytes(
+  rgba: &[u8],
+  width: usize,
+  stride: usize,
+  fourcc: u32,
+  alpha: u8,
+) -> Vec<u8> {
+  let rows = rgba.len() / (width * 4);
+  let mut bytes = vec![0xee; stride * (rows - 1) + width * 4];
+  for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+    let at = index / width * stride + index % width * 4;
+    let [r, g, b, a] = [pixel[0], pixel[1], pixel[2], pixel[3]];
+    bytes[at..at + 4].copy_from_slice(&match fourcc {
+      dmabuf::DRM_FORMAT_ARGB8888 => [b, g, r, a],
+      dmabuf::DRM_FORMAT_XRGB8888 => [b, g, r, alpha],
+      dmabuf::DRM_FORMAT_ABGR8888 => [r, g, b, a],
+      _ => [r, g, b, alpha],
+    });
+  }
+  bytes
+}
+
+/// Draws `texture` 1:1 into a 4x4 target with nearest filtering.
+fn texels(gpu: &GpuContext, texture: &GpuTexture) -> Vec<u8> {
+  let mut state = RenderState::default();
+  state.set_nearest_filter(true);
+  let tile = RenderTile::textured(rect(0, 0, 4, 4), texture);
+  draw_frame(gpu, &state, (4, 4), &[tile], [0.0; 4])
+}
+
+#[test]
+fn shm_uploads_match_rgba_uploads_in_every_format_and_stride() {
+  let Some(gpu) = gpu() else {
+    return;
+  };
+  let checker = checker_rgba();
+  let reference = gpu
+    .create_texture(4, 4, &checker, TextureFilter::Nearest)
+    .expect("texture upload");
+  let expected = texels(&gpu, &reference);
+  let uploader = gpu.texture_uploader();
+  for fourcc in dmabuf::DRM_FORMATS.map(|format| format.fourcc) {
+    // A padded stride that is not a multiple of 16, and alpha 0 in the
+    // X formats, which the opaque flag must ignore.
+    let bytes = shm_bytes(&checker, 4, 20, fourcc, 0);
+    let image = ShmImage {
+      width: 4,
+      height: 4,
+      stride: 20,
+      fourcc,
+      bytes: &bytes,
+    };
+    let texture = uploader
+      .create(&image, TextureFilter::Nearest)
+      .expect("shm texture");
+    assert!(uploader.fits(&texture, &image));
+    assert_eq!(uploader.write(&texture, &image, &[[0, 0, 4, 4]]), Ok(64));
+    let name = dmabuf::drm_format(fourcc).unwrap().name;
+    assert_eq!(texels(&gpu, &texture), expected, "{name}");
+    // A filter change keeps the texels.
+    let linear = uploader.rebind(&texture, TextureFilter::Linear);
+    assert_eq!(texels(&gpu, &linear), expected, "{name} rebound");
+  }
+}
+
+#[test]
+fn a_damaged_rectangle_replaces_only_its_texels() {
+  let Some(gpu) = gpu() else {
+    return;
+  };
+  let uploader = gpu.texture_uploader();
+  let fourcc = dmabuf::DRM_FORMAT_XRGB8888;
+  let checker = checker_rgba();
+  let first = shm_bytes(&checker, 4, 16, fourcc, 0);
+  let image = |bytes| ShmImage {
+    width: 4,
+    height: 4,
+    stride: 16,
+    fourcc,
+    bytes,
+  };
+  let texture = uploader
+    .create(&image(&first), TextureFilter::Nearest)
+    .expect("shm texture");
+  uploader
+    .write(&texture, &image(&first), &[[0, 0, 4, 4]])
+    .expect("full write");
+  // The client draws white everywhere but damages only the middle.
+  let white = shm_bytes(&[255; 64], 4, 16, fourcc, 255);
+  assert_eq!(
+    uploader.write(&texture, &image(&white), &[[1, 1, 2, 2]]),
+    Ok(16)
+  );
+  let mut expected = checker.clone();
+  for (x, y) in [(1, 1), (2, 1), (1, 2), (2, 2)] {
+    let at = (y * 4 + x) * 4;
+    expected[at..at + 4].copy_from_slice(&[255; 4]);
+  }
+  let reference = gpu
+    .create_texture(4, 4, &expected, TextureFilter::Nearest)
+    .expect("texture upload");
+  assert_eq!(texels(&gpu, &texture), texels(&gpu, &reference));
+  // The GPU copy a geometry animation keeps has the same texels.
+  let copy = uploader
+    .duplicate(&texture, TextureFilter::Nearest)
+    .expect("a copy");
+  assert_eq!(texels(&gpu, &copy), texels(&gpu, &reference));
+  // A texture of another size or byte order does not fit.
+  let mut other = image(&white);
+  other.fourcc = dmabuf::DRM_FORMAT_ABGR8888;
+  assert!(!uploader.fits(&texture, &other));
+  assert!(uploader.write(&texture, &other, &[[0, 0, 1, 1]]).is_err());
 }

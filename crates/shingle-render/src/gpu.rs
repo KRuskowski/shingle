@@ -199,6 +199,18 @@ impl GpuContext {
     })
   }
 
+  /// A handle that uploads shared-memory client buffers without the
+  /// context ([`crate::upload`]).
+  pub fn texture_uploader(&self) -> crate::TextureUploader {
+    crate::TextureUploader {
+      device: self.device.clone(),
+      queue: self.queue.clone(),
+      layout: self.texture_layout.clone(),
+      linear_sampler: self.linear_sampler.clone(),
+      nearest_sampler: self.nearest_sampler.clone(),
+    }
+  }
+
   /// A bind group sampling all of `texture` with `filter`.
   pub(crate) fn bind_texture(
     &self,
@@ -519,7 +531,10 @@ fn upload_texture(
     sample_count: 1,
     dimension: wgpu::TextureDimension::D2,
     format: wgpu::TextureFormat::Rgba8UnormSrgb,
-    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+    // COPY_SRC, so that the scene can keep a copy for an animation.
+    usage: wgpu::TextureUsages::TEXTURE_BINDING
+      | wgpu::TextureUsages::COPY_DST
+      | wgpu::TextureUsages::COPY_SRC,
     view_formats: &[],
   });
   write_texture(queue, &texture, width, height, rgba);

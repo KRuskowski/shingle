@@ -16,6 +16,9 @@
 //! ([`dmabuf`]): [`GpuContext::import_dmabuf`] turns a client's or a
 //! scanout buffer into a texture, and [`draw`] moves imported images in
 //! and out of the foreign queue family around each frame.
+//!
+//! Client `wl_shm` buffers are uploaded from their pools in their own
+//! byte order, damaged rectangles only ([`upload`]).
 
 #![warn(missing_docs)]
 
@@ -25,6 +28,7 @@ mod gpu;
 mod renderer;
 mod state;
 mod target;
+pub mod upload;
 
 use std::time::{Duration, Instant};
 
@@ -41,6 +45,7 @@ pub use state::RenderState;
 pub use target::{
   CAPTURE_TIMEOUT, OffscreenTarget, WindowTarget, capture_frame,
 };
+pub use upload::{ShmImage, TextureUploader, UploadError, UploadRect};
 
 use state::Zoom;
 
