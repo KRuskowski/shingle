@@ -34,10 +34,16 @@ fn output_line(
         index += 2;
       }
       "pos" | "position" => {
-        output.x =
-          number(value(index + 1, "incomplete output position")?, line_number)?;
-        output.y =
-          number(value(index + 2, "incomplete output position")?, line_number)?;
+        output.set_position(crate::OutputPosition::Fixed {
+          x: number(
+            value(index + 1, "incomplete output position")?,
+            line_number,
+          )?,
+          y: number(
+            value(index + 2, "incomplete output position")?,
+            line_number,
+          )?,
+        });
         index += 3;
       }
       "scale" => {

@@ -1,7 +1,7 @@
 output:
   mode: auto
-  x: 0
-  y: 0
+  # auto places outputs left to right; {x: 1920, y: 0} fixes one.
+  position: auto
   width: 1280
   height: 720
   scale: 1.0
@@ -13,6 +13,7 @@ output:
 outputs: []
 #  - name: DP-1
 #    mode: 2560x1440@144
+#    position: {x: 0, y: 0}
 #    scale: 1.25
 
 background_color: [0.1, 0.1, 0.1, 1.0]

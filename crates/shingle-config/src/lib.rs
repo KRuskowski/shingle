@@ -19,13 +19,18 @@
 
 mod config_watcher;
 mod i3;
+mod layout;
 mod output;
 mod view_matcher;
 mod wayfire;
 mod window_rule;
 
 pub use config_watcher::ConfigWatcher;
-pub use output::{OutputConfig, OutputMode};
+pub use layout::{
+  LayoutOutput, closest_point, disjoint, layout, layout_warnings, logical_size,
+  output_in_direction, output_relative, overlapping,
+};
+pub use output::{OutputConfig, OutputMode, OutputPosition};
 pub use view_matcher::{ViewMatcher, ViewProperties};
 pub use window_rule::{RuleAction, RuleEvent, WindowRule};
 

@@ -1,9 +1,10 @@
 //! Output configuration: Wayfire's `[output:NAME]` sections.
 //!
-//! [`OutputConfig`] holds one output's mode, position, scale, transform and
-//! VRR switch. [`crate::ShingleConfig::output`] is the default for every
-//! output, and [`crate::ShingleConfig::outputs`] holds one entry per named
-//! output, as Wayfire keeps one section per connector.
+//! [`OutputConfig`] holds one output's mode, position
+//! ([`OutputPosition`]), scale, transform and VRR switch.
+//! [`crate::ShingleConfig::output`] is the default for every output, and
+//! [`crate::ShingleConfig::outputs`] holds one entry per named output, as
+//! Wayfire keeps one section per connector.
 //! [`crate::ShingleConfig::output_config`] picks the entry for a name.
 //!
 //! [`OutputMode`] parses and prints the `mode` option exactly as Wayfire's
@@ -222,6 +223,91 @@ impl<'de> Deserialize<'de> for OutputMode {
   }
 }
 
+/// Where an output goes in the layout: Wayfire's `[output:NAME] position`.
+///
+/// In YAML it is written `auto` or `{x: 1920, y: 0}`; Wayfire writes `auto`
+/// or `1920,0`. Automatic outputs are placed by [`crate::layout`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OutputPosition {
+  /// Placed left to right after the fixed outputs, as wlroots does.
+  /// Wayfire's default.
+  #[default]
+  Auto,
+  /// The top-left corner at this point of the layout.
+  Fixed {
+    /// Horizontal position.
+    x: i32,
+    /// Vertical position.
+    y: i32,
+  },
+}
+
+impl FromStr for OutputPosition {
+  type Err = ConfigError;
+
+  /// Parses Wayfire's spelling: `auto`, or two integers separated by a
+  /// comma or spaces.
+  fn from_str(text: &str) -> Result<Self, Self::Err> {
+    if text.trim() == "auto" {
+      return Ok(Self::Auto);
+    }
+    let invalid =
+      || ConfigError::Invalid(format!("invalid output position {text:?}"));
+    let parts = text
+      .split(|character: char| character.is_whitespace() || character == ',')
+      .filter(|part| !part.is_empty())
+      .collect::<Vec<_>>();
+    let [x, y] = parts[..] else {
+      return Err(invalid());
+    };
+    Ok(Self::Fixed {
+      x: x.parse().map_err(|_| invalid())?,
+      y: y.parse().map_err(|_| invalid())?,
+    })
+  }
+}
+
+impl serde::Serialize for OutputPosition {
+  fn serialize<S: serde::Serializer>(
+    &self,
+    serializer: S,
+  ) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeStruct;
+    match self {
+      Self::Auto => serializer.serialize_str("auto"),
+      Self::Fixed { x, y } => {
+        let mut point = serializer.serialize_struct("OutputPosition", 2)?;
+        point.serialize_field("x", x)?;
+        point.serialize_field("y", y)?;
+        point.end()
+      }
+    }
+  }
+}
+
+impl<'de> Deserialize<'de> for OutputPosition {
+  fn deserialize<D: serde::Deserializer<'de>>(
+    deserializer: D,
+  ) -> Result<Self, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Point {
+      x: i32,
+      y: i32,
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Written {
+      Text(String),
+      Point(Point),
+    }
+    match Written::deserialize(deserializer)? {
+      Written::Text(text) => text.parse().map_err(serde::de::Error::custom),
+      Written::Point(Point { x, y }) => Ok(Self::Fixed { x, y }),
+    }
+  }
+}
+
 /// One output's mode, position, scale, transform and VRR switch.
 ///
 /// [`crate::ShingleConfig::output`] is the default for every output, and
@@ -229,11 +315,11 @@ impl<'de> Deserialize<'de> for OutputMode {
 /// [`crate::ShingleConfig::outputs`] holds one entry per Wayfire
 /// `[output:NAME]` section or i3 `output NAME` line, keyed by `name`.
 ///
-/// Wayfire's `[output:NAME]` supplies `mode`, `position = X,Y`, `scale`,
+/// Wayfire's `[output:NAME]` supplies `mode`, `position`, `scale`,
 /// `transform` and `vrr`; i3 supplies `output NAME mode WxH scale S
 /// transform T pos X Y`.
 #[derive(Clone, Debug, Deserialize, PartialEq, serde::Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(try_from = "OutputConfigFields")]
 pub struct OutputConfig {
   /// The connector this entry is for, such as `DP-1` or `eDP-1`, or
   /// `HEADLESS-1` for the nested and headless output. Required in
@@ -246,11 +332,18 @@ pub struct OutputConfig {
   /// `width` and `height` times `scale`, the nested window opens at that
   /// size, and its refresh rate is the one clients are told.
   pub mode: OutputMode,
-  /// Horizontal position of the output's top-left corner in the global layout.
-  /// `[output:NAME] position`; default 0.
+  /// Where the output goes in the layout. `[output:NAME] position`;
+  /// default `auto`. YAML that gives `x` or `y` instead means a fixed
+  /// position there, as before `position` existed; giving both forms is an
+  /// error.
+  pub position: OutputPosition,
+  /// The fixed position's horizontal coordinate, 0 for an automatic one.
+  /// Kept for the code that places a single output; change it with
+  /// [`OutputConfig::set_position`]. Not written to YAML.
+  #[serde(skip_serializing)]
   pub x: i32,
-  /// Vertical position of the output's top-left corner in the global layout.
-  /// Default 0.
+  /// The fixed position's vertical coordinate, like `x`.
+  #[serde(skip_serializing)]
   pub y: i32,
   /// Width of the nested window and the headless output in the untransformed
   /// orientation, before `scale` is applied, unless `mode` names a size.
@@ -279,6 +372,7 @@ impl Default for OutputConfig {
     Self {
       name: None,
       mode: OutputMode::Auto,
+      position: OutputPosition::Auto,
       x: 0,
       y: 0,
       width: 1280,
@@ -308,7 +402,84 @@ const TRANSFORMS: [&str; 14] = [
   "flipped270",
 ];
 
+/// The fields of [`OutputConfig`] as written, with the old `x` and `y`.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct OutputConfigFields {
+  name: Option<String>,
+  mode: OutputMode,
+  position: Option<OutputPosition>,
+  x: Option<i32>,
+  y: Option<i32>,
+  width: u32,
+  height: u32,
+  scale: f64,
+  transform: String,
+  vrr: bool,
+}
+
+impl Default for OutputConfigFields {
+  fn default() -> Self {
+    let defaults = OutputConfig::default();
+    Self {
+      name: defaults.name,
+      mode: defaults.mode,
+      position: None,
+      x: None,
+      y: None,
+      width: defaults.width,
+      height: defaults.height,
+      scale: defaults.scale,
+      transform: defaults.transform,
+      vrr: defaults.vrr,
+    }
+  }
+}
+
+impl TryFrom<OutputConfigFields> for OutputConfig {
+  type Error = String;
+
+  fn try_from(fields: OutputConfigFields) -> Result<Self, Self::Error> {
+    let old = (fields.x.is_some() || fields.y.is_some()).then(|| {
+      OutputPosition::Fixed {
+        x: fields.x.unwrap_or(0),
+        y: fields.y.unwrap_or(0),
+      }
+    });
+    let position = match (fields.position, old) {
+      (Some(_), Some(_)) => {
+        return Err("give an output either position or x and y".into());
+      }
+      (position, old) => position.or(old).unwrap_or_default(),
+    };
+    let mut output = Self {
+      name: fields.name,
+      mode: fields.mode,
+      position,
+      x: 0,
+      y: 0,
+      width: fields.width,
+      height: fields.height,
+      scale: fields.scale,
+      transform: fields.transform,
+      vrr: fields.vrr,
+    };
+    output.set_position(position);
+    Ok(output)
+  }
+}
+
 impl OutputConfig {
+  /// Sets `position`, and `x` and `y` to its coordinates (0 when
+  /// automatic).
+  pub fn set_position(&mut self, position: OutputPosition) {
+    self.position = position;
+    (self.x, self.y) = match position {
+      OutputPosition::Auto => (0, 0),
+      OutputPosition::Fixed { x, y } => (x, y),
+    };
+  }
+
   /// A default entry for the output `name`.
   pub fn named(name: impl Into<String>) -> Self {
     Self {
@@ -421,6 +592,58 @@ mod tests {
       height,
       refresh_mhz,
     }
+  }
+
+  #[test]
+  fn positions_are_auto_or_a_point() {
+    let config = ShingleConfig::parse(
+      concat!(
+        "outputs:\n",
+        "  - name: DP-1\n",
+        "    position: auto\n",
+        "  - name: DP-2\n",
+        "    position: {x: 1920, y: -40}\n",
+        "  - name: DP-3\n",
+        "    x: 5000\n",
+        "  - name: DP-4\n",
+      ),
+      ConfigFormat::Yaml,
+    )
+    .unwrap();
+    let position = |name: &str| config.output_config(name).position;
+    assert_eq!(position("DP-1"), OutputPosition::Auto);
+    assert_eq!(position("DP-2"), OutputPosition::Fixed { x: 1920, y: -40 });
+    let dp2 = config.output_config("DP-2");
+    assert_eq!((dp2.x, dp2.y), (1920, -40));
+    // The old keys still mean a fixed position.
+    assert_eq!(position("DP-3"), OutputPosition::Fixed { x: 5000, y: 0 });
+    assert_eq!(position("DP-4"), OutputPosition::Auto);
+    assert_eq!(config.output.position, OutputPosition::Auto);
+    let yaml = config.to_yaml().unwrap();
+    assert!(yaml.contains("position: auto"), "{yaml}");
+    // Only the position is written, not the old keys beside it.
+    assert!(!yaml.contains("\n  x: "), "{yaml}");
+    assert!(yaml.contains("\n    x: 5000\n"), "{yaml}");
+    let again = ShingleConfig::parse(&yaml, ConfigFormat::Yaml).unwrap();
+    assert_eq!(again.outputs, config.outputs);
+
+    let error = |yaml: &str| {
+      ShingleConfig::parse(yaml, ConfigFormat::Yaml)
+        .unwrap_err()
+        .to_string()
+    };
+    assert!(
+      error("output:\n  position: auto\n  x: 3\n").contains("either"),
+      "both forms"
+    );
+    assert!(error("output:\n  position: left\n").contains("position"));
+    assert!(!error("output:\n  position: {x: 1}\n").is_empty());
+    assert_eq!(
+      "10, -20".parse::<OutputPosition>().unwrap(),
+      OutputPosition::Fixed { x: 10, y: -20 }
+    );
+    assert!("10".parse::<OutputPosition>().is_err());
+    assert!("1,2,3".parse::<OutputPosition>().is_err());
   }
 
   #[test]
@@ -633,5 +856,44 @@ mod tests {
     assert!(
       ShingleConfig::parse("output DP-1 mode big\n", ConfigFormat::I3).is_err()
     );
+  }
+
+  #[test]
+  fn imported_positions_are_fixed_or_auto() {
+    let wayfire = ShingleConfig::parse(
+      concat!(
+        "[output:DP-1]\n",
+        "position = 2560, -10\n",
+        "[output:DP-2]\n",
+        "position = auto\n",
+        "[output:DP-3]\n",
+        "scale = 2\n",
+      ),
+      ConfigFormat::Wayfire,
+    )
+    .unwrap();
+    let dp1 = wayfire.output_config("DP-1");
+    assert_eq!(dp1.position, OutputPosition::Fixed { x: 2560, y: -10 });
+    assert_eq!((dp1.x, dp1.y), (2560, -10));
+    for name in ["DP-2", "DP-3"] {
+      assert_eq!(wayfire.output_config(name).position, OutputPosition::Auto);
+    }
+    assert!(
+      ShingleConfig::parse(
+        "[output:DP-1]\nposition = left\n",
+        ConfigFormat::Wayfire
+      )
+      .is_err()
+    );
+    let i3 = ShingleConfig::parse(
+      "output DP-1 pos 1920 0\noutput DP-2 scale 2\n",
+      ConfigFormat::I3,
+    )
+    .unwrap();
+    assert_eq!(
+      i3.output_config("DP-1").position,
+      OutputPosition::Fixed { x: 1920, y: 0 }
+    );
+    assert_eq!(i3.output_config("DP-2").position, OutputPosition::Auto);
   }
 }

@@ -694,17 +694,12 @@ fn output_option(
     "transform" => output.transform = value.to_lowercase(),
     "vrr" => output.vrr = boolean(value, line_number)?,
     "position" => {
-      let position = value
-        .split(|character: char| character.is_whitespace() || character == ',')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-      if position.len() != 2 {
-        return Err(ConfigError::Invalid(format!(
+      let position = value.parse().map_err(|_| {
+        ConfigError::Invalid(format!(
           "line {line_number}: invalid output position"
-        )));
-      }
-      output.x = signed_number(position[0], line_number)?;
-      output.y = signed_number(position[1], line_number)?;
+        ))
+      })?;
+      output.set_position(position);
     }
     _ => {}
   }
