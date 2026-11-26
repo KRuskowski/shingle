@@ -54,29 +54,23 @@ fn plan(
     }
   };
   match backend::select(options.backend, &env) {
+    // Native gets several outputs with MO-7.
+    Ok(selection)
+      if options.outputs.is_some() && selection.backend == Backend::Native =>
+    {
+      Plan::Fail(
+        "shingle: --outputs needs the headless, offscreen or nested \
+         backend, not native\n"
+          .to_owned(),
+        USAGE_STATUS,
+      )
+    }
     Ok(selection) if selection.backend == Backend::Native => {
       // Refuse an SSH login before libseat is even opened.
       match shingle_native::preflight(&env) {
         Ok(()) => Plan::Start(selection, options),
         Err(error) => Plan::Fail(no_seat(&error, &selection.reason), 1),
       }
-    }
-    // Nested gets several outputs with MO-6, native with MO-7.
-    Ok(selection)
-      if options.outputs.is_some()
-        && !matches!(
-          selection.backend,
-          Backend::Headless | Backend::Offscreen
-        ) =>
-    {
-      Plan::Fail(
-        format!(
-          "shingle: --outputs needs the headless or offscreen backend, not \
-           {}\n",
-          selection.backend
-        ),
-        USAGE_STATUS,
-      )
     }
     Ok(selection) => Plan::Start(selection, options),
     Err(error) => Plan::Fail(format!("shingle: {error}\n"), USAGE_STATUS),
@@ -133,12 +127,19 @@ fn start(
   // environment, not through Shingle's own environment.
   let config = ShingleConfig::load(options.config.as_deref())?;
   match selection.backend {
-    Backend::Nested => shingle_nested::run(
-      config,
-      options.config,
-      options.ipc.as_deref(),
-      options.spawn,
-    ),
+    Backend::Nested => {
+      let outputs = headless::output_count(
+        options.outputs,
+        std::env::var("WLR_WL_OUTPUTS").ok().as_deref(),
+      )?;
+      shingle_nested::run(
+        config,
+        options.config,
+        options.ipc.as_deref(),
+        options.spawn,
+        outputs,
+      )
+    }
     Backend::Headless => {
       let outputs = headless::output_count(
         options.outputs,
@@ -301,7 +302,7 @@ mod tests {
   // These tests only plan: no seat, device or VT is touched.
 
   #[test]
-  fn outputs_need_the_headless_or_offscreen_backend() {
+  fn outputs_need_the_headless_offscreen_or_nested_backend() {
     let (backend, options) =
       started(planned(&["--headless", "--outputs", "2"], &[]));
     assert_eq!((backend, options.outputs), (Backend::Headless, Some(2)));
@@ -313,9 +314,17 @@ mod tests {
       &["--outputs", "2"][..],
       &["--backend", "nested", "--outputs", "2"],
     ] {
+      let (backend, options) = started(planned(arguments, &session));
+      assert_eq!((backend, options.outputs), (Backend::Nested, Some(2)));
+    }
+    for arguments in [
+      &["--backend", "native", "--outputs", "2"][..],
+      &["--outputs", "2", "--allow-builtin-seat"],
+    ] {
       assert!(matches!(
-        planned(arguments, &session),
-        Plan::Fail(text, USAGE_STATUS) if text.contains("--outputs")
+        planned(arguments, &[("TERM", "linux"), ("XDG_SEAT", "seat0")]),
+        Plan::Fail(text, USAGE_STATUS)
+          if text.contains("--outputs") && text.contains("not native")
       ));
     }
   }

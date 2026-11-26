@@ -19,12 +19,13 @@ use shingle_session::{
   SessionSnapshot, SessionStore, launch_autostart, launch_program, launch_saved,
 };
 
-/// How many outputs headless Shingle starts with: `--outputs`, else
-/// `WLR_HEADLESS_OUTPUTS` as wlroots' headless backend reads it, else 1.
+/// How many outputs Shingle starts with: `--outputs`, else the backend's
+/// variable `variable` as wlroots reads it (`WLR_HEADLESS_OUTPUTS` for
+/// headless and offscreen, `WLR_WL_OUTPUTS` for nested), else 1.
 ///
 /// # Errors
 ///
-/// When `WLR_HEADLESS_OUTPUTS` is set but is not a positive number.
+/// When the variable is set but is not a positive number.
 pub fn output_count(
   option: Option<u32>,
   variable: Option<&str>,
