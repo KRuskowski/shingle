@@ -651,6 +651,20 @@ From NB-8 on, each lit monitor starts on copy scanout as before and, before its 
 2. A refused flip during zero-copy, if a driver produces one, shows `the page flip of CONN failed: ...` followed by `output CONN: back to copy scanout, because the page flip to a GBM buffer failed: ...`, and the picture continues on copy scanout. Record it if seen; it cannot be forced from outside.
 3. End Shingle with `kill -TERM`; expected `exit=0` and the text console back, as in step 14, now with GBM buffers freed (no `drm` errors in `sudo dmesg | tail`).
 
+## WG-5: touchpad workspace swipes
+
+Nested Shingle gets no touchpad swipes from its host (winit reports none on Wayland), so vswipe with a real touchpad is checked here, on a laptop or with a USB touchpad that libinput lists as a touchpad. The arithmetic and the frontend are covered by unit tests and by tools/gpu_test/run.py's `vswipe` group through `stipc/feed_gesture` ([status.md](status.md#with-real-clients)).
+
+### Step 43: four-finger swipes move the workspace wall
+
+1. Put a Wayfire file beside the test config, `~/.config/shingle/vswipe.ini`, with `[core]` `plugins = vswipe vswitch simple-tile`, `vwidth = 3`, `vheight = 1` and `xwayland = false`, and start Shingle on tty1 with `--config ~/.config/shingle/vswipe.ini --ipc /tmp/shingle-ipc --spawn foot`.
+2. After each swipe below, read the current workspace over SSH with `tools/native_test/ipc.py /tmp/shingle-ipc window-rules/get-focused-output` (its `workspace`).
+3. Swipe four fingers to the left by about half the touchpad and lift them. Expected: the wall follows the fingers, with a 32-pixel dark gap between the workspaces, and slides on to workspace 2 when they lift; `workspace` is `"x": 1, "y": 0`.
+4. A short swipe, under a third of the screen, slowly. Expected: the wall slides back and the workspace stays. The same short swipe flicked fast moves on.
+5. Swipe right twice from workspace 1. Expected: the wall resists like a rubber band at the left edge and stays on workspace 1.
+6. Swipe three fingers. Expected: the wall does not move, and a client that uses swipes (for example Firefox's history swipe, if it takes three fingers) gets it.
+7. Record the touchpad, libinput's version and whether the motion felt like Wayfire's on the same machine, if Wayfire is installed there.
+
 ## Results
 
 Record results in [status.md](status.md#with-real-clients). None of the steps above has been run yet: the test machine does not exist so far.

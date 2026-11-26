@@ -4,7 +4,7 @@ Detailed behaviour of the features Shingle implements, with their configuration.
 
 ## Importing Wayfire configuration
 
-A `wayfire.ini` is read line by line as Wayfire's wf-config reads it: every `#` not preceded by `\` starts a comment, `\#` is a literal `#` (WCM writes every hex colour as `\#RRGGBBAA`), a line ending in `\` continues on the next, as in Wayfire's own `plugins = \` list, and names and values are trimmed. A value Shingle cannot use keeps its default and is reported as a warning with its line, section and option, as Wayfire logs it, and the rest of the file still loads; so is each section of a plugin Shingle does not have (`[blur]`, `[cube]`, `[decoration]`, `[vswipe]`, `[wobbly]` and others), once. Activators keep their keys and buttons; a modifier alone (`<super>`) is bound for `[wayfire-shell] toggle_menu` and commands ([Modifier-alone bindings](#modifier-alone-bindings)) and elsewhere warns; touch gestures (`pinch in 4`, `swipe up 3`, `edge-swipe left 2`) and hotspots (`hotspot top-left 10x10 500`) are recognised, reported as not supported yet and never bound. Where Shingle's option takes one binding, the first key or button is used. The animations Shingle lacks fall back with a warning: `squeezimize` to `zoom`, and `fire`, `zap` and `spin` to `fade`. View matchers take Wayfire's `focusable equals true` form, so Wayfire's default `animate/enabled_for` works. Colours may be `#RRGGBBAA`, `#RGBA`, `#RRGGBB` or four numbers. i3 files warn the same way; YAML stays strict and rejects any bad value.
+A `wayfire.ini` is read line by line as Wayfire's wf-config reads it: every `#` not preceded by `\` starts a comment, `\#` is a literal `#` (WCM writes every hex colour as `\#RRGGBBAA`), a line ending in `\` continues on the next, as in Wayfire's own `plugins = \` list, and names and values are trimmed. A value Shingle cannot use keeps its default and is reported as a warning with its line, section and option, as Wayfire logs it, and the rest of the file still loads; so is each section of a plugin Shingle does not have (`[blur]`, `[cube]`, `[decoration]`, `[wobbly]` and others), once. Activators keep their keys and buttons; a modifier alone (`<super>`) is bound for `[wayfire-shell] toggle_menu` and commands ([Modifier-alone bindings](#modifier-alone-bindings)) and elsewhere warns; touch gestures (`pinch in 4`, `swipe up 3`, `edge-swipe left 2`) and hotspots (`hotspot top-left 10x10 500`) are recognised, reported as not supported yet and never bound. Where Shingle's option takes one binding, the first key or button is used. The animations Shingle lacks fall back with a warning: `squeezimize` to `zoom`, and `fire`, `zap` and `spin` to `fade`. View matchers take Wayfire's `focusable equals true` form, so Wayfire's default `animate/enabled_for` works. Colours may be `#RRGGBBAA`, `#RGBA`, `#RRGGBB` or four numbers. i3 files warn the same way; YAML stays strict and rejects any bad value.
 
 `shingle` prints the warnings once when it starts and again on a reload, as `shingle: PATH: line N: MESSAGE`. `shingle-wcm --config PATH --check` prints them and exits 0, or 1 when the file cannot be read.
 
@@ -148,6 +148,30 @@ extra_gestures:
 ```
 
 Wayfire's `[extra-gestures]` options import directly. The i3 variables are `$gesture_move_fingers`, `$gesture_move_delay`, and `$gesture_close_fingers`. All three settings are editable in WCM and can be reloaded live.
+
+### Touchpad workspace swipes
+
+Wayfire's `vswipe` plugin: a touchpad swipe with `fingers` fingers (four by default) drags the wall of workspaces under the fingers, and lifting them slides it to a workspace, as wayfire:plugins/single_plugins/vswipe.cpp does. The swipe's direction is decided once it has moved 0.05 of a workspace (`speed_factor` pixels make one workspace): horizontal or vertical when that axis is enabled and the grid has more than one workspace along it, or, with `enable_free_movement`, diagonal when it starts at a slope between 30° and 60° or moves 0.3 of a workspace along the other axis later. Each update moves the wall at most `speed_cap` workspaces and slows down like a rubber band past the neighbouring workspace (without free movement) or the grid's edge. When the fingers lift, the wall moves on to the next workspace if it went more than `threshold` of a workspace, or if the last two updates moved more than `delta_threshold` pixels (a flick); it never leaves the grid, vswitch's `wraparound` does not apply, and without free movement it moves one workspace at most. The workspace switches at once, as `wset-workspace-changed` reports, and the wall slides there over `duration` without vswitch's slide; with `enable_smooth_transition` the wall also eases to each new position while the fingers move. The wall is drawn with `gap` pixels between the workspaces and `background` behind them. Lifting the fingers after libinput cancelled the swipe is handled like any other end, as in Wayfire.
+
+Clients get every swipe until vswipe takes it: a swipe with another finger count, one that begins with the pointer on no output, and one whose direction is never decided are theirs whole. When vswipe starts a swipe, the client it went to gets its end, cancelled, and nothing more of it, and the output under the pointer becomes the active one. vswipe does not start while Scale, Expo, a switcher, a drag, window rotation or vswitch's slide runs, while the session is locked or while a shell client inhibits the output, and a swipe that begins while vswipe's slide still runs goes to clients, as Wayfire's plugin activation refuses it then. A configuration reload, a disabled pointer, a paused session, or a resize or removal of the output drops a running swipe without switching.
+
+```yaml
+vswipe:
+  enable_horizontal: true
+  enable_vertical: true
+  enable_free_movement: false
+  enable_smooth_transition: false
+  duration_ms: 180
+  background: [0.1, 0.1, 0.1, 1.0]
+  fingers: 4
+  gap: 32.0
+  threshold: 0.35
+  delta_threshold: 24.0
+  speed_factor: 256.0
+  speed_cap: 0.05
+```
+
+Wayfire's twelve `[vswipe]` options import with these names (`duration` in milliseconds, its easing curve ignored, as for every Shingle animation), when `[core] plugins` lists `vswipe`; Wayfire's default list does not. Tests feed swipes with Shingle's `stipc/feed_gesture` ([ipc.md](ipc.md#stipc-test-input)).
 
 ## Clients and protocols
 
