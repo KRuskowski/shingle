@@ -91,7 +91,19 @@ The work is split into seven workspaces, MO-1 to MO-7, each with acceptance crit
 
 ## 6. Remaining Wayfire compatibility
 
-Continue the missing plugins and configuration options, using Wayfire's source as the behavioural reference.
+Continue the missing plugins and configuration options, using Wayfire's source as the behavioural reference. The survey is [design/wayfire-gaps.md](design/wayfire-gaps.md), from 2026-11-26, against Wayfire `669bbe36`: every Wayfire plugin, option, protocol and IPC method classified as implemented, partly or missing, the gaps ranked, and seven workspaces with acceptance criteria. Its questions are open ([Questions](design/wayfire-gaps.md#questions-for-the-operator)).
+
+In short, a WCM-written `wayfire.ini` does not load today: escaped `\#` colours and values Shingle does not support (Wayfire's own default `animate/enabled_for`, `squeezimize`) make the import fail, and Shingle refuses to start. Options a file leaves out take Shingle's defaults, Shingle's extra bindings are always on (`super+shift+q` quits), and `core/plugins` is ignored. After those come the numbered `[vswitch]` bindings, touchpad workspace swipes, wf-shell's `zwf_shell_manager_v2`, server-side decorations, the switcher's view and Wayfire's client environment variables.
+
+1. WG-1 `shingle-wayfire-ini-parser`: wf-config's comment, escape and continuation rules, and a warning instead of a refused file for values Shingle cannot use.
+2. WG-2 `shingle-wayfire-defaults`: Wayfire's metadata defaults, `core/plugins`, the numbered vswitch bindings, `autostart_wf_shell` and every option over IPC.
+3. WG-3 `shingle-client-environment`: `XDG_CURRENT_DESKTOP`, `XCURSOR_*`, `WAYFIRE_CONFIG_FILE` and a session file.
+4. WG-4 `shingle-wayfire-shell`: `zwf_shell_manager_v2`, modifier-only bindings and `toggle_menu`.
+5. WG-5 `shingle-vswipe`: touchpad workspace swipes.
+6. WG-6 `shingle-decoration`: server-side decorations.
+7. WG-7 `shingle-switcher-view`: the switcher's thumbnails.
+
+WG-1 is next; it needs the answer to the survey's first question.
 
 ## 7. Soak tests and measurements
 
