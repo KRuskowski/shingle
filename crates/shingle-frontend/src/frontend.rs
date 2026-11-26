@@ -129,6 +129,9 @@ pub struct Frontend {
   middle_emulation: bool,
   pointer_x: f64,
   pointer_y: f64,
+  /// The buttons whose press reached the compositor and whose release
+  /// has not, by device.
+  delivered_buttons: HashSet<(InputDeviceId, u32)>,
   keybindings: Keybindings,
   commands: Vec<CommandBinding>,
   pointer_bindings: PointerBindings,
@@ -482,6 +485,7 @@ impl Frontend {
       middle_emulation: config.input.middle_emulation,
       pointer_x: 0.0,
       pointer_y: 0.0,
+      delivered_buttons: HashSet::new(),
       keybindings: config.keybindings.clone(),
       commands: config.commands.clone(),
       modifier_bindings: shingle::ModifierBindingTracker::default(),
@@ -1345,15 +1349,22 @@ impl Frontend {
     code: u32,
     pressed: bool,
   ) {
-    if self.expo_pointer_input(code, pressed) {
-      return;
-    }
-    if self.scale_pointer_input(code, pressed) {
-      return;
-    }
-    if !self.pointer_button_action(button_name(code), pressed) {
+    let consumed = self.expo_pointer_input(code, pressed)
+      || self.scale_pointer_input(code, pressed)
+      || self.pointer_button_action(button_name(code), pressed);
+    if !consumed {
+      if pressed {
+        self.delivered_buttons.insert((device, code));
+      } else {
+        self.delivered_buttons.remove(&(device, code));
+      }
       self.compositor.pointer_button(device, code, pressed);
       self.save();
+    } else if !pressed && self.delivered_buttons.remove(&(device, code)) {
+      // A drag the press started, such as a move the client asked for,
+      // took the release. The client got the press, so it gets the
+      // release too, and the seat no longer holds the button.
+      self.compositor.pointer_button(device, code, false);
     }
   }
 

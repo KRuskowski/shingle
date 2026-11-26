@@ -503,6 +503,34 @@ fn a_move_drag_drops_one_tile_onto_another() {
 }
 
 #[test]
+fn a_move_the_client_asks_for_leaves_no_button_held() {
+  let (mut fixture, [alpha, _, _]) = three_windows();
+  let (x, y) = fixture.center(alpha);
+  fixture.move_pointer(x, y);
+  fixture.button(BTN_LEFT, true);
+  assert!(fixture.frontend.compositor().buttons_or_touches_held());
+  // As after xdg_toplevel.move from the press.
+  fixture.frontend.compositor_mut().begin_move_window(alpha);
+  fixture.process();
+  assert!(fixture.frontend.drag.is_some());
+  fixture.move_pointer(x + 50.0, y);
+  fixture.button(BTN_LEFT, false);
+  assert!(fixture.frontend.drag.is_none());
+  // Before, the drag kept the release, and the seat held the button for
+  // good, which also stopped every modifier-alone binding.
+  assert!(!fixture.frontend.compositor().buttons_or_touches_held());
+  // A drag the compositor's binding started gave the client no press,
+  // so it gets no release either.
+  fixture.key(KEY_LEFTMETA, true);
+  fixture.button(BTN_LEFT, true);
+  assert!(fixture.frontend.drag.is_some());
+  assert!(!fixture.frontend.compositor().buttons_or_touches_held());
+  fixture.button(BTN_LEFT, false);
+  fixture.key(KEY_LEFTMETA, false);
+  assert!(!fixture.frontend.compositor().buttons_or_touches_held());
+}
+
+#[test]
 fn a_workspace_switch_animates_and_moves_the_focus() {
   let (mut fixture, _) = three_windows();
   fixture.tap(KEY_2, &[KEY_LEFTMETA]);
