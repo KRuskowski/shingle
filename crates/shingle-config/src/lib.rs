@@ -197,6 +197,8 @@ pub struct ShingleConfig {
   pub workspaces: WorkspaceConfig,
   /// The sliding workspace-switch transition (`[vswitch]`).
   pub vswitch: VswitchConfig,
+  /// Touchpad workspace swipes (`[vswipe]`).
+  pub vswipe: VswipeConfig,
   /// Gaps, tiling policy, minimum tile size and drag previews, mostly from
   /// `[simple-tile]`.
   pub tiling: TilingConfig,
@@ -275,6 +277,7 @@ impl Default for ShingleConfig {
       extra_gestures: ExtraGesturesConfig::default(),
       workspaces: WorkspaceConfig::default(),
       vswitch: VswitchConfig::default(),
+      vswipe: VswipeConfig::default(),
       tiling: TilingConfig::default(),
       resize: ResizeConfig::default(),
       idle: IdleConfig::default(),
@@ -624,6 +627,32 @@ impl ShingleConfig {
     }) {
       return Err(ConfigError::Invalid(
         "vswitch.background components must be between 0 and 1".into(),
+      ));
+    }
+    let swipe = &self.vswipe;
+    if swipe.background.iter().any(|component| {
+      !component.is_finite() || !(0.0..=1.0).contains(component)
+    }) {
+      return Err(ConfigError::Invalid(
+        "vswipe.background components must be between 0 and 1".into(),
+      ));
+    }
+    let valid = (1..=20).contains(&swipe.fingers)
+      && swipe.gap.is_finite()
+      && swipe.gap >= 0.0
+      && swipe.threshold.is_finite()
+      && swipe.delta_threshold.is_finite()
+      && swipe.speed_factor.is_finite()
+      && swipe.speed_factor > 0.0
+      && swipe.speed_cap.is_finite()
+      && swipe.speed_cap >= 0.0;
+    if !valid {
+      return Err(ConfigError::Invalid(
+        concat!(
+          "vswipe.fingers must be 1–20, gap and speed_cap at least 0, ",
+          "speed_factor above 0 and the thresholds finite",
+        )
+        .into(),
       ));
     }
     if !matches!(self.scale.title_overlay.as_str(), "never" | "mouse" | "all") {
@@ -1522,6 +1551,69 @@ impl Default for VswitchConfig {
       workspace_bindings: Vec::new(),
       workspace_bindings_win: Vec::new(),
       bindings_win: Vec::new(),
+    }
+  }
+}
+
+/// Touchpad workspace swipes from Wayfire's `vswipe` plugin
+/// (metadata/vswipe.xml). The defaults are Wayfire's.
+#[derive(Clone, Debug, Deserialize, PartialEq, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VswipeConfig {
+  /// Swipe between columns. `[vswipe] enable_horizontal`; default true.
+  pub enable_horizontal: bool,
+  /// Swipe between rows. `[vswipe] enable_vertical`; default true.
+  pub enable_vertical: bool,
+  /// Swipe diagonally and across more than one workspace at a time.
+  /// `[vswipe] enable_free_movement`; default false.
+  pub enable_free_movement: bool,
+  /// Ease the wall towards each new swipe position instead of jumping
+  /// to it. `[vswipe] enable_smooth_transition`; default false.
+  pub enable_smooth_transition: bool,
+  /// Milliseconds of the smooth transition and of the slide to the
+  /// target workspace after the fingers lift. `[vswipe] duration`;
+  /// default 180.
+  pub duration_ms: u64,
+  /// Colour between and around the workspaces of the wall. `[vswipe]
+  /// background`; components 0–1; default `[0.1, 0.1, 0.1, 1.0]`.
+  pub background: [f64; 4],
+  /// Fingers of the swipes that move the wall; others go to clients.
+  /// `[vswipe] fingers`; 1–20; default 4.
+  pub fingers: u32,
+  /// Pixels between neighbouring workspaces of the wall. `[vswipe] gap`;
+  /// at least 0; default 32.
+  pub gap: f64,
+  /// The fraction of a workspace a swipe must pass to move on to the
+  /// next one; Wayfire clamps it to 0–1. `[vswipe] threshold`; default
+  /// 0.35.
+  pub threshold: f64,
+  /// The motion in pixels of a swipe's last two updates that moves on
+  /// to the next workspace however far the swipe went; Wayfire clamps it
+  /// to 0–1000. `[vswipe] delta_threshold`; default 24.
+  pub delta_threshold: f64,
+  /// Pixels of finger motion per workspace. `[vswipe] speed_factor`;
+  /// above 0; default 256.
+  pub speed_factor: f64,
+  /// The most one update moves the wall, in workspaces. `[vswipe]
+  /// speed_cap`; at least 0; default 0.05.
+  pub speed_cap: f64,
+}
+
+impl Default for VswipeConfig {
+  fn default() -> Self {
+    Self {
+      enable_horizontal: true,
+      enable_vertical: true,
+      enable_free_movement: false,
+      enable_smooth_transition: false,
+      duration_ms: 180,
+      background: [0.1, 0.1, 0.1, 1.0],
+      fingers: 4,
+      gap: 32.0,
+      threshold: 0.35,
+      delta_threshold: 24.0,
+      speed_factor: 256.0,
+      speed_cap: 0.05,
     }
   }
 }
@@ -3505,6 +3597,77 @@ mod tests {
         assert!(ShingleConfig::parse(&yaml, ConfigFormat::Yaml).is_err());
       }
     }
+  }
+
+  #[test]
+  fn vswipe_imports_every_option_and_validates() {
+    let text = concat!(
+      "[core]\nplugins = vswipe\n[vswipe]\n",
+      "enable_horizontal = false\nenable_vertical = false\n",
+      "enable_free_movement = true\nenable_smooth_transition = true\n",
+      "duration = 250ms circle\nbackground = \\#FF000080\n",
+      "fingers = 3\ngap = 12.5\nthreshold = 0.5\n",
+      "delta_threshold = 30\nspeed_factor = 128\nspeed_cap = 0.1\n",
+    );
+    let (config, warnings) =
+      ShingleConfig::parse_with_warnings(text, ConfigFormat::Wayfire).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(config.plugin_enabled("vswipe"));
+    assert_eq!(
+      config.vswipe,
+      VswipeConfig {
+        enable_horizontal: false,
+        enable_vertical: false,
+        enable_free_movement: true,
+        enable_smooth_transition: true,
+        duration_ms: 250,
+        background: [1.0, 0.0, 0.0, 128.0 / 255.0],
+        fingers: 3,
+        gap: 12.5,
+        threshold: 0.5,
+        delta_threshold: 30.0,
+        speed_factor: 128.0,
+        speed_cap: 0.1,
+      }
+    );
+    // Wayfire's defaults are Shingle's.
+    let wayfire =
+      ShingleConfig::parse("[core]\nplugins = vswipe\n", ConfigFormat::Wayfire)
+        .unwrap();
+    assert_eq!(wayfire.vswipe, VswipeConfig::default());
+    // Without vswipe in the list its section is not read, and the plugin
+    // is off.
+    let unlisted = ShingleConfig::parse(
+      "[core]\nplugins = vswitch\n[vswipe]\nfingers = 3\n",
+      ConfigFormat::Wayfire,
+    )
+    .unwrap();
+    assert!(!unlisted.plugin_enabled("vswipe"));
+    assert_eq!(unlisted.vswipe.fingers, 4);
+    // Bad values warn and keep the default.
+    for line in [
+      "fingers = 0",
+      "speed_factor = 0",
+      "speed_cap = -1",
+      "gap = -2",
+      "threshold = nan",
+      "background = 2 0 0 1",
+    ] {
+      let text = format!("[core]\nplugins = vswipe\n[vswipe]\n{line}\n");
+      let (config, warnings) =
+        ShingleConfig::parse_with_warnings(&text, ConfigFormat::Wayfire)
+          .unwrap();
+      assert_eq!(warnings.len(), 1, "{line}: {warnings:?}");
+      assert_eq!(config.vswipe, VswipeConfig::default(), "{line}");
+    }
+    let yaml = "vswipe:\n  fingers: 3\n  enable_free_movement: true\n";
+    let yaml = ShingleConfig::parse(yaml, ConfigFormat::Yaml).unwrap();
+    assert_eq!(yaml.vswipe.fingers, 3);
+    assert!(yaml.vswipe.enable_free_movement);
+    assert!(
+      ShingleConfig::parse("vswipe:\n  speed_factor: 0\n", ConfigFormat::Yaml)
+        .is_err()
+    );
   }
 
   #[test]

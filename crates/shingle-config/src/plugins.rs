@@ -7,7 +7,8 @@
 //! holds for such a plugin: its bindings, effects, animations, rules and
 //! autostart entries. The rest is checked where it is used, through
 //! [`ShingleConfig::plugin_enabled`]: tiling (`simple-tile`), touch
-//! gestures (`extra-gestures`), Scale's title filter
+//! gestures (`extra-gestures`), touchpad workspace swipes (`vswipe`),
+//! Scale's title filter
 //! (`scale-title-filter`) and the protocols of Wayfire's protocol plugins.
 //! IPC is not a plugin here: `--ipc` governs it, so `ipc` and `ipc-rules`
 //! are always on.
@@ -43,6 +44,7 @@ pub const PLUGINS: &[&str] = &[
   "shortcuts-inhibit",
   "simple-tile",
   "switcher",
+  "vswipe",
   "vswitch",
   "wayfire-shell",
   "window-rules",

@@ -45,6 +45,7 @@ const SECTIONS: &[&str] = &[
   "shortcuts-inhibit",
   "simple-tile",
   "switcher",
+  "vswipe",
   "vswitch",
   "wayfire-shell",
   "window-rules",
@@ -925,6 +926,30 @@ fn apply(
     ("core", "exit") => {
       config.keybindings.quit = import::binding(value, notes)?
     }
+    ("vswipe", "enable_horizontal") => {
+      config.vswipe.enable_horizontal = boolean(value)?
+    }
+    ("vswipe", "enable_vertical") => {
+      config.vswipe.enable_vertical = boolean(value)?
+    }
+    ("vswipe", "enable_free_movement") => {
+      config.vswipe.enable_free_movement = boolean(value)?
+    }
+    ("vswipe", "enable_smooth_transition") => {
+      config.vswipe.enable_smooth_transition = boolean(value)?
+    }
+    ("vswipe", "duration") => config.vswipe.duration_ms = duration_ms(value)?,
+    ("vswipe", "background") => {
+      config.vswipe.background = crate::parse_color(value)?
+    }
+    ("vswipe", "fingers") => config.vswipe.fingers = number(value)?,
+    ("vswipe", "gap") => config.vswipe.gap = number(value)?,
+    ("vswipe", "threshold") => config.vswipe.threshold = number(value)?,
+    ("vswipe", "delta_threshold") => {
+      config.vswipe.delta_threshold = number(value)?
+    }
+    ("vswipe", "speed_factor") => config.vswipe.speed_factor = number(value)?,
+    ("vswipe", "speed_cap") => config.vswipe.speed_cap = number(value)?,
     ("vswitch", "duration") => config.vswitch.duration_ms = duration_ms(value)?,
     ("vswitch", "gap") => config.vswitch.gap = number(value)?,
     ("vswitch", "background") => {
@@ -1270,7 +1295,6 @@ mod tests {
         305,
         "[place] mode: unknown placement mode; keeping the default",
       ),
-      (376, "[vswipe] belongs to a plugin"),
       (
         417,
         "window rule workspace 5,5 is outside the 3x3 workspace grid",
