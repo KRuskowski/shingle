@@ -10,10 +10,11 @@
 //!
 //! tools/native_test/present_check.py compares these with the page flips
 //! Shingle logs with `SHINGLE_TRACE_FLIPS=1`. It is an ordinary client and
-//! safe in any compositor.
+//! safe in any compositor. With `--tearing` it asks for asynchronous
+//! presentation through `wp_tearing_control_v1` (NB-10).
 //!
 //! ```text
-//! present_probe [FRAMES]
+//! present_probe [--tearing] [FRAMES]
 //! ```
 
 use std::{
@@ -29,7 +30,12 @@ use wayland_client::{
   },
 };
 use wayland_protocols::{
-  wp::presentation_time::client::{wp_presentation, wp_presentation_feedback},
+  wp::{
+    presentation_time::client::{wp_presentation, wp_presentation_feedback},
+    tearing_control::v1::client::{
+      wp_tearing_control_manager_v1, wp_tearing_control_v1,
+    },
+  },
   xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
 };
 
@@ -40,6 +46,7 @@ struct Globals {
   shm: Option<wl_shm::WlShm>,
   wm_base: Option<xdg_wm_base::XdgWmBase>,
   presentation: Option<wp_presentation::WpPresentation>,
+  tearing: Option<wp_tearing_control_manager_v1::WpTearingControlManagerV1>,
 }
 
 /// The probe's state.
@@ -171,6 +178,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
       }
       "wp_presentation" => {
         globals.presentation = Some(registry.bind(name, 1, handle, ()));
+      }
+      "wp_tearing_control_manager_v1" => {
+        globals.tearing = Some(registry.bind(name, 1, handle, ()));
       }
       _ => {}
     }
@@ -320,23 +330,29 @@ ignore_events!(
   wl_shm_pool::WlShmPool,
   wl_buffer::WlBuffer,
   wp_presentation::WpPresentation,
+  wp_tearing_control_manager_v1::WpTearingControlManagerV1,
+  wp_tearing_control_v1::WpTearingControlV1,
 );
 
-/// The frame count from the arguments, 300 by default.
-fn frames(args: &[String]) -> Result<u32, String> {
+/// The frame count from the arguments, 300 by default, and whether
+/// `--tearing` asks for asynchronous presentation.
+fn frames(args: &[String]) -> Result<(u32, bool), String> {
+  let tearing = args.first().is_some_and(|arg| arg == "--tearing");
+  let args = &args[usize::from(tearing)..];
   match args {
-    [] => Ok(300),
+    [] => Ok((300, tearing)),
     [count] => count
       .parse()
+      .map(|frames| (frames, tearing))
       .map_err(|_| format!("not a frame count: {count}")),
-    _ => Err("usage: present_probe [FRAMES]".into()),
+    _ => Err("usage: present_probe [--tearing] [FRAMES]".into()),
   }
 }
 
 fn main() -> std::process::ExitCode {
   let args: Vec<String> = std::env::args().skip(1).collect();
-  let frames = match frames(&args) {
-    Ok(frames) => frames,
+  let (frames, tearing) = match frames(&args) {
+    Ok(parsed) => parsed,
     Err(message) => {
       eprintln!("{message}");
       return std::process::ExitCode::from(2);
@@ -376,6 +392,21 @@ fn main() -> std::process::ExitCode {
     eprintln!("present_probe: no wp_presentation");
   }
   let surface = compositor.create_surface(&handle, ());
+  // The hint applies with the first commit and lasts while the object
+  // does.
+  let _tearing = match (tearing, &probe.globals.tearing) {
+    (false, _) => None,
+    (true, Some(manager)) => {
+      let control = manager.get_tearing_control(&surface, &handle, ());
+      control
+        .set_presentation_hint(wp_tearing_control_v1::PresentationHint::Async);
+      Some(control)
+    }
+    (true, None) => {
+      eprintln!("present_probe: no wp_tearing_control_manager_v1");
+      return std::process::ExitCode::FAILURE;
+    }
+  };
   let xdg_surface = wm_base.get_xdg_surface(&surface, &handle, ());
   let toplevel = xdg_surface.get_toplevel(&handle, ());
   toplevel.set_app_id("present_probe".into());
@@ -395,10 +426,13 @@ mod tests {
   use super::*;
 
   #[test]
-  fn the_frame_count_is_the_only_argument() {
-    assert_eq!(frames(&[]), Ok(300));
-    assert_eq!(frames(&["5".into()]), Ok(5));
+  fn the_frame_count_follows_an_optional_tearing_flag() {
+    assert_eq!(frames(&[]), Ok((300, false)));
+    assert_eq!(frames(&["5".into()]), Ok((5, false)));
+    assert_eq!(frames(&["--tearing".into()]), Ok((300, true)));
+    assert_eq!(frames(&["--tearing".into(), "7".into()]), Ok((7, true)));
     assert!(frames(&["x".into()]).is_err());
     assert!(frames(&["1".into(), "2".into()]).is_err());
+    assert!(frames(&["7".into(), "--tearing".into()]).is_err());
   }
 }

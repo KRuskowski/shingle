@@ -3,11 +3,12 @@
 
 Usage:
   tools/native_test/present_check.py [--output NAME]
-      [--scanout zero-copy|copy] NATIVE_LOG PROBE_OUTPUT
+      [--scanout zero-copy|copy] [--tearing] [--vrr] NATIVE_LOG PROBE_OUTPUT
 
 NATIVE_LOG is Shingle's native.log from a run with SHINGLE_TRACE_FLIPS=1,
 which has a line `shingle: OUTPUT: page flip seq=S at SEC.NSEC s` for
-every flip it presented (`shingle: page flip ...` before MO-7). With
+every flip it presented (`shingle: page flip ...` before MO-7), ending
+in ` async` for a flip that did not wait for the vblank (NB-10). With
 several outputs lit, each CRTC counts its own vblanks, so `--output NAME`
 takes only the flips of the output the probe is on. PROBE_OUTPUT is the
 JSON-line output of the present_probe example
@@ -18,13 +19,18 @@ JSON-line output of the present_probe example
 - every frame callback's time is a logged flip's time in milliseconds, at
   or after the commit it answers, and callbacks never go back in time;
 - presented sequences strictly increase and carry the flags
-  vsync | hw_clock | hw_completion;
+  vsync | hw_clock | hw_completion, or with `--tearing` (a probe run with
+  `--tearing`, NB-10's async flips) hw_clock | hw_completion without
+  vsync;
+- with `--vrr`, every presented frame has a refresh of 0, as for an
+  output with variable refresh (NB-10);
 - with `--scanout zero-copy`, every presented frame also carries
   zero_copy, and with `--scanout copy` none does (NB-8's zero-copy
   scanout, and copy scanout as SHINGLE_SCANOUT=copy forces it).
 
-It prints the number of flips, of presented and discarded feedback and of
-frames presented as zero-copy, the largest difference between a feedback
+It prints the number of flips, of presented and discarded feedback, of
+frames presented as zero-copy, without vsync and with a refresh of 0,
+the largest difference between a feedback
 and its flip, and the median time between frame callbacks, which is one
 refresh when every frame makes the next vblank.
 
@@ -39,7 +45,9 @@ import sys
 FLIP = re.compile(
     r'(?:shingle: )?(?:(\S+): )?page flip seq=(\d+) at (\d+)\.(\d{9}) s')
 # wp_presentation_feedback.kind: vsync, hw_clock and hw_completion.
-FLIP_FLAGS = 0x1 | 0x2 | 0x4
+VSYNC = 0x1
+HARDWARE = 0x2 | 0x4
+FLIP_FLAGS = VSYNC | HARDWARE
 # wp_presentation_feedback.kind.zero_copy.
 ZERO_COPY = 0x8
 TOLERANCE_NS = 1_000_000
@@ -67,10 +75,12 @@ def parse_probe(lines):
       events.append(json.loads(line))
   return events
 
-def check(flips, events, scanout=None):
+def check(flips, events, scanout=None, tearing=False, vrr=False):
   """Returns (problems, statistics) for the probe's events. `scanout` is
   'zero-copy' or 'copy' to require every presented frame to carry the
-  zero_copy flag or none to, or None to accept either."""
+  zero_copy flag or none to, or None to accept either. With `tearing`
+  every presented frame must be an async flip, without vsync, and with
+  `vrr` have a refresh of 0."""
   problems = []
   commits = {}
   flip_ms = {(time // 1_000_000) & 0xffffffff for time in flips.values()}
@@ -105,8 +115,16 @@ def check(flips, events, scanout=None):
       if last_seq is not None and seq <= last_seq:
         problems.append(f'frame {n}: seq {seq} after {last_seq}')
       last_seq = seq
-      if event['flags'] & FLIP_FLAGS != FLIP_FLAGS:
-        problems.append(f'frame {n}: flags {event["flags"]:#x}')
+      flags = event['flags']
+      if tearing:
+        if flags & HARDWARE != HARDWARE or flags & VSYNC:
+          problems.append(f'frame {n}: flags {flags:#x}, not an async flip')
+      elif flags & FLIP_FLAGS != FLIP_FLAGS:
+        problems.append(f'frame {n}: flags {flags:#x}')
+      if vrr and event['refresh'] != 0:
+        problems.append(
+            f'frame {n}: refresh {event["refresh"]}, not 0 for variable '
+            'refresh')
       zero_copy = bool(event['flags'] & ZERO_COPY)
       if scanout == 'zero-copy' and not zero_copy:
         problems.append(f'frame {n}: not presented as zero-copy')
@@ -122,6 +140,11 @@ def check(flips, events, scanout=None):
       'discarded': sum(1 for e in events if e.get('event') == 'discarded'),
       'zero_copy': sum(1 for e in events if e.get('event') == 'presented'
                        and e['flags'] & ZERO_COPY),
+      'tearing': sum(1 for e in events if e.get('event') == 'presented'
+                     and not e['flags'] & VSYNC),
+      'variable_refresh': sum(1 for e in events
+                              if e.get('event') == 'presented'
+                              and e['refresh'] == 0),
       'max_difference_ns': max(differences, default=0),
       'median_frame_interval_ms': median,
   }
@@ -135,6 +158,10 @@ def parse_args(argv):
   parser.add_argument('--output', help='check only this output\'s flips')
   parser.add_argument('--scanout', choices=('zero-copy', 'copy'),
                       help='require every frame to be presented this way')
+  parser.add_argument('--tearing', action='store_true',
+                      help='require every frame to be an async flip')
+  parser.add_argument('--vrr', action='store_true',
+                      help='require a refresh of 0 in every frame')
   parser.add_argument('native_log')
   parser.add_argument('probe_output')
   try:
@@ -151,7 +178,8 @@ def main(argv):
     flips = parse_flips(log, args.output)
   with open(args.probe_output, encoding='utf-8') as probe:
     events = parse_probe(probe)
-  problems, statistics = check(flips, events, args.scanout)
+  problems, statistics = check(flips, events, args.scanout, args.tearing,
+                               args.vrr)
   print(json.dumps(statistics))
   for problem in problems:
     print(problem)

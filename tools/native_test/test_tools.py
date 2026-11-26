@@ -149,12 +149,38 @@ class PresentCheckTest(unittest.TestCase):
     self.assertEqual(problems, ['frame 0: not presented as zero-copy'])
     self.assertEqual(statistics['zero_copy'], 0)
 
+  def test_async_flips_can_be_required(self):
+    log = self.LOG + ['shingle: page flip seq=12 at 100.040000000 s async']
+    flips = present_check.parse_flips(log)
+    self.assertEqual(flips[12], 100_040_000_000, 'an async line is a flip')
+    torn = self.events(flags=0x6)
+    problems, statistics = present_check.check(flips, torn)
+    self.assertEqual(problems, ['frame 0: flags 0x6'])
+    self.assertEqual(statistics['tearing'], 1)
+    problems, _ = present_check.check(flips, torn, tearing=True)
+    self.assertEqual(problems, [])
+    problems, _ = present_check.check(flips, self.events(), tearing=True)
+    self.assertEqual(problems, ['frame 0: flags 0x7, not an async flip'])
+
+  def test_variable_refresh_can_be_required(self):
+    flips = present_check.parse_flips(self.LOG)
+    events = self.events()
+    problems, statistics = present_check.check(flips, events, vrr=True)
+    self.assertEqual(
+        problems, ['frame 0: refresh 16666666, not 0 for variable refresh'])
+    self.assertEqual(statistics['variable_refresh'], 0)
+    events[-1]['refresh'] = 0
+    problems, statistics = present_check.check(flips, events, vrr=True)
+    self.assertEqual((problems, statistics['variable_refresh']), ([], 1))
+
   def test_options_are_parsed(self):
     args = present_check.parse_args(
         ['--output', 'DP-1', '--scanout', 'copy', 'log', 'probe'])
     self.assertEqual((args.output, args.scanout, args.native_log,
                       args.probe_output), ('DP-1', 'copy', 'log', 'probe'))
     self.assertIsNone(present_check.parse_args(['--scanout', 'gbm', 'a', 'b']))
+    args = present_check.parse_args(['--tearing', '--vrr', 'log', 'probe'])
+    self.assertEqual((args.tearing, args.vrr), (True, True))
     self.assertIsNone(present_check.parse_args(['only-one']))
 
   def test_no_feedback_fails(self):
