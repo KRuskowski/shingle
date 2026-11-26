@@ -786,99 +786,171 @@ impl GpuContext {
     let caps = self
       .dmabuf()
       .map_err(|reason| ImportError::Unavailable(reason.clone()))?;
-    let kind = match usage {
-      DmabufUse::Sample(_) => ForeignKind::Sampled,
-      DmabufUse::Render => ForeignKind::Render,
-    };
-    let plan = plan_import(caps, descriptor, kind)?;
-    let fd = descriptor
-      .fd
-      .try_clone_to_owned()
-      .map_err(ImportError::Dup)?;
-    let (hal_usage, usage_flags, initial_state) = match kind {
-      ForeignKind::Sampled => (
-        wgpu::TextureUses::RESOURCE,
-        wgpu::TextureUsages::TEXTURE_BINDING,
-        wgpu::TextureUses::RESOURCE,
-      ),
-      ForeignKind::Render => (
-        wgpu::TextureUses::COLOR_TARGET,
-        wgpu::TextureUsages::RENDER_ATTACHMENT,
-        wgpu::TextureUses::UNINITIALIZED,
-      ),
-    };
-    let size = wgpu::Extent3d {
+    import(
+      self.device(),
+      caps,
+      &|texture, filter| self.bind_texture(texture, filter),
+      descriptor,
+      usage,
+    )
+  }
+}
+
+/// Imports DMA-BUFs into a [`GpuContext`]'s device without the context:
+/// clones of its device, queue, texture layout and samplers, and its
+/// [`DmabufCaps`]. The compositor's linux-dmabuf importer and texture
+/// cache hold one ([`GpuContext::texture_importer`]); every clone imports
+/// into the same device, so its textures draw with the context's targets.
+#[derive(Clone)]
+pub struct TextureImporter {
+  pub(crate) device: wgpu::Device,
+  pub(crate) queue: wgpu::Queue,
+  pub(crate) layout: wgpu::BindGroupLayout,
+  pub(crate) linear_sampler: wgpu::Sampler,
+  pub(crate) nearest_sampler: wgpu::Sampler,
+  pub(crate) caps: DmabufCaps,
+}
+
+impl TextureImporter {
+  /// What the device can import.
+  pub fn caps(&self) -> &DmabufCaps {
+    &self.caps
+  }
+
+  /// The device textures are imported into.
+  pub fn device(&self) -> &wgpu::Device {
+    &self.device
+  }
+
+  /// The device's queue, for example to learn when submitted frames that
+  /// sample imports have finished (`Queue::on_submitted_work_done`).
+  pub fn queue(&self) -> &wgpu::Queue {
+    &self.queue
+  }
+
+  /// [`GpuContext::import_dmabuf`] on the context this was made from.
+  pub fn import(
+    &self,
+    descriptor: &DmabufDescriptor<'_>,
+    usage: DmabufUse,
+  ) -> Result<ImportedTexture, ImportError> {
+    import(
+      &self.device,
+      &self.caps,
+      &|texture, filter| {
+        let sampler = match filter {
+          TextureFilter::Linear => &self.linear_sampler,
+          TextureFilter::Nearest => &self.nearest_sampler,
+        };
+        crate::gpu::bind_texture(&self.device, &self.layout, sampler, texture)
+      },
+      descriptor,
+      usage,
+    )
+  }
+}
+
+/// The import itself, on `device`, which was opened as `caps` says, with
+/// `bind` making a sampled texture's bind group.
+fn import(
+  device: &wgpu::Device,
+  caps: &DmabufCaps,
+  bind: &dyn Fn(&wgpu::Texture, TextureFilter) -> wgpu::BindGroup,
+  descriptor: &DmabufDescriptor<'_>,
+  usage: DmabufUse,
+) -> Result<ImportedTexture, ImportError> {
+  let kind = match usage {
+    DmabufUse::Sample(_) => ForeignKind::Sampled,
+    DmabufUse::Render => ForeignKind::Render,
+  };
+  let plan = plan_import(caps, descriptor, kind)?;
+  let fd = descriptor
+    .fd
+    .try_clone_to_owned()
+    .map_err(ImportError::Dup)?;
+  let (hal_usage, usage_flags, initial_state) = match kind {
+    ForeignKind::Sampled => (
+      wgpu::TextureUses::RESOURCE,
+      wgpu::TextureUsages::TEXTURE_BINDING,
+      wgpu::TextureUses::RESOURCE,
+    ),
+    ForeignKind::Render => (
+      wgpu::TextureUses::COLOR_TARGET,
+      wgpu::TextureUsages::RENDER_ATTACHMENT,
+      wgpu::TextureUses::UNINITIALIZED,
+    ),
+  };
+  let size = wgpu::Extent3d {
+    width: descriptor.width,
+    height: descriptor.height,
+    depth_or_array_layers: 1,
+  };
+  let hal_descriptor = wgpu::hal::TextureDescriptor {
+    label: Some("shingle dmabuf"),
+    size,
+    mip_level_count: 1,
+    sample_count: 1,
+    dimension: wgpu::TextureDimension::D2,
+    format: plan.format,
+    usage: hal_usage,
+    memory_flags: wgpu::hal::MemoryFlags::empty(),
+    view_formats: Vec::new(),
+  };
+  let hal_texture = {
+    // SAFETY: the device was opened with VULKAN_EXTERNAL_MEMORY_DMA_BUF
+    // (`dmabuf()` is Ok only then), and the modifier, offset and stride
+    // describe the buffer as the caller declared it.
+    let device = unsafe { device.as_hal::<Vulkan>() }
+      .ok_or(ImportError::Unavailable(DmabufUnavailable::NotVulkan))?;
+    unsafe {
+      device.texture_from_dmabuf_fd(
+        fd,
+        &hal_descriptor,
+        descriptor.modifier,
+        u64::from(descriptor.stride),
+        u64::from(descriptor.offset),
+      )
+    }
+    .map_err(|error| ImportError::Device(error.to_string()))?
+  };
+  // SAFETY: the handle stays valid as long as the wgpu texture below.
+  let image = unsafe { hal_texture.raw_handle() };
+  // SAFETY: created from this device with this descriptor; the initial
+  // state is the layout the first acquire barrier moves it to (sampled)
+  // or one whose contents may be discarded (render).
+  let texture = unsafe {
+    device.create_texture_from_hal::<Vulkan>(
+      hal_texture,
+      &wgpu::TextureDescriptor {
+        label: Some("shingle dmabuf"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: plan.format,
+        usage: usage_flags,
+        view_formats: &[],
+      },
+      initial_state,
+    )
+  };
+  let foreign = ForeignImage { image, kind };
+  let sampled = match usage {
+    DmabufUse::Sample(filter) => Some(GpuTexture {
+      bind_group: bind(&texture, filter),
+      texture: texture.clone(),
       width: descriptor.width,
       height: descriptor.height,
-      depth_or_array_layers: 1,
-    };
-    let hal_descriptor = wgpu::hal::TextureDescriptor {
-      label: Some("shingle dmabuf"),
-      size,
-      mip_level_count: 1,
-      sample_count: 1,
-      dimension: wgpu::TextureDimension::D2,
-      format: plan.format,
-      usage: hal_usage,
-      memory_flags: wgpu::hal::MemoryFlags::empty(),
-      view_formats: Vec::new(),
-    };
-    let hal_texture = {
-      // SAFETY: the device was opened with VULKAN_EXTERNAL_MEMORY_DMA_BUF
-      // (`dmabuf()` is Ok only then), and the modifier, offset and stride
-      // describe the buffer as the caller declared it.
-      let device = unsafe { self.device().as_hal::<Vulkan>() }
-        .ok_or(ImportError::Unavailable(DmabufUnavailable::NotVulkan))?;
-      unsafe {
-        device.texture_from_dmabuf_fd(
-          fd,
-          &hal_descriptor,
-          descriptor.modifier,
-          u64::from(descriptor.stride),
-          u64::from(descriptor.offset),
-        )
-      }
-      .map_err(|error| ImportError::Device(error.to_string()))?
-    };
-    // SAFETY: the handle stays valid as long as the wgpu texture below.
-    let image = unsafe { hal_texture.raw_handle() };
-    // SAFETY: created from this device with this descriptor; the initial
-    // state is the layout the first acquire barrier moves it to (sampled)
-    // or one whose contents may be discarded (render).
-    let texture = unsafe {
-      self.device().create_texture_from_hal::<Vulkan>(
-        hal_texture,
-        &wgpu::TextureDescriptor {
-          label: Some("shingle dmabuf"),
-          size,
-          mip_level_count: 1,
-          sample_count: 1,
-          dimension: wgpu::TextureDimension::D2,
-          format: plan.format,
-          usage: usage_flags,
-          view_formats: &[],
-        },
-        initial_state,
-      )
-    };
-    let foreign = ForeignImage { image, kind };
-    let sampled = match usage {
-      DmabufUse::Sample(filter) => Some(GpuTexture {
-        bind_group: self.bind_texture(&texture, filter),
-        texture: texture.clone(),
-        width: descriptor.width,
-        height: descriptor.height,
-        flags: plan.flags,
-        foreign: Some(foreign),
-      }),
-      DmabufUse::Render => None,
-    };
-    Ok(ImportedTexture {
-      texture,
-      sampled,
-      foreign,
-    })
-  }
+      flags: plan.flags,
+      foreign: Some(foreign),
+    }),
+    DmabufUse::Render => None,
+  };
+  Ok(ImportedTexture {
+    texture,
+    sampled,
+    foreign,
+  })
 }
 
 /// Vulkan instance-level queries on one physical device.

@@ -184,6 +184,21 @@ impl GpuContext {
     self.foreign_barriers
   }
 
+  /// A handle that imports DMA-BUFs for sampling without the context,
+  /// for the compositor's linux-dmabuf importer, or `None` when the device
+  /// cannot import them ([`GpuContext::dmabuf`]).
+  pub fn texture_importer(&self) -> Option<dmabuf::TextureImporter> {
+    let caps = self.dmabuf.as_ref().ok()?;
+    Some(dmabuf::TextureImporter {
+      device: self.device.clone(),
+      queue: self.queue.clone(),
+      layout: self.texture_layout.clone(),
+      linear_sampler: self.linear_sampler.clone(),
+      nearest_sampler: self.nearest_sampler.clone(),
+      caps: caps.clone(),
+    })
+  }
+
   /// A bind group sampling all of `texture` with `filter`.
   pub(crate) fn bind_texture(
     &self,
@@ -519,7 +534,7 @@ fn upload_texture(
   })
 }
 
-fn bind_texture(
+pub(crate) fn bind_texture(
   device: &wgpu::Device,
   layout: &wgpu::BindGroupLayout,
   sampler: &wgpu::Sampler,

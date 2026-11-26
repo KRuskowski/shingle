@@ -32,7 +32,7 @@ use thiserror::Error;
 
 pub use dmabuf::{
   DmabufCaps, DmabufDescriptor, DmabufUnavailable, DmabufUse, ForeignAccess,
-  ImportError, ImportedTexture,
+  ImportError, ImportedTexture, TextureImporter,
 };
 pub use draw::{draw, draw_with_access};
 pub use gpu::{AdapterFilter, GpuContext, GpuOptions, TextureFilter};
@@ -162,7 +162,9 @@ pub fn split_preview(
 }
 
 /// A client or UI texture uploaded with [`GpuContext::create_texture`], or
-/// a DMA-BUF imported with [`GpuContext::import_dmabuf`].
+/// a DMA-BUF imported with [`GpuContext::import_dmabuf`]. Clones share the
+/// texture and its bind group.
+#[derive(Clone)]
 pub struct GpuTexture {
   texture: wgpu::Texture,
   bind_group: wgpu::BindGroup,
@@ -184,6 +186,11 @@ impl GpuTexture {
   /// Height in texels, as uploaded.
   pub fn height(&self) -> u32 {
     self.height
+  }
+
+  /// Whether this is an imported DMA-BUF, which cannot be written to.
+  pub fn is_imported(&self) -> bool {
+    self.foreign.is_some()
   }
 }
 
