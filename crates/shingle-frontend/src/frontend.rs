@@ -282,8 +282,10 @@ impl Frontend {
 
   /// Offers linux-dmabuf to clients if `gpu` can import DMA-BUFs, has a
   /// render node to advertise and `SHINGLE_DMABUF` is not `0`, and logs
-  /// one line saying which (docs/design/dmabuf.md, section 9). Returns
-  /// whether the global is offered. Hosts call it once their renderer
+  /// one line saying which (docs/design/dmabuf.md, section 9). With it,
+  /// it offers linux-drm-syncobj too, unless `SHINGLE_SYNCOBJ` is `0` or
+  /// the render node lacks explicit sync, and logs a second line. Returns
+  /// whether linux-dmabuf is offered. Hosts call it once their renderer
   /// exists and before [`Frontend::start_clients`], and again with the
   /// new context after a GPU loss.
   pub fn enable_dmabuf(&mut self, gpu: &GpuContext) -> bool {
@@ -312,11 +314,27 @@ impl Frontend {
           dev_major(device),
           dev_minor(device)
         );
+        self.enable_syncobj();
         true
       }
       Err(error) => {
         eprintln!("shingle: no linux-dmabuf: {error}");
         false
+      }
+    }
+  }
+
+  /// Offers linux-drm-syncobj on linux-dmabuf's render node unless
+  /// `SHINGLE_SYNCOBJ=0`, and logs whether it did.
+  fn enable_syncobj(&mut self) {
+    let allowed = crate::dmabuf::syncobj_allowed(
+      std::env::var_os("SHINGLE_SYNCOBJ").as_deref(),
+    );
+    match allowed.map(|()| self.compositor.enable_syncobj()) {
+      Err(reason) => eprintln!("shingle: {reason}"),
+      Ok(Ok(line)) => eprintln!("shingle: {line}"),
+      Ok(Err(error)) => {
+        eprintln!("shingle: no linux-drm-syncobj, implicit sync only: {error}");
       }
     }
   }

@@ -283,5 +283,16 @@ pub(crate) fn feedback(
   })
 }
 
+/// Whether to try `linux-drm-syncobj-v1`: not with `SHINGLE_SYNCOBJ=0`
+/// (`variable`). Returns the log line saying why not.
+pub(crate) fn syncobj_allowed(variable: Option<&OsStr>) -> Result<(), String> {
+  if variable.is_some_and(|value| value == "0") {
+    return Err(
+      "linux-drm-syncobj is off: SHINGLE_SYNCOBJ=0 forces implicit sync".into(),
+    );
+  }
+  Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod tests;

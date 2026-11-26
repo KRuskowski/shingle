@@ -171,6 +171,14 @@ fn the_feedback_lists_every_sampling_pair_on_the_render_node() {
 }
 
 #[test]
+fn syncobj_is_tried_unless_forced_off() {
+  assert!(super::syncobj_allowed(None).is_ok());
+  assert!(super::syncobj_allowed(Some(OsStr::new("1"))).is_ok());
+  let forced = super::syncobj_allowed(Some(OsStr::new("0")));
+  assert!(forced.is_err_and(|reason| reason.contains("SHINGLE_SYNCOBJ=0")));
+}
+
+#[test]
 fn no_feedback_when_forced_off_unable_or_without_a_render_node() {
   let caps_without_node = caps(None);
   let forced = feedback(Some(OsStr::new("0")), Ok(&caps(Some((226, 128)))));
