@@ -317,7 +317,25 @@ fn describe(device: &Device, key: DeviceKey) -> DeviceDescription {
       gesture: device.has_capability(DeviceCapability::Gesture),
     },
     tap_fingers: device.config_tap_finger_count(),
+    udev: udev_properties(device),
   }
+}
+
+/// The udev properties a per-device config entry may name, with their
+/// values, in Wayfire's order.
+fn udev_properties(device: &Device) -> Vec<(String, String)> {
+  // SAFETY: libinput's udev backend created the device from its own udev
+  // context, which the returned handle references.
+  let Some(udev) = (unsafe { device.udev_device() }) else {
+    return Vec::new();
+  };
+  shingle_config::UDEV_PROPERTIES
+    .iter()
+    .filter_map(|name| {
+      let value = udev.property_value(name)?.to_str()?;
+      Some(((*name).to_owned(), value.to_owned()))
+    })
+    .collect()
 }
 
 /// Applies one setting; a device that does not support it says so, which
@@ -383,6 +401,13 @@ fn apply(device: &mut Device, setting: Setting) {
     Setting::NaturalScroll(enabled) => {
       if device.config_scroll_has_natural_scroll() {
         device.config_scroll_set_natural_scroll_enabled(enabled)
+      } else {
+        Ok(())
+      }
+    }
+    Setting::Calibration(matrix) => {
+      if device.config_calibration_has_matrix() {
+        device.config_calibration_set_matrix(matrix)
       } else {
         Ok(())
       }

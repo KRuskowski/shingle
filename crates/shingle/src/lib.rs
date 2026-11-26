@@ -126,7 +126,9 @@ use calloop::{
   signals::{Signal, Signals},
 };
 pub use input::{Axis, AxisSource, Modifiers};
-pub use input_device::{InputDeviceId, InputDeviceInfo, InputDeviceKind};
+pub use input_device::{
+  InputDeviceId, InputDeviceInfo, InputDeviceKind, InputDeviceSections,
+};
 pub use modifier_binding::{ModifierBindingTracker, modifier_of_key};
 pub use output::{
   HeadRequest, HeadState, MoveGeometry, OutputAction, OutputHandle, OutputInfo,
@@ -1439,6 +1441,17 @@ impl Compositor {
   /// up from 1 and are not reused.
   pub fn add_input_device(&mut self, info: InputDeviceInfo) -> InputDeviceId {
     input_device::add(&mut self.state, info)
+  }
+
+  /// Records which config sections a backend applied to seat device `id`,
+  /// which `input/list-devices` reports as `input-section` and
+  /// `input-device-section`. Returns whether the device is registered.
+  pub fn set_input_device_sections(
+    &mut self,
+    id: InputDeviceId,
+    sections: InputDeviceSections,
+  ) -> bool {
+    input_device::set_sections(&mut self.state, id, sections)
   }
 
   /// Unregisters a seat input device, for example on a libinput

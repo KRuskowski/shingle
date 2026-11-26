@@ -64,7 +64,6 @@ use shingle::{
   Compositor, HeadState, InputDeviceId, InputDeviceKind, OutputHandle,
   OutputKind, OutputRequest,
 };
-use shingle_config::InputConfig;
 use shingle_frontend::{
   CursorPlane, Frontend,
   host::{Host, InputEvent},
@@ -77,8 +76,8 @@ use crate::{
   gpu::{FrameRenderer, GpuHealth, RenderFailure, RendererFactory, Verdict},
   hotplug::{DeviceMonitor, DrmEvent},
   input::{
-    DeviceInput, InputSource, NativeEvent, OutputGeometry, SendEvents,
-    Translator, device_settings, enabled_mode,
+    DeviceInput, DeviceOptions, InputSource, NativeEvent, OutputGeometry,
+    SendEvents, Translator,
   },
   outputs::OutputPolicy,
   session::{SeatEvent, Session},
@@ -163,8 +162,8 @@ pub struct Backend<S: Session, I: InputSource> {
   input: I,
   devices: DeviceRegistry,
   translator: Translator,
-  /// The `[input]` options for device configuration.
-  config: InputConfig,
+  /// The `[input]` and per-device options for device configuration.
+  config: DeviceOptions,
   /// The first lit output's size in pixels, which libinput transforms
   /// absolute and touch positions to before they are mapped onto their
   /// output or the layout.
@@ -214,7 +213,7 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     mut frontend: Frontend,
     session: Rc<RefCell<S>>,
     input: I,
-    config: InputConfig,
+    config: DeviceOptions,
     mut display: Display,
     rendering: Rendering,
   ) -> Result<Self, Box<dyn Error>> {
@@ -762,17 +761,25 @@ impl<S: Session, I: InputSource> Backend<S, I> {
 
   fn device_added(&mut self, device: crate::input::DeviceDescription) {
     let key = device.key.clone();
-    let settings = device_settings(&self.config, &device);
-    let enabled = enabled_mode(&self.config, &device);
+    let settings = self.config.settings(&device);
+    let enabled = self.config.enabled_mode(&device);
+    let sections = self.config.sections(&device);
     let name = device.name.clone();
     let keyboard = device.capabilities.keyboard;
     match self.devices.add(self.frontend.compositor_mut(), device) {
       Added::Ignored => return,
-      Added::New(ids) => diagnostics::log(&format!(
-        "input device {} ({name}) added as {}",
-        key.0,
-        id_list(&ids)
-      )),
+      Added::New(ids) => {
+        diagnostics::log(&format!(
+          "input device {} ({name}) added as {}, options from [{}]",
+          key.0,
+          id_list(&ids),
+          sections.input.as_deref().unwrap_or("input")
+        ));
+        let compositor = self.frontend.compositor_mut();
+        for id in ids {
+          compositor.set_input_device_sections(id, sections.clone());
+        }
+      }
       Added::Returned(_) => {}
     }
     if !settings.is_empty() {
@@ -835,10 +842,9 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       return;
     }
     let compositor = self.frontend.compositor();
-    let mapped = self
-      .devices
-      .owner(id)
-      .and_then(|owner| compositor.input_device_output(&owner.name));
+    let mapped = self.devices.owner(id).and_then(|owner| {
+      compositor.input_device_output(self.config.output_key(owner))
+    });
     let size = self.output_size;
     let map = |x, y| absolute_position(compositor, mapped.as_ref(), size, x, y);
     let clamp = |x, y| compositor.clamp_to_layout(x, y);
@@ -914,7 +920,7 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       .devices
       .wants_events(self.frontend.compositor(), &device.key)
     {
-      enabled_mode(&self.config, &device)
+      self.config.enabled_mode(&device)
     } else {
       SendEvents::Disabled
     };

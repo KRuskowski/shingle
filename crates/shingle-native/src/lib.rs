@@ -61,7 +61,7 @@ use crate::{
   gpu::{Card, FrameRenderer, GpuRenderer, RendererFactory},
   host::{Backend, Rendering},
   hotplug::UdevMonitor,
-  input::LibinputSource,
+  input::{DeviceOptions, LibinputSource},
   kms::{KmsDevice, drm::DrmDevice},
   outputs::OutputPolicy,
   scanout::ScanoutChoice,
@@ -196,7 +196,7 @@ pub fn run(
     .map_err(|error| StartError::Probe(format!("{SYS_CLASS_DRM}: {error}")))?;
   let forced = std::env::var_os("SHINGLE_DRM_DEVICE");
   let cards = gpu::card_order(&cards, forced.as_deref());
-  let input_config = config.input.clone();
+  let input_config = DeviceOptions::from_config(&config);
   let policy = OutputPolicy::from_config(&config);
   let (display, rendering, (frontend, input), devnode) = startup(
     || {

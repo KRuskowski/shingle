@@ -83,6 +83,19 @@ pub struct InputDeviceInfo {
   pub kind: InputDeviceKind,
 }
 
+/// The config sections whose options a backend applied to a device, as
+/// `input/list-devices` reports them: Wayfire's `[input:NAME]` (or
+/// `[input]`) for libinput options and `[input-device:NAME]` for the output
+/// and calibration. `None` where the backend applies none, as nested and
+/// headless do.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InputDeviceSections {
+  /// `input` or `input:NAME`.
+  pub input: Option<String>,
+  /// `input-device:NAME`, if one names the device.
+  pub input_device: Option<String>,
+}
+
 /// The keys, buttons and touch points one device holds down.
 #[derive(Default)]
 struct Held {
@@ -103,6 +116,7 @@ struct Device {
   info: InputDeviceInfo,
   enabled: bool,
   held: Held,
+  sections: InputDeviceSections,
 }
 
 /// The registered seat devices and the session state that gates them all.
@@ -136,9 +150,26 @@ pub(crate) fn add(
       info,
       enabled: true,
       held: Held::default(),
+      sections: InputDeviceSections::default(),
     },
   );
   id
+}
+
+/// Records which config sections apply to a device. Returns whether the
+/// device is registered.
+pub(crate) fn set_sections(
+  state: &mut CompositorState,
+  id: InputDeviceId,
+  sections: InputDeviceSections,
+) -> bool {
+  match state.input.devices.devices.get_mut(&id) {
+    Some(device) => {
+      device.sections = sections;
+      true
+    }
+    None => false,
+  }
 }
 
 /// Unregisters a device after releasing everything it holds. Returns
@@ -346,6 +377,8 @@ pub(crate) fn list_json(state: &CompositorState) -> Value {
             "product": unknown_or(device.info.product),
             "type": device.info.kind.wayfire_type(),
             "enabled": device.enabled,
+            "input-section": device.sections.input,
+            "input-device-section": device.sections.input_device,
         })
       })
       .collect(),

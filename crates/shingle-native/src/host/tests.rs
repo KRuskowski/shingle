@@ -24,8 +24,8 @@ use crate::{
   gpu::{RenderFailure, tests::FakeRenderer},
   hotplug::{DrmEvent, tests::FakeMonitor},
   input::{
-    Capabilities, DeviceDescription, DeviceInput, DeviceKey, NativeEvent,
-    ScrollAxis, ScrollSource, SendEvents, Setting,
+    AccelProfile, Capabilities, DeviceDescription, DeviceInput, DeviceKey,
+    NativeEvent, ScrollAxis, ScrollSource, SendEvents, Setting,
     tests::{FakeInput, POINTER, device, key},
   },
   kms::{
@@ -221,7 +221,7 @@ impl Fixture {
       frontend,
       Rc::clone(&session),
       FakeInput::default(),
-      config.input,
+      crate::input::DeviceOptions::from_config(&config),
       display,
       rendering,
     )
@@ -565,6 +565,132 @@ fn added_devices_are_configured_from_the_input_options() {
     fixture.send_events(),
     [(key("event9"), SendEvents::DisabledOnExternalMouse)]
   );
+}
+
+#[test]
+fn devices_take_the_options_of_the_entry_that_names_them() {
+  use shingle_config::InputDeviceConfig;
+  let mut config = test_config();
+  config.input.mouse_cursor_speed = -0.5;
+  config.input.tap_to_click = true;
+  config.input_devices.insert(
+    "event3 device".into(),
+    InputDeviceConfig {
+      mouse_cursor_speed: Some(0.75),
+      mouse_accel_profile: Some("flat".into()),
+      ..InputDeviceConfig::default()
+    },
+  );
+  // A touchpad named by its udev ID_PATH rather than its name.
+  config.input_devices.insert(
+    "platform-i8042-serio-1".into(),
+    InputDeviceConfig {
+      tap_to_click: Some(false),
+      disable_touchpad_while_mouse: Some(true),
+      ..InputDeviceConfig::default()
+    },
+  );
+  config.input_devices.insert(
+    "event5 device".into(),
+    InputDeviceConfig {
+      calibration: Some([0.0, 1.0, 0.0, -1.0, 0.0, 1.0]),
+      ..InputDeviceConfig::default()
+    },
+  );
+  let mut fixture = Fixture::with_config(config);
+  fixture.add(device("event3", POINTER, 0));
+  fixture.add(device("event4", POINTER, 0));
+  let mut touchpad = device("event9", POINTER, 3);
+  touchpad.udev = vec![
+    ("ID_PATH".into(), "platform-i8042-serio-1".into()),
+    (
+      "LIBINPUT_DEVICE_GROUP".into(),
+      "11/2/7:isa0060/serio1".into(),
+    ),
+  ];
+  fixture.add(touchpad);
+  let touch = Capabilities {
+    pointer: false,
+    touch: true,
+    ..POINTER
+  };
+  fixture.add(device("event5", touch, 0));
+  let configured = &fixture.backend.input.configured;
+  let settings_of = |name: &str| {
+    configured
+      .iter()
+      .find(|(device, _)| device == &key(name))
+      .map(|(_, settings)| settings.clone())
+      .unwrap_or_default()
+  };
+  let mouse = settings_of("event3");
+  assert!(mouse.contains(&Setting::AccelSpeed(0.75)), "{mouse:?}");
+  assert!(mouse.contains(&Setting::AccelProfile(AccelProfile::Flat)));
+  let other = settings_of("event4");
+  assert!(other.contains(&Setting::AccelSpeed(-0.5)), "{other:?}");
+  let pad = settings_of("event9");
+  assert!(pad.contains(&Setting::Tap(false)), "{pad:?}");
+  assert!(
+    fixture
+      .send_events()
+      .contains(&(key("event9"), SendEvents::DisabledOnExternalMouse))
+  );
+  assert!(
+    fixture
+      .send_events()
+      .contains(&(key("event4"), SendEvents::Enabled))
+  );
+  assert_eq!(
+    settings_of("event5"),
+    [Setting::Calibration([0.0, 1.0, 0.0, -1.0, 0.0, 1.0])]
+  );
+  let devices = fixture.list_devices();
+  let section = |name: &str, field: &str| {
+    devices
+      .iter()
+      .find(|device| device["name"] == name)
+      .map(|device| device[field].clone())
+  };
+  assert_eq!(
+    section("event3 device", "input-section"),
+    Some(serde_json::json!("input:event3 device"))
+  );
+  assert_eq!(
+    section("event4 device", "input-section"),
+    Some(serde_json::json!("input"))
+  );
+  assert_eq!(
+    section("event9 device", "input-section"),
+    Some(serde_json::json!("input:platform-i8042-serio-1"))
+  );
+  assert_eq!(
+    section("event5 device", "input-device-section"),
+    Some(serde_json::json!("input-device:event5 device"))
+  );
+  assert_eq!(
+    section("event3 device", "input-device-section"),
+    Some(serde_json::Value::Null)
+  );
+}
+
+#[test]
+fn an_output_mapping_is_found_by_udev_property_too() {
+  let (card, _) = two_monitors(true);
+  let mut config = test_config();
+  config.input_devices.insert(
+    "usb-Wacom-event-mouse".into(),
+    shingle_config::InputDeviceConfig {
+      output: Some("DP-1".into()),
+      ..shingle_config::InputDeviceConfig::default()
+    },
+  );
+  let mut fixture = Fixture::with_card(config, card);
+  let mut pen = device("event7", POINTER, 0);
+  pen.udev = vec![("ID_SERIAL".into(), "usb-Wacom-event-mouse".into())];
+  fixture.add(pen);
+  let middle = DeviceInput::MotionAbsolute { x: 640.0, y: 360.0 };
+  fixture.input("event7", 1_000, middle);
+  assert_eq!(fixture.backend.translator.pointer, (1280.0 + 960.0, 540.0));
 }
 
 #[test]
@@ -1488,6 +1614,7 @@ fn absolute_devices_map_to_their_output_or_the_whole_layout() {
     "event7 device".into(),
     shingle_config::InputDeviceConfig {
       output: Some("DP-1".into()),
+      ..shingle_config::InputDeviceConfig::default()
     },
   );
   let mut fixture = Fixture::with_card(config, card);

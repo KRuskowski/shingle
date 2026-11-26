@@ -3451,7 +3451,33 @@ mod tests {
       for field in ["name", "vendor", "product"] {
         assert!(device[field].is_string(), "{field}");
       }
+      // Without a backend that applies libinput options, no section.
+      assert_eq!(device["input-section"], Value::Null);
+      assert_eq!(device["input-device-section"], Value::Null);
     }
+    let pointer = crate::input_device::add(
+      &mut state,
+      crate::InputDeviceInfo {
+        name: "Logitech USB Receiver".into(),
+        vendor: Some(0x46d),
+        product: Some(0xc52b),
+        kind: crate::InputDeviceKind::Pointer,
+      },
+    );
+    assert!(crate::input_device::set_sections(
+      &mut state,
+      pointer,
+      crate::InputDeviceSections {
+        input: Some("input:Logitech USB Receiver".into()),
+        input_device: None,
+      },
+    ));
+    let devices = call(&mut state, "input/list-devices", Value::Null);
+    assert_eq!(
+      devices[3]["input-section"],
+      json!("input:Logitech USB Receiver")
+    );
+    assert_eq!(devices[3]["input-device-section"], Value::Null);
     let reply = call(
       &mut state,
       "input/configure-device",

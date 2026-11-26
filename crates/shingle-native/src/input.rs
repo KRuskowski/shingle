@@ -15,7 +15,12 @@ mod libinput;
 use std::{collections::HashMap, io, os::fd::BorrowedFd};
 
 use shingle::OutputHandle;
-use shingle_config::InputConfig;
+use std::collections::BTreeMap;
+
+use shingle::InputDeviceSections;
+use shingle_config::{
+  InputConfig, InputDeviceConfig, ShingleConfig, matching_device,
+};
 use shingle_core::Rect;
 use shingle_frontend::{
   host::{Axis, AxisSource, Gesture, InputEvent, Touch, TouchPhase},
@@ -57,12 +62,124 @@ pub struct DeviceDescription {
   /// The number of fingers it can tap with. Wayfire treats a device with
   /// any as a touchpad.
   pub tap_fingers: u32,
+  /// The udev properties of [`shingle_config::UDEV_PROPERTIES`] it has,
+  /// with their values, which a per-device config entry may name.
+  pub udev: Vec<(String, String)>,
 }
 
 impl DeviceDescription {
   /// Whether Wayfire's options for touchpads rather than mice apply.
   pub fn is_touchpad(&self) -> bool {
     self.tap_fingers > 0
+  }
+
+  /// The value of udev property `name`, if the device has it.
+  pub fn udev_property(&self, name: &str) -> Option<String> {
+    self
+      .udev
+      .iter()
+      .find(|(property, _)| property == name)
+      .map(|(_, value)| value.clone())
+  }
+}
+
+/// The input options of every device: `[input]` and the per-device
+/// entries (`input_devices`, Wayfire's `[input:NAME]` and
+/// `[input-device:NAME]`), which a device finds by its udev properties or
+/// its name ([`shingle_config::matching_device`]).
+#[derive(Clone, Debug, Default)]
+pub struct DeviceOptions {
+  /// The `[input]` options.
+  pub input: InputConfig,
+  /// The per-device entries, by the name they are found under.
+  pub devices: BTreeMap<String, InputDeviceConfig>,
+}
+
+impl DeviceOptions {
+  /// The input options of `config`.
+  pub fn from_config(config: &ShingleConfig) -> Self {
+    Self {
+      input: config.input.clone(),
+      devices: config.input_devices.clone(),
+    }
+  }
+
+  /// The entry whose libinput options `device` takes, with its name.
+  pub fn input_entry(
+    &self,
+    device: &DeviceDescription,
+  ) -> Option<(&str, &InputDeviceConfig)> {
+    matching_device(
+      &self.devices,
+      &device.name,
+      |name| device.udev_property(name),
+      InputDeviceConfig::has_input_options,
+    )
+  }
+
+  /// The entry whose output or calibration `device` takes, with its
+  /// name.
+  pub fn device_entry(
+    &self,
+    device: &DeviceDescription,
+  ) -> Option<(&str, &InputDeviceConfig)> {
+    matching_device(
+      &self.devices,
+      &device.name,
+      |name| device.udev_property(name),
+      |entry| entry.output.is_some() || entry.calibration.is_some(),
+    )
+  }
+
+  /// The options `device` gets: `[input]`, with its entry's in their
+  /// place.
+  pub fn config_for(&self, device: &DeviceDescription) -> InputConfig {
+    match self.input_entry(device) {
+      Some((_, entry)) => entry.input_config(&self.input),
+      None => self.input.clone(),
+    }
+  }
+
+  /// The libinput configuration of `device`: [`device_settings`] of its
+  /// options and, for a touch device, its entry's calibration matrix, as
+  /// Wayfire calibrates touch screens.
+  pub fn settings(&self, device: &DeviceDescription) -> Vec<Setting> {
+    let mut settings = device_settings(&self.config_for(device), device);
+    if device.capabilities.touch
+      && let Some(matrix) = self
+        .device_entry(device)
+        .and_then(|(_, entry)| entry.calibration)
+    {
+      settings.push(Setting::Calibration(matrix));
+    }
+    settings
+  }
+
+  /// The send-events mode of `device` while it is enabled.
+  pub fn enabled_mode(&self, device: &DeviceDescription) -> SendEvents {
+    enabled_mode(&self.config_for(device), device)
+  }
+
+  /// The name `device`'s output mapping is found under: its entry's that
+  /// has an output, else its own.
+  pub fn output_key<'a>(&'a self, device: &'a DeviceDescription) -> &'a str {
+    self
+      .device_entry(device)
+      .filter(|(_, entry)| entry.output.is_some())
+      .map_or(&device.name, |(name, _)| name)
+  }
+
+  /// The sections `input/list-devices` reports for `device`.
+  pub fn sections(&self, device: &DeviceDescription) -> InputDeviceSections {
+    InputDeviceSections {
+      input: Some(match self.input_entry(device) {
+        Some((name, _)) => format!("input:{name}"),
+        None => "input".into(),
+      }),
+      input_device: self
+        .device_entry(device)
+        .map(|(name, _)| format!("input-device:{name}")),
+    }
   }
 }
 
@@ -243,6 +360,8 @@ pub enum Setting {
   DragLock(bool),
   /// Natural scrolling, where the device supports it.
   NaturalScroll(bool),
+  /// A touch device's calibration matrix, where it supports one.
+  Calibration([f32; 6]),
 }
 
 /// Returns the libinput configuration `config` gives `device`, in the
@@ -640,6 +759,7 @@ pub(crate) mod tests {
       product: 0xc52b,
       capabilities,
       tap_fingers,
+      udev: Vec::new(),
     }
   }
 
