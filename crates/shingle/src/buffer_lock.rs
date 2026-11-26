@@ -41,7 +41,7 @@ impl ReleaseQueue {
     );
     for buffer in buffers {
       if buffer.is_alive() {
-        crate::trace::buffer(format_args!("release wl_buffer@{}", buffer.id()));
+        crate::trace::buffer(format_args!("release {}", buffer.id()));
         buffer.release();
       }
     }
