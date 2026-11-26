@@ -17,8 +17,11 @@
 //!     [--size WxH] [--position X,Y] [--min WxH] [--max WxH]
 //!     [--no-input] [--take-focus] [--no-delete] [--override-redirect]
 //!     [--state fullscreen,maximized,hidden] [--color RRGGBB]
-//!     [--no-background] [--no-map]
+//!     [--no-background] [--no-map] [--no-decorations]
 //! ```
+//!
+//! `--no-decorations` sets `_MOTIF_WM_HINTS` to ask for no decorations,
+//! as a client that draws its own frame does.
 //!
 //! Commands: `map`, `unmap`, `destroy`, `exit`, `title TEXT`,
 //! `configure X Y W H`, `state add|remove|toggle NAME`, `activate`,
@@ -80,6 +83,8 @@ struct Options {
   color: Option<u32>,
   background: bool,
   map: bool,
+  /// Asks for no decorations through `_MOTIF_WM_HINTS`.
+  no_decorations: bool,
 }
 
 impl Default for Options {
@@ -102,6 +107,7 @@ impl Default for Options {
       color: None,
       background: true,
       map: true,
+      no_decorations: false,
     }
   }
 }
@@ -165,6 +171,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
       }
       "--no-background" => options.background = false,
       "--no-map" => options.map = false,
+      "--no-decorations" => options.no_decorations = true,
       _ => return Err(format!("unknown option {argument}")),
     }
   }
@@ -378,6 +385,19 @@ impl Probe {
           self.net_wm_state,
           AtomEnum::ATOM,
           &states,
+        )
+        .map_err(error)?;
+    }
+    if options.no_decorations {
+      // Flags MWM_HINTS_DECORATIONS, and no decorations.
+      let hints = atom(connection, "_MOTIF_WM_HINTS")?;
+      connection
+        .change_property32(
+          PropMode::REPLACE,
+          window,
+          hints,
+          hints,
+          &[2, 0, 0, 0, 0],
         )
         .map_err(error)?;
     }
@@ -799,8 +819,10 @@ mod tests {
       "fullscreen,hidden",
       "--color",
       "ff0000",
+      "--no-decorations",
     ]))
     .unwrap();
+    assert!(options.no_decorations);
     assert_eq!(options.color, Some(0xff0000));
     assert_eq!(options.class, "Probe");
     assert_eq!(options.instance, "probe");

@@ -22,7 +22,7 @@ user namespaces:
       [--probe target/debug/examples/xw_probe]
       [--wl-probe target/debug/examples/wl_probe] [--keep]
       [--only lazy|disabled|eager|running|idle|windows|probe|behaviour|
-              session|nested|selection|outputs ...]
+              session|nested|selection|outputs|decoration ...]
 
 It prints one line per check and exits 0 when all pass. Every signal it
 sends goes to its own children or, through `kill_xwayland`, to a
@@ -42,7 +42,10 @@ Shingle, so the operator's clipboard is never touched. The `outputs`
 group (MO-3, docs/design/multi-output.md) runs headless Shingle with two
 outputs and checks that `xrandr --listmonitors` lists both at their
 positions and `xdpyinfo` reports their union as the root, also after
-`wlr-randr --pos` moves one.
+`wlr-randr --pos` moves one. The `decoration` group (WG-6,
+docs/design/wayfire-gaps.md) checks that `xterm` gets a server-side
+frame and an `xw_probe --no-decorations` window none, tiled and
+floating, from IPC's geometries and `xwininfo`.
 """
 
 import argparse
@@ -994,6 +997,20 @@ WORKAREA = {'x': 0, 'y': 0, 'width': 1280, 'height': 720}
 # comm stay the program's.
 AS_USER = ['unshare', '--user', '--map-user=1000', '--map-group=1000', '--']
 
+# Wayfire's default server-side frame (WG-6): 4-pixel borders and a
+# 30-pixel title bar.
+FRAME_BORDER = 4
+FRAME_TITLE = 30
+
+def inside_frame(geometry):
+  """The client rectangle inside a default frame at `geometry`."""
+  return {
+      'x': geometry['x'] + FRAME_BORDER,
+      'y': geometry['y'] + FRAME_TITLE + FRAME_BORDER,
+      'width': geometry['width'] - 2 * FRAME_BORDER,
+      'height': geometry['height'] - FRAME_TITLE - 2 * FRAME_BORDER,
+  }
+
 def start_mapped(shingle, arguments, display, program, app_id):
   """Starts an X client and waits until its view is mapped."""
   client = XClient(shingle, arguments, display, program)
@@ -1053,18 +1070,21 @@ def windows_checks(results, binary, work, probe):
                   classes == ['XTerm', 'XEyes', 'XLogo'], json.dumps(classes))
     ids = {app_id: window for window, app_id in windows.items()}
 
+    # The X window is the view's base geometry, inside a server-side
+    # frame when it has one (WG-6).
     def matches_xwininfo():
       for app_id, _, _ in order:
         view = shingle.view(app_id)
         x_geometry = shingle.x_geometry(ids[app_id], display)
         if not view or not x_geometry:
           return False
-        if not same_geometry(view['geometry'], x_geometry):
+        if not same_geometry(view['base-geometry'], x_geometry):
           return False
       return True
     matched = wait_for(matches_xwininfo, timeout=5)
     detail = '; '.join(
-        f'{app_id} view {json.dumps(shingle.view(app_id)["geometry"])} '
+        f'{app_id} view '
+        f'{json.dumps(shingle.view(app_id)["base-geometry"])} '
         f'x {json.dumps(shingle.x_geometry(ids[app_id], display))}'
         for app_id, _, _ in order)
     results.check('windows: xwininfo matches view-info for all three',
@@ -1107,9 +1127,11 @@ def windows_checks(results, binary, work, probe):
     results.check('windows: configure-view is accepted',
                   reply.get('result') == 'ok', json.dumps(reply))
     reached = wait_for(lambda: same_geometry(
-        shingle.x_geometry(ids['XLogo'], display) or {}, target), timeout=5)
-    results.check('windows: configure-view reaches the X geometry',
-                  reached,
+        shingle.view('XLogo')['geometry'], target) and same_geometry(
+            shingle.x_geometry(ids['XLogo'], display) or {},
+            inside_frame(target)), timeout=5)
+    results.check('windows: configure-view reaches the X geometry, inside '
+                  'the frame', reached,
                   json.dumps(shingle.x_geometry(ids['XLogo'], display)))
     # close-view: WM_DELETE_WINDOW for xterm, KillClient for xeyes.
     _, xterm_protocols = shingle.x_client(
@@ -1176,8 +1198,9 @@ def probe_checks(results, binary, work, probe):
     mapped = wait_for(lambda: (shingle.view('Held') or {}).get('mapped'))
     results.check('probe: unblock-map maps the X window', mapped)
     watcher.close()
-    # The probe sees the tile geometry in ConfigureNotify.
-    geometry = shingle.view('Held')['geometry']
+    # The probe sees the tile geometry in ConfigureNotify, inside the
+    # tile's server-side frame (WG-6), which is the view's base geometry.
+    geometry = shingle.view('Held')['base-geometry']
 
     def configured_to(client, geometry):
       def find():
@@ -1557,13 +1580,20 @@ def _behaviour_dialogs(results, shingle, display, clients, probe):
                 view and view['parent'] == parent['id'], json.dumps(view))
   if not view:
     return
+  # Its frame (WG-6) is centred on its parent's, as Wayfire centres
+  # views, and the X window, 300x200, is inside it.
   geometry = view['geometry']
   pg = parent['geometry']
-  expected_x = pg['x'] + (pg['width'] - 300) // 2
-  expected_y = pg['y'] + (pg['height'] - 200) // 2
+  framed = {'width': 300 + 2 * FRAME_BORDER,
+            'height': 200 + FRAME_TITLE + 2 * FRAME_BORDER}
+  expected_x = pg['x'] + (pg['width'] - framed['width']) // 2
+  expected_y = pg['y'] + (pg['height'] - framed['height']) // 2
   results.check('dialogs: the transient floats centred on its parent',
-                view['tiled-edges'] == 0 and geometry['width'] == 300
-                and geometry['height'] == 200
+                view['tiled-edges'] == 0
+                and geometry['width'] == framed['width']
+                and geometry['height'] == framed['height']
+                and same_geometry(view['base-geometry'],
+                                  inside_frame(geometry))
                 and abs(geometry['x'] - expected_x) <= 1
                 and abs(geometry['y'] - expected_y) <= 1,
                 f'{json.dumps(geometry)} parent {json.dumps(pg)}')
@@ -1572,7 +1602,7 @@ def _behaviour_dialogs(results, shingle, display, clients, probe):
   results.check('dialogs: xwininfo matches the dialog view',
                 wait_for(lambda: same_geometry(
                     shingle.x_geometry(window, display) or {},
-                    shingle.view('Dialog')['geometry']), timeout=5),
+                    shingle.view('Dialog')['base-geometry']), timeout=5),
                 json.dumps(shingle.x_geometry(window, display)))
   dialog.send('destroy')
   dialog.exited(5)
@@ -1580,18 +1610,21 @@ def _behaviour_dialogs(results, shingle, display, clients, probe):
                                     '--size', '300x200', '--min', '300x200',
                                     '--max', '300x200', '--type', 'dialog')
   clients.append(fixed)
+  # At its size inside its frame (WG-6), which is centred.
   results.check('dialogs: a fixed-size dialog floats at its size',
                 view and view['tiled-edges'] == 0
-                and view['geometry']['width'] == 300
-                and view['geometry']['height'] == 200
+                and view['base-geometry']['width'] == 300
+                and view['base-geometry']['height'] == 200
+                and same_geometry(view['base-geometry'],
+                                  inside_frame(view['geometry']))
                 and view['min-size'] == {'width': 300, 'height': 200},
                 json.dumps(view))
   if view:
     g = view['geometry']
     results.check('dialogs: it is placed in the centre of the workarea',
-                  abs(g['x'] - (WORKAREA['width'] - 300) // 2) <= 1
-                  and abs(g['y'] - (WORKAREA['height'] - 200) // 2) <= 1,
-                  json.dumps(g))
+                  abs(g['x'] - (WORKAREA['width'] - g['width']) // 2) <= 1
+                  and abs(g['y'] - (WORKAREA['height'] - g['height']) // 2)
+                  <= 1, json.dumps(g))
   fixed.send('destroy')
   fixed.exited(5)
 
@@ -1731,7 +1764,8 @@ def _behaviour_menus(results, shingle, display):
   view = shingle.view('XTerm')
   shingle.focus_view(view['id'])
   wait_for(lambda: focused_id(shingle) == view['id'])
-  geometry = view['geometry']
+  # The xterm itself, inside its server-side frame (WG-6).
+  geometry = view['base-geometry']
   x, y = centre(geometry)
   xterm = next(w for w, c in shingle.x_windows(display).items()
                if c == 'XTerm')
@@ -2061,7 +2095,12 @@ def nested_checks(results, binary, work, probe):
   """Pixels, the Unmanaged layer, Scale, Expo and the switcher with X
   windows, in nested Shingle on lavapipe inside a headless Shingle."""
   del work
-  outer = Shingle(binary, None, 'outer', {'xwayland': {'mode': False}})
+  # Nested's winit window asks for server-side decorations; without a
+  # frame (WG-6) it covers the headless output, as these checks assume.
+  outer = Shingle(binary, None, 'outer', {
+      'xwayland': {'mode': False},
+      'decoration': {'ignore_views': 'all'},
+  })
   inner_config = {
       'xwayland': {'mode': True},
       'workspaces': {'width': 2, 'height': 2},
@@ -2620,7 +2659,78 @@ def _selection_no_primary(results, binary):
   return shingle.log_text()
 
 GROUPS = ('lazy', 'disabled', 'eager', 'running', 'idle', 'windows', 'probe',
-          'behaviour', 'session', 'nested', 'selection', 'outputs')
+          'behaviour', 'session', 'nested', 'selection', 'outputs',
+          'decoration')
+
+def decoration_checks(results, binary, work, probe):
+  """WG-6: xterm, which sets no _MOTIF_WM_HINTS, gets a server-side frame
+  and an X window whose hints turn decorations off does not, in tiles
+  and floating."""
+  del work
+  shingle = Shingle(binary, None, 'decoration', {'xwayland': {'mode': True}})
+  shingle.wait_pid(lambda value: value > 0)
+  ready = wait_for(lambda: 'Xwayland ready' in shingle.log_text())
+  results.check('decoration: Xwayland is ready', ready)
+  display = ':0'
+  clients = []
+  try:
+    client, xterm = start_mapped(
+        shingle, AS_USER + ['xterm', '-e', 'sleep', '600'], display, 'xterm',
+        'XTerm')
+    clients.append(client)
+    client, _, frameless = start_probe(shingle, probe, display, 'Frameless',
+                                       '--no-decorations')
+    clients.append(client)
+    results.check('decoration: xterm and a probe without decorations map',
+                  bool(xterm) and bool(frameless), json.dumps(shingle.views()))
+    if not xterm or not frameless:
+      return shingle.log_text()
+    windows = {app_id: window
+               for window, app_id in shingle.x_windows(display).items()}
+
+    def framed(app_id):
+      view = shingle.view(app_id)
+      x_geometry = shingle.x_geometry(windows[app_id], display) or {}
+      return (same_geometry(view['base-geometry'],
+                            inside_frame(view['geometry']))
+              and same_geometry(x_geometry, view['base-geometry']))
+
+    def unframed(app_id):
+      view = shingle.view(app_id)
+      x_geometry = shingle.x_geometry(windows[app_id], display) or {}
+      return (same_geometry(view['base-geometry'], view['geometry'])
+              and same_geometry(x_geometry, view['geometry']))
+
+    def detail(app_id):
+      view = shingle.view(app_id)
+      return (f'{app_id} geometry {json.dumps(view["geometry"])} base '
+              f'{json.dumps(view["base-geometry"])} x '
+              f'{json.dumps(shingle.x_geometry(windows[app_id], display))}')
+    results.check('decoration: xterm\'s tile is its frame, and its X window '
+                  'the inside of the frame',
+                  wait_for(lambda: framed('XTerm'), timeout=5),
+                  detail('XTerm'))
+    results.check('decoration: the probe without decorations fills its tile',
+                  wait_for(lambda: unframed('Frameless'), timeout=5),
+                  detail('Frameless'))
+    target = {'x': 200, 'y': 150, 'width': 500, 'height': 400}
+    for app_id in ('XTerm', 'Frameless'):
+      shingle.call('window-rules/configure-view',
+                   {'id': shingle.view(app_id)['id'], 'geometry': target})
+    results.check('decoration: floating, xterm keeps its frame',
+                  wait_for(lambda: framed('XTerm') and same_geometry(
+                      shingle.view('XTerm')['geometry'], target), timeout=5),
+                  detail('XTerm'))
+    results.check('decoration: floating, the probe still has none',
+                  wait_for(lambda: unframed('Frameless') and same_geometry(
+                      shingle.view('Frameless')['geometry'], target),
+                           timeout=5), detail('Frameless'))
+  finally:
+    for client in clients:
+      client.stop()
+  results.check('decoration: SIGTERM exits with status 0',
+                shingle.stop() == 0)
+  return shingle.log_text()
 
 def outputs_checks(results, binary, work):
   """MO-3: Xwayland sees both outputs of headless Shingle, at their
@@ -2698,13 +2808,14 @@ def inner(binary, probe, wl_probe, work, groups):
       'nested': nested_checks,
       'selection': selection_checks,
       'outputs': outputs_checks,
+      'decoration': decoration_checks,
   }
   for group in groups:
     if group == 'behaviour':
       log = checks[group](results, binary, work, probe, wl_probe)
     elif group == 'selection':
       log = checks[group](results, binary, work, wl_probe)
-    elif group in ('windows', 'probe', 'session', 'nested'):
+    elif group in ('windows', 'probe', 'session', 'nested', 'decoration'):
       log = checks[group](results, binary, work, probe)
     else:
       log = checks[group](results, binary, work)

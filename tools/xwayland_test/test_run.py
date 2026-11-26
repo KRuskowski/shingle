@@ -156,6 +156,11 @@ class TilesTest(unittest.TestCase):
         {'x': 1, 'y': 2, 'width': 3, 'height': 4}))
     self.assertFalse(run.same_geometry({'x': 1}, {'x': 2}))
 
+  def test_the_client_is_inside_wayfires_default_frame(self):
+    self.assertEqual(
+        run.inside_frame({'x': 200, 'y': 150, 'width': 500, 'height': 400}),
+        {'x': 204, 'y': 184, 'width': 492, 'height': 362})
+
 class ChildrenTest(unittest.TestCase):
   """Parsing `xwininfo -root -children`."""
 
