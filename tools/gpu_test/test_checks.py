@@ -132,8 +132,13 @@ class PatternTest(unittest.TestCase):
     self.assertEqual(checks.released_buffers(''), set())
 
   def test_every_group_has_a_check(self):
+    import dmabuf_checks
     self.assertEqual(set(checks.GROUPS), set(checks.CHECKS))
-    self.assertEqual(checks.GROUPS, checks.run.CHECK_GROUPS)
+    self.assertEqual(set(dmabuf_checks.GROUPS), set(dmabuf_checks.CHECKS))
+    self.assertEqual(checks.GROUPS + dmabuf_checks.GROUPS,
+                     checks.run.CHECK_GROUPS)
+    self.assertEqual(dmabuf_checks.GROUPS, checks.run.MODESET_GROUPS)
+    self.assertEqual(set(checks.all_checks()), set(checks.run.CHECK_GROUPS))
 
   def test_tail(self):
     self.assertEqual(checks.tail('a\nb\nc\n', 2), 'b | c')

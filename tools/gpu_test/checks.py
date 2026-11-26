@@ -8,8 +8,9 @@ These are DB-2's and DB-3's checks (docs/design/dmabuf.md, section 11):
 - `nested`: nested Shingle on lavapipe inside offscreen Shingle shows its
   own `wl_probe --pattern` client in captures of the outer output.
 - `baseline`: what `vkcube`, `es2gears_wayland` and nested Shingle on the
-  GPU do against a compositor without linux-dmabuf. These are recorded
-  (`INFO` lines), not judged; DB-4 compares against them.
+  GPU do against a compositor without linux-dmabuf (`SHINGLE_DMABUF=0`).
+  These are recorded (`INFO` lines), not judged; DB-4 compares against
+  them, and its own checks are in dmabuf_checks.py.
 - `buffers` (DB-3): a `wl_probe --fifo` client commits buffer `a` with a
   FIFO barrier and then `b` and `c` behind it in one flush; `b` is
   replaced before it is shown, and both `b` and `c` must be released.
@@ -489,7 +490,10 @@ def _record_client(outer, captures, name, arguments, run_for,
 def baseline_checks(results, binary, wl_probe, captures):
   """Records what GPU clients do without linux-dmabuf."""
   del wl_probe
-  outer = Shingle(binary, 'baseline', BASE_CONFIG)
+  # Since DB-4 offscreen Shingle offers linux-dmabuf; the baseline is
+  # without it.
+  outer = Shingle(binary, 'baseline', BASE_CONFIG,
+                  extra_environment={'SHINGLE_DMABUF': '0'})
   vkcube = ['vkcube', '--wsi', 'wayland', '--c', '300']
   # stdbuf, so that -info's lines survive the SIGTERM that ends it.
   gears = ['stdbuf', '-oL', 'es2gears_wayland', '-info']
@@ -570,14 +574,20 @@ CHECKS = {
     'buffers': buffer_checks,
 }
 
+def all_checks():
+  """DB-2's and DB-3's groups here, and DB-4's (dmabuf_checks.py)."""
+  import dmabuf_checks
+  return {**CHECKS, **dmabuf_checks.CHECKS}
+
 def run_checks(groups, binary, wl_probe, captures_directory=None):
   """Runs the check `groups` in order; returns 0 when all passed."""
   os.environ[NAMESPACE_VARIABLE] = '1'
+  groups_by_name = all_checks()
   results = xw.Results()
   captures = Captures(captures_directory)
   for group in groups:
     try:
-      CHECKS[group](results, binary, wl_probe, captures)
+      groups_by_name[group](results, binary, wl_probe, captures)
     except (OSError, RuntimeError, TimeoutError, ConnectionError) as error:
       results.check(f'{group}: the checks ran to the end', False, str(error))
   passed = sum(1 for _, ok, _ in results.checks if ok)

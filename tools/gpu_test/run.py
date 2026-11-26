@@ -26,7 +26,8 @@ namespaces:
       -- COMMAND [ARGUMENT ...]
   tools/gpu_test/run.py [--modeset] [--keep] [--binary target/debug/shingle]
       [--wl-probe target/debug/examples/wl_probe] [--captures DIR]
-      --checks offscreen|nested|baseline|buffers ...
+      --checks offscreen|nested|baseline|buffers|dmabuf|browsers|xwayland|
+               nested-gpu|nodmabuf|weston ...
 
 For example, DB-1's import test:
 
@@ -40,7 +41,10 @@ and DB-2's real-client checks of `shingle --backend offscreen`
   tools/gpu_test/run.py --checks offscreen nested baseline
 
 DB-3's check that buffers replaced behind a FIFO barrier are released is
-`--checks buffers`.
+`--checks buffers`. DB-4's linux-dmabuf checks (dmabuf_checks.py) are
+`--checks dmabuf browsers xwayland nested-gpu nodmabuf weston`; for these
+groups nvidia-modeset is exposed as with `--modeset`, because NVIDIA's
+Vulkan WSI cannot create a swapchain without it.
 
 It exits with the command's status, or 1 when a check failed. With
 `--checks` it prints one PASS or FAIL line per check and INFO lines for
@@ -71,8 +75,13 @@ STRIPPED_VARIABLES = ('WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'DISPLAY',
 # What the private /dev may also hold besides the bound nodes.
 PRIVATE_ENTRIES = ('pts', 'ptmx', 'shm', 'fd', 'stdin', 'stdout', 'stderr')
 SAMPLE_INTERVAL = 0.05
-# checks.GROUPS, kept here so that `--help` works without importing it.
-CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers')
+# checks.GROUPS and dmabuf_checks.GROUPS, kept here so that `--help` works
+# without importing them.
+CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'dmabuf',
+                'browsers', 'xwayland', 'nested-gpu', 'nodmabuf', 'weston')
+# DB-4's groups, whose NVIDIA Vulkan swapchains need nvidia-modeset.
+MODESET_GROUPS = ('dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
+                  'weston')
 
 def allowed_devices(modeset):
   """The device nodes, relative to /dev, that the namespace exposes."""
@@ -318,6 +327,10 @@ def main():
         'captures': (os.path.abspath(options.captures)
                      if options.captures else None),
     }
+  # NVIDIA's Vulkan WSI fails to create a swapchain without nvidia-modeset
+  # (docs/design/dmabuf.md, DB-4 as built), so DB-4's checks expose it.
+  options.modeset = options.modeset or any(
+      group in MODESET_GROUPS for group in options.checks or ())
   if options.inner:
     return inner(options.inner, options.command, options.modeset,
                  options.timeout, checks)
