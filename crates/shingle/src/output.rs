@@ -19,6 +19,7 @@
 
 mod bindings;
 mod focus;
+mod host;
 mod hotplug;
 mod moving;
 mod registry;
@@ -35,6 +36,10 @@ pub use focus::OutputSwitch;
 pub(crate) use focus::{
   FocusSettings, LostFocus, clamp, focus_output, focus_output_at, oswitch,
   output_at, set_active,
+};
+pub(crate) use host::{
+  configured_physical_size, create as create_host_output,
+  destroy as destroy_host_output,
 };
 pub(crate) use hotplug::{add, park_restored, remove, restore};
 pub use moving::MoveGeometry;

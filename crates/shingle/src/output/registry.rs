@@ -350,6 +350,23 @@ impl Outputs {
     format!("HEADLESS-{}", self.last_headless)
   }
 
+  /// The name of a new host window's output (nested): the lowest
+  /// `HEADLESS-N` that no output, live or turned off, has. A window
+  /// closed and opened again therefore shows the same output, which takes
+  /// back the workspace set it left behind, as a monitor plugged into the
+  /// same connector does.
+  pub(crate) fn free_headless_name(&self) -> String {
+    let taken = self
+      .list
+      .iter()
+      .map(|output| output.id.as_str())
+      .chain(self.disabled.iter().map(|output| output.info.name.as_str()))
+      .filter_map(headless_number)
+      .collect::<std::collections::BTreeSet<_>>();
+    let number = (1..).find(|number| !taken.contains(number)).unwrap_or(1);
+    format!("HEADLESS-{number}")
+  }
+
   /// Where output `id` is in the add order.
   pub(crate) fn index_of(&self, id: &OutputId) -> Option<usize> {
     self.list.iter().position(|output| output.id == *id)
@@ -443,6 +460,29 @@ mod tests {
     assert_eq!(outputs.next_headless_name(), "HEADLESS-3");
     push(&mut outputs, "HEADLESS-7");
     assert_eq!(outputs.next_headless_name(), "HEADLESS-8");
+  }
+
+  #[test]
+  fn host_outputs_take_the_lowest_free_headless_name() {
+    let mut outputs = Outputs::new();
+    assert_eq!(outputs.free_headless_name(), "HEADLESS-1");
+    for name in ["HEADLESS-1", "HEADLESS-2", "HEADLESS-3", "DP-1"] {
+      push(&mut outputs, name);
+    }
+    assert_eq!(outputs.free_headless_name(), "HEADLESS-4");
+    outputs.remove(&OutputId::new("HEADLESS-2"));
+    assert_eq!(outputs.free_headless_name(), "HEADLESS-2", "reused");
+    let third = outputs.get(&OutputId::new("HEADLESS-3")).unwrap();
+    outputs.disabled.push(DisabledOutput::new(third, 2));
+    outputs.remove(&OutputId::new("HEADLESS-3"));
+    outputs.remove(&OutputId::new("HEADLESS-1"));
+    assert_eq!(outputs.free_headless_name(), "HEADLESS-1");
+    push(&mut outputs, "HEADLESS-1");
+    assert_eq!(
+      outputs.free_headless_name(),
+      "HEADLESS-2",
+      "a turned-off output keeps its name"
+    );
   }
 
   #[test]

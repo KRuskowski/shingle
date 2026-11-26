@@ -422,3 +422,41 @@ fn stipc_pointer_input_moves_the_frontends_pointer() {
     (300.0, 40.0)
   );
 }
+
+#[test]
+fn stipc_opens_and_closes_host_windows_and_a_window_sizes_its_output() {
+  let mut fixture = Fixture::new(still());
+  let create = r#"{"method":"stipc/create_wayland_output","data":{}}"#;
+  assert!(fixture.ipc(create).contains("not running in nested"));
+  assert!(fixture.host.opened.is_empty());
+  fixture.frontend.compositor_mut().set_host_outputs(true);
+  assert!(fixture.ipc(create).contains(r#""name":"HEADLESS-2""#));
+  assert_eq!(fixture.host.opened, [second()]);
+  // The host opens the window and gives the output its size.
+  fixture
+    .frontend
+    .output_resized_on(&second(), 640, 480)
+    .expect("the output takes the window's size");
+  let rect = fixture
+    .frontend
+    .compositor()
+    .output_view(&second())
+    .unwrap();
+  assert_eq!(
+    (rect.rect.x, rect.rect.width, rect.rect.height),
+    (1000, 640, 480)
+  );
+  let reply = fixture.ipc(concat!(
+    r#"{"method":"stipc/destroy_wayland_output","#,
+    r#""data":{"output":"HEADLESS-2"}}"#
+  ));
+  assert_eq!(reply, r#"{"result":"ok"}"#);
+  assert_eq!(fixture.host.closed, [second()]);
+  assert!(
+    fixture
+      .frontend
+      .compositor()
+      .output_view(&second())
+      .is_none()
+  );
+}

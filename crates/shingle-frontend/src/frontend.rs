@@ -604,6 +604,8 @@ impl Frontend {
           self.prune_scenes();
           save = true;
         }
+        Event::CreateHostOutput { output } => host.open_output(&output),
+        Event::DestroyHostOutput { output } => host.close_output(&output),
         Event::WsetSelected { output, wset } => {
           self.show_wset_label(&output, wset);
         }
@@ -960,7 +962,8 @@ impl Frontend {
 
   /// Sets the output to a `width` by `height` pixel display, in logical
   /// size after the output scale, keeping its position. The host calls
-  /// this once it knows its display size.
+  /// this once it knows its display size. It means the first output;
+  /// [`Frontend::output_resized_on`] names one.
   pub fn set_output_size(
     &mut self,
     width: u32,
@@ -982,21 +985,43 @@ impl Frontend {
 
   /// Handles a resize of the host's display to `width` by `height`
   /// pixels: resizes the output and lays out Scale and Expo again, ending
-  /// transitions that no longer fit.
+  /// transitions that no longer fit. It means the first output;
+  /// [`Frontend::output_resized_on`] names one.
   pub fn output_resized(
     &mut self,
     width: u32,
     height: u32,
   ) -> Result<(), shingle::Error> {
     let result = self.set_output_size(width, height);
-    self.expo_exit = None;
     let primary = self.compositor.primary_output();
-    if let Some(scene) = self.scenes.get_mut(&primary) {
+    self.after_output_resize(&primary);
+    result
+  }
+
+  /// Handles a resize of the host window or display that shows `output`
+  /// to `width` by `height` physical pixels, as
+  /// [`Frontend::output_resized`] does for the first output. Nested calls
+  /// it for each of its windows.
+  pub fn output_resized_on(
+    &mut self,
+    output: &OutputHandle,
+    width: u32,
+    height: u32,
+  ) -> Result<(), shingle::Error> {
+    let result = self.compositor.set_output_size(output, (width, height));
+    self.after_output_resize(output);
+    result
+  }
+
+  /// Ends what a resize of `output` invalidates: its workspace slide, and
+  /// Expo's exit; Scale and Expo are laid out again.
+  fn after_output_resize(&mut self, output: &OutputHandle) {
+    self.expo_exit = None;
+    if let Some(scene) = self.scenes.get_mut(output) {
       scene.workspace_transition = None;
     }
     self.update_scale_layout();
     self.update_expo_layout();
-    result
   }
 
   /// Pauses or resumes the seat session, as the native host does when

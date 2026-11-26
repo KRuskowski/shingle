@@ -45,6 +45,23 @@ pub trait Host {
   /// Ends the host's event loop. The host calls
   /// [`crate::Frontend::shutdown`] on the way out, which saves the session.
   fn exit(&mut self);
+
+  /// Opens a window for `output`, which `stipc/create_wayland_output` has
+  /// just added, and gives the output the window's size with
+  /// [`crate::Frontend::output_resized_on`]. Only a host that turned on
+  /// [`shingle::Compositor::set_host_outputs`] is asked; others need not
+  /// implement it.
+  fn open_output(&mut self, output: &OutputHandle) {
+    let _ = output;
+  }
+
+  /// Closes the window of `output`, which `stipc/destroy_wayland_output`
+  /// has just removed. Only a host that turned on
+  /// [`shingle::Compositor::set_host_outputs`] is asked; others need not
+  /// implement it.
+  fn close_output(&mut self, output: &OutputHandle) {
+    let _ = output;
+  }
 }
 
 /// Frontend-neutral input, in output pixels and evdev codes.

@@ -71,6 +71,10 @@ struct FakeHost {
   vt_switches: Vec<u32>,
   device_changes: Vec<(InputDeviceId, bool)>,
   exits: usize,
+  /// The outputs whose windows the host was asked to open.
+  opened: Vec<OutputHandle>,
+  /// The outputs whose windows the host was asked to close.
+  closed: Vec<OutputHandle>,
 }
 
 impl Host for FakeHost {
@@ -95,6 +99,14 @@ impl Host for FakeHost {
 
   fn exit(&mut self) {
     self.exits += 1;
+  }
+
+  fn open_output(&mut self, output: &OutputHandle) {
+    self.opened.push(output.clone());
+  }
+
+  fn close_output(&mut self, output: &OutputHandle) {
+    self.closed.push(output.clone());
   }
 }
 

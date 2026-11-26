@@ -393,6 +393,8 @@ const SUPPORTED_METHODS: &[&str] = &[
   "simple-tile/get-layout",
   "simple-tile/set-layout",
   "simple-tile/set-show-maximized",
+  "stipc/create_wayland_output",
+  "stipc/destroy_wayland_output",
   "stipc/feed_button",
   "stipc/feed_key",
   "stipc/get_display",
@@ -951,6 +953,38 @@ fn destroy_headless_output(state: &mut CompositorState, data: &Value) -> Value {
   }
   let id = output.id.clone();
   match crate::output::remove(state, &id) {
+    Ok(()) => json_ok(),
+    Err(error) => json_error(&error.to_string()),
+  }
+}
+
+/// `stipc/create_wayland_output`: a new host window and its output, when
+/// the backend shows outputs in host windows (nested). Wayfire replies
+/// only `ok`; the reply also names the output, as
+/// `create-headless-output`'s does.
+fn create_wayland_output(state: &mut CompositorState) -> Value {
+  if !state.host_outputs {
+    return json_error("Wayfire is not running in nested wayland mode!");
+  }
+  match crate::output::create_host_output(state) {
+    Ok(id) => json!({"result": "ok", "output": output_json(state, &id)}),
+    Err(error) => json_error(&error.to_string()),
+  }
+}
+
+/// `stipc/destroy_wayland_output`: closes the host window of the output
+/// called `output`, whose windows go where `output_layout.unplug` says.
+fn destroy_wayland_output(state: &mut CompositorState, data: &Value) -> Value {
+  let name = match data.get("output") {
+    None => return json_error("Missing \"output\""),
+    Some(Value::String(name)) => name.clone(),
+    Some(_) => {
+      return json_error(
+        "Field \"output\" does not have the correct type, expected string",
+      );
+    }
+  };
+  match crate::output::destroy_host_output(state, &name) {
     Ok(()) => json_ok(),
     Err(error) => json_error(&error.to_string()),
   }
@@ -3091,6 +3125,8 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
     }
     "input/list-devices" => input_device::list_json(state),
     "input/configure-device" => input_device::configure(state, data),
+    "stipc/create_wayland_output" => create_wayland_output(state),
+    "stipc/destroy_wayland_output" => destroy_wayland_output(state, data),
     "stipc/feed_key" => feed_key(state, data),
     "stipc/feed_button" => feed_button(state, data),
     "stipc/get_display" => json!({
@@ -3188,12 +3224,12 @@ mod tests {
   }
 
   #[test]
-  fn list_methods_reports_83_sorted_methods_with_input_devices() {
+  fn list_methods_reports_85_sorted_methods_with_input_devices() {
     let mut state = test_state();
     let reply = call(&mut state, "list-methods", Value::Null);
     let methods = reply["methods"].as_array().unwrap();
-    assert_eq!(methods.len(), 83);
-    assert_eq!(SUPPORTED_METHODS.len(), 83);
+    assert_eq!(methods.len(), 85);
+    assert_eq!(SUPPORTED_METHODS.len(), 85);
     assert!(SUPPORTED_METHODS.windows(2).all(|pair| pair[0] < pair[1]));
     for method in [
       "input/list-devices",

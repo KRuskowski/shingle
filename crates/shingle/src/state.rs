@@ -269,6 +269,9 @@ pub(crate) struct CompositorState {
   /// input to the frontend as [`Event::StipcPointerMotion`] and
   /// [`Event::StipcButton`].
   pub(crate) stipc_pointer_events: bool,
+  /// Whether the backend shows each output in a host window that STIPC
+  /// opens and closes ([`crate::Compositor::set_host_outputs`]).
+  pub(crate) host_outputs: bool,
   pub(crate) focus_sequence: u64,
   pub(crate) dispatch_pending: bool,
   pub(crate) accept_pending: bool,
@@ -436,6 +439,7 @@ impl CompositorState {
       runtime_bindings: Default::default(),
       stipc_key_events: false,
       stipc_pointer_events: false,
+      host_outputs: false,
       focus_sequence: 0,
       dispatch_pending: true,
       accept_pending: false,

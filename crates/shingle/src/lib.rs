@@ -916,6 +916,21 @@ pub enum Event {
     /// The output, which no longer exists.
     output: OutputHandle,
   },
+  /// `stipc/create_wayland_output` added `output`, after
+  /// [`Compositor::set_host_outputs`]: the host opens a window for it and
+  /// gives it the window's size ([`Compositor::set_output_size`]).
+  /// [`Event::OutputAdded`] came first.
+  CreateHostOutput {
+    /// The new output.
+    output: OutputHandle,
+  },
+  /// `stipc/destroy_wayland_output` removed `output`, after
+  /// [`Compositor::set_host_outputs`]: the host closes its window.
+  /// [`Event::OutputRemoved`] came first.
+  DestroyHostOutput {
+    /// The output, which no longer exists.
+    output: OutputHandle,
+  },
   /// IPC `scale/toggle` (`false`, current workspace) or `scale/toggle_all`
   /// (`true`, all workspaces). The frontend runs Scale.
   ToggleScale(bool),
@@ -2169,6 +2184,18 @@ impl Compositor {
     self.state.stipc_pointer_events = enabled;
   }
 
+  /// Tells the compositor that the backend shows each output in a window
+  /// of a host session, as nested does, so that
+  /// `stipc/create_wayland_output` adds an output and emits
+  /// [`Event::CreateHostOutput`] for the host to open its window, and
+  /// `stipc/destroy_wayland_output` removes one of them and emits
+  /// [`Event::DestroyHostOutput`]. Without it both refuse with Wayfire's
+  /// errors. The backend's own outputs ([`Compositor::add_output`]) are
+  /// those windows.
+  pub fn set_host_outputs(&mut self, enabled: bool) {
+    self.state.host_outputs = enabled;
+  }
+
   /// Offers `zwp_linux_dmabuf_v1` version 5 with `feedback` to clients,
   /// importing their buffers through `importer`, and makes commits of
   /// DMA-BUFs wait for their implicit write fences
@@ -3113,7 +3140,8 @@ impl Compositor {
   /// Maps a point in display pixels, on a `display_width` x `display_height`
   /// surface as the host draws it, to layout logical pixels, undoing the
   /// output transform and adding the output's position. The inverse of
-  /// [`Compositor::unmap_output_point`].
+  /// [`Compositor::unmap_output_point`]. Both mean the first output;
+  /// [`Compositor::map_point_on`] names one.
   pub fn map_output_point(
     &self,
     x: f64,
@@ -3121,19 +3149,11 @@ impl Compositor {
     display_width: u32,
     display_height: u32,
   ) -> (f64, f64) {
-    let (x, y) = output_transform::map_point(
-      x,
-      y,
-      display_width,
-      display_height,
-      self.state.primary().rect.width,
-      self.state.primary().rect.height,
-      self.state.primary().transform,
-    );
-    (
-      x + f64::from(self.state.primary().rect.x),
-      y + f64::from(self.state.primary().rect.y),
-    )
+    let rect = self.state.primary().rect;
+    let (x, y) = self
+      .map_point_on(&self.primary_output(), x, y, display_width, display_height)
+      .expect("the first output exists");
+    (x + f64::from(rect.x), y + f64::from(rect.y))
   }
 
   /// Maps a point in layout logical pixels to display pixels; the inverse of
@@ -3146,15 +3166,16 @@ impl Compositor {
     display_width: u32,
     display_height: u32,
   ) -> (f64, f64) {
-    output_transform::unmap_point(
-      x - f64::from(self.state.primary().rect.x),
-      y - f64::from(self.state.primary().rect.y),
-      display_width,
-      display_height,
-      self.state.primary().rect.width,
-      self.state.primary().rect.height,
-      self.state.primary().transform,
-    )
+    let rect = self.state.primary().rect;
+    self
+      .unmap_point_on(
+        &self.primary_output(),
+        x - f64::from(rect.x),
+        y - f64::from(rect.y),
+        display_width,
+        display_height,
+      )
+      .expect("the first output exists")
   }
 
   /// Maps a relative motion in display pixels to logical pixels, like
@@ -3166,15 +3187,85 @@ impl Compositor {
     display_width: u32,
     display_height: u32,
   ) -> (f64, f64) {
-    output_transform::map_vector(
+    self
+      .map_vector_on(
+        &self.primary_output(),
+        x,
+        y,
+        display_width,
+        display_height,
+      )
+      .expect("the first output exists")
+  }
+
+  /// Maps a point in display pixels, on a `display_width` x
+  /// `display_height` surface showing `output` (a nested window), to that
+  /// output's logical pixels with its top-left corner at 0,0, undoing its
+  /// transform. `None` if there is no such output.
+  pub fn map_point_on(
+    &self,
+    output: &OutputHandle,
+    x: f64,
+    y: f64,
+    display_width: u32,
+    display_height: u32,
+  ) -> Option<(f64, f64)> {
+    let output = self.state.outputs.get(&output.id())?;
+    Some(output_transform::map_point(
       x,
       y,
       display_width,
       display_height,
-      self.state.primary().rect.width,
-      self.state.primary().rect.height,
-      self.state.primary().transform,
-    )
+      output.rect.width,
+      output.rect.height,
+      output.transform,
+    ))
+  }
+
+  /// Maps a point in `output`'s logical pixels, relative to its top-left
+  /// corner, to display pixels of a `display_width` x `display_height`
+  /// surface showing it; the inverse of [`Compositor::map_point_on`].
+  pub fn unmap_point_on(
+    &self,
+    output: &OutputHandle,
+    x: f64,
+    y: f64,
+    display_width: u32,
+    display_height: u32,
+  ) -> Option<(f64, f64)> {
+    let output = self.state.outputs.get(&output.id())?;
+    Some(output_transform::unmap_point(
+      x,
+      y,
+      display_width,
+      display_height,
+      output.rect.width,
+      output.rect.height,
+      output.transform,
+    ))
+  }
+
+  /// Maps a relative motion in display pixels of a surface showing
+  /// `output` to its logical pixels, like [`Compositor::map_point_on`]
+  /// without the translation.
+  pub fn map_vector_on(
+    &self,
+    output: &OutputHandle,
+    x: f64,
+    y: f64,
+    display_width: u32,
+    display_height: u32,
+  ) -> Option<(f64, f64)> {
+    let output = self.state.outputs.get(&output.id())?;
+    Some(output_transform::map_vector(
+      x,
+      y,
+      display_width,
+      display_height,
+      output.rect.width,
+      output.rect.height,
+      output.transform,
+    ))
   }
 
   /// Sets the output's position and logical size, after the transform.
@@ -3315,12 +3406,7 @@ impl Compositor {
   /// mode of its own, as in headless: its explicit mode, else its logical
   /// size times its scale.
   pub fn configured_physical_size(&self, name: &str) -> (u32, u32) {
-    let placement = self.state.placements.get(name);
-    let scale = |extent: u32| (f64::from(extent) * placement.scale).round();
-    (
-      scale(placement.width).clamp(1.0, f64::from(u32::MAX)) as u32,
-      scale(placement.height).clamp(1.0, f64::from(u32::MAX)) as u32,
-    )
+    output::configured_physical_size(&self.state, name)
   }
 
   /// Removes an output whose monitor, window or connector is gone. Its
