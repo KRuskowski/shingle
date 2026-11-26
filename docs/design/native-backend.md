@@ -481,7 +481,7 @@ What the test machine covers:
 
 A test client that records `wl_keyboard`/`wl_pointer` events checks what clients receive, and pixel checks use Shingle's own wlr-screencopy (crates/shingle/src/screencopy.rs) with `grim`. Test harnesses are Python scripts under `tools/native_test/`, run on the test machine over SSH. Once the machine exists it should be registered as a takt target so workspaces can claim it exclusively.
 
-The steps for NB-6 are in [native-testing.md](../native-testing.md), with `wev` as the recording client and tools/native_test/uinput.py (virtual keyboard, mouse and touchscreen through `python3-evdev`, refusing to run without the test machine's marker file) and tools/native_test/ipc.py for IPC. The NB-7 steps follow them there, with `grim`, `wlopm`, the presentation probe (crates/shingle-native/examples/present_probe.rs) and tools/native_test/present_check.py, which compares the probe's feedback with the page flips Shingle logs under `SHINGLE_TRACE_FLIPS=1`.
+The steps for NB-6 are in [native-testing.md](../native-testing.md), with `wev` as the recording client and tools/native_test/uinput.py (virtual keyboard, mouse and touchscreen through `python3-evdev`, refusing to run without the test machine's marker file) and tools/native_test/ipc.py for IPC. The NB-7 steps follow them there, with `grim`, `wlopm`, the presentation probe (crates/shingle-native/examples/present_probe.rs) and tools/native_test/present_check.py, which compares the probe's feedback with the page flips Shingle logs under `SHINGLE_TRACE_FLIPS=1`. NB-8's zero-copy steps (36 to 42) use the same probe, with `present_check.py --scanout zero-copy|copy` checking the `ZERO_COPY` flag.
 
 ### Rejected test strategies
 
@@ -919,7 +919,7 @@ Where the code differs from the plan, and why:
 - **No `acquire_master_lock`.** libseat hands out the card already as DRM master. "No DRM master" is detected where it would show: `EACCES` or `EBUSY` from the first `TEST_ONLY` commit stops the mode search at once with "cannot become DRM master". After startup, a flip refused with `EACCES` or `EPERM` pauses the display until the seat's next resume.
 - **Mode choice.** NB-7 always uses `ModeChoice::Auto`. `OutputConfig`'s `width` and `height` are nested's window size and default to 1280x720, so taking them as a mode would be wrong; reading `[output:NAME] mode` is NB-9's. `kms/modes.rs` already implements `highres`, `highrr` and `WxH@R` as Wayfire does and is tested with mode lists. The fallback order is the chosen mode, the preferred mode, every mode by area (faster first at equal size), then the CRTC's current mode.
 - **The modeset turns off the rest.** Other connectors on a CRTC get `CRTC_ID=0`, other active CRTCs `ACTIVE=0` and `MODE_ID=0`, and every plane on a CRTC other than ours, including our CRTC's cursor and overlay planes, `FB_ID=0` and `CRTC_ID=0`. `VRR_ENABLED` is set to 0 where the CRTC has it, so a VRR left on by another session does not stay on; NB-10 sets it from the configuration.
-- **Copy path details.** The renderer draws into the existing RGBA `OffscreenTarget` and reads it back with `read_rgba_within(100 ms)`; the copy into the XRGB8888 dumb buffer swaps red and blue, so no BGRA target was added. Dumb buffers are mapped for each copy instead of staying mapped, since `drm`'s mapping borrows the buffer. `Scanout::prepare` takes a CPU `Frame`; NB-8's zero-copy path renders into the buffer itself and will change that method.
+- **Copy path details.** The renderer draws into the existing RGBA `OffscreenTarget` and reads it back with `read_rgba_within(100 ms)`; the copy into the XRGB8888 dumb buffer swaps red and blue, so no BGRA target was added. Dumb buffers are mapped for each copy instead of staying mapped, since `drm`'s mapping borrows the buffer. `Scanout::prepare` takes a CPU `Frame`; NB-8's zero-copy path renders into the buffer itself and will change that method (it did: [NB-8 as built](#nb-8-as-built)).
 - **Frames.** A frame starts when the frontend asked for one and the scheduler is idle, so there is no fixed interval any more: the next frame waits for the flip. A commit is a flip that sets only the primary plane's `FB_ID`, with `NONBLOCK | PAGE_FLIP_EVENT`. The frontend's `RenderTarget::render` returns false for the KMS target, so the frontend does not call `Compositor::frame`; the page-flip event calls `frame_presented` with the flip's time, its vblank counter extended to 64 bits, the mode's refresh and `VSYNC | HW_CLOCK | HW_COMPLETION`. The compositor sends every pending callback of a visible surface on a flip, also for content committed after the frame was drawn; it waits only for the flip. If the driver's timestamps are not `CLOCK_MONOTONIC`, the compositor's clock is used and `HW_CLOCK` dropped.
 - **DPMS.** The backend follows `Compositor::dpms_state` (new; it covers wlr-output-power-management, the idle timeouts and activity) rather than `Event::DpmsChanged`, which the frontend consumes and which is reported twice. Off is a commit of only `ACTIVE=0`, keeping mode and planes; on is a full modeset with `ACTIVE=1`. Both are tested with `TEST_ONLY` first and wait until a pending flip completed; a change while paused is applied by the resume's modeset.
 - **Page-flip timeout.** After 1 s the pending flip is dropped and a `TEST_ONLY` plus blocking `ALLOW_MODESET` commit shows the current buffer again; a failed recovery lets the next frame try a flip. The third timeout without a completed flip in between ends the loop with `Fatal`.
@@ -943,6 +943,82 @@ Acceptance:
 - Unit tests for negotiation.
 - Forcing the fallback (for example with an environment override) selects the copy path with a logged reason.
 - On the test machine, zero-copy is selected on at least one of i915, amdgpu or nvidia-drm, and `wp_presentation` reports `ZERO_COPY`.
+
+#### NB-8 as built
+
+Done on branch `shingle-native-zero-copy`: built, clippy-checked and unit-tested on this host through the fake card, its fake GBM and a fake renderer; it has never allocated a GBM buffer or made a framebuffer of one. The hardware acceptance item is steps 36 to 42 of [native-testing.md](../native-testing.md). The API (crates/shingle-native/src):
+
+```rust
+// scanout.rs
+pub struct ScanoutDmabuf { pub serial: u64, pub fd: OwnedFd, pub width,
+  pub height, pub fourcc, pub modifier, pub stride, pub offset }
+pub enum DrawTarget<'a> { Readback, Dmabuf(&'a ScanoutDmabuf) }
+pub enum Drawn { Pixels(Frame), InPlace }
+pub trait Scanout { fn size(&self) -> (u32, u32);
+  fn current(&self) -> FramebufferId;
+  fn target(&self) -> DrawTarget<'_>;
+  fn prepare(&mut self, device: &mut dyn KmsDevice, drawn: &Drawn)
+    -> io::Result<FramebufferId>;
+  fn presented(&mut self); fn zero_copy(&self) -> bool;
+  fn destroy(&mut self, device: &mut dyn KmsDevice); }
+pub trait ScanoutImporter {
+  fn render_modifiers(&self, fourcc: u32, size: (u32, u32))
+    -> Result<Vec<u64>, String>;
+  fn prepare_buffers(&mut self, output: &str,
+    buffers: &[&ScanoutDmabuf]) -> Result<(), String>; }
+pub enum ScanoutChoice { Auto, Copy }  // ScanoutChoice::from_env
+pub enum ScanoutStatus { Untried, ZeroCopy(u64), Copy(String) }
+
+// scanout/allocator.rs
+pub trait BufferAllocator {
+  fn plane_count(&self, fourcc: u32, modifier: u64) -> Option<u32>;
+  fn allocate(&mut self, width, height, fourcc, modifiers: &[u64])
+    -> io::Result<AllocatedBuffer>; }
+pub struct GbmAllocator; // the real one, over the gbm crate
+
+// scanout/gbm.rs
+pub fn negotiate(plane: &[u64], render: &[u64],
+  plane_count: &dyn Fn(u64) -> Option<u32>) -> Vec<u64>;
+pub struct GbmScanout; // GbmScanout::create(device, allocator,
+                       //   importer, output, in_formats, size, serial)
+
+// kms.rs: KmsDevice gains
+fn add_framebuffer(&mut self, buffer: &PlanarFramebuffer)
+  -> io::Result<FramebufferId>;
+fn remove_framebuffer(&mut self, framebuffer: FramebufferId)
+  -> io::Result<()>;
+fn buffer_allocator(&mut self) -> io::Result<Box<dyn BufferAllocator>>;
+
+// display.rs
+Display::set_scanout_choice(&mut self, ScanoutChoice);
+Display::upgrade_scanout(&mut self, name: &str,
+  importer: &mut dyn ScanoutImporter);
+Display::draw_target(&self, name: &str) -> DrawTarget<'_>;
+Display::scanout_failed(&mut self, name: &str, reason: &str);
+Display::scanout_status(&self, name: &str) -> Option<ScanoutStatus>;
+Display::present_on(&mut self, name: &str, drawn: &Drawn, now: Instant);
+
+// gpu.rs
+pub trait FrameRenderer: ScanoutImporter { fn draw(&mut self,
+  frontend: &mut Frontend, host: &mut dyn Host, output: &OutputHandle,
+  size: (u32, u32), target: DrawTarget<'_>)
+  -> Result<Drawn, RenderFailure>; ... }
+RenderFailure::Scanout(String);
+```
+
+Where the code differs from the plan, and why:
+
+- **Zero-copy comes after the first modeset, per output, through a tested blocking flip.** Section 2 has the native crate try zero-copy first and fall back when "the first `TEST_ONLY` commit fails", which reads as choosing the scanout before startup's test. But the negotiation needs the renderer's render modifiers and the import needs its device, and the renderer is created after the display passed its test, so that a display that cannot work fails before anything else ([6](#6-failure-handling)); and every later modeset with fresh buffers (hotplug, reloaded modes, output management, a resume that relights) happens inside `Display`, which does not own the renderer. So every output is lit as NB-7 lit it, with two black dumb buffers. Before its next frame, once it is on, the seat is enabled and no flip of it is pending, the host calls `Display::upgrade_scanout` with the renderer: the negotiation, three GBM buffers, a framebuffer of each, and the renderer importing them with `DmabufUse::Render` and clearing them to black; then a `TEST_ONLY` commit of the primary plane's `FB_ID` alone with a GBM framebuffer, which is the test the design names, and the same commit blocking, after which the dumb buffers are off screen and freed. A new mode starts on copy buffers again and is tried again. The first frame of a zero-copy output is therefore always black, as with copy scanout.
+- **No `IN_FORMATS`, no zero-copy.** wlroots assumes `LINEAR` and the implicit modifier for a plane without `IN_FORMATS`; Shingle keeps the design's intersection literally, so such a plane, which current kernels give only to drivers without modifier support, gets copy scanout. `DRM_FORMAT_MOD_INVALID` is never offered, since Vulkan imports explicit modifiers only.
+- **Render modifiers allow the mode's size.** The renderer's `render_modifiers` leaves out modifiers whose `maxExtent` is smaller than the mode, so that GBM is never offered a modifier the import would then refuse.
+- **The adapter must be on the card's GPU.** Section 2 lets the copy path render on any adapter when none is on the card's PCI slot. Zero-copy is refused then ("the renderer's adapter is not the card's GPU (PCI ...)"), because a GBM buffer of the card would be imported into another GPU; a card without a PCI slot (a platform display controller) still tries, since its render GPU is another device by nature, as wlroots handles it.
+- **The fallback also works after the start.** Beyond the design's list (empty intersection, GBM or import error, refused `TEST_ONLY`, `SHINGLE_SCANOUT=copy`), a zero-copy output falls back to copy buffers, by the same tested blocking flip, when a renderer cannot import its buffers any more (`RenderFailure::Scanout`, as after a GPU loss onto a device that cannot import) or when the card refuses a flip to one of them. A GPU loss alone keeps zero-copy: the GBM buffers belong to the card, and the new renderer imports them again on its first frame. A commit refused for lack of DRM master changes nothing and is tried again.
+- **Framebuffers through `drm-ffi`.** `drm`'s `add_planar_framebuffer` asserts that the modifier is valid; `DrmDevice::add_framebuffer` calls `drm_ffi::mode::add_fb2` with `DRM_MODE_FB_MODIFIERS` itself and refuses the invalid modifier with an error, so no `PlanarBuffer` wrapper was needed. The GBM device is made on a duplicate of the card's descriptor, which shares the card's open file, so GEM handles of its buffers are valid for the card's framebuffers; each buffer keeps the device alive.
+- **Three buffers, least recently shown first.** With one flip in flight two would do; the third is the design's, and the buffer drawn next is the one that left the screen longest ago.
+- **Synchronisation** is the design's: the frame is drawn between the foreign acquire and release barriers (`draw_with_access`), and the renderer waits at most 100 ms for that submission (`PollType::Wait`) before the flip is committed. The renderer keeps no offscreen target for a zero-copy output; screencopy still draws its capture separately (`capture_frame`).
+- **Logs.** The line of a lit output is `output NAME: WxH at R Hz`, without the scanout, which follows as `output NAME: zero-copy scanout, modifier M` or `output NAME: copy scanout, because REASON`; a fallback logs `output NAME: back to copy scanout, because REASON`. `rendering on ADAPTER` no longer says that zero-copy is not built. `Display::scanout_status` keeps the reason for tests. `SHINGLE_SCANOUT` other than `copy` or `auto` is logged and treated as `auto`.
+
+Unit tests cover the negotiation (the plane's order kept, metadata planes, modifiers unknown to GBM and the implicit modifier left out), its reasons, the GBM scanout's allocation, framebuffers, imports, buffer rotation and freeing, and every failure freeing what it made (crates/shingle-native/src/scanout/gbm.rs); `SHINGLE_SCANOUT` parsing (scanout.rs); the display through the fake card (crates/shingle-native/src/display/zero_copy_tests.rs: the tested blocking flip with only `FB_ID`, the dumb buffers freed, frames presented with `ZERO_COPY`, `SHINGLE_SCANOUT=copy`, no GBM, a renderer without a GPU, no shared modifier, no `IN_FORMATS`, a refused test, a test refused for lack of master tried again, waiting for a pending flip, a pause and DPMS off, resume and DPMS modesets showing a GBM buffer, the fallback when the renderer cannot draw and when a flip is refused, a new mode tried again at its size, and a refused mode change keeping zero-copy); and the host with a real compositor and client (host/tests.rs: frames drawn into the GBM buffers after the tested blocking flip and presented to the client with `ZERO_COPY`, `SHINGLE_SCANOUT=copy` reading frames back without it, the fallback after a renderer cannot draw into the buffers, and a GPU loss drawing on into the same buffers). What only hardware can show is listed in [status.md](../status.md#native-backend-zero-copy-scanout).
 
 ### NB-9 `shingle-native-outputs`: hotplug and mode configuration
 

@@ -227,6 +227,8 @@ From NB-7 on, Shingle lights the monitor: it opens the boot GPU's card through t
 
 Unit tests through a fake card cover the logic behind every step ([design, NB-7 as built](design/native-backend.md#nb-7-as-built)); these steps check that real drivers behave the way the fake assumes.
 
+Since NB-8, outputs move to zero-copy scanout when they can (steps 36 to 42). Steps 10 to 15 were written for copy scanout: run them with `SHINGLE_SCANOUT=copy` in Shingle's environment to check the copy path, and once more without it, in which case the log has `output NAME: zero-copy scanout, modifier M` after the output's line and presented frames carry `"flags": 15` instead of 7.
+
 ### Step 9: prepare the test machine for NB-7
 
 1. In addition to step 0, install `foot`, `grim`, `wlopm` and `wayland-utils`, and connect one monitor to the GPU that drives the boot console (the one whose `/sys/class/drm/cardN/device/boot_vga` is `1`).
@@ -272,7 +274,7 @@ Acceptance: "A client is visible on the test machine's display, checked with `gr
    wayland-info | grep -A4 "interface: 'wl_output'"
    ```
 
-   Expected: the log has `using /dev/dri/cardN` (the boot VGA card), `output NAME: WxH at R Hz, copy scanout` with the monitor's connector name (such as `HDMI-A-1` or `DP-1`) and preferred mode, and `rendering on ADAPTER; zero-copy scanout is not built yet, so frames are copied`, where ADAPTER is the GPU on that card's PCI slot. The descriptors include that `/dev/dri/cardN`. `grim` writes a PNG of the mode's size showing the foot window, tiled over the whole output. `wayland-info` reports the output with the connector name, the mode's size and refresh rate, and the monitor's physical size.
+   Expected: the log has `using /dev/dri/cardN` (the boot VGA card), `output NAME: WxH at R Hz` with the monitor's connector name (such as `HDMI-A-1` or `DP-1`) and preferred mode, `rendering on ADAPTER`, where ADAPTER is the GPU on that card's PCI slot, and, with `SHINGLE_SCANOUT=copy`, `output NAME: copy scanout, because SHINGLE_SCANOUT=copy forces copy scanout`. (Before NB-8 the output's line ended in `, copy scanout` and the adapter's in `; zero-copy scanout is not built yet, so frames are copied`.) The descriptors include that `/dev/dri/cardN`. `grim` writes a PNG of the mode's size showing the foot window, tiled over the whole output. `wayland-info` reports the output with the connector name, the mode's size and refresh rate, and the monitor's physical size.
 3. On the physical screen: the same foot window, sharp, at the monitor's native resolution, and its cursor follows typing on the test machine's keyboard. The mouse pointer is drawn and moves.
 4. Run this step with one monitor connected. (In NB-7 a second monitor stayed dark; since MO-7 every connected monitor that a CRTC is free for is lit, which steps 25 to 35 check.)
 5. End Shingle with `kill -TERM`; expected `exit=0` and the text console back on the screen.
@@ -527,7 +529,7 @@ Needs a dock or MST hub with two monitors (B and C) behind one cable; otherwise 
 
 1. Start Shingle with `mo7-return.yaml`, A and B connected, and `present_probe 100000` as the client, so that flips are pending at almost any moment.
 2. `wlr-randr --output CONN_B --mode WxH@R --dryrun; echo "status=$?"` with a mode B lists but is not current: `status=0`, nothing changes and the log has no new `output CONN_B:` line.
-3. `wlr-randr --output CONN_B --mode WxH@R; echo "status=$?"`: `status=0`, B switches mode within a second, the log says `output CONN_B: WxH at R Hz, copy scanout`, and A's picture does not flicker or drop out.
+3. `wlr-randr --output CONN_B --mode WxH@R; echo "status=$?"`: `status=0`, B switches mode within a second, the log says `output CONN_B: WxH at R Hz` (followed by its scanout line since NB-8), and A's picture does not flicker or drop out.
 4. Both at once: `wlr-randr --output CONN_A --mode W1xH1 --output CONN_B --mode W2xH2; echo "status=$?"`: `status=0` and both `output` lines appear together (one combined modeset).
 5. `wlr-randr --output CONN_B --pos 0,-1080` (B above A, using B's height): `outputs` shows B at 0,-1080, and the pointer crosses at the top edge of A.
 6. `wlr-randr --output CONN_B --off`: B goes dark, `wlr-randr` lists it `Enabled: no`, windows on B join A, and A keeps its probe running. `wlr-randr --output CONN_B --on`: B is lit again and its windows come back. Unplugging and replugging B now leaves it as it is (`--off` and `--on` hold until Shingle restarts, as in Wayfire).
@@ -574,6 +576,80 @@ Needs a dock or MST hub with two monitors (B and C) behind one cable; otherwise 
    and start Shingle with it, A and B connected and `sh -c 'exec wev > /tmp/wev.log 2>&1'` as the client; move wev's window to B (step 28.1).
 2. `uinput touch 0.5 0.5`. Expected: wev's log has a `wl_touch` `down` in the middle of its window on B (half of B's width and height in window coordinates), not on A.
 3. Without the mapping (remove the two lines and restart), `uinput touch 0.5 0.5` touches the middle of the whole layout's bounding box: with A and B side by side and equally wide and high, the point on the edge between them.
+
+## NB-8: zero-copy scanout
+
+From NB-8 on, each lit monitor starts on copy scanout as before and, before its next frame, moves to zero-copy scanout: three GBM buffers with a modifier that the primary plane's `IN_FORMATS`, the Vulkan renderer and GBM (with one plane) all accept, imported into the renderer and drawn into directly, shown after a `TEST_ONLY` and a blocking flip. Whatever fails keeps copy scanout and logs why; `SHINGLE_SCANOUT=copy` forces copy scanout. Unit tests through the fake card, its fake GBM and a fake renderer cover the negotiation, the switch, every fallback and the override ([design, NB-8 as built](design/native-backend.md#nb-8-as-built)); these steps check that real drivers, GBM and Vulkan behave the way the fakes assume, and the acceptance item "on the test machine, zero-copy is selected on at least one of i915, amdgpu or nvidia-drm, and `wp_presentation` reports `ZERO_COPY`".
+
+### Step 36: prepare the test machine for NB-8
+
+1. In addition to steps 0 and 9, install `drm-info` and `vulkan-tools`. Connect one monitor to the boot VGA card. On NVIDIA, check that nvidia-drm runs with kernel modesetting, without which there is no atomic KMS at all: `cat /sys/module/nvidia_drm/parameters/modeset` must print `Y`.
+2. Record what the card and the Vulkan driver offer, from a text console or over SSH while no Shingle runs (`drm_info` opens the card node, which is fine on the test machine):
+
+   ```sh
+   drm_info > /tmp/drm_info.txt
+   cargo run --manifest-path ~/shingle/Cargo.toml -p shingle-render \
+     --example dmabuf_caps > /tmp/dmabuf_caps.txt
+   ```
+
+   In /tmp/drm_info.txt, find the planes whose `type` is `Primary` and, under their `IN_FORMATS`, the modifiers that list `XR24` (XRGB8888). Note them and the `render` modifiers `dmabuf_caps` lists for `XRGB8888` on the card's adapter. The modifiers in both lists are the candidates; if none is in both, the expected result of step 37 is copy scanout with the reason `no XRGB8888 modifier is both scanned out by the primary plane (...) and rendered to by the renderer (...)`, which is recorded as the driver's result.
+3. "Start Shingle on tty1 with CLIENT" means step 9's command, with `SHINGLE_TRACE_FLIPS=1`.
+
+### Step 37: zero-copy is selected, and the picture is right
+
+1. Start Shingle on tty1 with `foot`.
+2. Over SSH:
+
+   ```sh
+   grep -E 'rendering on|output .*: |scanout' ~/.local/state/shingle/native.log
+   grim /tmp/zero-copy.png && file /tmp/zero-copy.png
+   ```
+
+   Expected: `rendering on ADAPTER`, `output CONN: WxH at R Hz`, then `output CONN: zero-copy scanout, modifier M`, with M one of the candidates of step 36.2 (for example `INTEL 0x0100000000000002` for Y tiling, an `AMD 0x02...` modifier, or `NVIDIA 0x030000000060601x` block linear), and no `copy scanout, because` line. `grim` shows the foot window as in step 10.
+3. On the physical screen: the same picture as in step 10, with the right colours (foot's background and text as configured, not with red and blue swapped), no tiling garbage, stripes or shear, and no tearing while typing. The first frame after the switch is black, then foot appears. Record any difference from step 10's copy scanout.
+4. With `ls -l /proc/$(pgrep -n -u "$USER" -x shingle)/fd | grep -c dmabuf`, count the DMA-BUF descriptors: 3 per zero-copy output, besides any of client buffers.
+5. Record the driver (`i915`, `xe`, `amdgpu` or `nvidia-drm`, from `readlink /sys/class/drm/cardN/device/driver`), the kernel, Mesa or the NVIDIA driver version, the modifier chosen and the mode. Repeat 1 to 4 on every GPU family the test machine has; the acceptance item needs one of i915, amdgpu or nvidia-drm to reach zero-copy.
+
+### Step 38: `wp_presentation` reports `ZERO_COPY`, and frames keep up
+
+1. Start Shingle on tty1 with `sh -c 'exec present_probe 600 > /tmp/probe.out'`.
+2. After 20 s, over SSH:
+
+   ```sh
+   python3 ~/shingle/tools/native_test/present_check.py --scanout zero-copy \
+     ~/.local/state/shingle/native.log /tmp/probe.out; echo "status=$?"
+   grep -c '"flags":15' /tmp/probe.out
+   ```
+
+   Expected: `status=0`; the summary has `"presented": 600`, `"zero_copy": 600`, `"max_difference_ns"` below 1000000 and `"median_frame_interval_ms"` of one refresh period; every `presented` line has `"flags": 15` (vsync, hardware clock, hardware completion and zero copy), so the count is 600.
+3. Compare the copy path: repeat 1 and 2 with `SHINGLE_SCANOUT=copy` in Shingle's environment and `--scanout copy` for the check. Expected: `status=0`, `"zero_copy": 0` and `"flags": 7`. In both runs, record Shingle's CPU time for the 600 frames, `ps -o times= -p $(pgrep -n -u "$USER" -x shingle)` read right before and after the probe (the difference), and the median frame interval. Zero-copy should need clearly less CPU time, since it drops the readback and the copy of every frame (about 8 MB at 1080p); record the numbers without claims beyond them.
+
+### Step 39: `SHINGLE_SCANOUT=copy` and the other fallbacks name their reason
+
+1. Start Shingle on tty1 with `foot` and `SHINGLE_SCANOUT=copy`. Expected: `output CONN: copy scanout, because SHINGLE_SCANOUT=copy forces copy scanout`, no `zero-copy scanout` line, and the picture of step 10.
+2. `SHINGLE_SCANOUT=bogus`: the log has `SHINGLE_SCANOUT=bogus is neither copy nor auto; trying zero-copy`, then the zero-copy line of step 37.
+3. A renderer that is not the card's GPU: with only lavapipe as the Vulkan driver, `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json` in Shingle's environment, the log has `no Vulkan adapter on PCI SLOT; copy scanout renders on any` and `output CONN: copy scanout, because the renderer's adapter is not the card's GPU (PCI SLOT)`, and the picture of step 10 drawn by lavapipe.
+4. On a card whose plane and renderer share no modifier (step 36.2), the reason names both lists; record it. If the test machine has no such card, record that this row was only unit-tested.
+
+### Step 40: zero-copy across VT switches, DPMS, mode changes and hotplug
+
+1. Start Shingle on tty1 with `sh -c 'exec present_probe 100000 > /tmp/probe.out'` and check step 37.2's zero-copy line.
+2. `sudo chvt 2; sleep 2; sudo chvt 1`. Expected: `seat disabled; paused`, `seat enabled; resumed`, the probe's picture back, no new `zero-copy scanout` or `copy scanout` line (the GBM buffers are kept across the switch), and `tail -5 /tmp/probe.out` shows `"flags":15` again.
+3. `wlopm --off CONN; sleep 3; wlopm --on CONN`: the picture returns, still zero-copy (`"flags":15`).
+4. `wlr-randr --output CONN --mode WxH@R` with another listed mode: the log has `output CONN: WxH at R Hz` and a new `output CONN: zero-copy scanout, modifier M` line for the new mode, and the picture is right at the new size. `wlr-randr --output CONN --preferred` (or the old mode) goes back the same way.
+5. Unplug and replug the monitor: after `output CONN: ...`, a new zero-copy line follows, and the probe presents with `"flags":15`.
+6. With two monitors (step 25), start with `mo7-return.yaml`: each output has its own zero-copy line, and step 32's two probes pass `present_check.py --output CONN_A --scanout zero-copy` and `--output CONN_B --scanout zero-copy`.
+
+### Step 41: a GPU loss with zero-copy scanout
+
+1. Start Shingle on tty1 with `sh -c 'exec present_probe 100000 > /tmp/probe.out'` on zero-copy, and trigger a GPU reset as in step 15's row for a lost GPU, where the driver allows it.
+2. Expected: `recreating the GPU context`, and the picture returns without a `back to copy scanout` line: the new renderer imports the same GBM buffers again, and the probe presents with `"flags":15` again. If the new device cannot import them, the log says `output CONN: back to copy scanout, because ...` and frames continue on copy scanout (`"flags":7`); record which happened. Record if the driver has no trigger.
+
+### Step 42: failure-table rows of zero-copy that the test machine can produce
+
+1. Note for each GPU in steps 37 to 41 whether the driver accepted the blocking flip from the dumb buffers to a GBM buffer with another modifier without a modeset (step 37 passing shows it did). If a driver refuses it, the log has `output CONN: copy scanout, because the card refuses a flip to a GBM buffer: ...`; record the error, since the design assumes plane updates may change the modifier.
+2. A refused flip during zero-copy, if a driver produces one, shows `the page flip of CONN failed: ...` followed by `output CONN: back to copy scanout, because the page flip to a GBM buffer failed: ...`, and the picture continues on copy scanout. Record it if seen; it cannot be forced from outside.
+3. End Shingle with `kill -TERM`; expected `exit=0` and the text console back, as in step 14, now with GBM buffers freed (no `drm` errors in `sudo dmesg | tail`).
 
 ## Results
 
