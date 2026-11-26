@@ -6,8 +6,16 @@
 //! targets, so they also prove the split changed no pixels. Set
 //! `SHINGLE_RENDER_BLESS=1` to write new reference images instead of
 //! comparing. Tests are skipped when the machine has no wgpu adapter.
+//!
+//! Every test draws with one GPU context, which they take in turn: with a
+//! device of its own per test, NVIDIA's driver crashed now and then
+//! (SIGSEGV) while the tests ran in parallel, as the DB-4 cache tests
+//! did (crates/shingle-frontend/src/dmabuf/tests.rs).
 
-use std::path::PathBuf;
+use std::{
+  path::PathBuf,
+  sync::{Mutex, MutexGuard, OnceLock, PoisonError},
+};
 
 use shingle_render::{
   GpuContext, GpuOptions, GpuTexture, OffscreenRenderer, OffscreenTarget,
@@ -25,17 +33,6 @@ const CHANNEL_TOLERANCE: u8 = 2;
 /// Pixels allowed to exceed the tolerance, for rasteriser edge differences
 /// between GPUs.
 const MAX_OUTLIERS: usize = (WIDTH * HEIGHT / 100) as usize;
-
-fn renderer() -> Option<OffscreenRenderer> {
-  match pollster::block_on(OffscreenRenderer::new(WIDTH, HEIGHT)) {
-    Ok(renderer) => Some(renderer),
-    Err(RenderError::RequestAdapter(error)) => {
-      eprintln!("skipping pixel test, no GPU adapter: {error}");
-      None
-    }
-    Err(error) => panic!("offscreen renderer failed: {error}"),
-  }
-}
 
 fn rect(x: i32, y: i32, width: u32, height: u32) -> RenderRect {
   RenderRect {
@@ -57,16 +54,33 @@ fn checker_rgba() -> Vec<u8> {
     .collect()
 }
 
-fn gpu() -> Option<GpuContext> {
-  let instance = GpuContext::create_instance();
-  match pollster::block_on(GpuContext::new(instance, GpuOptions::default())) {
-    Ok(gpu) => Some(gpu),
-    Err(RenderError::RequestAdapter(error)) => {
-      eprintln!("skipping pixel test, no GPU adapter: {error}");
-      None
+/// The identity gamma ramp: 256 values each for red, green and blue.
+fn identity_ramp() -> Vec<u16> {
+  (0..3)
+    .flat_map(|_| (0..256u16).map(|value| value * 257))
+    .collect()
+}
+
+/// The shared GPU context, for this test alone until the guard drops,
+/// with the identity gamma ramp and no inversion; `None` without an
+/// adapter. The context lives as long as the test process.
+fn gpu() -> Option<MutexGuard<'static, GpuContext>> {
+  static GPU: OnceLock<Option<Mutex<GpuContext>>> = OnceLock::new();
+  let gpu = GPU.get_or_init(|| {
+    let instance = GpuContext::create_instance();
+    match pollster::block_on(GpuContext::new(instance, GpuOptions::default())) {
+      Ok(gpu) => Some(Mutex::new(gpu)),
+      Err(RenderError::RequestAdapter(error)) => {
+        eprintln!("skipping pixel test, no GPU adapter: {error}");
+        None
+      }
+      Err(error) => panic!("GPU context failed: {error}"),
     }
-    Err(error) => panic!("GPU context failed: {error}"),
-  }
+  });
+  let mut gpu = gpu.as_ref()?.lock().unwrap_or_else(PoisonError::into_inner);
+  gpu.set_inversion(false, false);
+  gpu.set_gamma_ramp(&identity_ramp()).expect("identity ramp");
+  Some(gpu)
 }
 
 /// Overlapping solid, translucent, textured, transformed and rotated tiles.
@@ -86,13 +100,27 @@ fn scene_tiles(texture: &GpuTexture) -> Vec<RenderTile<'_>> {
   ]
 }
 
-fn scene(renderer: &mut OffscreenRenderer) -> Vec<u8> {
-  let texture = renderer
-    .create_texture(4, 4, &checker_rgba())
+/// Draws `tiles` over `clear` into a new `width` by `height` target and
+/// reads it back.
+fn draw_frame(
+  gpu: &GpuContext,
+  state: &RenderState,
+  (width, height): (u32, u32),
+  tiles: &[RenderTile<'_>],
+  clear: [f64; 4],
+) -> Vec<u8> {
+  let target = OffscreenTarget::new(gpu, width, height).expect("target");
+  target.render(gpu, state, tiles, clear);
+  target.read_rgba(gpu).expect("readback")
+}
+
+/// The fixed scene, with the checker texture uploaded with `state`'s
+/// filter, as `OffscreenRenderer` draws it.
+fn scene(gpu: &GpuContext, state: &RenderState) -> Vec<u8> {
+  let texture = gpu
+    .create_texture(4, 4, &checker_rgba(), state.texture_filter())
     .expect("texture upload");
-  renderer
-    .render(&scene_tiles(&texture), CLEAR)
-    .expect("offscreen render")
+  draw_frame(gpu, state, (WIDTH, HEIGHT), &scene_tiles(&texture), CLEAR)
 }
 
 fn golden_path(name: &str) -> PathBuf {
@@ -138,28 +166,29 @@ fn check_golden(name: &str, rgba: &[u8]) {
 
 #[test]
 fn plain_scene_matches_reference() {
-  let Some(mut renderer) = renderer() else {
+  let Some(gpu) = gpu() else {
     return;
   };
-  let rgba = scene(&mut renderer);
+  let rgba = scene(&gpu, &RenderState::default());
   check_golden("plain", &rgba);
 }
 
 #[test]
 fn scaled_transformed_zoomed_scene_matches_reference() {
-  let Some(mut renderer) = renderer() else {
+  let Some(gpu) = gpu() else {
     return;
   };
-  renderer.set_scale_factor(1.25);
-  renderer.set_output_transform(TextureTransform::Rotate90);
-  renderer.set_zoom(1.3, 60.0, 40.0);
-  let rgba = scene(&mut renderer);
+  let mut state = RenderState::default();
+  state.set_scale_factor(1.25);
+  state.set_output_transform(TextureTransform::Rotate90);
+  state.set_zoom(1.3, 60.0, 40.0);
+  let rgba = scene(&gpu, &state);
   check_golden("scaled_transformed_zoomed", &rgba);
 }
 
 #[test]
 fn gamma_and_hue_inversion_match_reference() {
-  let Some(mut renderer) = renderer() else {
+  let Some(mut gpu) = gpu() else {
     return;
   };
   let ramp = (0..3)
@@ -174,30 +203,32 @@ fn gamma_and_hue_inversion_match_reference() {
       })
     })
     .collect::<Vec<_>>();
-  renderer.set_gamma_ramp(&ramp).expect("gamma ramp");
-  renderer.set_inversion(true, true);
-  let rgba = scene(&mut renderer);
+  gpu.set_gamma_ramp(&ramp).expect("gamma ramp");
+  gpu.set_inversion(true, true);
+  let rgba = scene(&gpu, &RenderState::default());
   check_golden("gamma_hue_inverted", &rgba);
 }
 
 #[test]
 fn nearest_filter_and_inversion_match_reference() {
-  let Some(mut renderer) = renderer() else {
+  let Some(mut gpu) = gpu() else {
     return;
   };
-  assert!(renderer.set_nearest_filter(true));
-  assert!(!renderer.set_nearest_filter(true));
-  renderer.set_inversion(true, false);
-  let rgba = scene(&mut renderer);
+  let mut state = RenderState::default();
+  assert!(state.set_nearest_filter(true));
+  assert!(!state.set_nearest_filter(true));
+  gpu.set_inversion(true, false);
+  let rgba = scene(&gpu, &state);
   check_golden("nearest_inverted", &rgba);
 }
 
 #[test]
 fn empty_scene_is_clear_color() {
-  let Some(mut renderer) = renderer() else {
+  let Some(gpu) = gpu() else {
     return;
   };
-  let rgba = renderer.render(&[], CLEAR).expect("offscreen render");
+  let rgba =
+    draw_frame(&gpu, &RenderState::default(), (WIDTH, HEIGHT), &[], CLEAR);
   // The target is sRGB, so the linear clear colour is encoded on readback.
   let first = &rgba[..4];
   assert!(rgba.chunks_exact(4).all(|pixel| pixel == first));
