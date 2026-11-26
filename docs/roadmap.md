@@ -82,7 +82,8 @@ In short:
 The work is split into seven workspaces, MO-1 to MO-7, each with acceptance criteria in the design: core workspace sets and sessions, the compositor's output registry, client protocols per output, focus and moving views, the frontend's scenes per output with the offscreen backend, nested windows, and native multi-CRTC. All but MO-7 are verified on this host with headless, offscreen and nested Shingle inside the harness namespaces; MO-7 needs the test machine. Mirroring is a later, optional MO-8.
 
 1. MO-1 `shingle-wsets-core`: done; workspace sets, away records and session version 2 in the core, positions, the layout functions and the new config sections ([status.md](status.md#sessions), [MO-1 as built](design/multi-output.md#mo-1-as-built)).
-2. MO-2 `shingle-output-registry`: next.
+2. MO-2 `shingle-output-registry`: done; the compositor's output registry with a global, xdg-output and output-management head per output, the layout, unplug policies, restored sessions settling on the outputs, IPC ids, `wayfire/create-headless-output` and `destroy-headless-output`, the output events and headless `--outputs N` ([status.md](status.md#several-outputs), [MO-2 as built](design/multi-output.md#mo-2-as-built)).
+3. MO-3 `shingle-output-protocols`: next.
 
 ## 6. Remaining Wayfire compatibility
 

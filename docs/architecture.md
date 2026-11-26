@@ -85,6 +85,7 @@
 | Native event loop, pause and resume, `Host` | `crates/shingle-native/src/host.rs`; tests in `host/tests.rs` |
 | Native test plan and tools (test machine only) | `docs/native-testing.md`, `tools/native_test/` |
 | Output description, renaming, mode requests, configured placement | `crates/shingle/src/output.rs`, `output_management.rs`; tests in `output/tests.rs` |
+| The output registry: outputs in add order, IPC ids, globals, adding and removing outputs under the unplug policy, restored sessions | `crates/shingle/src/output/registry.rs`, `output/hotplug.rs`, `output.rs`; tests in `output/multi_tests.rs` |
 | Output configuration, Wayfire's mode syntax and `position` | `crates/shingle-config/src/output.rs` |
 | Output layout, pointer clamping, oswitch's next and directional outputs, layout warnings (pure functions) | `crates/shingle-config/src/layout.rs` |
 | Unplug policy, `oswitch`, `wsets` and per-device output settings | `crates/shingle-config/src/multi_output.rs` |

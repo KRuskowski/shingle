@@ -1,6 +1,6 @@
 # Multi-output design
 
-Status: accepted, 2026-11-26, with the proposed defaults adopted on the operator's behalf ([Decisions](#decisions)). MO-1 is built ([MO-1 as built](#mo-1-as-built)), with the deviations listed there; the sections below are corrected where the code differs. Roadmap item "Multi-output" ([roadmap.md](../roadmap.md#5-multi-output)). It extends the native backend's output work ([native-backend.md](native-backend.md#5-outputs), [NB-9 as built](native-backend.md#nb-9-as-built)), which lights exactly one connector.
+Status: accepted, 2026-11-26, with the proposed defaults adopted on the operator's behalf ([Decisions](#decisions)). MO-1 and MO-2 are built ([MO-1 as built](#mo-1-as-built), [MO-2 as built](#mo-2-as-built)), with the deviations listed there; the sections below are corrected where the code differs. Roadmap item "Multi-output" ([roadmap.md](../roadmap.md#5-multi-output)). It extends the native backend's output work ([native-backend.md](native-backend.md#5-outputs), [NB-9 as built](native-backend.md#nb-9-as-built)), which lights exactly one connector.
 
 Shingle drives one output. The core window model already holds any number of outputs, each with its own workspaces and tiling trees, but everything above it assumes one: `CompositorState` has a single output rectangle, scale, transform, description and `wl_output` global, IPC reports output id 1 for everything, the frontend draws one scene, nested opens one window and native lights one CRTC. This document decides how several outputs are lit and used at once, as in Wayfire: the output layout and positions, workspace sets and tiling trees per output, focus and pointer movement between outputs, moving views between outputs, unplugging and replugging, sessions, rendering and frame pacing in every backend, the client protocols that name outputs, Xwayland's root, headless outputs created over IPC, and the Wayfire IPC methods and events that involve outputs. It is the brief for the implementation workspaces in [section 12](#12-implementation-plan).
 
@@ -71,23 +71,28 @@ The per-output code that exists (output.rs, output_management.rs, output_power.r
 **Public API.** A backend adds and removes outputs and the frontend names the output it draws or presents:
 
 ```rust
-// shingle
+// shingle, as built in MO-2 (see MO-2 as built)
 pub struct OutputHandle(String);        // the output's name
 Compositor::add_output(&mut self, info: OutputInfo, physical: (u32, u32))
   -> Result<OutputHandle, Error>;
-Compositor::remove_output(&mut self, output: &OutputHandle);
-Compositor::set_output_info(&mut self, output: &OutputHandle, OutputInfo);
-Compositor::set_output_size(&mut self, output: &OutputHandle, (u32, u32));
+Compositor::remove_output(&mut self, output: &OutputHandle)
+  -> Result<(), Error>;
+Compositor::describe_output(&mut self, output: &OutputHandle, OutputInfo);
+Compositor::set_output_size(&mut self, output: &OutputHandle, (u32, u32))
+  -> Result<(), Error>;
 Compositor::outputs(&self) -> Vec<OutputView>;  // name, rect, scale, ...
 Compositor::output_at(&self, x: f64, y: f64) -> Option<OutputHandle>;
 Compositor::active_output(&self) -> OutputHandle;
+Compositor::primary_output(&self) -> OutputHandle;  // the first added
 Compositor::frame_presented(&mut self, &OutputHandle, PresentInfo);
-Compositor::visible_surfaces(&self, &OutputHandle) -> Vec<SurfaceSnapshot>;
+Compositor::visible_surfaces_on(&self, &OutputHandle)
+  -> Vec<SurfaceSnapshot>;
+Compositor::restore_outputs(&mut self);
 Compositor::take_output_requests(&mut self) -> Vec<OutputRequest>;
 pub enum Event { OutputAdded { output }, OutputRemoved { output },
-  OutputChanged { output, rect }, OutputFocused { output },
-  CaptureRequested { id, output, region }, CreateHostOutput,
-  DestroyHostOutput { output }, .. }
+  OutputChanged { output, rect }, .. }
+// later: Event::OutputFocused (MO-4), CaptureRequested's output (MO-3,
+// MO-5), CreateHostOutput and DestroyHostOutput (MO-6)
 ```
 
 `Compositor::new` still creates `HEADLESS-1`, so embedders and tests that never add an output keep working; a backend that knows its outputs at start renames it to the first one before clients connect (the NB-9 rename, `output::rename`, output.rs:300) and adds the others. `set_output_info` with a new name is a rename only before clients have connected; afterwards a backend removes the old output and adds the new one, which runs the unplug rules of [section 5](#5-unplug-and-replug).
@@ -414,6 +419,22 @@ Acceptance:
 - The Wayland pin transcript is unchanged; the IPC fixtures of [status.md](../status.md#with-real-clients) are unchanged apart from the two event payloads, whose new form is recorded.
 - On this host, in the output_test namespace with `--headless --outputs 2`: `wayland-info` and `wlr-randr` list both outputs at their auto positions and at configured fixed ones; `wayfire/create-headless-output` adds a third that clients see, and destroying it moves its windows to the active output; `list-methods` returns 81.
 - Nothing needs the test machine.
+
+### MO-2 as built
+
+Built on branch `shingle-output-registry`, 2026-11-26. The registry is crates/shingle/src/output/registry.rs (`Outputs`, `OutputState`, `OutputKind`), adding and removing outputs and the restore are crates/shingle/src/output/hotplug.rs, and globals, renames, the layout and claiming a parked set are in crates/shingle/src/output.rs. `CompositorState` holds `outputs` and `active_output`; code that meant the one output now reads `state.primary()` (the first output added), `state.active()` or `state.output_of_window(window)`. Headless takes `--outputs N` (crates/shingle-bin/src/headless.rs). Where the code differs from the sections above:
+
+- **The calls without an output stay.** `Compositor::output`, `output_info`, `set_output_info`, `set_output`, the scale and transform calls, `map_output_point`, `visible_surfaces` and `allows_tearing` mean the first output added, which `Compositor::primary_output` names; every host draws only that one until MO-5. The per-output forms are `describe_output(&OutputHandle, OutputInfo)` (the design's `set_output_info` with an output), `set_output_size`, `visible_surfaces_on`, `frame_presented(&OutputHandle, PresentInfo)` and `frame_now(&OutputHandle)`; `frame()` presents every output that is not dark, so that the frontend's hosts also give frame callbacks to windows on outputs they do not draw, such as IPC outputs. `Compositor::configured_physical_size` gives a backend without modes the size an output's entry asks for. `OutputView` has `kind` and `dark` besides the fields listed.
+- **Renames stay renames.** A new name in `set_output_info` renames the output at any time, as NB-9 does, instead of removing and adding it once clients have connected; native needs that until MO-7 adds and removes its outputs. When the new name or identity has a parked set, the output shows that set and the windows of the set it showed join it.
+- **Placements.** `OutputPlacement` has `position: OutputPosition` instead of `x` and `y`, and `Config` gains `output_position` (the default entry's position; the position of `Config::output` is ignored) and `output_unplug`. A call to `set_output` that moves the first output fixes it there; one that keeps its position keeps it automatic.
+- **Identities.** Only an output with its own description has an EDID identity: one whose make, model or serial differs from Shingle's own headless description. Nested and headless outputs all look alike, so with identities a new `HEADLESS-3` would have taken the parked set of `HEADLESS-2` as the only one with its identity; they are matched by name instead. IPC outputs have none.
+- **Restoring a session.** `Compositor::with_core` parks every saved set, and each output takes its own as it is added (`HEADLESS-1` in `Compositor::new`, the others in `add_output` and renames), returning the windows that are away from it. `Compositor::restore_outputs` then handles the sets that no output took under `output_layout.unplug` and focuses the saved active output. It runs once, from `Frontend::start_clients`, from headless after its outputs, or else at the first `poll`. Under `return`, a native session restored in nested therefore shows its windows in the one output, and `describe_output` on the next native start brings them back. The core records the active output only when it changes, so that a session with one output is saved exactly as before (the pin transcript is unchanged).
+- **Unplugging.** A set that nothing can return to (no windows, no copy, no window away from it) is destroyed under `move` and `return`, so closing and creating outputs leaves no empty parked sets behind; `park` keeps it. IPC outputs take parked sets by name like any other output, which the output harness uses to bring a restored window to a created `HEADLESS-3`.
+- **What still means the first output.** Until MO-3: layer surfaces and their exclusive zones (every other output's workarea is its whole rectangle), lock surfaces, override-redirect X windows and the cursor are on the first output and drawn only there; `wl_surface.enter` names the window's output for toplevels and the first output for everything else; foreign-toplevel `output_enter` is sent for the first output's bindings; the ext-workspace group is the first output's; FIFO and commit-timing barriers are released by the first output's frames. Presentation feedback is per output already: a surface shown on another output waits for that output's frame instead of being discarded, and `sync_output` is the presenting output's `wl_output`.
+- **Output management.** Every output has a head and a configuration applies to each head's own output, so `wlr-randr --output HEADLESS-2 --pos` works; disabling a head still fails (MO-3), and a backend mode change for more than one head in one configuration fails, since `OutputRequest` names no output yet (MO-7).
+- **IPC limits until MO-4.** `vswitch/set-workspace` takes only the active output's id, `simple-tile/get-layout` and `set-layout` only the active output's set index, and `configure-view` only the window's own output id. `wset_to_json`'s `name` is the set's index as a string, as Wayfire names a set by its object id; it was the output name before. `output-layout-changed` is sent once per batch of events, as Wayfire sends one per configuration change.
+- **Events.** `Event::OutputChanged` carries `output` and `rect`, `Event::WorkspaceChanged` gains `previous` and `output`, and `Event::OutputAdded` and `OutputRemoved` are new. `output-added`, `output-removed` and `output-wset-changed` are queued for IPC directly, as the X11 events are, so headless sends them too. Headless now drains events every turn: before, nothing drained them in headless, so IPC watchers there never got `view-mapped` or any other event built from them, and the event queue grew without bound.
+- **Other backends.** `--outputs` is refused for every backend but headless until MO-5 (offscreen) and MO-6 (nested). Offscreen and native present only the first output; outputs created over IPC in them get no frames until MO-5, while nested gives them frames through `frame()`.
 
 ### MO-3 `shingle-output-protocols`: client protocols per output
 
