@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-  Binding, ConfigError, ConfigWarning, ShingleConfig, XwaylandMode,
+  Binding, ConfigError, ConfigWarning, ShingleConfig,
   import::{self, Import},
   ini::{self, Entry},
 };
@@ -89,21 +89,175 @@ struct Unsupported {
   options: usize,
 }
 
+/// Sections that belong to no plugin, whose options always apply:
+/// Wayfire's core sections, its objects and Shingle's own `[session]`.
+const CORE_SECTIONS: &[&str] = &["core", "input", "workarounds", "session"];
+
+/// Defaults applied after the others, because they set a field that an
+/// earlier default of another plugin disables: `[wm-actions]
+/// toggle_maximize` is `disabled`, while simple-tile binds `super+m` to the
+/// same action.
+const LATE_DEFAULTS: &[(&str, &str)] =
+  &[("simple-tile", "key_toggle_maximized")];
+
+/// The plugin a lower-case section belongs to, or `None` for a section
+/// that always applies.
+fn plugin_of(section: &str) -> Option<&str> {
+  let base = section.split_once(':').map_or(section, |(base, _)| base);
+  (!CORE_SECTIONS.contains(&base)
+    && !crate::wayfire_options::OBJECTS.contains(&base))
+  .then_some(base)
+}
+
+/// Whether the options of a lower-case `section` apply with `plugins`.
+fn applies(section: &str, plugins: &[String]) -> bool {
+  plugin_of(section).is_none_or(|plugin| {
+    !crate::PLUGINS.contains(&plugin)
+      || plugins.iter().any(|entry| entry == plugin)
+  })
+}
+
+/// The section name [`crate::WayfireValues`] keeps: lower case, except
+/// for the name of an object instance such as `output:DP-1`.
+fn values_section(section_name: &str) -> String {
+  match section_name.split_once(':') {
+    Some((object, name))
+      if crate::wayfire_options::OBJECTS
+        .contains(&object.trim().to_lowercase().as_str()) =>
+    {
+      format!("{}:{}", object.trim().to_lowercase(), name.trim())
+    }
+    _ => section_name.to_lowercase(),
+  }
+}
+
+/// The plugins of a file: its last `[core] plugins` line, or Wayfire's
+/// default list.
+fn listed_plugins(lines: &[ini::Line]) -> Vec<String> {
+  let mut section = String::new();
+  let mut value = None;
+  for line in lines {
+    match ini::entry(&line.text) {
+      Entry::Section(name) => section = name.trim().to_lowercase(),
+      Entry::Option { name, value: text }
+        if section == "core" && name.eq_ignore_ascii_case("plugins") =>
+      {
+        value = Some(text.to_owned());
+      }
+      _ => {}
+    }
+  }
+  let value = value.unwrap_or_else(|| {
+    crate::wayfire_option("core", "plugins")
+      .map(|option| option.default.to_owned())
+      .unwrap_or_default()
+  });
+  crate::plugins::parse_list(&value)
+}
+
+/// Shingle's defaults with every Shingle binding that no Wayfire option
+/// sets turned off (docs/design/wayfire-gaps.md, Decisions 3).
+fn without_shingle_bindings() -> ShingleConfig {
+  let mut config = ShingleConfig::default();
+  let keys = &mut config.keybindings;
+  for binding in [
+    &mut keys.move_left,
+    &mut keys.move_right,
+    &mut keys.move_up,
+    &mut keys.move_down,
+    &mut keys.resize_left,
+    &mut keys.resize_right,
+    &mut keys.resize_up,
+    &mut keys.resize_down,
+    &mut keys.reload,
+    &mut keys.lock,
+  ] {
+    *binding = Binding::disabled();
+  }
+  for binding in keys
+    .workspace_switch
+    .iter_mut()
+    .chain(&mut keys.workspace_move)
+  {
+    *binding = Binding::disabled();
+  }
+  config
+}
+
+/// Applies the default of one option of the table to `config`, returning
+/// the notes it raised. A default that Shingle cannot use leaves `config`
+/// as it was.
+fn apply_default(
+  config: &mut ShingleConfig,
+  option: &crate::WayfireOption,
+) -> Result<Vec<String>, ConfigError> {
+  let before = config.clone();
+  let mut notes = Vec::new();
+  let result = apply(
+    config,
+    option.section,
+    option.section,
+    option.name,
+    option.default,
+    &mut notes,
+  )
+  .and_then(|()| config.validate_fields());
+  match result {
+    Ok(()) => Ok(notes),
+    Err(error) => {
+      *config = before;
+      Err(error)
+    }
+  }
+}
+
+/// Wayfire's defaults for a file whose plugin list is `plugins`: Shingle's
+/// own defaults without its extra bindings, then the default of every
+/// option of the table whose section applies, in table order. Defaults
+/// whose values Shingle lacks (`squeezimize`) fall back silently; the
+/// file's own values warn.
+fn wayfire_defaults(plugins: &[String]) -> ShingleConfig {
+  let mut config = without_shingle_bindings();
+  let options = crate::wayfire_options().iter().filter(|option| {
+    !option.is_list()
+      && !crate::wayfire_options::OBJECTS.contains(&option.section)
+      && supported(option.section)
+      && applies(option.section, plugins)
+  });
+  let (late, early): (Vec<_>, Vec<_>) = options
+    .partition(|option| LATE_DEFAULTS.contains(&(option.section, option.name)));
+  for option in early.into_iter().chain(late) {
+    let _ = apply_default(&mut config, option);
+  }
+  config
+}
+
+/// The commands Wayfire's autostart plugin adds with
+/// `autostart_wf_shell`: `wf-panel` and `wf-background`, each unless an
+/// entry's command already names it.
+fn wf_shell_commands(autostart: &[String]) -> Vec<String> {
+  ["wf-panel", "wf-background"]
+    .into_iter()
+    .filter(|program| !autostart.iter().any(|entry| entry.contains(program)))
+    .map(str::to_owned)
+    .collect()
+}
+
 pub(crate) fn parse(
   text: &str,
 ) -> Result<(ShingleConfig, Vec<ConfigWarning>), ConfigError> {
-  let mut config = ShingleConfig::default();
-  // Wayfire starts Xwayland eagerly unless told otherwise
-  // (metadata/core.xml), unlike Shingle's own default.
-  config.xwayland.mode = XwaylandMode::Eager;
-  let mut importer = Import::new(config);
+  let lines = ini::lines(text);
+  let plugins = listed_plugins(&lines);
+  let mut importer = Import::new(wayfire_defaults(&plugins));
+  let mut values = crate::WayfireValues::default();
+  let mut wf_shell = true;
   let mut command_bindings = BTreeMap::<String, CommandEntry>::new();
   let mut commands = BTreeMap::new();
   let mut unsupported: Vec<Unsupported> = Vec::new();
   // The section name as written: connector names keep their case.
   let mut section_name: Option<String> = None;
   let mut section_line = 0;
-  for line in ini::lines(text) {
+  for line in &lines {
     let (name, value) = match ini::entry(&line.text) {
       Entry::Section(name) => {
         section_name = Some(name.trim().to_owned());
@@ -127,6 +281,9 @@ pub(crate) fn parse(
       continue;
     };
     let section = section_name.to_lowercase();
+    let key = name.to_lowercase();
+    let kept_section = values_section(section_name);
+    values.set(&kept_section, &key, value);
     if !supported(&section) {
       match unsupported.iter_mut().find(|entry| entry.name == section) {
         Some(entry) => entry.options += 1,
@@ -138,7 +295,10 @@ pub(crate) fn parse(
       }
       continue;
     }
-    let key = name.to_lowercase();
+    // A plugin Wayfire does not load reads none of its options.
+    if !applies(&section, &plugins) {
+      continue;
+    }
     let context = format!("[{section_name}] {name}");
     if section == "command" {
       if let Some(command) = key.strip_prefix("command_") {
@@ -164,24 +324,47 @@ pub(crate) fn parse(
         continue;
       }
     }
-    importer.option(line.number, &context, |config, notes| {
-      apply(config, &section, section_name, &key, value, notes)
-    });
+    let applied = if (section.as_str(), key.as_str())
+      == ("autostart", "autostart_wf_shell")
+    {
+      importer.option(line.number, &context, |_, _| {
+        wf_shell = boolean(value)?;
+        Ok(())
+      })
+    } else {
+      importer.option(line.number, &context, |config, notes| {
+        apply(config, &section, section_name, &key, value, notes)
+      })
+    };
+    if !applied {
+      values.reject(&kept_section, &key);
+    }
   }
   for (name, command) in commands {
     let Some(entry) = command_bindings.remove(&name) else {
       continue;
     };
-    importer.option(entry.line, &entry.context, |config, notes| {
-      config.commands.push(crate::CommandBinding {
-        binding: import::binding(&entry.value, notes)?,
-        command,
-        repeatable: entry.repeatable,
-        on_release: entry.on_release,
-        always: entry.always,
+    let applied =
+      importer.option(entry.line, &entry.context, |config, notes| {
+        config.commands.push(crate::CommandBinding {
+          binding: import::binding(&entry.value, notes)?,
+          command,
+          repeatable: entry.repeatable,
+          on_release: entry.on_release,
+          always: entry.always,
+        });
+        Ok(())
       });
-      Ok(())
-    });
+    if !applied {
+      let prefix = COMMAND_PREFIXES
+        .iter()
+        .find(|prefix| {
+          (prefix.1, prefix.2, prefix.3)
+            == (entry.repeatable, entry.on_release, entry.always)
+        })
+        .map_or("binding_", |prefix| prefix.0);
+      values.reject("command", &format!("{prefix}{name}"));
+    }
   }
   for section in unsupported {
     let options = match section.options {
@@ -196,6 +379,20 @@ pub(crate) fn parse(
       ),
     );
   }
+  let config = importer.config_mut();
+  // Without preserve-output Wayfire moves an unplugged output's windows
+  // for good; Shingle's default brings them back, so only the plugin's
+  // own behaviour is imported.
+  if plugins.iter().any(|plugin| plugin == "preserve-output") {
+    config.output_layout.unplug = crate::UnplugPolicy::Park;
+  }
+  if wf_shell {
+    let added = wf_shell_commands(&config.autostart);
+    config.autostart.extend(added);
+  }
+  config.plugins = Some(plugins);
+  config.wayfire_values = values;
+  config.turn_off_unlisted_plugins();
   importer.finish()
 }
 
@@ -774,6 +971,31 @@ fn apply(
     ("vswitch", "with_win_last") => {
       config.keybindings.workspace_move_last = import::binding(value, notes)?;
     }
+    ("vswitch", key) if numbered(key, "binding_").is_some() => {
+      config
+        .vswitch
+        .workspace_bindings
+        .push(crate::WorkspaceBinding {
+          workspace: numbered(key, "binding_").unwrap_or_default(),
+          binding: import::binding(value, notes)?,
+        });
+    }
+    ("vswitch", key) if numbered(key, "with_win_").is_some() => {
+      config
+        .vswitch
+        .workspace_bindings_win
+        .push(crate::WorkspaceBinding {
+          workspace: numbered(key, "with_win_").unwrap_or_default(),
+          binding: import::binding(value, notes)?,
+        });
+    }
+    ("vswitch", key) if numbered(key, "send_win_").is_some() => {
+      config.vswitch.bindings_win.push(crate::WorkspaceBinding {
+        workspace: numbered(key, "send_win_").unwrap_or_default(),
+        binding: import::binding(value, notes)?,
+      });
+    }
+    // Read by `parse`, which adds wf-shell's clients at the end.
     ("autostart", "autostart_wf_shell") => {}
     ("autostart", _) if !value.is_empty() => {
       config.autostart.push(value.to_owned());
@@ -787,17 +1009,8 @@ fn apply(
     ("window-rules", _) => {
       config.window_rules.push(value.to_owned().try_into()?);
     }
-    ("core", "plugins") => {
-      // Without preserve-output Wayfire moves an unplugged output's
-      // windows for good; Shingle's default brings them back, so only
-      // the plugin's own behaviour is imported.
-      if value
-        .split_whitespace()
-        .any(|plugin| plugin == "preserve-output")
-      {
-        config.output_layout.unplug = crate::UnplugPolicy::Park;
-      }
-    }
+    // Read before the rest of the file (`listed_plugins`).
+    ("core", "plugins") => {}
     ("preserve-output", "last_output_focus_timeout") => {
       config.output_layout.last_output_focus_timeout = number(value)?;
     }
@@ -897,6 +1110,14 @@ fn output_option(
   Ok(())
 }
 
+/// The workspace number of a numbered vswitch option such as `binding_3`
+/// for `prefix` `binding_`. Wayfire reads every name the prefix completes
+/// as a number and logs the others, such as `binding_left`, which is an
+/// option of its own.
+fn numbered(key: &str, prefix: &str) -> Option<usize> {
+  key.strip_prefix(prefix)?.parse().ok()
+}
+
 fn optional_seconds(value: &str) -> Result<Option<u64>, ConfigError> {
   let seconds: i64 = number(value)?;
   Ok((seconds >= 0).then_some(seconds as u64))
@@ -962,7 +1183,7 @@ fn boolean(value: &str) -> Result<bool, ConfigError> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::{ConfigFormat, Modifier, OutputMode, UnplugPolicy};
+  use crate::{ConfigFormat, Modifier, OutputMode, UnplugPolicy, XwaylandMode};
 
   const STOCK: &str = include_str!("../testdata/wayfire-stock.ini");
   const WCM: &str = include_str!("../testdata/wayfire-wcm.ini");
@@ -1006,7 +1227,10 @@ mod tests {
     assert_eq!(text(&screenshot.binding), "shift+print");
     assert!(config.commands.iter().any(|command| command.repeatable));
     assert_eq!(config.expo.workspace_bindings.len(), 9);
-    assert_eq!(config.autostart.len(), 6);
+    // autostart_wf_shell = true adds wf-shell's clients, which no entry
+    // names.
+    assert_eq!(config.autostart.len(), 8);
+    assert_eq!(config.autostart[6..], ["wf-panel", "wf-background"]);
     assert_eq!(config.keybindings.grid_slot_left.len(), 2);
     // The continued plugins line is read whole, without preserve-output.
     assert_eq!(config.output_layout.unplug, UnplugPolicy::Return);
@@ -1044,7 +1268,6 @@ mod tests {
         305,
         "[place] mode: unknown placement mode; keeping the default",
       ),
-      (332, "[scale] toggle: \"pinch in 4\" is a touch gesture"),
       (376, "[vswipe] belongs to a plugin"),
       (412, "[wayfire-shell] belongs to a plugin"),
       (
@@ -1087,8 +1310,9 @@ mod tests {
     assert_eq!(config.output_layout.unplug, UnplugPolicy::Park);
     assert_eq!(config.xwayland.mode, XwaylandMode::Disabled);
 
-    // Activators: keys stay, everything else is never a key.
-    assert_eq!(text(&config.keybindings.scale_toggle), "super+p");
+    // Activators: keys stay, everything else is never a key. Scale is not
+    // in the plugin list, so its toggle is off.
+    assert_eq!(config.keybindings.scale_toggle, Binding::disabled());
     assert_eq!(text(&config.keybindings.expo_toggle), "super+e");
     assert_eq!(config.keybindings.toggle_fullscreen, Binding::disabled());
     assert_eq!(
@@ -1126,15 +1350,24 @@ mod tests {
   #[test]
   fn the_silent_pinch_binding_is_gone() {
     // `pinch in 4` used to bind the key `4`, the gesture's last word.
-    // The fixture imports exactly as it does without the gesture.
-    let without = WCM.replace(" | pinch in 4", "");
-    assert_ne!(without, WCM);
+    // The fixture, with Scale loaded, imports exactly as it does without
+    // the gesture.
+    let scale = WCM.replace("expo \\\n", "expo scale \\\n");
+    assert_ne!(scale, WCM);
+    let without = scale.replace(" | pinch in 4", "");
+    assert_ne!(without, scale);
     assert_eq!(
-      import(WCM).0.to_yaml().unwrap(),
+      String::from(import(&scale).0.keybindings.scale_toggle),
+      "super+p"
+    );
+    assert_eq!(
+      import(&scale).0.to_yaml().unwrap(),
       import(&without).0.to_yaml().unwrap()
     );
     for text in ["pinch in 4", "swipe up 3", "edge-swipe left 2"] {
-      let (config, warnings) = import(&format!("[scale]\ntoggle = {text}\n"));
+      let (config, warnings) = import(&format!(
+        "[core]\nplugins = scale\n[scale]\ntoggle = {text}\n"
+      ));
       assert_eq!(config.keybindings.scale_toggle, Binding::disabled());
       assert_eq!(warnings.len(), 1, "{text}");
     }
@@ -1174,6 +1407,8 @@ mod tests {
   #[test]
   fn a_bad_value_keeps_the_default_and_the_rest_imports() {
     let (config, warnings) = import(concat!(
+      "[core]\n",
+      "plugins = simple-tile scale\n",
       "[simple-tile]\n",
       "inner_gap_size = wide\n",
       "outer_horiz_gap_size = 3\n",
@@ -1181,20 +1416,20 @@ mod tests {
       "inactive_alpha = 1.5\n",
       "spacing = 12\n",
     ));
-    let defaults = ShingleConfig::default();
-    assert_eq!(config.tiling.gaps.inner, defaults.tiling.gaps.inner);
+    // The defaults kept are Wayfire's.
+    assert_eq!(config.tiling.gaps.inner, 5);
     assert_eq!(config.tiling.gaps.left, 3);
-    assert_eq!(config.scale.inactive_alpha, defaults.scale.inactive_alpha);
+    assert_eq!(config.scale.inactive_alpha, 0.75);
     assert_eq!(config.scale.spacing, 12);
     assert_eq!(
       warnings,
       [
         concat!(
-          "line 2: [simple-tile] inner_gap_size: invalid number \"wide\"; ",
+          "line 4: [simple-tile] inner_gap_size: invalid number \"wide\"; ",
           "keeping the default"
         ),
         concat!(
-          "line 5: [scale] inactive_alpha: scale.inactive_alpha must be ",
+          "line 7: [scale] inactive_alpha: scale.inactive_alpha must be ",
           "between 0 and 1; keeping the default"
         ),
       ]
@@ -1243,5 +1478,283 @@ mod tests {
         "options are ignored"
       )]
     );
+  }
+
+  /// Every string a configuration's YAML holds, which includes every
+  /// binding in its canonical form.
+  fn strings(config: &ShingleConfig) -> Vec<String> {
+    fn walk(value: &serde_yaml::Value, found: &mut Vec<String>) {
+      match value {
+        serde_yaml::Value::String(text) => found.push(text.clone()),
+        serde_yaml::Value::Sequence(items) => {
+          items.iter().for_each(|item| walk(item, found))
+        }
+        serde_yaml::Value::Mapping(map) => {
+          map.values().for_each(|item| walk(item, found))
+        }
+        _ => {}
+      }
+    }
+    let value = serde_yaml::to_value(config).unwrap();
+    let mut found = Vec::new();
+    walk(&value, &mut found);
+    found
+  }
+
+  #[test]
+  fn an_empty_file_has_wayfires_defaults() {
+    let (config, warnings) = import("");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!((config.workspaces.width, config.workspaces.height), (3, 3));
+    assert_eq!(
+      config.keybindings.quit,
+      Binding::new("backspace", vec![Modifier::Control, Modifier::Alt])
+    );
+    let bound = strings(&config);
+    for binding in [
+      "super+shift+q",
+      "super+s",
+      "super+d",
+      "super+n",
+      "super+f",
+      "super+b",
+      "super+1",
+      "super+shift+1",
+      "super+shift+h",
+      "super+ctrl+h",
+      "super+grave",
+      "super+shift+r",
+      "super+f8",
+    ] {
+      assert!(
+        !bound.iter().any(|text| text == binding),
+        "{binding} is bound"
+      );
+    }
+    // Wayfire's other defaults, where they differ from Shingle's.
+    assert_eq!(config.xwayland.mode, XwaylandMode::Eager);
+    assert_eq!(
+      (config.input.repeat_rate, config.input.repeat_delay),
+      (40, 400)
+    );
+    assert_eq!(config.keybindings.workspace_move_down, Binding::disabled());
+    assert_eq!(config.idle.idle_seconds, Some(3600));
+    // Wayfire's default plugin list leaves out simple-tile, scale and
+    // wm-actions.
+    let plugins = config.plugins.as_deref().unwrap();
+    assert!(plugins.iter().any(|plugin| plugin == "animate"));
+    assert!(!config.plugin_enabled("simple-tile"));
+    assert!(!config.plugin_enabled("scale"));
+    assert_eq!(config.keybindings.scale_toggle, Binding::disabled());
+    assert_eq!(config.keybindings.focus_left, Binding::disabled());
+    assert_eq!(config.keybindings.toggle_maximized, Binding::disabled());
+    // Animate is in it; minimize falls back from squeezimize silently.
+    assert_eq!(config.animate.minimize_animation, "zoom");
+    assert_eq!(text(&config.keybindings.expo_toggle), "super+e");
+    // autostart_wf_shell defaults to true.
+    assert_eq!(config.autostart, ["wf-panel", "wf-background"]);
+  }
+
+  #[test]
+  fn every_default_applies_but_the_ones_shingle_lacks() {
+    let mut config = without_shingle_bindings();
+    let mut problems = Vec::new();
+    for option in crate::wayfire_options() {
+      if option.is_list()
+        || crate::wayfire_options::OBJECTS.contains(&option.section)
+        || !supported(option.section)
+      {
+        continue;
+      }
+      match apply_default(&mut config, option) {
+        Ok(notes) if notes.is_empty() => {}
+        Ok(notes) => problems.push(format!(
+          "[{}] {}: {}",
+          option.section,
+          option.name,
+          notes.join("; ")
+        )),
+        Err(error) => problems
+          .push(format!("[{}] {}: {error}", option.section, option.name)),
+      }
+    }
+    assert_eq!(
+      problems,
+      [concat!(
+        "[animate] minimize_animation: Shingle has no \"squeezimize\" ",
+        "animation yet; using \"zoom\""
+      )]
+    );
+  }
+
+  #[test]
+  fn a_wayfire_file_keeps_shingle_bindings_set_by_name() {
+    let (config, _) = import(concat!(
+      "[core]\n",
+      "plugins = simple-tile idle\n",
+      "[simple-tile]\n",
+      "key_move_left = <super> <shift> KEY_H\n",
+      "[idle]\n",
+      "key_lock = <super> KEY_F8\n",
+    ));
+    assert_eq!(text(&config.keybindings.move_left), "super+shift+h");
+    assert_eq!(text(&config.keybindings.lock), "super+f8");
+    assert_eq!(config.keybindings.move_right, Binding::disabled());
+  }
+
+  #[test]
+  fn plugins_the_list_leaves_out_are_off() {
+    let all = concat!(
+      "[core]\n",
+      "plugins = scale zoom grid animate simple-tile\n",
+      "[scale]\n",
+      "toggle = <super> KEY_P\n",
+    );
+    let (on, _) = import(all);
+    assert_eq!(text(&on.keybindings.scale_toggle), "super+p");
+    assert_eq!(on.zoom.modifier, "<super>");
+    assert_eq!(on.keybindings.grid_slot_left.len(), 2);
+    assert_eq!(on.animate.open_animation, "zoom");
+    assert!(on.plugin_enabled("simple-tile"));
+    assert_eq!(text(&on.keybindings.focus_left), "super+h");
+
+    let (off, warnings) =
+      import(&all.replace("scale zoom grid animate simple-tile", "expo"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(off.keybindings.scale_toggle, Binding::disabled());
+    assert!(off.zoom.modifier.is_empty());
+    assert!(off.keybindings.grid_slot_left.is_empty());
+    assert_eq!(off.animate.open_animation, "none");
+    assert!(!off.plugin_enabled("simple-tile"));
+    assert_eq!(off.keybindings.focus_left, Binding::disabled());
+    assert_eq!(text(&off.keybindings.expo_toggle), "super+e");
+    // What the file says about an unloaded plugin is still kept.
+    assert_eq!(
+      off.wayfire_values.value("scale", "toggle"),
+      Some(crate::OptionValue::Text {
+        value: "<super> KEY_P".into(),
+        default: "<super> KEY_P",
+      })
+    );
+  }
+
+  #[test]
+  fn a_shared_binding_follows_the_plugin_that_is_loaded() {
+    // simple-tile and wm-actions both set toggle_maximized.
+    let file = concat!(
+      "[core]\n",
+      "plugins = PLUGINS\n",
+      "[simple-tile]\n",
+      "key_toggle_maximized = <super> KEY_M\n",
+      "[wm-actions]\n",
+      "toggle_maximize = <super> KEY_X\n",
+    );
+    let maximize = |plugins: &str| {
+      let (config, _) = import(&file.replace("PLUGINS", plugins));
+      text(&config.keybindings.toggle_maximized)
+    };
+    assert_eq!(maximize("simple-tile"), "super+m");
+    assert_eq!(maximize("wm-actions"), "super+x");
+    assert_eq!(maximize("expo"), "");
+    // Both loaded, without the file's values: simple-tile's default wins
+    // over wm-actions' disabled one.
+    let (both, _) = import("[core]\nplugins = simple-tile wm-actions\n");
+    assert_eq!(text(&both.keybindings.toggle_maximized), "super+m");
+  }
+
+  #[test]
+  fn numbered_vswitch_bindings_import() {
+    let (config, warnings) = import(concat!(
+      "[core]\n",
+      "plugins = vswitch\n",
+      "[vswitch]\n",
+      "binding_3 = <super> KEY_3\n",
+      "with_win_2 = <super> <shift> KEY_2\n",
+      "send_win_9 = <super> <ctrl> KEY_9\n",
+      "send_win_10 = <super> <ctrl> KEY_0\n",
+      "binding_left = <super> KEY_LEFT\n",
+    ));
+    let vswitch = &config.vswitch;
+    assert_eq!(
+      vswitch.workspace_bindings,
+      [crate::WorkspaceBinding {
+        workspace: 3,
+        binding: Binding::new("3", vec![Modifier::Super]),
+      }]
+    );
+    assert_eq!(vswitch.workspace_bindings_win[0].workspace, 2);
+    assert_eq!(vswitch.bindings_win.len(), 1);
+    assert_eq!(vswitch.bindings_win[0].workspace, 9);
+    assert_eq!(text(&config.keybindings.workspace_previous), "super+left");
+    // Workspace 10 is outside the 3x3 grid.
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].starts_with("line 7: vswitch workspace 10 is outside"));
+    let yaml = config.to_yaml().unwrap();
+    let back = ShingleConfig::parse(&yaml, ConfigFormat::Yaml).unwrap();
+    assert_eq!(back.vswitch.workspace_bindings, vswitch.workspace_bindings);
+  }
+
+  #[test]
+  fn autostart_adds_wf_shell_as_wayfire_does() {
+    let autostart = |text: &str| import(text).0.autostart;
+    // Nothing names wf-shell: both start.
+    assert_eq!(
+      autostart("[autostart]\nterm = foot\n"),
+      ["foot", "wf-panel", "wf-background"]
+    );
+    // An entry runs the panel: only the background is added.
+    assert_eq!(
+      autostart("[autostart]\npanel = env X=1 wf-panel --flag\n"),
+      ["env X=1 wf-panel --flag", "wf-background"]
+    );
+    // Turned off: nothing is added.
+    assert_eq!(
+      autostart("[autostart]\nautostart_wf_shell = false\nterm = foot\n"),
+      ["foot"]
+    );
+    // Without the autostart plugin nothing starts at all.
+    assert!(
+      autostart("[core]\nplugins = expo\n[autostart]\nterm = foot\n")
+        .is_empty()
+    );
+    let (config, warnings) = import("[autostart]\nautostart_wf_shell = no?\n");
+    assert_eq!(config.autostart.len(), 2);
+    assert_eq!(warnings.len(), 1);
+  }
+
+  #[test]
+  fn the_file_is_kept_for_ipc() {
+    let (config, _) = import(concat!(
+      "[core]\n",
+      "vwidth = 4\n",
+      "vheight = many\n",
+      "background_color = \\#FF0000FF\n",
+      "[output:DP-1]\n",
+      "mode = 1920x1080@60\n",
+      "[command]\n",
+      "binding_term = <super> KEY_ENTER\n",
+      "command_term = foot\n",
+    ));
+    let values = &config.wayfire_values;
+    let text = |section: &str, option: &str| match values.value(section, option)
+    {
+      Some(crate::OptionValue::Text { value, .. }) => value,
+      other => panic!("{other:?}"),
+    };
+    assert_eq!(text("core", "vwidth"), "4");
+    // A value Shingle rejected reports the default, as in wf-config.
+    assert_eq!(text("core", "vheight"), "3");
+    assert_eq!(text("core", "background_color"), "#FF0000FF");
+    assert_eq!(text("output:DP-1", "mode"), "1920x1080@60");
+    assert_eq!(text("simple-tile", "inner_gap_size"), "5");
+    assert_eq!(
+      values.value("command", "bindings"),
+      Some(crate::OptionValue::List(vec![vec![
+        "term".into(),
+        "foot".into(),
+        "<super> KEY_ENTER".into(),
+      ]]))
+    );
+    assert!(values.sections().contains(&"output:DP-1".to_owned()));
   }
 }

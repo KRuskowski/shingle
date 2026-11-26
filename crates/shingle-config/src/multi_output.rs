@@ -345,11 +345,11 @@ mod tests {
       assert_eq!(config.output_layout.unplug, UnplugPolicy::Return);
     }
     let warnings = crate::warnings_of(
-      "[wsets]\nwset_0 = <super> KEY_F1\n",
+      "[core]\nplugins = wsets\n[wsets]\nwset_0 = <super> KEY_F1\n",
       ConfigFormat::Wayfire,
     );
     assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].starts_with("line 2: [wsets] wset_0: "));
+    assert!(warnings[0].starts_with("line 4: [wsets] wset_0: "));
     assert!(warnings[0].contains("from 1"), "{warnings:?}");
   }
 

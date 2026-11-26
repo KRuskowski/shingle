@@ -29,8 +29,10 @@ mod ini;
 mod layout;
 mod multi_output;
 mod output;
+mod plugins;
 mod view_matcher;
 mod wayfire;
+mod wayfire_options;
 mod window_rule;
 
 pub use config_watcher::ConfigWatcher;
@@ -43,7 +45,11 @@ pub use multi_output::{
   WsetBinding, WsetsConfig,
 };
 pub use output::{OutputConfig, OutputMode, OutputPosition};
+pub use plugins::PLUGINS;
 pub use view_matcher::{ViewMatcher, ViewProperties};
+pub use wayfire_options::{
+  OptionValue, WayfireOption, WayfireValues, wayfire_option, wayfire_options,
+};
 pub use window_rule::{RuleAction, RuleEvent, WindowRule};
 
 use std::{
@@ -74,10 +80,21 @@ pub enum ConfigFormat {
   /// imported; whole sections of plugins Shingle does not have are reported
   /// once each, and other options are ignored. A value Shingle cannot use
   /// keeps its default and is reported with its line, as wf-config does, so
-  /// any readable file loads. Import starts from [`ShingleConfig::default`],
-  /// not from Wayfire's defaults; in particular the workspace grid stays
-  /// 10×1 unless `[core] vwidth` and `vheight` are set (Wayfire defaults to
-  /// 3×3).
+  /// any readable file loads.
+  ///
+  /// Import starts from Wayfire's defaults (data/wayfire-options.tsv, see
+  /// [`wayfire_options`]), not from [`ShingleConfig::default`]: an empty
+  /// file has a 3×3 workspace grid and exits on `ctrl+alt+backspace`.
+  /// Shingle's bindings that no Wayfire option sets (moving and resizing
+  /// tiles, `super+1` to `super+0`, reload and lock) are off unless the file
+  /// sets them with Shingle's own names. `[core] plugins`, or Wayfire's
+  /// default list when the file has none, becomes
+  /// [`ShingleConfig::plugins`]: options of a plugin it leaves out are not
+  /// applied, and the plugin is off. With `[autostart] autostart_wf_shell`
+  /// (default true), `wf-panel` and `wf-background` are added to
+  /// [`ShingleConfig::autostart`] unless an entry already runs them, as
+  /// Wayfire's autostart plugin does. Every option the file sets is kept as
+  /// written in [`ShingleConfig::wayfire_values`].
   ///
   /// Activators are Wayfire's `<super> <shift> KEY_Q` form with `|` between
   /// alternatives. Keys and buttons are bound; a modifier alone, touch
@@ -208,6 +225,17 @@ pub struct ShingleConfig {
   pub pointer: PointerBindings,
   /// Keymap, key repeat, pointer and cursor settings (`[input]`).
   pub input: InputConfig,
+  /// Wayfire's `[core] plugins`: when set, only the plugins of
+  /// [`PLUGINS`] it names are on, and [`ShingleConfig::plugin_enabled`]
+  /// says which. A Wayfire import always sets it; default unset, which
+  /// turns every plugin on.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub plugins: Option<Vec<String>>,
+  /// The options a Wayfire file set, as written, for
+  /// `wayfire/get-config-option`. Empty for other formats; never
+  /// written to YAML.
+  #[serde(skip)]
+  pub wayfire_values: WayfireValues,
 }
 
 impl Default for ShingleConfig {
@@ -249,6 +277,8 @@ impl Default for ShingleConfig {
       commands: Vec::new(),
       pointer: PointerBindings::default(),
       input: InputConfig::default(),
+      plugins: None,
+      wayfire_values: WayfireValues::default(),
     }
   }
 }
@@ -327,7 +357,9 @@ impl ShingleConfig {
   /// Parses `text` as `format`, validates the result and returns it with the
   /// warnings, in line order. YAML never warns: anything it cannot use is an
   /// error. Wayfire and i3 files warn instead (see [`ConfigFormat`]), so
-  /// they only fail on a bug.
+  /// they only fail on a bug. Plugins [`ShingleConfig::plugins`] leaves out
+  /// are turned off ([`ShingleConfig::turn_off_unlisted_plugins`]) in every
+  /// format.
   ///
   /// # Errors
   ///
@@ -339,11 +371,12 @@ impl ShingleConfig {
     text: &str,
     format: ConfigFormat,
   ) -> Result<(Self, Vec<ConfigWarning>), ConfigError> {
-    let (config, warnings) = match format {
+    let (mut config, warnings) = match format {
       ConfigFormat::Yaml => (serde_yaml::from_str::<Self>(text)?, Vec::new()),
       ConfigFormat::Wayfire => wayfire::parse(text)?,
       ConfigFormat::I3 => i3::parse(text)?,
     };
+    config.turn_off_unlisted_plugins();
     config.validate()?;
     Ok((config, warnings))
   }
@@ -485,7 +518,7 @@ impl ShingleConfig {
     }
     if !matches!(
       self.placement.mode.as_str(),
-      "center" | "cascade" | "maximize" | "random" | "pointer"
+      "center" | "cascade" | "maximize" | "random" | "pointer" | "none"
     ) {
       return Err(ConfigError::Invalid("unknown placement mode".into()));
     }
@@ -707,6 +740,13 @@ impl ShingleConfig {
         )));
       }
     }
+    for entry in self.vswitch.all_bindings() {
+      if entry.workspace == 0 || entry.workspace as u64 > workspace_count {
+        return Err(ConfigError::Invalid(
+          "vswitch workspace bindings must name a configured workspace".into(),
+        ));
+      }
+    }
     if self.keybindings.workspace_switch.len() != 10
       || self.keybindings.workspace_move.len() != 10
     {
@@ -843,8 +883,10 @@ impl Default for ExtraGesturesConfig {
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PlacementConfig {
-  /// `center`, `cascade`, `maximize`, `random` or `pointer` (centred on the
-  /// cursor, clamped to the workarea). Default `center`.
+  /// `center`, `cascade`, `maximize`, `random`, `pointer` (centred on the
+  /// cursor, clamped to the workarea) or `none` (at the top left of the
+  /// workarea, as Wayfire places views without its `place` plugin).
+  /// Default `center`.
   pub mode: String,
 }
 
@@ -1428,6 +1470,26 @@ pub struct VswitchConfig {
   pub gap: u32,
   /// Color visible in the inter-workspace gap.
   pub background: [f64; 4],
+  /// Bindings that switch to a workspace. `[vswitch] binding_N` (Wayfire's
+  /// `workspace_bindings` list); default empty.
+  pub workspace_bindings: Vec<WorkspaceBinding>,
+  /// Bindings that carry the focused window to a workspace and follow it.
+  /// `[vswitch] with_win_N` (`workspace_bindings_win`); default empty.
+  pub workspace_bindings_win: Vec<WorkspaceBinding>,
+  /// Bindings that send the focused window to a workspace without
+  /// switching. `[vswitch] send_win_N` (`bindings_win`); default empty.
+  pub bindings_win: Vec<WorkspaceBinding>,
+}
+
+impl VswitchConfig {
+  /// Every entry of the three workspace binding lists.
+  pub fn all_bindings(&self) -> impl Iterator<Item = &WorkspaceBinding> {
+    self
+      .workspace_bindings
+      .iter()
+      .chain(&self.workspace_bindings_win)
+      .chain(&self.bindings_win)
+  }
 }
 
 impl Default for VswitchConfig {
@@ -1436,8 +1498,24 @@ impl Default for VswitchConfig {
       duration_ms: 300,
       gap: 20,
       background: [0.1, 0.1, 0.1, 1.0],
+      workspace_bindings: Vec::new(),
+      workspace_bindings_win: Vec::new(),
+      bindings_win: Vec::new(),
     }
   }
+}
+
+/// A binding for one workspace of the grid, from Wayfire's numbered
+/// `[vswitch]` options.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceBinding {
+  /// One-based workspace number, counted row by row across the grid, as
+  /// vswitch counts it. Must lie in `1..=width*height` of
+  /// [`WorkspaceConfig`].
+  pub workspace: usize,
+  /// The key or button.
+  pub binding: Binding,
 }
 
 /// Tiling policy and appearance, mostly from Wayfire's `[simple-tile]`
@@ -2516,11 +2594,14 @@ mod tests {
       parse("[animate]\nminimize_animation = squeezimize\n");
     assert_eq!(animation.animate.minimize_animation, "zoom");
     assert_eq!(warnings.len(), 1);
-    let (modifier, warnings) = parse("[scale]\ntoggle = <super>\n");
+    let (modifier, warnings) =
+      parse("[core]\nplugins = scale\n[scale]\ntoggle = <super>\n");
     assert_eq!(modifier.keybindings.scale_toggle, Binding::disabled());
     assert!(warnings[0].message.contains("modifier-alone"));
-    let (pinch, warnings) =
-      parse("[scale]\ntoggle = <super> KEY_P | pinch in 4\n");
+    let (pinch, warnings) = parse(concat!(
+      "[core]\nplugins = scale\n",
+      "[scale]\ntoggle = <super> KEY_P | pinch in 4\n"
+    ));
     assert_eq!(String::from(pinch.keybindings.scale_toggle), "super+p");
     assert!(warnings[0].message.contains("touch gesture"));
     let (joined, warnings) = parse("[core]\nplugins = \\\n  preserve-output\n");
@@ -2669,6 +2750,7 @@ mod tests {
   fn scale_imports_from_wayfire_and_i3() {
     let wayfire = ShingleConfig::parse(
       concat!(
+        "[core]\nplugins = scale\n",
         "[scale]\n",
         "toggle = <super> KEY_O\n",
         "toggle_all = <super> <shift> KEY_O\n",
@@ -2724,6 +2806,7 @@ mod tests {
   fn scale_imports_interaction_and_minimized_options() {
     let wayfire = ShingleConfig::parse(
       concat!(
+        "[core]\nplugins = scale\n",
         "[scale]\n",
         "middle_click_close = true\n",
         "include_minimized = true\n",
@@ -2796,7 +2879,7 @@ mod tests {
   #[test]
   fn scale_imports_duration() {
     let wayfire = ShingleConfig::parse(
-      "[scale]\nduration = 250ms\n",
+      "[core]\nplugins = scale\n[scale]\nduration = 250ms\n",
       ConfigFormat::Wayfire,
     )
     .unwrap();
@@ -2811,6 +2894,7 @@ mod tests {
   fn scale_imports_and_validates_title_options() {
     let wayfire = ShingleConfig::parse(
       concat!(
+        "[core]\nplugins = scale\n",
         "[scale]\n",
         "title_overlay = mouse\n",
         "title_font_size = 20\n",
@@ -2885,6 +2969,7 @@ mod tests {
   fn scale_filter_imports_and_validates_options() {
     let wayfire = ShingleConfig::parse(
       concat!(
+        "[core]\nplugins = scale scale-title-filter\n",
         "[scale-title-filter]\n",
         "case_sensitive = true\n",
         "share_filter = true\n",
@@ -2959,6 +3044,7 @@ mod tests {
   fn security_context_privileged_protocols_are_imported() {
     let wayfire = ShingleConfig::parse(
       concat!(
+        "[core]\nplugins = security-context-v1\n",
         "[security-context-v1]\n",
         "privileged_protocols = zwlr_screencopy_manager_v1,",
         " zwp_virtual_keyboard_manager_v1\n",
@@ -3260,6 +3346,7 @@ mod tests {
   fn extra_gestures_import_and_validate() {
     let wayfire = ShingleConfig::parse(
       concat!(
+        "[core]\nplugins = extra-gestures\n",
         "[extra-gestures]\n",
         "move_fingers = 4\n",
         "move_delay = 500\n",
@@ -3354,6 +3441,7 @@ mod tests {
   fn xkb_command_bindings_preserve_symbol_case() {
     let wayfire = ShingleConfig::parse(
       concat!(
+        "[core]\nplugins = command xkb-bindings\n",
         "[command]\n",
         "binding_symbol = <super> xkb:XF86AudioPlay\n",
         "command_symbol = playerctl play-pause\n",

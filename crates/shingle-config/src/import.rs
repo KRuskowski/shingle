@@ -15,6 +15,17 @@ pub(crate) struct Import {
   expo_lines: Vec<usize>,
   /// The line each entry of `config.window_rules` came from.
   rule_lines: Vec<usize>,
+  /// The line each entry of the three `config.vswitch` workspace binding
+  /// lists came from.
+  vswitch_lines: [Vec<usize>; 3],
+}
+
+/// Keeps `lines` one entry per item of a list now `length` long, the
+/// added ones from `line`.
+fn track(lines: &mut Vec<usize>, length: usize, line: usize) {
+  let added = length.saturating_sub(lines.len());
+  lines.truncate(length);
+  lines.extend(std::iter::repeat_n(line, added));
 }
 
 impl Import {
@@ -25,7 +36,13 @@ impl Import {
       warnings: Vec::new(),
       expo_lines: Vec::new(),
       rule_lines: Vec::new(),
+      vswitch_lines: Default::default(),
     }
+  }
+
+  /// The configuration as imported so far.
+  pub(crate) fn config_mut(&mut self) -> &mut ShingleConfig {
+    &mut self.config
   }
 
   /// Applies one option from `line`. `apply` changes the configuration and
@@ -33,7 +50,8 @@ impl Import {
   /// the result breaks a range [`ShingleConfig::validate`] checks, the
   /// configuration goes back to what it was and the failure becomes a
   /// warning; otherwise each note does. `context` names the option in the
-  /// warnings, such as `[core] background_color`.
+  /// warnings, such as `[core] background_color`. Returns whether the
+  /// option was applied.
   pub(crate) fn option(
     &mut self,
     line: usize,
@@ -42,24 +60,32 @@ impl Import {
       &mut ShingleConfig,
       &mut Vec<String>,
     ) -> Result<(), ConfigError>,
-  ) {
+  ) -> bool {
     let before = self.config.clone();
     let mut notes = Vec::new();
     let result = apply(&mut self.config, &mut notes)
       .and_then(|()| self.config.validate_fields());
     match result {
       Ok(()) => {
-        let expo = self.config.expo.workspace_bindings.len();
-        let added = expo.saturating_sub(self.expo_lines.len());
-        self.expo_lines.truncate(expo);
-        self.expo_lines.extend(std::iter::repeat_n(line, added));
-        let rules = self.config.window_rules.len();
-        let added = rules.saturating_sub(self.rule_lines.len());
-        self.rule_lines.truncate(rules);
-        self.rule_lines.extend(std::iter::repeat_n(line, added));
+        let config = &self.config;
+        track(
+          &mut self.expo_lines,
+          config.expo.workspace_bindings.len(),
+          line,
+        );
+        track(&mut self.rule_lines, config.window_rules.len(), line);
+        let vswitch = &config.vswitch;
+        for (lines, length) in self.vswitch_lines.iter_mut().zip([
+          vswitch.workspace_bindings.len(),
+          vswitch.workspace_bindings_win.len(),
+          vswitch.bindings_win.len(),
+        ]) {
+          track(lines, length, line);
+        }
         for note in notes {
           self.warn(Some(line), format!("{context}: {note}"));
         }
+        true
       }
       Err(error) => {
         self.config = before;
@@ -67,6 +93,7 @@ impl Import {
           Some(line),
           format!("{context}: {}; keeping the default", describe(&error)),
         );
+        false
       }
     }
   }
@@ -76,10 +103,10 @@ impl Import {
     self.warnings.push(ConfigWarning { line, message });
   }
 
-  /// Drops Expo workspace bindings and window rules that name a workspace
-  /// outside the grid, which can only be judged once the whole file is
-  /// read, and returns the validated result with the warnings in line
-  /// order.
+  /// Drops Expo and vswitch workspace bindings and window rules that name
+  /// a workspace outside the grid, which can only be judged once the whole
+  /// file is read, and returns the validated result with the warnings in
+  /// line order.
   ///
   /// # Errors
   ///
@@ -107,6 +134,36 @@ impl Import {
         self.config.expo.workspace_bindings.push(binding);
       }
     }
+    let vswitch = &mut self.config.vswitch;
+    let lists = [
+      std::mem::take(&mut vswitch.workspace_bindings),
+      std::mem::take(&mut vswitch.workspace_bindings_win),
+      std::mem::take(&mut vswitch.bindings_win),
+    ];
+    let mut kept: [Vec<crate::WorkspaceBinding>; 3] = Default::default();
+    let all_lines = std::mem::take(&mut self.vswitch_lines);
+    for ((list, lines), kept) in lists.into_iter().zip(all_lines).zip(&mut kept)
+    {
+      for (binding, line) in list.into_iter().zip(lines) {
+        if binding.workspace == 0 || binding.workspace as u64 > count {
+          self.warnings.push(ConfigWarning {
+            line: Some(line),
+            message: format!(
+              "vswitch workspace {} is outside the {width}x{height} \
+               workspace grid; the binding is ignored",
+              binding.workspace
+            ),
+          });
+        } else {
+          kept.push(binding);
+        }
+      }
+    }
+    let [switch, with_window, send] = kept;
+    let vswitch = &mut self.config.vswitch;
+    vswitch.workspace_bindings = switch;
+    vswitch.workspace_bindings_win = with_window;
+    vswitch.bindings_win = send;
     let rules = std::mem::take(&mut self.config.window_rules);
     let lines = std::mem::take(&mut self.rule_lines);
     for (rule, line) in rules.into_iter().zip(lines) {
