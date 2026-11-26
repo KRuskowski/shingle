@@ -740,7 +740,10 @@ impl CompositorState {
       return Vec::new();
     };
     let primary = self.primary().id == *id;
-    if self.idle.dpms_state() == DpmsState::Off || output.dark {
+    if self.idle.dpms_state() == DpmsState::Off
+      || output.dark
+      || !output.powered
+    {
       return Vec::new();
     }
     if self.idle.lock_state() != LockState::Unlocked {

@@ -25,6 +25,7 @@ use wayland_protocols::{
   },
 };
 use wayland_protocols_wlr::{
+  gamma_control::v1::client::zwlr_gamma_control_manager_v1 as gamma,
   layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{Anchor, ZwlrLayerSurfaceV1},
@@ -748,5 +749,113 @@ fn a_configured_output_keeps_its_place_across_config_reloads() {
   let configured = place(&compositor);
   compositor.apply_config(Config::default()).unwrap();
   assert_eq!(place(&compositor), configured);
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn outputs_are_powered_off_and_on_one_at_a_time() {
+  use wayland_protocols_wlr::output_power_management::v1::client::{
+    zwlr_output_power_manager_v1::ZwlrOutputPowerManagerV1,
+    zwlr_output_power_v1::Mode,
+  };
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let manager = client.bind::<ZwlrOutputPowerManagerV1>(1);
+  let first =
+    manager.get_output_power(&outputs["HEADLESS-1"], &client.handle, ());
+  let second =
+    manager.get_output_power(&outputs["HEADLESS-2"], &client.handle, ());
+  client.roundtrip(&mut compositor);
+  let last = |client: &TestClient,
+              control: wayland_client::backend::ObjectId| {
+    client
+      .events
+      .power
+      .iter()
+      .rev()
+      .find(|(id, _)| *id == control)
+      .map(|(_, seen)| *seen)
+  };
+  assert_eq!(last(&client, first.id()), Some("on"));
+  second.set_mode(Mode::Off);
+  client.roundtrip(&mut compositor);
+  assert_eq!(last(&client, second.id()), Some("off"));
+  assert_eq!(last(&client, first.id()), Some("on"));
+  assert_eq!(compositor.dpms_state(), crate::DpmsState::On);
+  assert!(!compositor.output_powered(&OutputHandle::new("HEADLESS-2")));
+  let (_toplevel, window) = mapped(&mut compositor, &mut client, "dark");
+  move_to(&mut compositor, window, "HEADLESS-2");
+  assert!(
+    compositor
+      .visible_surfaces_on(&OutputHandle::new("HEADLESS-2"))
+      .is_empty()
+  );
+  // Turning the last lit output off is DPMS off; waking lights both.
+  first.set_mode(Mode::Off);
+  client.roundtrip(&mut compositor);
+  assert_eq!(compositor.dpms_state(), crate::DpmsState::Off);
+  first.set_mode(Mode::On);
+  client.roundtrip(&mut compositor);
+  assert_eq!(compositor.dpms_state(), crate::DpmsState::On);
+  assert_eq!(last(&client, second.id()), Some("on"));
+  compositor
+    .remove_output(&OutputHandle::new("HEADLESS-2"))
+    .unwrap();
+  client.roundtrip(&mut compositor);
+  assert_eq!(last(&client, second.id()), Some("failed"));
+  assert_eq!(last(&client, first.id()), Some("on"));
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn every_output_has_a_gamma_ramp_of_its_own() {
+  use std::os::fd::AsFd;
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let manager = client.bind::<gamma::ZwlrGammaControlManagerV1>(1);
+  let first =
+    manager.get_gamma_control(&outputs["HEADLESS-1"], &client.handle, ());
+  let second =
+    manager.get_gamma_control(&outputs["HEADLESS-2"], &client.handle, ());
+  let again =
+    manager.get_gamma_control(&outputs["HEADLESS-1"], &client.handle, ());
+  client.roundtrip(&mut compositor);
+  let seen = |control: wayland_client::backend::ObjectId| {
+    client
+      .events
+      .gamma
+      .iter()
+      .filter(|(id, _)| *id == control)
+      .map(|(_, seen)| *seen)
+      .collect::<Vec<_>>()
+  };
+  assert_eq!(seen(first.id()), ["size"]);
+  assert_eq!(seen(second.id()), ["size"]);
+  assert_eq!(seen(again.id()), ["failed"], "one control per output");
+  let identity = compositor.gamma_ramp().to_vec();
+  let fd =
+    rustix::fs::memfd_create("shingle-gamma", rustix::fs::MemfdFlags::CLOEXEC)
+      .unwrap();
+  let ramp = vec![0x12u8; 256 * 3 * 2];
+  rustix::io::write(&fd, &ramp).unwrap();
+  rustix::fs::seek(&fd, rustix::fs::SeekFrom::Start(0)).unwrap();
+  second.set_gamma(fd.as_fd());
+  client.roundtrip(&mut compositor);
+  assert_eq!(compositor.gamma_ramp(), identity, "HEADLESS-1 is unchanged");
+  let changed = compositor.gamma_ramp_of(&OutputHandle::new("HEADLESS-2"));
+  assert!(changed.iter().all(|value| *value == 0x1212));
+  compositor
+    .remove_output(&OutputHandle::new("HEADLESS-2"))
+    .unwrap();
+  client.roundtrip(&mut compositor);
+  let seen = client
+    .events
+    .gamma
+    .iter()
+    .filter(|(id, _)| *id == second.id())
+    .count();
+  assert_eq!(seen, 2, "size, then failed");
   let _ = std::fs::remove_file(path);
 }

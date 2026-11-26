@@ -10,7 +10,7 @@ use std::{
 };
 
 use wayland_client::{
-  Connection, Dispatch, EventQueue, Proxy, QueueHandle,
+  Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
   backend::ObjectId,
   protocol::{
     wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer,
@@ -67,6 +67,10 @@ use wayland_protocols_wlr::{
     zwlr_data_control_offer_v1::{self, ZwlrDataControlOfferV1},
     zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
   },
+  gamma_control::v1::client::{
+    zwlr_gamma_control_manager_v1::ZwlrGammaControlManagerV1,
+    zwlr_gamma_control_v1::{self, ZwlrGammaControlV1},
+  },
   layer_shell::v1::client::{
     zwlr_layer_shell_v1::ZwlrLayerShellV1,
     zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
@@ -77,6 +81,10 @@ use wayland_protocols_wlr::{
     zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
     zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
     zwlr_output_mode_v1::{self, ZwlrOutputModeV1},
+  },
+  output_power_management::v1::client::{
+    zwlr_output_power_manager_v1::ZwlrOutputPowerManagerV1,
+    zwlr_output_power_v1::{self, ZwlrOutputPowerV1},
   },
   screencopy::v1::client::{
     zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
@@ -165,6 +173,10 @@ pub(crate) struct Events {
   pub(crate) lock_configures: Vec<(ObjectId, u32, u32, u32)>,
   /// `wp_fractional_scale_v1.preferred_scale`, with its object.
   pub(crate) preferred_scales: Vec<(ObjectId, u32)>,
+  /// wlr-output-power events: the control and `on`, `off` or `failed`.
+  pub(crate) power: Vec<(ObjectId, &'static str)>,
+  /// wlr-gamma-control events: the control and `size` or `failed`.
+  pub(crate) gamma: Vec<(ObjectId, &'static str)>,
   synced: bool,
 }
 
@@ -1128,7 +1140,48 @@ impl Dispatch<WpFractionalScaleV1, ()> for Events {
   }
 }
 
+impl Dispatch<ZwlrOutputPowerV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    control: &ZwlrOutputPowerV1,
+    event: zwlr_output_power_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    let seen = match event {
+      zwlr_output_power_v1::Event::Mode {
+        mode: WEnum::Value(zwlr_output_power_v1::Mode::On),
+      } => "on",
+      zwlr_output_power_v1::Event::Mode { .. } => "off",
+      zwlr_output_power_v1::Event::Failed => "failed",
+      _ => return,
+    };
+    events.power.push((control.id(), seen));
+  }
+}
+
+impl Dispatch<ZwlrGammaControlV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    control: &ZwlrGammaControlV1,
+    event: zwlr_gamma_control_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    let seen = match event {
+      zwlr_gamma_control_v1::Event::GammaSize { .. } => "size",
+      zwlr_gamma_control_v1::Event::Failed => "failed",
+      _ => return,
+    };
+    events.gamma.push((control.id(), seen));
+  }
+}
+
 ignore_events!(
+  ZwlrOutputPowerManagerV1,
+  ZwlrGammaControlManagerV1,
   wl_compositor::WlCompositor,
   ZwlrLayerShellV1,
   ExtSessionLockManagerV1,

@@ -1,4 +1,9 @@
-use std::{fs::File, io::Read, os::fd::OwnedFd};
+//! wlr-gamma-control: a gamma ramp per output, each set by at most one
+//! client at a time (docs/design/multi-output.md, section 8).
+
+use std::{collections::HashMap, fs::File, io::Read, os::fd::OwnedFd};
+
+use shingle_core::OutputId;
 
 use wayland_protocols_wlr::gamma_control::v1::server::{
   zwlr_gamma_control_manager_v1::{self, ZwlrGammaControlManagerV1},
@@ -17,8 +22,10 @@ const TABLE_BYTES: usize = RAMP_SIZE * 3 * 2;
 
 #[derive(Default)]
 pub(crate) struct GammaControl {
-  active: Option<ActiveControl>,
-  pub(crate) ramp: Vec<u16>,
+  /// The control of each output that has one.
+  active: HashMap<OutputId, ActiveControl>,
+  /// The ramp each control set, by output.
+  ramps: HashMap<OutputId, Vec<u16>>,
 }
 
 struct ActiveControl {
@@ -31,37 +38,50 @@ pub(crate) fn create_global(handle: &DisplayHandle) {
   handle.create_global::<CompositorState, ZwlrGammaControlManagerV1, ()>(1, ());
 }
 
-pub(crate) fn ramp(state: &CompositorState) -> &[u16] {
-  if state.gamma_control.ramp.len() == RAMP_SIZE * 3 {
-    &state.gamma_control.ramp
-  } else {
-    identity_ramp()
+/// The gamma ramp of output `id`: its control's, or the identity.
+pub(crate) fn ramp<'a>(state: &'a CompositorState, id: &OutputId) -> &'a [u16] {
+  match state.gamma_control.ramps.get(id) {
+    Some(ramp) if ramp.len() == RAMP_SIZE * 3 => ramp,
+    _ => identity_ramp(),
   }
 }
 
 pub(crate) fn cleanup_client(state: &mut CompositorState, client: &ClientId) {
-  if state
+  let outputs = state
     .gamma_control
     .active
-    .as_ref()
-    .is_some_and(|active| active.client == *client)
-  {
-    restore(state);
+    .iter()
+    .filter(|(_, active)| active.client == *client)
+    .map(|(output, _)| output.clone())
+    .collect::<Vec<_>>();
+  for output in outputs {
+    restore(state, &output);
   }
 }
 
-/// Fails the active control, which belongs to an output that was
-/// replaced, and restores the identity ramp.
-pub(crate) fn output_removed(state: &mut CompositorState) {
-  if let Some(active) = state.gamma_control.active.take() {
+/// Fails the control of output `id`, which is gone or renamed, and
+/// forgets its ramp.
+pub(crate) fn output_removed(state: &mut CompositorState, id: &OutputId) {
+  if let Some(active) = state.gamma_control.active.remove(id) {
     active.resource.failed();
-    restore(state);
   }
+  restore(state, id);
 }
 
-fn restore(state: &mut CompositorState) {
-  state.gamma_control.active = None;
-  state.gamma_control.ramp = identity_ramp().to_vec();
+/// Gives output `id` the identity ramp again, without a control.
+fn restore(state: &mut CompositorState, id: &OutputId) {
+  state.gamma_control.active.remove(id);
+  state.gamma_control.ramps.remove(id);
+}
+
+/// The output whose control `resource` is.
+fn output_of(state: &CompositorState, resource: &ObjectId) -> Option<OutputId> {
+  state
+    .gamma_control
+    .active
+    .iter()
+    .find(|(_, active)| active.id == *resource)
+    .map(|(output, _)| output.clone())
 }
 
 impl GlobalDispatch<ZwlrGammaControlManagerV1, ()> for CompositorState {
@@ -109,18 +129,24 @@ fn create_control(
   output: WlOutput,
   control: ZwlrGammaControlV1,
 ) {
-  if !state.outputs.is_bound(&output.id())
-    || state.gamma_control.active.is_some()
-  {
+  let Some(id) = state
+    .outputs
+    .of_resource(&output)
+    .map(|output| output.id.clone())
+    .filter(|id| !state.gamma_control.active.contains_key(id))
+  else {
     control.failed();
     return;
-  }
+  };
   control.gamma_size(RAMP_SIZE as u32);
-  state.gamma_control.active = Some(ActiveControl {
-    id: control.id(),
-    client: client.id(),
-    resource: control,
-  });
+  state.gamma_control.active.insert(
+    id,
+    ActiveControl {
+      id: control.id(),
+      client: client.id(),
+      resource: control,
+    },
+  );
 }
 
 impl Dispatch<ZwlrGammaControlV1, ()> for CompositorState {
@@ -135,27 +161,19 @@ impl Dispatch<ZwlrGammaControlV1, ()> for CompositorState {
   ) {
     match request {
       zwlr_gamma_control_v1::Request::Destroy => {
-        if state
-          .gamma_control
-          .active
-          .as_ref()
-          .is_some_and(|active| active.id == resource.id())
-        {
-          restore(state);
+        if let Some(output) = output_of(state, &resource.id()) {
+          restore(state, &output);
         }
       }
       zwlr_gamma_control_v1::Request::SetGamma { fd } => {
-        if state
-          .gamma_control
-          .active
-          .as_ref()
-          .is_none_or(|active| active.id != resource.id())
-        {
+        let Some(output) = output_of(state, &resource.id()) else {
           resource.failed();
           return;
-        }
+        };
         match read_ramp(fd) {
-          Ok(ramp) => state.gamma_control.ramp = ramp,
+          Ok(ramp) => {
+            state.gamma_control.ramps.insert(output, ramp);
+          }
           Err(error) => resource
             .post_error(zwlr_gamma_control_v1::Error::InvalidGamma, error),
         }
@@ -170,13 +188,8 @@ impl Dispatch<ZwlrGammaControlV1, ()> for CompositorState {
     resource: &ZwlrGammaControlV1,
     _data: &(),
   ) {
-    if state
-      .gamma_control
-      .active
-      .as_ref()
-      .is_some_and(|active| active.id == resource.id())
-    {
-      restore(state);
+    if let Some(output) = output_of(state, &resource.id()) {
+      restore(state, &output);
     }
   }
 }

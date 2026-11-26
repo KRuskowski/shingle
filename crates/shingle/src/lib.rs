@@ -2929,11 +2929,23 @@ impl Compositor {
     self.state.primary().scale
   }
 
-  /// The gamma table to apply to the output: 256 red, then 256 green, then
-  /// 256 blue 16-bit entries, from the active wlr-gamma-control client, or the
-  /// identity ramp without one.
+  /// The gamma table to apply to the first output: 256 red, then 256
+  /// green, then 256 blue 16-bit entries, from its wlr-gamma-control
+  /// client, or the identity ramp without one.
   pub fn gamma_ramp(&self) -> &[u16] {
-    gamma_control::ramp(&self.state)
+    gamma_control::ramp(&self.state, &self.state.primary().id)
+  }
+
+  /// [`Compositor::gamma_ramp`] of `output`; the identity ramp for an
+  /// output that is not there.
+  pub fn gamma_ramp_of(&self, output: &OutputHandle) -> &[u16] {
+    gamma_control::ramp(&self.state, &output.id())
+  }
+
+  /// Whether `output` is lit: idle DPMS is on and no wlr-output-power
+  /// client turned it off. An output that is not lit draws nothing.
+  pub fn output_powered(&self, output: &OutputHandle) -> bool {
+    output_power::is_on(&self.state, &output.id())
   }
 
   /// Sets the output scale. Clients get `wl_output.scale` rounded up, the

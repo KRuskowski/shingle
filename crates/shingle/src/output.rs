@@ -414,8 +414,8 @@ pub(crate) fn rename(
       .attach_wset(wset, Some(new_id.clone()), identity.clone())?;
   }
   claim_parked(state, &new_id, identity);
-  crate::output_power::output_removed(state);
-  crate::gamma_control::output_removed(state);
+  crate::output_power::output_removed(state, id);
+  crate::gamma_control::output_removed(state, id);
   crate::output_management::output_removed(state, id);
   crate::output_management::output_added(state, &new_id);
   Ok(new_id)

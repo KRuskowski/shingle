@@ -58,6 +58,8 @@ pub(crate) struct OutputState {
   /// its placement alone until Shingle restarts, as Wayfire's
   /// `is_externally_managed` does.
   pub(crate) managed: bool,
+  /// Whether it is lit: a wlr-output-power client can turn it off.
+  pub(crate) powered: bool,
 }
 
 /// An output turned off through output management: still a connector,
@@ -245,6 +247,7 @@ impl Outputs {
       generation,
       bound: HashMap::new(),
       managed: false,
+      powered: true,
     });
     self.list.last_mut().expect("an output was just pushed")
   }
@@ -327,14 +330,6 @@ impl Outputs {
   /// Every output in add order, to change.
   pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut OutputState> {
     self.list.iter_mut()
-  }
-
-  /// Whether `resource` is a live binding of any output.
-  pub(crate) fn is_bound(&self, resource: &ObjectId) -> bool {
-    self
-      .list
-      .iter()
-      .any(|output| output.bound.contains_key(resource))
   }
 
   /// The name of the next output created over IPC: `HEADLESS-N` with `N`

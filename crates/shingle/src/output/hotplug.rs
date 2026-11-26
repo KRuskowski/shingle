@@ -137,6 +137,8 @@ pub(crate) fn remove(
   }
   crate::layer_shell::output_removed(state, id);
   crate::shell::lock_output_removed(state, id);
+  crate::output_power::output_removed(state, id);
+  crate::gamma_control::output_removed(state, id);
   retire_global(state, id);
   crate::output_management::output_removed(state, id);
   state.outputs.remove(id);
