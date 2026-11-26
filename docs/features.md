@@ -195,4 +195,6 @@ Each Wayfire `[output:NAME]` section, i3 `output NAME` line or YAML `outputs` en
 
 ### Resource limits
 
+Shared-memory buffers go to the GPU straight from the client's pool, in its own byte order, with only the damaged rectangles written, and are given back to the client in the turn they were committed, before any frame; a pool sealed against shrinking stays mapped. The headless backend, which draws nothing, copies them on the CPU instead.
+
 `behavior.max_buffer_size` limits either dimension of a shared-memory client buffer and defaults to 16384 pixels, matching Wayfire. Oversized buffers are rejected before mapping or GPU upload. The limit is also editable in WCM.

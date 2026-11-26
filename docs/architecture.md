@@ -31,7 +31,7 @@
 | Protocol timestamps (`CLOCK_MONOTONIC`) | `crates/shingle/src/clock.rs` |
 | In-process Wayland test client | `crates/shingle/src/test_client.rs` |
 | Shared state and workspace transitions | `crates/shingle/src/state.rs` |
-| Client buffers: content (`BufferContent`), shm pools, CPU copies | `crates/shingle/src/buffer.rs` |
+| Client buffers: content (`BufferContent`), shm pools and their persistent mappings, CPU copies, shm content for upload (`ShmContent`) | `crates/shingle/src/buffer.rs` |
 | Buffer locks and `wl_buffer.release` (`BufferLock`, `ReleaseQueue`) | `crates/shingle/src/buffer_lock.rs` |
 | Per-surface commit queue, its blocker interface and the fd wait of the implicit and syncobj blockers (`FdWait`) | `crates/shingle/src/commit_queue.rs` |
 | `zwp_linux_dmabuf_v1`: global, feedback and format table, params checks, `DmabufBuffer`, the `DmabufImporter` trait, the implicit-sync fence wait | `crates/shingle/src/linux_dmabuf.rs`; tests in `linux_dmabuf/tests.rs` |
@@ -57,7 +57,8 @@
 | `Frontend` struct, public API, input dispatch | `crates/shingle-frontend/src/frontend.rs` |
 | Frontend areas: bindings, Scale, Expo, switcher, drags, effects, animations, scene build, session | `crates/shingle-frontend/src/frontend/*.rs` |
 | What the scene is drawn into (`RenderTarget`) | `crates/shingle-frontend/src/render_target.rs` |
-| The frontend's DMA-BUF importer, texture cache by buffer serial, locks of frames in flight, the linux-dmabuf and syncobj decisions | `crates/shingle-frontend/src/dmabuf.rs`; `Frontend::enable_dmabuf` and `start_clients` in `frontend.rs` |
+| The frontend's DMA-BUF importer, texture cache by buffer serial, locks of frames in flight, the linux-dmabuf and syncobj decisions | `crates/shingle-frontend/src/dmabuf.rs`; `Frontend::attach_gpu`, `enable_dmabuf` and `start_clients` in `frontend.rs` |
+| The frontend's shm uploads: damage rectangles, the upload after each commit, release | `crates/shingle-frontend/src/shm.rs`; `upload_committed` and `upload_shm` in `frontend.rs` |
 | Frontend input-script tests (`FakeHost`) | `crates/shingle-frontend/src/frontend/tests.rs` |
 | Command line, `--help` text | `crates/shingle-bin/src/cli.rs` |
 | Backend selection from arguments and environment | `crates/shingle-bin/src/backend.rs` |
@@ -65,7 +66,7 @@
 | Headless backend | `crates/shingle-bin/src/headless.rs` |
 | Offscreen backend: the frontend on the GPU without a display, frame pacing, presentation | `crates/shingle-bin/src/offscreen.rs` |
 | Screencopy: CPU composite, or frame capture answered by the frontend (`set_frame_capture`, `finish_capture`) | `crates/shingle/src/screencopy.rs`; the frontend's capture draw in `crates/shingle-frontend/src/frontend/scene.rs` (`answer_captures`), `shingle_render::capture_frame` in `crates/shingle-render/src/target.rs` |
-| GPU namespace and DB-2's and DB-3's real-client checks (offscreen, nested, baseline, buffers) | `tools/gpu_test/run.py`, `tools/gpu_test/checks.py` |
+| GPU namespace and DB-2's, DB-3's and DB-6's real-client checks (offscreen, nested, baseline, buffers, shm) | `tools/gpu_test/run.py`, `tools/gpu_test/checks.py`; the probe `crates/shingle/examples/wl_probe.rs` |
 | DB-4's and DB-5's real-client checks (dmabuf, browsers, xwayland, nested-gpu, nodmabuf, weston, syncobj, nosyncobj) | `tools/gpu_test/dmabuf_checks.py`; the stall probe `crates/shingle/examples/syncobj_probe.rs` |
 | winit host: window, input translation, button emulation | `crates/shingle-nested/src/lib.rs` |
 | Native seat: `Session`, libseat, startup checks (SSH, enable timeout, backend) | `crates/shingle-native/src/session.rs` |
@@ -94,6 +95,7 @@
 | Composite pass and tile geometry | `crates/shingle-render/src/draw.rs` |
 | Window and offscreen render targets | `crates/shingle-render/src/target.rs` |
 | DMA-BUF device setup, modifier caps, fourcc table, import, foreign queue-family barriers | `crates/shingle-render/src/dmabuf.rs`; caps of every adapter: `examples/dmabuf_caps.rs`; device tests `tests/dmabuf_import.rs` |
+| shm textures in the client's byte order, damage writes with the client's stride, rebinding and GPU copies (`TextureUploader`) | `crates/shingle-render/src/upload.rs`; pixel tests in `tests/offscreen_pixels.rs` |
 | GPU test namespace with a private `/dev` (render node and NVIDIA nodes only) | `tools/gpu_test/run.py` |
 | Native config model and XKB generation | `crates/shingle-config/src/lib.rs` |
 | Wayfire INI import | `crates/shingle-config/src/wayfire.rs` |
