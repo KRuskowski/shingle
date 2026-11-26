@@ -215,6 +215,7 @@ pub enum WorkspaceWraparound {
 ///
 /// [`Compositor::apply_config`] re-applies most fields at runtime. The
 /// exceptions are only read at startup: `enable_text_input_v3`,
+/// `enable_text_input_v1`,
 /// `protocol_plugins`, `initial_locked_modifiers`,
 /// `disable_primary_selection`, `security_privileged_protocols` and
 /// everything in `xwayland` except the startup script.
@@ -285,9 +286,13 @@ pub struct Config {
   /// `input/modifier_binding_timeout` in milliseconds, for
   /// modifier-alone bindings; 0 never cancels.
   pub modifier_binding_timeout: u32,
-  /// Advertises text-input-v3, input-method v1/v2 and input panels. Read
-  /// only when the globals are created.
+  /// Advertises text-input-v3. Read only when the globals are created.
+  /// Input-method v1 and v2 and the input panels exist while this or
+  /// `enable_text_input_v1` is set.
   pub enable_text_input_v3: bool,
+  /// Advertises text-input-v1 (`zwp_text_input_manager_v1`). Read only
+  /// when the globals are created.
+  pub enable_text_input_v1: bool,
   /// xkb locked-modifier mask applied at startup: bit 1 (Lock) for Caps
   /// Lock and bit 4 (Mod2) for Num Lock.
   pub initial_locked_modifiers: u32,
@@ -436,6 +441,7 @@ impl Default for Config {
       toggle_menu: shingle_config::Binding::disabled(),
       modifier_binding_timeout: 400,
       enable_text_input_v3: true,
+      enable_text_input_v1: true,
       initial_locked_modifiers: 0,
       idle: IdleConfig::default(),
       gaps: Gaps::default(),
@@ -517,6 +523,7 @@ impl From<shingle_config::ShingleConfig> for Config {
       toggle_menu: config.keybindings.toggle_menu,
       modifier_binding_timeout: config.input.modifier_binding_timeout,
       enable_text_input_v3: config.input.enable_text_input_v3,
+      enable_text_input_v1: config.input.enable_text_input_v1,
       initial_locked_modifiers: (u32::from(config.input.capslock_default) << 1)
         | (u32::from(config.input.numlock_default) << 4),
       idle: config.idle.as_idle_config(),

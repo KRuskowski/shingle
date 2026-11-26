@@ -2444,6 +2444,10 @@ pub struct InputConfig {
   pub modifier_binding_timeout: u32,
   /// Enable the text-input-v3 protocol for editable client surfaces.
   pub enable_text_input_v3: bool,
+  /// Enable the text-input-v1 protocol, which Chromium and Electron use
+  /// for input methods. `[input-method-v1] enable_text_input_v1`; default
+  /// true.
+  pub enable_text_input_v1: bool,
 }
 
 impl Default for InputConfig {
@@ -2479,6 +2483,7 @@ impl Default for InputConfig {
       cursor_size: 24,
       modifier_binding_timeout: 400,
       enable_text_input_v3: true,
+      enable_text_input_v1: true,
     }
   }
 }
@@ -3515,6 +3520,29 @@ mod tests {
         .unwrap();
     assert!(!i3.input.enable_text_input_v3);
     assert!(ShingleConfig::default().input.enable_text_input_v3);
+  }
+
+  #[test]
+  fn text_input_v1_enablement_is_imported() {
+    let wayfire = ShingleConfig::parse(
+      "[core]\nplugins = input-method-v1\n\
+       [input-method-v1]\nenable_text_input_v1 = false\n",
+      ConfigFormat::Wayfire,
+    )
+    .unwrap();
+    assert!(!wayfire.input.enable_text_input_v1);
+    assert!(wayfire.input.enable_text_input_v3);
+    let i3 =
+      ShingleConfig::parse("set $enable_text_input_v1 no\n", ConfigFormat::I3)
+        .unwrap();
+    assert!(!i3.input.enable_text_input_v1);
+    let yaml = ShingleConfig::parse(
+      "input:\n  enable_text_input_v1: false\n",
+      ConfigFormat::Yaml,
+    )
+    .unwrap();
+    assert!(!yaml.input.enable_text_input_v1);
+    assert!(ShingleConfig::default().input.enable_text_input_v1);
   }
 
   #[test]

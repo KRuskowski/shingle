@@ -389,6 +389,9 @@ fn line(
           "$enable_text_input_v3" => {
             config.input.enable_text_input_v3 = boolean(&value)?
           }
+          "$enable_text_input_v1" => {
+            config.input.enable_text_input_v1 = boolean(&value)?
+          }
           "$cursor_size" => config.input.cursor_size = number(&value)?,
           "$output_unplug" => {
             config.output_layout.unplug = match value.as_str() {

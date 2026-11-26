@@ -114,7 +114,7 @@ fn sync_method(state: &mut CompositorState, id: &ObjectId) {
   let Some(method) = state.input_methods_v2.methods.get_mut(id) else {
     return;
   };
-  if method.synced_serial == Some(snapshot.commit_serial) {
+  if method.synced_serial == Some(snapshot.generation) {
     return;
   }
   if let Some((text, cursor, anchor)) = snapshot.surrounding {
@@ -131,7 +131,7 @@ fn sync_method(state: &mut CompositorState, id: &ObjectId) {
     .unwrap_or(ContentPurpose::Normal);
   method.resource.text_change_cause(cause);
   method.resource.content_type(hint, purpose);
-  method.synced_serial = Some(snapshot.commit_serial);
+  method.synced_serial = Some(snapshot.generation);
   done(method);
 }
 

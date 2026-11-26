@@ -263,6 +263,7 @@ pub(crate) struct CompositorState {
   pub(crate) input_methods_v2: crate::input_method_v2::InputMethods,
   pub(crate) icons: crate::toplevel_icon::Icons,
   pub(crate) enable_text_input_v3: bool,
+  pub(crate) enable_text_input_v1: bool,
   /// Whether views tile (`Config::tiling`).
   pub(crate) tiling: bool,
   /// Which protocol plugins' globals `create_globals` creates.
@@ -459,6 +460,7 @@ impl CompositorState {
       input_methods_v2: Default::default(),
       icons: Default::default(),
       enable_text_input_v3: config.enable_text_input_v3,
+      enable_text_input_v1: config.enable_text_input_v1,
       tiling: config.tiling,
       protocol_plugins: config.protocol_plugins,
       wayfire_values: config.wayfire_values,
@@ -727,8 +729,15 @@ impl CompositorState {
     crate::commit_timing::create_global(handle);
     crate::gamma_control::create_global(handle);
     crate::input::create_globals(handle);
+    // As in Wayfire's input-method-v1 plugin, each text-input version
+    // has its own option, and the input methods serve either.
     if self.enable_text_input_v3 {
       crate::text_input::create_global(handle);
+    }
+    if self.enable_text_input_v1 {
+      crate::text_input::v1::create_global(handle);
+    }
+    if self.enable_text_input_v3 || self.enable_text_input_v1 {
       crate::input_method::create_global(handle);
       crate::input_method_v2::create_global(handle);
       crate::input_panel::create_global(handle);

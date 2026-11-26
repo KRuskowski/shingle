@@ -39,6 +39,10 @@ use wayland_protocols::{
       wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
       wp_fractional_scale_v1::{self, WpFractionalScaleV1},
     },
+    input_method::zv1::client::{
+      zwp_input_method_context_v1::{self, ZwpInputMethodContextV1},
+      zwp_input_method_v1::{self, ZwpInputMethodV1},
+    },
     linux_dmabuf::zv1::client::{
       zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1,
       zwp_linux_dmabuf_v1,
@@ -49,6 +53,10 @@ use wayland_protocols::{
     },
     presentation_time::client::{wp_presentation, wp_presentation_feedback},
     single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1,
+    text_input::zv1::client::{
+      zwp_text_input_manager_v1::ZwpTextInputManagerV1,
+      zwp_text_input_v1::{self, ZwpTextInputV1},
+    },
     viewporter::client::{wp_viewport, wp_viewporter},
   },
   xdg::decoration::zv1::client::{
@@ -224,6 +232,15 @@ pub(crate) struct Events {
   pub(crate) data_source: Vec<String>,
   /// `wl_data_source.send` descriptors, in order.
   pub(crate) data_sends: Vec<OwnedFd>,
+  /// Every `zwp_text_input_v1` event, with its object.
+  pub(crate) text_input_v1: Vec<(ObjectId, zwp_text_input_v1::Event)>,
+  /// Every `zwp_input_method_v1` event, in order.
+  pub(crate) input_method_v1: Vec<zwp_input_method_v1::Event>,
+  /// Every `zwp_input_method_context_v1` event, with its object.
+  pub(crate) input_method_context:
+    Vec<(ObjectId, zwp_input_method_context_v1::Event)>,
+  /// Every `zwp_input_method_v2` event, in order.
+  pub(crate) input_method_v2: Vec<zwp_input_method_v2::Event>,
   synced: bool,
 }
 
@@ -1572,7 +1589,7 @@ ignore_events!(
   zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
   zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
   zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
-  zwp_input_method_v2::ZwpInputMethodV2,
+  ZwpTextInputManagerV1,
   wp_fifo_manager_v1::WpFifoManagerV1,
   wp_fifo_v1::WpFifoV1,
   wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1,
@@ -1586,3 +1603,60 @@ ignore_events!(
   ZwlrDataControlManagerV1,
   ZwlrScreencopyManagerV1,
 );
+
+impl Dispatch<ZwpTextInputV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    input: &ZwpTextInputV1,
+    event: zwp_text_input_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.text_input_v1.push((input.id(), event));
+  }
+}
+
+impl Dispatch<ZwpInputMethodV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ZwpInputMethodV1,
+    event: zwp_input_method_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.input_method_v1.push(event);
+  }
+
+  wayland_client::event_created_child!(Events, ZwpInputMethodV1, [
+    zwp_input_method_v1::EVT_ACTIVATE_OPCODE
+      => (ZwpInputMethodContextV1, ()),
+  ]);
+}
+
+impl Dispatch<ZwpInputMethodContextV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    context: &ZwpInputMethodContextV1,
+    event: zwp_input_method_context_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.input_method_context.push((context.id(), event));
+  }
+}
+
+impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &zwp_input_method_v2::ZwpInputMethodV2,
+    event: zwp_input_method_v2::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.input_method_v2.push(event);
+  }
+}

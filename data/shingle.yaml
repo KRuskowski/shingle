@@ -339,3 +339,4 @@ input:
   cursor_size: 24
   modifier_binding_timeout: 400
   enable_text_input_v3: true
+  enable_text_input_v1: true

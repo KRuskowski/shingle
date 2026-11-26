@@ -12,7 +12,10 @@ use wayland_server::{
     protocol::wl_keyboard::{self, WlKeyboard},
 };
 
-use crate::{state::CompositorState, text_input};
+use crate::{
+  state::CompositorState,
+  text_input::{self, ContextEvent},
+};
 
 struct InputMethod {
   resource: ZwpInputMethodV1,
@@ -255,7 +258,7 @@ pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {
       continue;
     };
     if state.input_methods.methods[&method_id].synced_serial
-      == Some(snapshot.commit_serial)
+      == Some(snapshot.generation)
     {
       continue;
     }
@@ -347,12 +350,14 @@ fn sync_context(
       anchor.max(0) as u32,
     );
   }
-  context
-    .resource
-    .content_type(snapshot.content_hint, snapshot.content_purpose);
+  // input-method v1 numbers content purposes as text-input v1 does.
+  context.resource.content_type(
+    snapshot.content_hint,
+    text_input::v1::purpose_from_v3(snapshot.content_purpose),
+  );
   context.resource.commit_state(snapshot.commit_serial);
   if let Some(method) = state.input_methods.methods.get_mut(method_id) {
-    method.synced_serial = Some(snapshot.commit_serial);
+    method.synced_serial = Some(snapshot.generation);
   }
 }
 
@@ -429,37 +434,11 @@ impl Dispatch<ZwpInputMethodContextV1, ()> for CompositorState {
     else {
       return;
     };
-    match request {
+    let event = match request {
       zwp_input_method_context_v1::Request::GrabKeyboard { keyboard } => {
-        grab_keyboard(state, resource, keyboard, data_init)
+        grab_keyboard(state, resource, keyboard, data_init);
+        return;
       }
-      zwp_input_method_context_v1::Request::CommitString { serial, text } => {
-        text_input::commit_string(state, &input, serial, text)
-      }
-      zwp_input_method_context_v1::Request::PreeditString {
-        serial,
-        text,
-        ..
-      } => text_input::preedit_string(state, &input, serial, text, cursor),
-      zwp_input_method_context_v1::Request::PreeditCursor { index } => {
-        if let Some(context) = state
-          .input_methods
-          .contexts
-          .get_mut(&Resource::id(resource))
-        {
-          context.preedit_cursor = index;
-        }
-      }
-      zwp_input_method_context_v1::Request::DeleteSurroundingText {
-        index,
-        length,
-      } => text_input::delete_surrounding_text(
-        state,
-        &input,
-        serial_for_commit(state, &input),
-        index,
-        length,
-      ),
       zwp_input_method_context_v1::Request::Key {
         time,
         key,
@@ -468,6 +447,7 @@ impl Dispatch<ZwpInputMethodContextV1, ()> for CompositorState {
       } => {
         let pressed = key_state == wl_keyboard::KeyState::Pressed as u32;
         forward_key(state, &Resource::id(resource), key, pressed, time);
+        return;
       }
       zwp_input_method_context_v1::Request::Modifiers {
         mods_depressed,
@@ -475,17 +455,34 @@ impl Dispatch<ZwpInputMethodContextV1, ()> for CompositorState {
         mods_locked,
         group,
         ..
-      } => forward_modifiers(
-        state,
-        crate::input::Modifiers {
-          depressed: mods_depressed,
-          latched: mods_latched,
-          locked: mods_locked,
-          group,
-        },
-      ),
-      _ => {}
-    }
+      } => {
+        forward_modifiers(
+          state,
+          crate::input::Modifiers {
+            depressed: mods_depressed,
+            latched: mods_latched,
+            locked: mods_locked,
+            group,
+          },
+        );
+        return;
+      }
+      zwp_input_method_context_v1::Request::PreeditCursor { index } => {
+        if let Some(context) = state
+          .input_methods
+          .contexts
+          .get_mut(&Resource::id(resource))
+        {
+          context.preedit_cursor = index;
+        }
+        ContextEvent::PreeditCursor { index }
+      }
+      request => match context_event(request) {
+        Some(event) => event,
+        None => return,
+      },
+    };
+    text_input::context_event(state, &input, event, cursor);
   }
 
   fn destroyed(
@@ -524,10 +521,93 @@ pub(crate) fn release_context(state: &mut CompositorState, context: &ObjectId) {
   }
 }
 
-fn serial_for_commit(state: &CompositorState, input: &ObjectId) -> u32 {
-  state
-    .text_inputs
-    .snapshot(input)
-    .map(|snapshot| snapshot.commit_serial)
-    .unwrap_or(0)
+/// The text-input event of a context request that is one.
+fn context_event(
+  request: zwp_input_method_context_v1::Request,
+) -> Option<ContextEvent> {
+  use zwp_input_method_context_v1::Request;
+  Some(match request {
+    Request::CommitString { serial, text } => {
+      ContextEvent::CommitString { serial, text }
+    }
+    Request::PreeditString {
+      serial,
+      text,
+      commit,
+    } => ContextEvent::PreeditString {
+      serial,
+      text,
+      commit,
+    },
+    Request::PreeditStyling {
+      index,
+      length,
+      style,
+    } => ContextEvent::PreeditStyling {
+      index,
+      length,
+      style,
+    },
+    Request::DeleteSurroundingText { index, length } => {
+      ContextEvent::DeleteSurroundingText { index, length }
+    }
+    Request::CursorPosition { index, anchor } => {
+      ContextEvent::CursorPosition { index, anchor }
+    }
+    Request::ModifiersMap { map } => ContextEvent::ModifiersMap { map },
+    Request::Keysym {
+      serial,
+      time,
+      sym,
+      state,
+      modifiers,
+    } => ContextEvent::Keysym {
+      serial,
+      time,
+      sym,
+      state,
+      modifiers,
+    },
+    Request::Language { serial, language } => {
+      ContextEvent::Language { serial, language }
+    }
+    Request::TextDirection { serial, direction } => {
+      ContextEvent::TextDirection { serial, direction }
+    }
+    _ => return None,
+  })
+}
+
+/// A request of a text-input-v1 client that only input-method v1 has a
+/// counterpart for.
+pub(crate) enum TextInputRequest {
+  Reset,
+  PreferredLanguage(String),
+  InvokeAction { button: u32, index: u32 },
+}
+
+/// Passes `request` of text input `input` to the contexts serving it.
+pub(crate) fn text_input_request(
+  state: &CompositorState,
+  input: &ObjectId,
+  request: TextInputRequest,
+) {
+  let contexts = state
+    .input_methods
+    .methods
+    .values()
+    .filter(|method| method.active_input.as_ref() == Some(input))
+    .filter_map(|method| method.context.as_ref())
+    .filter_map(|id| state.input_methods.contexts.get(id));
+  for context in contexts {
+    match &request {
+      TextInputRequest::Reset => context.resource.reset(),
+      TextInputRequest::PreferredLanguage(language) => {
+        context.resource.preferred_language(language.clone());
+      }
+      TextInputRequest::InvokeAction { button, index } => {
+        context.resource.invoke_action(*button, *index);
+      }
+    }
+  }
 }

@@ -970,6 +970,11 @@ pub fn build(model: &UiModel<'_>) -> Widget {
         "Enable text-input-v3 for editable surfaces",
         config.input.enable_text_input_v3,
       ),
+      checkbox_row(
+        "enable_text_input_v1",
+        "Enable text-input-v1 (Chromium and Electron)",
+        config.input.enable_text_input_v1,
+      ),
     ],
     Page::IdleSession => vec![
       heading("Idle, display power, and locking"),

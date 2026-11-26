@@ -717,6 +717,9 @@ fn apply(
     ("input-method-v1", "enable_text_input_v3") => {
       config.input.enable_text_input_v3 = boolean(value)?
     }
+    ("input-method-v1", "enable_text_input_v1") => {
+      config.input.enable_text_input_v1 = boolean(value)?
+    }
     ("scale", "toggle") => {
       config.keybindings.scale_toggle = import::binding(value, notes)?
     }

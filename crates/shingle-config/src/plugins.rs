@@ -180,6 +180,7 @@ impl ShingleConfig {
     }
     if input_method {
       self.input.enable_text_input_v3 = false;
+      self.input.enable_text_input_v1 = false;
     }
     if invert {
       disable(&mut [&mut keys.invert_toggle]);
@@ -368,6 +369,7 @@ mod tests {
     assert_eq!(config.placement.mode, "none");
     assert_eq!(config.idle.idle_seconds, None);
     assert!(!config.input.enable_text_input_v3);
+    assert!(!config.input.enable_text_input_v1);
     assert!(!config.grid.enable_snap);
     // Core bindings are not a plugin's.
     assert_ne!(keys.close, Binding::disabled());

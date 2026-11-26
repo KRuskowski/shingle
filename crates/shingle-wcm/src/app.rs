@@ -676,6 +676,8 @@ impl Editor {
         self.config.input.cursor_size = self.number("input_cursor_size")?;
         self.config.input.enable_text_input_v3 =
           self.checkbox("enable_text_input_v3")?;
+        self.config.input.enable_text_input_v1 =
+          self.checkbox("enable_text_input_v1")?;
       }
       Page::IdleSession => {
         self.config.idle.idle_seconds = self.optional_number("idle_seconds")?;
