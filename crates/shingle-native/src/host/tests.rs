@@ -1808,3 +1808,30 @@ fn vrr_from_the_config_reaches_the_crtc_and_presentation() {
   let presented = fixture.client.events.presented.last().copied().unwrap();
   assert_eq!(presented.refresh, 0, "no constant refresh rate");
 }
+
+#[test]
+fn zero_copy_frames_hand_their_fence_to_the_plane_until_it_refuses() {
+  let mut fixture = Fixture::zero_copy(ScanoutChoice::Auto);
+  fixture.gpu.importer.borrow_mut().fences = true;
+  fixture.settle();
+  fixture.client_frame();
+  let in_fence = fixture.card.borrow_mut().property_id("IN_FENCE_FD");
+  let primary = crate::kms::Object::Plane(fixture.card.borrow().plane_id);
+  let (request, _) = fixture.last_commit();
+  assert!(request.get(primary, in_fence).is_some(), "{request:?}");
+  fixture.settle();
+  // The card refuses fences: the frame goes out without, and later ones
+  // are drawn without.
+  fixture.card.borrow_mut().reject =
+    Box::new(move |request, _| request.get(primary, in_fence).map(|_| 22));
+  fixture.client_frame();
+  let (request, _) = fixture.last_commit();
+  assert_eq!(request.get(primary, in_fence), None);
+  assert!(fixture.backend.display().fences_allowed().is_err());
+  fixture.settle();
+  fixture.client_frame();
+  assert!(!fixture.gpu.importer.borrow().fences_allowed);
+  let commits = fixture.card.borrow().commits.len();
+  let refused = fixture.card.borrow().commits[commits - 1].2;
+  assert!(refused, "the last frame was not refused: no fence tried");
+}

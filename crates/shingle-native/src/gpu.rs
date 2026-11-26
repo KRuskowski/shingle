@@ -13,7 +13,9 @@
 //! for copy scanout, or straight into zero-copy scanout's GBM buffers,
 //! which it imports with `DmabufUse::Render` and draws into between the
 //! foreign acquire and release barriers (docs/design/dmabuf.md, section
-//! 7); tests use a fake. [`GpuHealth`] decides what a
+//! 7), handing the plane the frame's render fence where it can
+//! ([`FenceExporter`], NB-10); tests use a fake. [`GpuHealth`] decides
+//! what a
 //! failure means: a missed 100 ms wait is skipped, three in a row or a
 //! lost device recreate the renderer, and a third loss within 60 s ends
 //! Shingle.
@@ -22,6 +24,7 @@ use std::{
   collections::{HashMap, VecDeque},
   ffi::OsStr,
   fmt, fs, io,
+  os::fd::OwnedFd,
   path::{Path, PathBuf},
   sync::{
     Arc,
@@ -33,14 +36,14 @@ use std::{
 use shingle::OutputHandle;
 use shingle_frontend::{Frontend, host::Host, render_target::RenderTarget};
 use shingle_render::{
-  ForeignAccess, GpuContext, GpuOptions, GpuTexture, OffscreenTarget,
-  RenderError, RenderState, RenderTile, TextureTransform,
+  FenceExporter, ForeignAccess, GpuContext, GpuOptions, GpuTexture,
+  OffscreenTarget, RenderError, RenderState, RenderTile, TextureTransform,
   dmabuf::{DmabufUse, ImportedTexture},
   draw_with_access,
 };
 
 use crate::scanout::{
-  DrawTarget, Drawn, Frame, ScanoutDmabuf, ScanoutImporter,
+  DrawTarget, Drawn, Frame, RenderFence, ScanoutDmabuf, ScanoutImporter,
 };
 
 /// A DRM card as sysfs describes it.
@@ -286,9 +289,15 @@ struct OutputTarget {
 
 /// The real renderer: each output's scene drawn on one GPU into an RGBA
 /// offscreen target of its own and read back within [`GPU_WAIT`] for copy
-/// scanout, or into the output's imported scanout buffer, waiting at most
-/// [`GPU_WAIT`] for the GPU to finish, for zero-copy scanout.
+/// scanout, or into the output's imported scanout buffer for zero-copy
+/// scanout, ending with a render fence the plane waits for or, without
+/// one, waiting at most [`GPU_WAIT`] for the GPU to finish.
 pub struct GpuRenderer {
+  /// Exports render fences, where the device can. Declared before `gpu`
+  /// so that it is dropped first, as it must be.
+  fences: Option<FenceExporter>,
+  /// Whether zero-copy frames may end with a fence.
+  fences_enabled: bool,
   gpu: GpuContext,
   targets: HashMap<OutputHandle, OutputTarget>,
   /// Set by wgpu's device-lost callback.
@@ -320,7 +329,19 @@ impl GpuRenderer {
     // A target this GPU cannot make fails the start, not the first frame.
     OffscreenTarget::new(&gpu, size.0, size.1)
       .map_err(|error| error.to_string())?;
+    let fences = match FenceExporter::new(&gpu) {
+      Ok(exporter) => Some(exporter),
+      Err(reason) => {
+        crate::diagnostics::log(&format!(
+          "zero-copy frames wait for the GPU before their flip, because \
+           {reason}"
+        ));
+        None
+      }
+    };
     Ok(Self {
+      fences,
+      fences_enabled: true,
       gpu,
       targets: HashMap::new(),
       lost,
@@ -375,9 +396,11 @@ fn open_gpu(pci: Option<&str>) -> Result<(GpuContext, bool), RenderError> {
 }
 
 /// Draws `tiles` over `clear` into the imported scanout buffer `texture`
-/// of `size` pixels, between its foreign acquire and release, and waits
-/// at most [`GPU_WAIT`] for the GPU to finish, since KMS reads the buffer
-/// as soon as the flip is committed.
+/// of `size` pixels, between its foreign acquire and release. KMS reads
+/// the buffer as soon as the flip is committed, so with `fences` the
+/// submission's render fence is returned for the plane to wait for, and
+/// without one (or if exporting it fails) this waits at most
+/// [`GPU_WAIT`] for the GPU to finish and returns `None`.
 fn draw_into(
   gpu: &GpuContext,
   state: &RenderState,
@@ -385,18 +408,31 @@ fn draw_into(
   size: (u32, u32),
   tiles: &[RenderTile<'_>],
   clear: [f64; 4],
-) -> Result<(), RenderFailure> {
+  fences: Option<&mut FenceExporter>,
+) -> Result<Option<OwnedFd>, RenderFailure> {
   let view = texture.texture().create_view(&Default::default());
   let mut access = ForeignAccess::new();
   access.add(texture.foreign());
+  let armed = fences.map(|fences| {
+    let armed = fences.arm(gpu);
+    (fences, armed)
+  });
   let index = draw_with_access(gpu, state, &view, size, tiles, clear, access);
+  if let Some((fences, Ok(armed))) = armed {
+    match fences.export(gpu, armed) {
+      Ok(fence) => return Ok(fence),
+      Err(reason) => crate::diagnostics::log(&format!(
+        "{reason}; waiting for the GPU instead"
+      )),
+    }
+  }
   gpu
     .device()
     .poll(wgpu::PollType::Wait {
       submission_index: Some(index),
       timeout: Some(GPU_WAIT),
     })
-    .map(|_| ())
+    .map(|_| None)
     .map_err(|error| match error {
       wgpu::PollError::Timeout => RenderFailure::Timeout,
       error => RenderFailure::Failed(error.to_string()),
@@ -425,6 +461,8 @@ enum Destination<'a> {
 /// drawn on the shared GPU, and what the frame became.
 struct NativeTarget<'a> {
   gpu: &'a mut GpuContext,
+  /// Exports the render fence of a frame drawn into a scanout buffer.
+  fences: Option<&'a mut FenceExporter>,
   state: &'a mut RenderState,
   destination: Destination<'a>,
   lost: &'a AtomicBool,
@@ -493,10 +531,19 @@ impl RenderTarget for NativeTarget<'_> {
       return Ok(false);
     }
     let drawn = match self.destination {
-      Destination::Imported(texture, size) => {
-        draw_into(self.gpu, self.state, texture, size, tiles, clear)
-          .map(|()| Drawn::InPlace)
-      }
+      Destination::Imported(texture, size) => draw_into(
+        self.gpu,
+        self.state,
+        texture,
+        size,
+        tiles,
+        clear,
+        self.fences.as_deref_mut(),
+      )
+      .map(|fence| match fence {
+        Some(fence) => Drawn::Fenced(RenderFence::new(fence)),
+        None => Drawn::InPlace,
+      }),
       Destination::Offscreen(target) => {
         target.render(self.gpu, self.state, tiles, clear);
         let (width, height) = target.size();
@@ -571,6 +618,7 @@ impl ScanoutImporter for GpuRenderer {
         size,
         &[],
         black,
+        None,
       )
       .map_err(|failure| failure.to_string())?;
       imports.push((buffer.serial, texture));
@@ -643,8 +691,10 @@ impl FrameRenderer for GpuRenderer {
         Destination::Imported(texture, (buffer.width, buffer.height))
       }
     };
+    let fences = self.fences.as_mut().filter(|_| self.fences_enabled);
     let mut native = NativeTarget {
       gpu: &mut self.gpu,
+      fences,
       state: &mut entry.state,
       destination,
       lost: &self.lost,
@@ -663,6 +713,10 @@ impl FrameRenderer for GpuRenderer {
 
   fn forget(&mut self, output: &OutputHandle) {
     self.targets.remove(output);
+  }
+
+  fn set_fences(&mut self, enabled: bool) {
+    self.fences_enabled = enabled;
   }
 }
 
@@ -706,6 +760,10 @@ pub(crate) mod tests {
   }
 
   impl FrameRenderer for FakeRenderer {
+    fn set_fences(&mut self, enabled: bool) {
+      self.importer.borrow_mut().fences_allowed = enabled;
+    }
+
     fn draw(
       &mut self,
       _frontend: &mut Frontend,
@@ -725,6 +783,14 @@ pub(crate) mod tests {
         DrawTarget::Dmabuf(buffer) => {
           assert_eq!((buffer.width, buffer.height), size);
           self.drawn_into.borrow_mut().push(buffer.serial);
+          let importer = self.importer.borrow();
+          if importer.fences && importer.fences_allowed {
+            // A fence that has signalled: a readable eventfd.
+            let fd =
+              rustix::event::eventfd(1, rustix::event::EventfdFlags::CLOEXEC)
+                .expect("an eventfd");
+            return Ok(Drawn::Fenced(crate::scanout::RenderFence::new(fd)));
+          }
           Ok(Drawn::InPlace)
         }
         DrawTarget::Readback => Ok(Drawn::Pixels(Frame {

@@ -281,6 +281,10 @@ pub(crate) mod tests {
     pub(crate) prepared: Vec<(String, Vec<u64>)>,
     /// The size asked for in the last `render_modifiers`.
     pub(crate) asked_size: Option<(u32, u32)>,
+    /// Whether the renderer can end frames with a render fence.
+    pub(crate) fences: bool,
+    /// Whether the host lets it, as `FrameRenderer::set_fences` said last.
+    pub(crate) fences_allowed: bool,
   }
 
   impl FakeImporter {
