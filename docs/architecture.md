@@ -119,6 +119,7 @@
 | Expo, vswitch transitions, touch gestures | `crates/shingle-frontend/src/expo.rs`, `workspace_transition.rs`, `extra_gestures.rs` |
 | Touchpad workspace swipes (vswipe) | `crates/shingle-frontend/src/vswipe.rs`, `frontend/vswipe.rs` |
 | GPU device, pipelines, textures, gamma and effects | `crates/shingle-render/src/gpu.rs` |
+| Configured colours decoded to the linear colours tiles and clears take | `crates/shingle-render/src/color.rs` |
 | Composite pass and tile geometry | `crates/shingle-render/src/draw.rs` |
 | Window and offscreen render targets | `crates/shingle-render/src/target.rs` |
 | DMA-BUF device setup, modifier caps, fourcc table, import, foreign queue-family barriers | `crates/shingle-render/src/dmabuf.rs`; caps of every adapter: `examples/dmabuf_caps.rs`; device tests `tests/dmabuf_import.rs` |

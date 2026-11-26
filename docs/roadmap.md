@@ -104,6 +104,8 @@ A WCM-written `wayfire.ini` loads since WG-1, and since WG-2 it behaves like tha
 
 All seven workspaces of the survey are done; the [Later](design/wayfire-gaps.md#later) list is not planned in detail yet.
 
+Since `shingle-colour-and-focus-fixes` every configured colour shows the bytes Wayfire writes for it, and the gamma LUT no longer darkens dark tones; WG-7's belief that Wayfire records the view refocused after a minimize as recently focused turned out wrong, and Shingle already matched Wayfire there ([Colour and focus fixes as built](design/wayfire-gaps.md#colour-and-focus-fixes-as-built)).
+
 ## 7. Soak tests and measurements
 
 Add long-running nested and native soak tests. Measure CPU, RSS, frame latency and GPU behaviour before making any resource or stability claims.
