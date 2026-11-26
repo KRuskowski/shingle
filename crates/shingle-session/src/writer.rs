@@ -58,7 +58,8 @@ impl<T> Shared<T> {
 }
 
 /// Writes session snapshots on a background thread, newest first and
-/// never out of order; see the [module documentation](self).
+/// never out of order. A snapshot that arrives while another waits
+/// replaces it, so a burst of changes costs one write of the newest state.
 ///
 /// Dropping the writer without [`SessionWriter::finish`] still writes a
 /// snapshot that is waiting, and waits for it.
