@@ -34,7 +34,8 @@ the parts of the output registry clients see: `wlr-randr` and
 `wayland-info` list both outputs at their automatic and at configured
 fixed positions, a head moved with `wlr-randr --pos` moves, outputs
 created with `wayfire/create-headless-output` appear to clients and IPC
-watchers and go again, and a `wl_probe` window restored from a session
+watchers and go again, a watcher gets `view-mapped` from headless
+Shingle, and a `wl_probe` window restored from a session
 whose set belongs to `HEADLESS-3` waits on the active output, moves to
 `HEADLESS-3` when IPC creates it and back when IPC destroys it. That
 needs `cargo build -p shingle --example wl_probe`.
@@ -621,6 +622,7 @@ def session_checks(results, binary, wl_probe):
                    extra_environment={NAMESPACE_VARIABLE: '1'})
   probe = None
   try:
+    watcher = watch(first, ['view-mapped'])
     probe = subprocess.Popen(
         [wl_probe, 'mo2-probe'], env=first.client_environment(),
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
@@ -628,6 +630,13 @@ def session_checks(results, binary, wl_probe):
     mapped = wait_for(lambda: view_output(first, 'mo2-probe'))
     results.check('MO-2: the probe maps on the active output',
                   mapped == ('HEADLESS-1', 1), str(mapped))
+    event = next_event(watcher, 'view-mapped')
+    watcher.close()
+    results.check('MO-2: headless sends view-mapped to watchers',
+                  event is not None
+                  and event['view']['app-id'] == 'mo2-probe'
+                  and event['view']['output-name'] == 'HEADLESS-1',
+                  str(event))
   finally:
     status = first.stop()
     if probe is not None:
