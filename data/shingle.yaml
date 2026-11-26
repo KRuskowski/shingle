@@ -165,6 +165,20 @@ vswitch:
   gap: 20
   background: [0.1, 0.1, 0.1, 1.0]
 
+vswipe:
+  enable_horizontal: true
+  enable_vertical: true
+  enable_free_movement: false
+  enable_smooth_transition: false
+  duration_ms: 180
+  background: [0.1, 0.1, 0.1, 1.0]
+  fingers: 4
+  gap: 32.0
+  threshold: 0.35
+  delta_threshold: 24.0
+  speed_factor: 256.0
+  speed_cap: 0.05
+
 tiling:
   minimum_extent: 50
   keep_fullscreen_on_adjacent: true
