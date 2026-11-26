@@ -179,6 +179,22 @@ vswipe:
   speed_factor: 256.0
   speed_cap: 0.05
 
+decoration:
+  font: sans-serif
+  font_color: [1.0, 1.0, 1.0, 1.0]
+  font_scale: 0.8
+  title_halign: left
+  title_valign: top
+  title_height: 30
+  border_size: 4
+  button_order: minimize maximize close
+  button_scale: 0.7
+  button_padding: 4
+  active_color: [0.13333333333333333, 0.13333333333333333, 0.13333333333333333, 0.6666666666666666]
+  inactive_color: [0.2, 0.2, 0.2, 0.8666666666666667]
+  ignore_views: none
+  forced_views: none
+
 tiling:
   minimum_extent: 50
   keep_fullscreen_on_adjacent: true
