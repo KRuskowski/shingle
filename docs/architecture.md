@@ -46,6 +46,11 @@
 | Pinned outside view of Wayland toplevels | `crates/shingle/src/wayland_pins.rs`, `crates/shingle/testdata/wayland_pins.txt` |
 | IPC transport, dispatch, method list, events | `crates/shingle/src/ipc.rs` |
 | wayfire-shell-unstable-v2 (`zwf_shell_manager_v2`): fullscreen events, hotspots, `toggle_menu`, inhibits, `interactive_move`; the protocol file and its generated code | `crates/shingle/src/wayfire_shell.rs`, `crates/shingle/protocols/`; tests in `wayfire_shell/tests.rs` |
+| Server-side frames (WG-6): margins, the layout of buttons, title and borders, and the press, drag and click rules (`FrameLayout`, `FrameInput`, `FrameSnapshot`) | `crates/shingle/src/frame.rs` |
+| Which windows have a frame, a window's geometry with its frame and its client's inside it, pointer input on frames | `crates/shingle/src/decorator.rs`; `shell::window_geometry` and `configure_toplevel` in `crates/shingle/src/shell.rs`; `hit_at` in `crates/shingle/src/input.rs`; tests in `decorator/tests.rs` |
+| xdg-decoration: modes sent, followed by a configure and applied when acknowledged | `crates/shingle/src/decoration.rs` |
+| Frame pixels: the pieces of a frame, title text and buttons as Wayfire's theme draws them; the scene's frame textures and tiles | `crates/shingle-frontend/src/frame_raster.rs`, `crates/shingle-frontend/src/frontend/frames.rs`; GPU tests in `frontend/tests/frames.rs` |
+| WG-6's real-client checks of frames (GPU harness group `decoration`) | `tools/gpu_test/decoration_checks.py` |
 | Modifier-alone bindings (`ModifierBindingTracker`) | `crates/shingle/src/modifier_binding.rs`; the frontend's use in `crates/shingle-frontend/src/frontend/bindings.rs` (`track_modifier_binding`) |
 | XWayland glue: display, Xwayland start and exit, XWM connection, `xwayland-ready` | `crates/shingle/src/xwayland/mod.rs` |
 | `xwayland_shell_v1` and `Role::Xwayland` | `crates/shingle/src/xwayland/shell.rs` |

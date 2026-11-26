@@ -4,7 +4,7 @@ Detailed behaviour of the features Shingle implements, with their configuration.
 
 ## Importing Wayfire configuration
 
-A `wayfire.ini` is read line by line as Wayfire's wf-config reads it: every `#` not preceded by `\` starts a comment, `\#` is a literal `#` (WCM writes every hex colour as `\#RRGGBBAA`), a line ending in `\` continues on the next, as in Wayfire's own `plugins = \` list, and names and values are trimmed. A value Shingle cannot use keeps its default and is reported as a warning with its line, section and option, as Wayfire logs it, and the rest of the file still loads; so is each section of a plugin Shingle does not have (`[blur]`, `[cube]`, `[decoration]`, `[wobbly]` and others), once. Activators keep their keys and buttons; a modifier alone (`<super>`) is bound for `[wayfire-shell] toggle_menu` and commands ([Modifier-alone bindings](#modifier-alone-bindings)) and elsewhere warns; touch gestures (`pinch in 4`, `swipe up 3`, `edge-swipe left 2`) and hotspots (`hotspot top-left 10x10 500`) are recognised, reported as not supported yet and never bound. Where Shingle's option takes one binding, the first key or button is used. The animations Shingle lacks fall back with a warning: `squeezimize` to `zoom`, and `fire`, `zap` and `spin` to `fade`. View matchers take Wayfire's `focusable equals true` form, so Wayfire's default `animate/enabled_for` works. Colours may be `#RRGGBBAA`, `#RGBA`, `#RRGGBB` or four numbers. i3 files warn the same way; YAML stays strict and rejects any bad value.
+A `wayfire.ini` is read line by line as Wayfire's wf-config reads it: every `#` not preceded by `\` starts a comment, `\#` is a literal `#` (WCM writes every hex colour as `\#RRGGBBAA`), a line ending in `\` continues on the next, as in Wayfire's own `plugins = \` list, and names and values are trimmed. A value Shingle cannot use keeps its default and is reported as a warning with its line, section and option, as Wayfire logs it, and the rest of the file still loads; so is each section of a plugin Shingle does not have (`[blur]`, `[cube]`, `[wobbly]` and others), once. Activators keep their keys and buttons; a modifier alone (`<super>`) is bound for `[wayfire-shell] toggle_menu` and commands ([Modifier-alone bindings](#modifier-alone-bindings)) and elsewhere warns; touch gestures (`pinch in 4`, `swipe up 3`, `edge-swipe left 2`) and hotspots (`hotspot top-left 10x10 500`) are recognised, reported as not supported yet and never bound. Where Shingle's option takes one binding, the first key or button is used. The animations Shingle lacks fall back with a warning: `squeezimize` to `zoom`, and `fire`, `zap` and `spin` to `fade`. View matchers take Wayfire's `focusable equals true` form, so Wayfire's default `animate/enabled_for` works. Colours may be `#RRGGBBAA`, `#RGBA`, `#RRGGBB` or four numbers. i3 files warn the same way; YAML stays strict and rejects any bad value.
 
 `shingle` prints the warnings once when it starts and again on a reload, as `shingle: PATH: line N: MESSAGE`. `shingle-wcm --config PATH --check` prints them and exits 0, or 1 when the file cannot be read.
 
@@ -197,7 +197,31 @@ wf-shell's panel and dock, and other shell clients, bind `zwf_shell_manager_v2` 
 
 ### Decorations
 
-`behavior.preferred_decoration_mode` accepts `client` (the Wayfire default) or `server`. Explicit client requests are honored unless `behavior.force_preferred_decoration_mode` is enabled. Preference changes are sent to existing XDG decoration objects during live configuration reloads.
+`behavior.preferred_decoration_mode` accepts `client` (the Wayfire default) or `server`. Explicit client requests are honored unless `behavior.force_preferred_decoration_mode` is enabled. Preference changes are sent to existing XDG decoration objects during live configuration reloads. Every mode Shingle sends is followed by an `xdg_surface.configure` and takes effect when the client acknowledges it; destroying the decoration object goes back to client-side decorations.
+
+Windows that want server-side decorations get Wayfire's frame, as its `decoration` plugin draws it (wayfire:plugins/decor/): an xdg toplevel in server-side mode, and an X window unless its `_MOTIF_WM_HINTS` leave out the title or the border or it is a splash screen. `decoration.forced_views` frames windows whatever their client asks, and `decoration.ignore_views` keeps windows unframed. The frame is a title bar `title_height` pixels high under a `border_size` border all round, in `active_color` for the focused window and `inactive_color` for the others; the title is drawn in Inter (Shingle draws every title in its bundled font, whatever `font` names) at `title_height` times `font_scale`, in `font_color`, aligned by `title_halign` and `title_valign` and ellipsized at its end; the buttons of `button_order` sit at the right, `title_height` times `button_scale` square with `button_padding` pixels on each side, grey, and red, green or yellow under the pointer. A dialog has no minimize button. A fullscreen window has no frame.
+
+The frame is part of the window, as in Wayfire: a tile, a floating rectangle, a maximized window and IPC's `geometry` and `bbox` include it, and the client gets the rest, which is IPC's `base-geometry`. A floating window that gains or loses its frame keeps its client where it was. A click on the frame focuses the window; a drag of the title bar of five pixels or more moves it, a double click on it maximizes or restores it, the buttons minimize, maximize or restore and close it, and a press on a border resizes a floating window from that border or corner, with the resize cursor shown over it. The frame follows its window through animations, Scale, Expo and workspace slides; a window rotated by `wrot` is drawn without it.
+
+```yaml
+decoration:
+  font: sans-serif
+  font_color: [1.0, 1.0, 1.0, 1.0]
+  font_scale: 0.8
+  title_halign: left
+  title_valign: top
+  title_height: 30
+  border_size: 4
+  button_order: minimize maximize close
+  button_scale: 0.7
+  button_padding: 4
+  active_color: [0.133, 0.133, 0.133, 0.667]
+  inactive_color: [0.2, 0.2, 0.2, 0.867]
+  ignore_views: none
+  forced_views: none
+```
+
+Wayfire's fourteen `[decoration]` options import with these names when `[core] plugins` lists `decoration`, which Wayfire's default list does; numbers outside the bounds of Wayfire's metadata are clamped to them, as wf-config clamps them. Without a plugin list (a YAML file without `plugins`), the plugin is on.
 
 For clients with popup-focus bugs, `behavior.focus_main_surface_instead_of_popup` moves keyboard focus to the popup's main surface while leaving pointer input on the popup. It is disabled by default and can be changed through WCM or live configuration reloads.
 
