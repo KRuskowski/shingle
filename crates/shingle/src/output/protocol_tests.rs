@@ -622,13 +622,13 @@ fn captures_are_in_output_coordinates_and_physical_pixels() {
       .expect("a region capture");
   assert_eq!(size, (10, 8));
   assert!(bytes.chunks(4).all(|pixel| pixel == [0, 0, 0, 255]));
-  // HEADLESS-1 shows only the background, 0.1 linear or 89 in sRGB.
+  // HEADLESS-1 shows only the background, 0.1 or the byte 26.
   let first = &outputs["HEADLESS-1"];
   let (size, bytes) =
     capture(&mut compositor, &mut client, first, Some((1278, 0, 10, 1)))
       .expect("a region clipped to the output");
   assert_eq!(size, (2, 1));
-  assert_eq!(bytes, [89, 89, 89, 255, 89, 89, 89, 255]);
+  assert_eq!(bytes, [26, 26, 26, 255, 26, 26, 26, 255]);
   assert!(
     capture(&mut compositor, &mut client, first, Some((1280, 0, 10, 10)))
       .is_none(),

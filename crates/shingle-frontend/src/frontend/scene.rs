@@ -13,7 +13,7 @@ use shingle::{
 use shingle_core::WindowId as TileWindowId;
 use shingle_render::{
   GpuTexture, RenderRect, RenderTile, TextureTransform, animation_progress,
-  preview_tiles,
+  preview_tiles, srgb_clear, srgb_fill,
 };
 
 use super::{
@@ -78,8 +78,8 @@ impl Frontend {
     };
     tiles.extend(preview_tiles(
       rect,
-      self.preview_base_color.map(|component| component as f32),
-      self.preview_border_color.map(|component| component as f32),
+      srgb_fill(self.preview_base_color),
+      srgb_fill(self.preview_border_color),
       self.preview_border_width,
     ));
   }
@@ -933,10 +933,7 @@ impl Frontend {
         let border = [0.8 * brightness; 4];
         cells.extend(preview_tiles(
           *cell,
-          self
-            .expo_config
-            .background
-            .map(|component| component as f32),
+          srgb_fill(self.expo_config.background),
           border,
           2,
         ));
@@ -1027,7 +1024,9 @@ impl Frontend {
       }
     }
     let renderer = target;
-    let background = if switcher_here {
+    // Configured colours name the bytes Wayfire writes; the target takes
+    // linear ones.
+    let background = srgb_clear(if switcher_here {
       [0.0, 0.0, 0.0, 1.0]
     } else if expo_here {
       self.expo_config.background
@@ -1037,7 +1036,7 @@ impl Frontend {
       self.vswitch.background
     } else {
       self.background_color
-    };
+    });
     // A shell client inhibits the output: it is cleared to black, as
     // Wayfire 0.9 drew it (wayfire-shell's `inhibit_output`).
     let background = if self.compositor.output_inhibited(output) {

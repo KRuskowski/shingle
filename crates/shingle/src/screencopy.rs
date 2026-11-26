@@ -406,9 +406,9 @@ fn composite(
   geometry: &CaptureGeometry,
 ) -> Vec<u8> {
   let background = [
-    srgb_channel(state.background_color[0]),
-    srgb_channel(state.background_color[1]),
-    srgb_channel(state.background_color[2]),
+    color_byte(state.background_color[0]),
+    color_byte(state.background_color[1]),
+    color_byte(state.background_color[2]),
     255,
   ];
   let surfaces = state
@@ -502,14 +502,10 @@ fn sample_index(
   Some((source_y as usize * buffer.width as usize + source_x as usize) * 4)
 }
 
-fn srgb_channel(value: f64) -> u8 {
-  let value = value.clamp(0.0, 1.0);
-  let encoded = if value <= 0.0031308 {
-    value * 12.92
-  } else {
-    1.055 * value.powf(1.0 / 2.4) - 0.055
-  };
-  (encoded * 255.0).round() as u8
+/// The byte of configured colour component `value`, which Wayfire writes
+/// as it is (crates/shingle-render/src/color.rs).
+fn color_byte(value: f64) -> u8 {
+  (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 impl GlobalDispatch<ZwlrScreencopyManagerV1, ()> for CompositorState {
@@ -721,8 +717,9 @@ mod tests {
     let (_frame, _buffer, fd) = capturer.copy(&mut compositor, (0, 0, 2, 1));
     assert_eq!(capturer.outcome(), Some("ready"));
     assert!(requests(&mut compositor).is_empty());
-    // The default background, 0.1 linear, is 89 in sRGB, as BGRA.
-    assert_eq!(read(&fd, 8), [89, 89, 89, 255, 89, 89, 89, 255]);
+    // The default background, 0.1, is the byte 26, as Wayfire writes it,
+    // in BGRA.
+    assert_eq!(read(&fd, 8), [26, 26, 26, 255, 26, 26, 26, 255]);
   }
 
   #[test]

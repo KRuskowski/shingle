@@ -29,25 +29,6 @@ impl Fixture {
       .find(|frame| window.is_none_or(|window| frame.window == window))
       .expect("a frame")
   }
-
-  /// The pixel at layout point (`x`, `y`) as drawn, as (r, g, b).
-  fn pixel(
-    &mut self,
-    target: &mut RecordingTarget,
-    x: i32,
-    y: i32,
-  ) -> (u8, u8, u8) {
-    let capture = self
-      .client
-      .capture(self.frontend.compositor_mut(), (x, y, 1, 1));
-    self.frontend.process(&mut self.host);
-    self
-      .frontend
-      .render(&mut self.host, &primary(), target)
-      .expect("the frame renders");
-    self.process();
-    first_pixel(&capture.bytes())
-  }
 }
 
 fn rect(frame: shingle_core::Rect) -> RenderRect {

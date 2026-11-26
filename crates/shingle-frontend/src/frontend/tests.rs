@@ -29,6 +29,7 @@ use wayland_client::Proxy;
 
 use super::{Frontend, drag::DragState, switcher::SwitcherKind};
 
+mod colours;
 mod frames;
 mod outputs;
 mod switcher;
@@ -195,6 +196,25 @@ impl Fixture {
   fn process(&mut self) {
     self.client.roundtrip(self.frontend.compositor_mut());
     self.frontend.process(&mut self.host);
+  }
+
+  /// The pixel at layout point (`x`, `y`) as drawn, as (r, g, b).
+  fn pixel(
+    &mut self,
+    target: &mut RecordingTarget,
+    x: i32,
+    y: i32,
+  ) -> (u8, u8, u8) {
+    let capture = self
+      .client
+      .capture(self.frontend.compositor_mut(), (x, y, 1, 1));
+    self.frontend.process(&mut self.host);
+    self
+      .frontend
+      .render(&mut self.host, &primary(), target)
+      .expect("the frame renders");
+    self.process();
+    first_pixel(&capture.bytes())
   }
 
   fn input(&mut self, device: InputDeviceId, event: InputEvent) {
@@ -1347,9 +1367,9 @@ fn screencopy_captures_the_frame_as_drawn_including_inversion() {
     [(1000, 800)],
     "one draw at the output size"
   );
-  // The background, 0.1 linear, is 89 in sRGB.
+  // The background, 0.1, is Wayfire's byte 26; 25.5 may round down.
   let (r, g, b) = first_pixel(&capture.bytes());
-  assert!(r.abs_diff(89) <= 2 && r == g && g == b, "{:?}", (r, g, b));
+  assert!(r.abs_diff(26) <= 1 && r == g && g == b, "{:?}", (r, g, b));
   fixture.frontend.toggle_inversion();
   let inverted = fixture
     .client
@@ -1361,9 +1381,9 @@ fn screencopy_captures_the_frame_as_drawn_including_inversion() {
     .expect("the frame renders");
   fixture.process();
   assert_eq!(fixture.client.captures(), ["ready", "ready"]);
-  // 0.9 linear is 243 in sRGB.
+  // Inversion works in linear light: 1 - 0.0103 is 254 in sRGB.
   let (r, g, b) = first_pixel(&inverted.bytes());
-  assert!(r.abs_diff(243) <= 2 && r == g && g == b, "{:?}", (r, g, b));
+  assert!(r.abs_diff(254) <= 1 && r == g && g == b, "{:?}", (r, g, b));
 }
 
 /// A frontend offering linux-dmabuf through a fake importer whose texture

@@ -8,6 +8,9 @@
 //! scale factor, rotate the tile around its centre, apply the zoom crop,
 //! then the output transform. Colours are premultiplied, and the gamma ramp
 //! and inversion effect held by the [`GpuContext`] apply to every tile.
+//! Tile and clear colours are linear; a configured colour, which names
+//! sRGB bytes as in Wayfire, goes through [`srgb_fill`] or [`srgb_clear`]
+//! first ([`color`]).
 //!
 //! The crate has no windowing dependency: a host gives it a
 //! `wgpu::Surface` through [`WindowTarget`], or renders into an
@@ -23,6 +26,7 @@
 
 #![warn(missing_docs)]
 
+pub mod color;
 pub mod dmabuf;
 mod draw;
 mod gpu;
@@ -35,6 +39,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
+pub use color::{srgb_clear, srgb_fill};
 pub use dmabuf::{
   DmabufCaps, DmabufDescriptor, DmabufUnavailable, DmabufUse, ForeignAccess,
   ImportError, ImportedTexture, TextureImporter,
@@ -241,7 +246,7 @@ pub struct RenderTile<'a> {
   pub geometry: RenderRect,
   /// Premultiplied RGBA multiplier, each component in 0..=1. Window opacity
   /// is `[alpha; 4]`; a solid colour must already be multiplied by its
-  /// alpha.
+  /// alpha, and is linear: [`srgb_fill`] makes one of a configured colour.
   pub color: [f32; 4],
   /// The texture to sample, or `None` for a solid `color` quad.
   pub texture: Option<&'a GpuTexture>,

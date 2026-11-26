@@ -61,7 +61,9 @@ impl TitleStyle {
 /// One piece of a frame, in layout coordinates, as the frontend draws it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FramePiece {
-  /// A band of the frame's background in a premultiplied linear colour.
+  /// A band of the frame's background in a premultiplied linear colour,
+  /// `active_color` or `inactive_color` through
+  /// [`shingle_render::srgb_fill`].
   Fill {
     /// Where.
     rect: Rect,
@@ -99,15 +101,7 @@ pub fn frame_pieces(
   } else {
     config.inactive_color
   };
-  // Wayfire draws the colour's bytes as they are; Shingle's solid colours
-  // are linear and encoded to sRGB on output, so the colour is decoded.
-  let alpha = color[3] as f32;
-  let color = [
-    srgb_to_linear(color[0]) * alpha,
-    srgb_to_linear(color[1]) * alpha,
-    srgb_to_linear(color[2]) * alpha,
-    alpha,
-  ];
+  let color = shingle_render::srgb_fill(color);
   let inner = rect
     .height
     .saturating_sub(margins.top.saturating_add(margins.bottom));
@@ -160,16 +154,6 @@ pub fn button_look(frame: &FrameSnapshot, index: usize) -> ButtonLook {
   } else {
     ButtonLook::Normal
   }
-}
-
-/// The linear value of sRGB component `value`.
-fn srgb_to_linear(value: f64) -> f32 {
-  let linear = if value <= 0.04045 {
-    value / 12.92
-  } else {
-    ((value + 0.055) / 1.055).powf(2.4)
-  };
-  linear as f32
 }
 
 /// Lays `title` out in a `width` by `height` pixel rectangle as Pango
@@ -442,13 +426,6 @@ mod tests {
       .filter(|y| (0..raster.width).any(|x| alpha_at(raster, x, *y) > 0))
       .collect::<Vec<_>>();
     Some((*rows.first()?, *rows.last()?))
-  }
-
-  #[test]
-  fn srgb_components_decode_to_linear() {
-    assert_eq!(srgb_to_linear(0.0), 0.0);
-    assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-6);
-    assert!((srgb_to_linear(0.5) - 0.214).abs() < 1e-3);
   }
 
   fn snapshot(activated: bool) -> FrameSnapshot {

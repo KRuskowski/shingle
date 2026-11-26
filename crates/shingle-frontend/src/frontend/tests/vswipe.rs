@@ -418,7 +418,11 @@ fn the_wall_is_drawn_with_the_gap_and_background() {
     .frontend
     .render(&mut fixture.host, &primary(), &mut target)
     .expect("the frame renders");
-  assert_eq!(target.clears.last(), Some(&[0.5, 0.25, 0.0, 1.0]));
+  // The configured colour's bytes, as a linear clear colour.
+  assert_eq!(
+    target.clears.last(),
+    Some(&shingle_render::srgb_clear([0.5, 0.25, 0.0, 1.0]))
+  );
   let frame = target.frames.last().expect("a frame");
   let step = 1000.0 + 40.0;
   let shifted = |workspace: f64| {
