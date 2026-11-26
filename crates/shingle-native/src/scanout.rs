@@ -6,6 +6,7 @@
 //! read back from the GPU and copied into one of two dumb buffers. NB-8
 //! adds zero-copy GBM buffers behind the same trait.
 
+pub mod allocator;
 pub mod copy;
 
 use std::io;

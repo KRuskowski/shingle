@@ -15,8 +15,87 @@ use super::{
   AtomicRequest, BlobId, BufferId, CommitFlags, Connection, ConnectorId,
   ConnectorInfo, CrtcId, CrtcInfo, DumbFramebuffer, FORMAT_XRGB8888,
   FramebufferId, KmsDevice, MODE_TYPE_PREFERRED, Mode, Object, PageFlip,
-  PlaneId, PlaneInfo, Property, PropertyId, Resources, Subpixel,
+  PlanarFramebuffer, PlaneId, PlaneInfo, Property, PropertyId, Resources,
+  Subpixel,
 };
+use crate::scanout::allocator::{AllocatedBuffer, BufferAllocator};
+
+/// The fake card's GBM: it hands out memfds as buffers, with the first
+/// modifier it is offered, and counts the buffers alive.
+#[derive(Debug, Default)]
+pub(crate) struct FakeGbm {
+  /// Plane counts by modifier; modifiers not listed have one plane.
+  pub(crate) plane_counts: HashMap<u64, Option<u32>>,
+  /// Makes every allocation fail.
+  pub(crate) fail: bool,
+  /// The plane count of every buffer, whatever the modifier says.
+  pub(crate) forced_planes: Option<u32>,
+  /// The modifier list of every allocation.
+  pub(crate) requests: Vec<Vec<u64>>,
+  /// How many buffers are alive.
+  pub(crate) live: usize,
+  next_handle: u32,
+}
+
+/// Counts a fake buffer as alive until it is dropped.
+struct Alive(Rc<RefCell<FakeGbm>>);
+
+impl Drop for Alive {
+  fn drop(&mut self) {
+    self.0.borrow_mut().live -= 1;
+  }
+}
+
+/// The fake card's [`BufferAllocator`].
+pub(crate) struct FakeAllocator(pub(crate) Rc<RefCell<FakeGbm>>);
+
+impl BufferAllocator for FakeAllocator {
+  fn plane_count(&self, _fourcc: u32, modifier: u64) -> Option<u32> {
+    self
+      .0
+      .borrow()
+      .plane_counts
+      .get(&modifier)
+      .copied()
+      .unwrap_or(Some(1))
+  }
+
+  fn allocate(
+    &mut self,
+    width: u32,
+    height: u32,
+    fourcc: u32,
+    modifiers: &[u64],
+  ) -> io::Result<AllocatedBuffer> {
+    let mut gbm = self.0.borrow_mut();
+    gbm.requests.push(modifiers.to_vec());
+    if gbm.fail {
+      return Err(io::ErrorKind::OutOfMemory.into());
+    }
+    let modifier = *modifiers.first().ok_or(io::ErrorKind::InvalidInput)?;
+    let planes = gbm.forced_planes.unwrap_or(1);
+    gbm.next_handle += 1;
+    gbm.live += 1;
+    let handle = BufferId(500 + gbm.next_handle);
+    drop(gbm);
+    let fd = rustix::fs::memfd_create(
+      "shingle-fake-gbm",
+      rustix::fs::MemfdFlags::CLOEXEC,
+    )?;
+    Ok(AllocatedBuffer {
+      handle,
+      fd,
+      width,
+      height,
+      fourcc,
+      modifier,
+      stride: (width * 4).div_ceil(256) * 256,
+      offset: 0,
+      planes,
+      keep: Box::new(Alive(Rc::clone(&self.0))),
+    })
+  }
+}
 
 /// A mode of `width` by `height` at `hz`, with timings that give exactly
 /// that refresh rate.
@@ -115,6 +194,14 @@ pub(crate) struct FakeKms {
   pub(crate) no_buffers: bool,
   /// EDID blobs by connector.
   pub(crate) edids: HashMap<ConnectorId, Vec<u8>>,
+  /// The card's GBM.
+  pub(crate) gbm: Rc<RefCell<FakeGbm>>,
+  /// Whether the card has no GBM device.
+  pub(crate) no_gbm: bool,
+  /// Framebuffers of GBM buffers that exist.
+  pub(crate) framebuffers: BTreeMap<u32, PlanarFramebuffer>,
+  /// Whether making a framebuffer of a GBM buffer fails.
+  pub(crate) reject_framebuffers: bool,
 }
 
 impl FakeKms {
@@ -147,6 +234,10 @@ impl FakeKms {
       events: VecDeque::new(),
       no_buffers: false,
       edids: HashMap::new(),
+      gbm: Rc::default(),
+      no_gbm: false,
+      framebuffers: BTreeMap::new(),
+      reject_framebuffers: false,
     }
   }
 
@@ -641,6 +732,36 @@ impl KmsDevice for FakeKms {
       .ok_or_else(|| io::ErrorKind::NotFound.into())
   }
 
+  fn add_framebuffer(
+    &mut self,
+    buffer: &PlanarFramebuffer,
+  ) -> io::Result<FramebufferId> {
+    if self.reject_framebuffers {
+      return Err(io::Error::from_raw_os_error(libc_einval()));
+    }
+    let framebuffer = FramebufferId(self.alloc());
+    self.framebuffers.insert(framebuffer.0, *buffer);
+    Ok(framebuffer)
+  }
+
+  fn remove_framebuffer(
+    &mut self,
+    framebuffer: FramebufferId,
+  ) -> io::Result<()> {
+    self
+      .framebuffers
+      .remove(&framebuffer.0)
+      .map(|_| ())
+      .ok_or_else(|| io::ErrorKind::NotFound.into())
+  }
+
+  fn buffer_allocator(&mut self) -> io::Result<Box<dyn BufferAllocator>> {
+    if self.no_gbm {
+      return Err(io::Error::from_raw_os_error(19));
+    }
+    Ok(Box::new(FakeAllocator(Rc::clone(&self.gbm))))
+  }
+
   fn read_events(&mut self) -> io::Result<Vec<PageFlip>> {
     Ok(self.events.drain(..).collect())
   }
@@ -721,6 +842,24 @@ impl KmsDevice for Rc<RefCell<FakeKms>> {
     buffer: &DumbFramebuffer,
   ) -> io::Result<()> {
     self.borrow_mut().destroy_dumb_framebuffer(buffer)
+  }
+
+  fn add_framebuffer(
+    &mut self,
+    buffer: &PlanarFramebuffer,
+  ) -> io::Result<FramebufferId> {
+    self.borrow_mut().add_framebuffer(buffer)
+  }
+
+  fn remove_framebuffer(
+    &mut self,
+    framebuffer: FramebufferId,
+  ) -> io::Result<()> {
+    self.borrow_mut().remove_framebuffer(framebuffer)
+  }
+
+  fn buffer_allocator(&mut self) -> io::Result<Box<dyn BufferAllocator>> {
+    self.borrow_mut().buffer_allocator()
   }
 
   fn read_events(&mut self) -> io::Result<Vec<PageFlip>> {

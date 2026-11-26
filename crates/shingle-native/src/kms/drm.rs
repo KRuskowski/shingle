@@ -25,9 +25,10 @@ use ::drm::{
 use super::{
   AtomicRequest, BlobId, BufferId, CommitFlags, Connection, ConnectorId,
   ConnectorInfo, CrtcId, CrtcInfo, DumbFramebuffer, FramebufferId, KmsDevice,
-  Mode, Object, PageFlip, PlaneId, PlaneInfo, Property, PropertyId, Resources,
-  Subpixel,
+  MODIFIER_INVALID, Mode, Object, PageFlip, PlanarFramebuffer, PlaneId,
+  PlaneInfo, Property, PropertyId, Resources, Subpixel,
 };
+use crate::scanout::allocator::{BufferAllocator, GbmAllocator};
 
 /// A DRM card opened through the seat.
 pub struct DrmDevice {
@@ -306,13 +307,14 @@ impl KmsDevice for DrmDevice {
   ) -> io::Result<DumbFramebuffer> {
     let mut buffer =
       self.create_dumb_buffer((width, height), DrmFourcc::Xrgb8888, 32)?;
-    let framebuffer = match self.add_framebuffer(&buffer, 24, 32) {
-      Ok(framebuffer) => framebuffer,
-      Err(error) => {
-        let _ = self.destroy_dumb_buffer(buffer);
-        return Err(error);
-      }
-    };
+    let framebuffer =
+      match control::Device::add_framebuffer(self, &buffer, 24, 32) {
+        Ok(framebuffer) => framebuffer,
+        Err(error) => {
+          let _ = self.destroy_dumb_buffer(buffer);
+          return Err(error);
+        }
+      };
     // Dumb buffers are zeroed by the kernel, but make sure they start
     // black whatever the driver does.
     if let Ok(mut mapping) = self.map_dumb_buffer(&mut buffer) {
@@ -357,6 +359,43 @@ impl KmsDevice for DrmDevice {
     let removed = self.destroy_framebuffer(framebuffer);
     self.destroy_dumb_buffer(dumb)?;
     removed
+  }
+
+  fn add_framebuffer(
+    &mut self,
+    buffer: &PlanarFramebuffer,
+  ) -> io::Result<FramebufferId> {
+    // drm's add_planar_framebuffer asserts on an invalid modifier; refuse
+    // it here instead.
+    if buffer.modifier == MODIFIER_INVALID {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "a framebuffer needs an explicit modifier",
+      ));
+    }
+    let info = drm_ffi::mode::add_fb2(
+      self.fd.as_fd(),
+      buffer.width,
+      buffer.height,
+      buffer.fourcc,
+      &[buffer.buffer.0, 0, 0, 0],
+      &[buffer.stride, 0, 0, 0],
+      &[buffer.offset, 0, 0, 0],
+      &[buffer.modifier, 0, 0, 0],
+      drm_ffi::DRM_MODE_FB_MODIFIERS,
+    )?;
+    Ok(FramebufferId(info.fb_id))
+  }
+
+  fn remove_framebuffer(
+    &mut self,
+    framebuffer: FramebufferId,
+  ) -> io::Result<()> {
+    drm_ffi::mode::rm_fb(self.fd.as_fd(), framebuffer.0)
+  }
+
+  fn buffer_allocator(&mut self) -> io::Result<Box<dyn BufferAllocator>> {
+    Ok(Box::new(GbmAllocator::new(self.fd.as_fd())?))
   }
 
   fn read_events(&mut self) -> io::Result<Vec<PageFlip>> {

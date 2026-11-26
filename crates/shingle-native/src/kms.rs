@@ -22,6 +22,8 @@ use std::{io, os::fd::BorrowedFd, time::Duration};
 
 pub use atomic::AtomicRequest;
 
+use crate::scanout::allocator::BufferAllocator;
+
 macro_rules! handle {
   ($(#[$doc:meta] $name:ident),* $(,)?) => {
     $(
@@ -273,6 +275,27 @@ pub struct DumbFramebuffer {
   pub stride: u32,
 }
 
+/// A single-plane buffer with an explicit modifier, as a framebuffer is
+/// made of it with `DRM_MODE_FB_MODIFIERS`: one of zero-copy scanout's
+/// GBM buffers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlanarFramebuffer {
+  /// The buffer's GEM handle.
+  pub buffer: BufferId,
+  /// Width in pixels.
+  pub width: u32,
+  /// Height in pixels.
+  pub height: u32,
+  /// The DRM fourcc.
+  pub fourcc: u32,
+  /// The DRM modifier, never `DRM_FORMAT_MOD_INVALID`.
+  pub modifier: u64,
+  /// Bytes per row.
+  pub stride: u32,
+  /// Byte offset of the plane.
+  pub offset: u32,
+}
+
 /// A completed page flip, from a `DRM_EVENT_FLIP_COMPLETE` event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PageFlip {
@@ -374,6 +397,23 @@ pub trait KmsDevice {
     buffer: &DumbFramebuffer,
   ) -> io::Result<()>;
 
+  /// Makes a framebuffer of a single-plane buffer with an explicit
+  /// modifier.
+  fn add_framebuffer(
+    &mut self,
+    buffer: &PlanarFramebuffer,
+  ) -> io::Result<FramebufferId>;
+
+  /// Removes a framebuffer made by [`KmsDevice::add_framebuffer`]; the
+  /// buffer itself belongs to its allocator.
+  fn remove_framebuffer(
+    &mut self,
+    framebuffer: FramebufferId,
+  ) -> io::Result<()>;
+
+  /// A GBM allocator on this card, for zero-copy scanout's buffers.
+  fn buffer_allocator(&mut self) -> io::Result<Box<dyn BufferAllocator>>;
+
   /// Reads the page flips that completed, without waiting.
   fn read_events(&mut self) -> io::Result<Vec<PageFlip>>;
 
@@ -386,6 +426,9 @@ pub const FORMAT_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 
 /// The linear modifier, `DRM_FORMAT_MOD_LINEAR`.
 pub const MODIFIER_LINEAR: u64 = 0;
+
+/// `DRM_FORMAT_MOD_INVALID`: no explicit modifier.
+pub const MODIFIER_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
 
 #[cfg(test)]
 pub(crate) mod fake;

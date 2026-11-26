@@ -9,6 +9,7 @@ description = "Native backend of the shingle binary: libseat, libinput and KMS"
 [dependencies]
 drm = "0.15.0"
 drm-ffi = "0.9.1"
+gbm = { version = "0.18.0", default-features = false }
 input = { version = "0.10.0", default-features = false, features = ["udev", "libinput_1_19"] }
 libseat = "0.2.4"
 log = "0.4"
