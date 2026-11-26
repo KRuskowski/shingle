@@ -169,6 +169,8 @@ pub struct ShingleConfig {
   pub alpha: AlphaConfig,
   /// The Alt+Escape switcher (`[fast-switcher]`).
   pub fast_switcher: FastSwitcherConfig,
+  /// The Alt+Tab switcher's thumbnails (`[switcher]`).
+  pub switcher: SwitcherConfig,
   /// Open, close and minimize animations (`[animate]`).
   pub animate: AnimateConfig,
   /// The Scale window overview (`[scale]`).
@@ -266,6 +268,7 @@ impl Default for ShingleConfig {
       zoom: ZoomConfig::default(),
       alpha: AlphaConfig::default(),
       fast_switcher: FastSwitcherConfig::default(),
+      switcher: SwitcherConfig::default(),
       animate: AnimateConfig::default(),
       scale: ScaleConfig::default(),
       scale_title_filter: ScaleTitleFilterConfig::default(),
@@ -630,6 +633,11 @@ impl ShingleConfig {
     }) {
       return Err(ConfigError::Invalid(
         "vswitch.background components must be between 0 and 1".into(),
+      ));
+    }
+    if !self.switcher.view_thumbnail_scale.is_finite() {
+      return Err(ConfigError::Invalid(
+        "switcher.view_thumbnail_scale must be finite".into(),
       ));
     }
     let swipe = &self.vswipe;
@@ -1287,6 +1295,36 @@ impl Default for FastSwitcherConfig {
   fn default() -> Self {
     Self {
       inactive_alpha: 0.7,
+    }
+  }
+}
+
+/// The view of the regular switcher, Wayfire's `switcher` plugin
+/// (metadata/switcher.xml): thumbnails of the current workspace's windows,
+/// turned towards the selected one in the middle. Its keys are
+/// [`Keybindings::focus_next`] and `focus_previous`. The defaults are
+/// Wayfire's.
+#[derive(Clone, Debug, Deserialize, PartialEq, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SwitcherConfig {
+  /// Milliseconds the thumbnails take to move. `[switcher] speed`, whose
+  /// easing curve is ignored; default 500.
+  pub duration_ms: u64,
+  /// Size of the thumbnails, a factor of the size that fits them into
+  /// 45 % of the output. `[switcher] view_thumbnail_scale`; finite;
+  /// default 1.0.
+  pub view_thumbnail_scale: f64,
+  /// Degrees the thumbnails beside the selected one are turned by.
+  /// `[switcher] view_thumbnail_rotation`; default 30.
+  pub view_thumbnail_rotation: i32,
+}
+
+impl Default for SwitcherConfig {
+  fn default() -> Self {
+    Self {
+      duration_ms: 500,
+      view_thumbnail_scale: 1.0,
+      view_thumbnail_rotation: 30,
     }
   }
 }
@@ -3903,6 +3941,65 @@ mod tests {
     assert!(
       ShingleConfig::parse("vswipe:\n  speed_factor: 0\n", ConfigFormat::Yaml)
         .is_err()
+    );
+  }
+
+  #[test]
+  fn switcher_imports_its_view_options_and_validates() {
+    let text = concat!(
+      "[core]\nplugins = switcher\n[switcher]\n",
+      "speed = 300ms circle\nview_thumbnail_scale = 0.5\n",
+      "view_thumbnail_rotation = -45\n",
+    );
+    let (config, warnings) =
+      ShingleConfig::parse_with_warnings(text, ConfigFormat::Wayfire).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+      config.switcher,
+      SwitcherConfig {
+        duration_ms: 300,
+        view_thumbnail_scale: 0.5,
+        view_thumbnail_rotation: -45,
+      }
+    );
+    // Wayfire's defaults are Shingle's.
+    let wayfire = ShingleConfig::parse(
+      "[core]\nplugins = switcher\n",
+      ConfigFormat::Wayfire,
+    )
+    .unwrap();
+    assert_eq!(wayfire.switcher, SwitcherConfig::default());
+    assert_eq!(wayfire.switcher.duration_ms, 500);
+    // Without the plugin in the list its section is not read.
+    let unlisted = ShingleConfig::parse(
+      "[core]\nplugins = vswitch\n[switcher]\nspeed = 100\n",
+      ConfigFormat::Wayfire,
+    )
+    .unwrap();
+    assert_eq!(unlisted.switcher.duration_ms, 500);
+    for line in [
+      "view_thumbnail_scale = nan",
+      "view_thumbnail_scale = big",
+      "view_thumbnail_rotation = 1.5",
+      "speed = soon",
+    ] {
+      let text = format!("[core]\nplugins = switcher\n[switcher]\n{line}\n");
+      let (config, warnings) =
+        ShingleConfig::parse_with_warnings(&text, ConfigFormat::Wayfire)
+          .unwrap();
+      assert_eq!(warnings.len(), 1, "{line}: {warnings:?}");
+      assert_eq!(config.switcher, SwitcherConfig::default(), "{line}");
+    }
+    let yaml = "switcher:\n  duration_ms: 0\n  view_thumbnail_rotation: 0\n";
+    let yaml = ShingleConfig::parse(yaml, ConfigFormat::Yaml).unwrap();
+    assert_eq!(yaml.switcher.duration_ms, 0);
+    assert_eq!(yaml.switcher.view_thumbnail_rotation, 0);
+    assert!(
+      ShingleConfig::parse(
+        "switcher:\n  view_thumbnail_scale: .inf\n",
+        ConfigFormat::Yaml
+      )
+      .is_err()
     );
   }
 

@@ -462,6 +462,13 @@ fn apply(
     ("switcher", "prev_view") => {
       config.keybindings.focus_previous = import::binding(value, notes)?;
     }
+    ("switcher", "speed") => config.switcher.duration_ms = duration_ms(value)?,
+    ("switcher", "view_thumbnail_scale") => {
+      config.switcher.view_thumbnail_scale = number(value)?
+    }
+    ("switcher", "view_thumbnail_rotation") => {
+      config.switcher.view_thumbnail_rotation = number(value)?
+    }
     ("wm-actions", "toggle_fullscreen") => {
       config.keybindings.toggle_fullscreen = import::binding(value, notes)?;
     }
