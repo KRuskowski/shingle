@@ -3764,6 +3764,25 @@ impl Compositor {
     self.state.visible_surfaces_on(&output.id())
   }
 
+  /// The layer-shell surfaces of `output` and their popups, bottom to top:
+  /// those of the background and bottom layers, or with `above` those of
+  /// the top and overlay layers and the input panel, as
+  /// [`Compositor::visible_surfaces_on`] draws them below and above the
+  /// windows. Wayfire's switcher draws its thumbnails between the two.
+  pub fn layer_surfaces_on(
+    &self,
+    output: &OutputHandle,
+    above: bool,
+  ) -> Vec<SurfaceSnapshot> {
+    self.state.layer_surfaces_on(&output.id(), above)
+  }
+
+  /// The windows of the workspace `output` shows, bottom to top in their
+  /// stacking order.
+  pub fn stacking_order_on(&self, output: &OutputHandle) -> Vec<WindowId> {
+    self.state.stacking_order_on(&output.id())
+  }
+
   /// The surfaces of `window` bottom to top: its toplevel, then its
   /// subsurfaces and popups, as [`Compositor::visible_surfaces_on`] lists
   /// them. Empty for a window without a mapped buffer. The frontend draws

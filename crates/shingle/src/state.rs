@@ -1088,6 +1088,53 @@ impl CompositorState {
 
   /// Appends the mapped layer surfaces of `layers` on output `id`, and
   /// with `primary` the visible input-method panels among the overlays.
+  /// The layer-shell surfaces of output `id` with their popups, bottom
+  /// to top: of the background and bottom layers, or with `above` of the
+  /// top and overlay layers and the input panel. Nothing on an output
+  /// `visible_surfaces_on` draws nothing on, or while the session is
+  /// locked.
+  pub(crate) fn layer_surfaces_on(
+    &self,
+    id: &OutputId,
+    above: bool,
+  ) -> Vec<SurfaceSnapshot> {
+    let Some(output) = self.outputs.get(id) else {
+      return Vec::new();
+    };
+    if self.idle.dpms_state() == DpmsState::Off
+      || output.dark
+      || !output.powered
+      || self.idle.lock_state() != LockState::Unlocked
+    {
+      return Vec::new();
+    }
+    let primary = self.primary().id == *id;
+    let mut snapshots = Vec::new();
+    let layers: &[&[Layer]] = if above {
+      &[&[Layer::Top], &[Layer::Overlay]]
+    } else {
+      &[&[Layer::Background, Layer::Bottom]]
+    };
+    for layers in layers {
+      self.append_layers(&mut snapshots, id, primary, layers);
+    }
+    snapshots
+  }
+
+  /// The windows of the current workspace of output `id`'s workspace set,
+  /// bottom to top.
+  pub(crate) fn stacking_order_on(
+    &self,
+    id: &OutputId,
+  ) -> Vec<shingle_core::WindowId> {
+    self
+      .core
+      .current_workspace(id)
+      .and_then(|workspace| self.core.tree(id, workspace))
+      .map(|tree| tree.stack_order().to_vec())
+      .unwrap_or_default()
+  }
+
   fn append_layers(
     &self,
     snapshots: &mut Vec<SurfaceSnapshot>,

@@ -1152,3 +1152,54 @@ fn without_output_limits_a_window_is_drawn_and_entered_where_it_overlaps() {
   );
   let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn layer_surfaces_come_below_or_above_the_windows_and_stack_per_output() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let wl_compositor = client.bind::<WlCompositor>(4);
+  let shell = client.bind::<ZwlrLayerShellV1>(4);
+  // Told apart by their heights.
+  let mut surfaces = Vec::new();
+  for (layer, height) in [(Layer::Background, 40), (Layer::Top, 30)] {
+    let surface = wl_compositor.create_surface(&client.handle, ());
+    let layer_surface = shell.get_layer_surface(
+      &surface,
+      Some(&outputs["HEADLESS-1"]),
+      layer,
+      "test".into(),
+      &client.handle,
+      (),
+    );
+    layer_surface.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+    layer_surface.set_size(0, height);
+    surface.commit();
+    client.roundtrip(&mut compositor);
+    let &(_, serial, ..) = client.events.layer_configures.last().unwrap();
+    layer_surface.ack_configure(serial);
+    client.attach_buffer(&mut compositor, &surface, 1280, height as i32);
+    client.roundtrip(&mut compositor);
+    surfaces.push((surface, layer_surface));
+  }
+  let (_first, first) = mapped(&mut compositor, &mut client, "first");
+  let (_second, second) = mapped(&mut compositor, &mut client, "second");
+  let heights = |output: &str, above: bool| {
+    compositor
+      .layer_surfaces_on(&OutputHandle::new(output), above)
+      .into_iter()
+      .map(|snapshot| snapshot.geometry.height)
+      .collect::<Vec<_>>()
+  };
+  assert_eq!(heights("HEADLESS-1", false), [40], "the background");
+  assert_eq!(heights("HEADLESS-1", true), [30], "the top layer");
+  assert!(heights("HEADLESS-2", false).is_empty());
+  let stacking = |compositor: &Compositor, output: &str| {
+    compositor.stacking_order_on(&OutputHandle::new(output))
+  };
+  assert_eq!(stacking(&compositor, "HEADLESS-1"), [first, second]);
+  assert!(stacking(&compositor, "HEADLESS-2").is_empty());
+  compositor.raise_window(first).unwrap();
+  assert_eq!(stacking(&compositor, "HEADLESS-1"), [second, first]);
+  let _ = std::fs::remove_file(path);
+}
