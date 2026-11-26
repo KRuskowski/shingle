@@ -4,7 +4,7 @@
 
 | Crate | Role |
 | --- | --- |
-| `shingle-core` | Tiling trees, workspaces, geometry and the serializable session model. No Wayland dependency. |
+| `shingle-core` | Tiling trees, workspaces, workspace sets and the outputs that show them, geometry and the serializable session model. No Wayland dependency. |
 | `shingle` | Wayland protocol handling, input routing, output state, IPC and the compositor event loop. Library only; no winit. |
 | `shingle-render` | wgpu rendering without a windowing dependency: shared `GpuContext`, per-output `RenderState`, the `draw` pass, window and offscreen targets, and DMA-BUF import with its Vulkan setup. |
 | `shingle-frontend` | The interactive frontend shared by the nested and native hosts, without winit: `Frontend` with Scale, Expo, the switchers, drags, animations, effects, the scene build, binding dispatch, key repeat and session handling, behind the `Host` trait and `InputEvent`. |
@@ -25,7 +25,8 @@
 | --- | --- |
 | Persistent windows and mapped presence | `crates/shingle-core/src/core.rs` |
 | Tiling order, focus, masks and splits | `crates/shingle-core/src/tree.rs` |
-| Session snapshot format | `crates/shingle-core/src/session.rs` |
+| Workspace sets: attaching, parking, moving windows between sets, unplug transfers, away records and their return, finding a parked set | `crates/shingle-core/src/wset.rs` |
+| Session snapshot format (version 2, and loading version 1) | `crates/shingle-core/src/session.rs` |
 | Background session writes: coalescing, order, final save, error reporting (`SessionWriter`) | `crates/shingle-session/src/writer.rs`; frontend callers in `crates/shingle-frontend/src/frontend/session.rs` and `Frontend::shutdown` |
 | Environment of every child process (`ClientEnvironment`), launching clients | `crates/shingle-session/src/environment.rs`, `crates/shingle-session/src/lib.rs` |
 | Public compositor API and renderer events | `crates/shingle/src/lib.rs` |
@@ -84,9 +85,12 @@
 | Native event loop, pause and resume, `Host` | `crates/shingle-native/src/host.rs`; tests in `host/tests.rs` |
 | Native test plan and tools (test machine only) | `docs/native-testing.md`, `tools/native_test/` |
 | Output description, renaming, mode requests, configured placement | `crates/shingle/src/output.rs`, `output_management.rs`; tests in `output/tests.rs` |
-| Output configuration and Wayfire's mode syntax | `crates/shingle-config/src/output.rs` |
+| Output configuration, Wayfire's mode syntax and `position` | `crates/shingle-config/src/output.rs` |
+| Output layout, pointer clamping, oswitch's next and directional outputs, layout warnings (pure functions) | `crates/shingle-config/src/layout.rs` |
+| Unplug policy, `oswitch`, `wsets` and per-device output settings | `crates/shingle-config/src/multi_output.rs` |
 | Real-client output-management checks (headless and nested) | `tools/output_test/run.py` |
 | Real-client check of responsiveness during slow session writes (nested on a FUSE mount with slow fsync) | `tools/session_test/run.py`, `tools/session_test/slowfs.py` |
+| Real-client session round trips through SIGKILL, SIGTERM and a version 1 session from `master` | `tools/session_test/round_trip.py`, run by `tools/session_test/run.py --checks round-trip` |
 | Host keyboard focus changes | `crates/shingle-nested/src/host_keyboard.rs` |
 | xkb keyboard state, key names, keysyms, modifier masks | `crates/shingle-frontend/src/keyboard.rs` |
 | Key repeat timer | `crates/shingle-frontend/src/keyboard/repeat.rs` |

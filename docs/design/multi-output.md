@@ -1,6 +1,6 @@
 # Multi-output design
 
-Status: proposed, 2026-11-26, waiting for the operator's answers to the [open questions](#open-questions). Roadmap item "Multi-output" ([roadmap.md](../roadmap.md#5-multi-output)). It extends the native backend's output work ([native-backend.md](native-backend.md#5-outputs), [NB-9 as built](native-backend.md#nb-9-as-built)), which lights exactly one connector.
+Status: accepted, 2026-11-26, with the proposed defaults adopted on the operator's behalf ([Decisions](#decisions)). MO-1 is built ([MO-1 as built](#mo-1-as-built)), with the deviations listed there; the sections below are corrected where the code differs. Roadmap item "Multi-output" ([roadmap.md](../roadmap.md#5-multi-output)). It extends the native backend's output work ([native-backend.md](native-backend.md#5-outputs), [NB-9 as built](native-backend.md#nb-9-as-built)), which lights exactly one connector.
 
 Shingle drives one output. The core window model already holds any number of outputs, each with its own workspaces and tiling trees, but everything above it assumes one: `CompositorState` has a single output rectangle, scale, transform, description and `wl_output` global, IPC reports output id 1 for everything, the frontend draws one scene, nested opens one window and native lights one CRTC. This document decides how several outputs are lit and used at once, as in Wayfire: the output layout and positions, workspace sets and tiling trees per output, focus and pointer movement between outputs, moving views between outputs, unplugging and replugging, sessions, rendering and frame pacing in every backend, the client protocols that name outputs, Xwayland's root, headless outputs created over IPC, and the Wayfire IPC methods and events that involve outputs. It is the brief for the implementation workspaces in [section 12](#12-implementation-plan).
 
@@ -21,8 +21,8 @@ Sources and dates (all read on 2026-11-26):
 | 2 | Workspace sets | The core separates workspace sets from outputs, as Wayfire does: a workspace set owns a workspace grid with one tiling tree per workspace and is attached to at most one output. Each output shows one set; a set without an output is parked. Sets have Wayfire's indices (lowest free, from 1). |
 | 3 | Focus and pointer | One active (focused) output, changed as in Wayfire: by the first button press or a touch down on another output, by focusing a view, by `oswitch` and by IPC, never by pointer motion alone. The pointer moves freely across the layout and is clamped to the nearest point on an output. Keyboard focus follows the active output's current workspace. |
 | 4 | Moving views | `move_view_to_output` semantics from Wayfire: same workspace, tiled views join the target workspace's tree, floating geometry scales with the output size and is clamped, fullscreen and snapped views are re-applied on the target. Exposed through `oswitch` bindings, `window-rules/configure-view` with `output_id`, `wsets/send-view-to-wset`, `start_on_output` rules, `xdg_toplevel.set_fullscreen(output)` and drags. |
-| 5 | Unplug and replug | Configurable with `outputs.unplug`: `move` (Wayfire's core: views join the active output), `park` (Wayfire's preserve-output: the set waits, hidden, for its output) and `return` (the default: views join the active output and go back to their trees when the output returns, matched by EDID make, model and serial, else by name). The last output is never removed; it stays described without frames, as NB-9 does today. |
-| 6 | Sessions | Snapshot version 2 stores workspace sets with the name and EDID identity of their output and the windows that are away from their set. A start restores each set to its output when that output exists, and otherwise treats it as unplugged under `outputs.unplug`. Version 1 files still load. |
+| 5 | Unplug and replug | Configurable with `output_layout.unplug`: `move` (Wayfire's core: views join the active output), `park` (Wayfire's preserve-output: the set waits, hidden, for its output) and `return` (the default: views join the active output and go back to their trees when the output returns, matched by EDID make, model and serial, else by name). The last output is never removed; it stays described without frames, as NB-9 does today. |
+| 6 | Sessions | Snapshot version 2 stores workspace sets with the name and EDID identity of their output and the windows that are away from their set. A start restores each set to its output when that output exists, and otherwise treats it as unplugged under `output_layout.unplug`. Version 1 files still load. |
 | 7 | Rendering | One frontend, one scene per output, drawn into one render target per output and clipped to that output, as Wayfire clips each output's views. Frame callbacks are sent by every output a surface is visible on (the first one consumes them); presentation feedback, FIFO and commit-timing follow the surface's primary output, chosen as wlroots' scene does. Nested opens one host window per output; native lights one CRTC per output with wlroots' CRTC matching, combined `TEST_ONLY` modesets and page flips per CRTC; headless and offscreen take `--outputs N`. |
 | 8 | Protocols | One `wl_output` global per output with xdg-output, `wl_surface.enter`/`leave` by overlap, a lock surface per output, layer surfaces on their requested or the active output and closed when it goes, screencopy in output-local coordinates scaled to physical pixels, output management with every head in one configuration, power and gamma per output, ext-workspace groups per output and foreign-toplevel `output_enter` for the view's output. |
 | 9 | Xwayland | Nothing to drive: Xwayland sizes its root from the outputs' xdg-output geometry (union with origin 0,0) and creates a RandR output per `wl_output`. Shingle keeps layout coordinates as configured, like Wayfire, and warns when an output has a negative position, which X cannot reach. |
@@ -119,9 +119,10 @@ The core takes Wayfire's model: workspace sets are separate from outputs. `shing
 
 ```rust
 pub struct WsetId(pub u32);             // Wayfire's wset index, from 1
-pub struct WorkspaceRef { pub wset: WsetId, pub workspace: WorkspaceId }
 pub struct OutputIdentity { pub make: String, pub model: String,
   pub serial: Option<String> }
+// WorkspaceRef stays { output, workspace }; WindowInfo gains
+// wset: WsetId and away_from: Option<WsetId> (see MO-1 as built).
 
 Shingle::create_wset(&mut self, workarea: Rect) -> Result<WsetId>;
 Shingle::attach_wset(&mut self, wset: WsetId, output: Option<OutputId>,
@@ -131,14 +132,16 @@ Shingle::wsets(&self) -> impl Iterator<Item = (WsetId, &WsetInfo)>;
 Shingle::set_wset_workarea(&mut self, wset: WsetId, workarea: Rect)
   -> Result<()>;
 Shingle::move_window_to_wset(&mut self, window: WindowId, wset: WsetId,
-  workspace: WorkspaceId) -> Result<()>;
+  workspace: WorkspaceId) -> Result<Vec<WindowId>>;
 Shingle::transfer_wset(&mut self, from: WsetId, to: WsetId,
-  remember: bool) -> Result<()>;
+  remember: bool) -> Result<Vec<WindowId>>;
 Shingle::return_windows(&mut self, wset: WsetId) -> Result<Vec<WindowId>>;
 Shingle::destroy_wset(&mut self, wset: WsetId) -> Result<()>;
+Shingle::find_parked_wset(&self, name: &OutputId,
+  identity: Option<&OutputIdentity>) -> Option<WsetId>;
 ```
 
-`OutputState` (core.rs:204) becomes `WsetState { workarea, current_workspace, workspaces, output: Option<OutputId>, home: OutputId, identity: Option<OutputIdentity> }`. `home` is the name of the output the set was last attached to and `identity` that output's EDID make, model and serial; both are kept while the set is parked, so a returning monitor finds its set. The existing output-keyed calls (`current_workspace(&OutputId)`, `tree(&OutputId, ..)`, `attach_window(&OutputId, ..)`) stay as thin wrappers that resolve the output's attached set, so most of `shingle` reads as before; only code that must work on parked sets uses `WsetId`.
+`OutputState` (core.rs:204) becomes `WsetState { workarea, current_workspace, workspaces, output: Option<OutputId>, home: Option<OutputId>, identity: Option<OutputIdentity>, away }` (`home` is `None` only for a set created parked that was never shown). `home` is the name of the output the set was last attached to and `identity` that output's EDID make, model and serial; both are kept while the set is parked, so a returning monitor finds its set. The existing output-keyed calls (`current_workspace(&OutputId)`, `tree(&OutputId, ..)`, `attach_window(&OutputId, ..)`) stay as thin wrappers that resolve the output's attached set, so most of `shingle` reads as before; only code that must work on parked sets uses `WsetId`.
 
 - **Allocation.** A new output first looks for a parked set to take ([section 5](#5-unplug-and-replug)); otherwise it gets a new set with the lowest free index, as Wayfire does.
 - **Trees.** Each set keeps one `TileTree` per workspace, laid out in the attached output's workarea; a parked set keeps its last workarea, so its trees keep their geometry and are laid out again when it is attached to an output of another size.
@@ -207,7 +210,7 @@ The callers are `oswitch` `*_with_win`, `window-rules/configure-view` with `outp
 
 ### Decision
 
-A new option `outputs.unplug` chooses what happens to a removed output's set, for unplugged monitors, disabled heads, `mode: off` on reload, closed nested windows and destroyed IPC outputs:
+A new option `output_layout.unplug` chooses what happens to a removed output's set, for unplugged monitors, disabled heads, `mode: off` on reload, closed nested windows and destroyed IPC outputs:
 
 - **`move`** is Wayfire's default exactly: every window of the set moves to the active output's set as in [section 4](#4-moving-views-between-outputs) (same workspace, tiled windows appended), the set is destroyed, and nothing comes back.
 - **`park`** is Wayfire's `preserve-output` exactly: the set is detached with its trees, its windows stay unmapped from every output (hidden, but alive and in the session), and the set is attached again when its output returns. Imported as `park` when Wayfire's `core/plugins` lists `preserve-output`, together with `[preserve-output] last_output_focus_timeout`.
@@ -235,9 +238,9 @@ Details that apply to all three:
 
 ### Decision
 
-- **Format.** `SNAPSHOT_VERSION` becomes 2. `OutputSnapshot` becomes `WsetSnapshot { wset: WsetId, home: OutputId, identity: Option<OutputIdentity>, workarea, current_workspace, workspaces, away: Option<Vec<WorkspaceSnapshot>> }`, and `WindowSnapshot` gains `away_from: Option<WsetId>`. A version 1 file loads as one set per saved output, with `home` the output name and no identity, so every saved session keeps working; files are always written as version 2.
+- **Format.** `SNAPSHOT_VERSION` becomes 2. `OutputSnapshot` becomes `WsetSnapshot { wset: WsetId, output: Option<OutputId>, home: Option<OutputId>, identity: Option<OutputIdentity>, workarea, current_workspace, workspaces, away: Option<Vec<WorkspaceSnapshot>> }`, `WindowSnapshot` gains `away_from: Option<WsetId>` and the snapshot `active_output: Option<OutputId>`. `output` records which output showed the set, so that a snapshot restores to exactly the model it was taken from. A version 1 file loads as one set per saved output, with `home` the output name and no identity, so every saved session keeps working; files are always written as version 2.
 - **Saving** stores every set, attached or parked, so a session saved while undocked still knows where windows go when the monitor returns, and the active output's name, so a start focuses it again.
-- **Restoring.** The restored sets are attached when outputs exist, not when the `Compositor` is created: `Compositor::new` currently merges every other saved output into `HEADLESS-1` at once (state.rs:298-313). That merge moves to `Frontend::start_clients` (crates/shingle-frontend/src/frontend.rs:256), which runs after the backend has added its outputs. There each saved set is matched to an output as in [section 5](#5-unplug-and-replug); an output without a saved set gets a new one, and saved sets without an output are handled by `outputs.unplug` as if the output had just been unplugged (merged under `move`, parked under `park`, merged with away records under `return`). A native session restored in nested therefore shows its windows in the nested window and, under `return`, gives them back to their monitors on the next native start.
+- **Restoring.** The restored sets are attached when outputs exist, not when the `Compositor` is created: `Compositor::new` currently merges every other saved output into `HEADLESS-1` at once (state.rs:298-313). That merge moves to `Frontend::start_clients` (crates/shingle-frontend/src/frontend.rs:256), which runs after the backend has added its outputs. There each saved set is matched to an output as in [section 5](#5-unplug-and-replug); an output without a saved set gets a new one, and saved sets without an output are handled by `output_layout.unplug` as if the output had just been unplugged (merged under `move`, parked under `park`, merged with away records under `return`). A native session restored in nested therefore shows its windows in the nested window and, under `return`, gives them back to their monitors on the next native start.
 - **Placeholders** keep working per set: saved applications relaunch and reconcile into the set and workspace they were saved in, including parked sets.
 
 ### Rejected alternatives
@@ -256,7 +259,7 @@ Details that apply to all three:
 
 ### Decision: the frontend
 
-- **One scene per output.** `Frontend::render(host, output, target)` builds the scene of one output, in that output's logical coordinates, from `Compositor::visible_surfaces(output)`: the windows of its attached set, its layer surfaces, override-redirect X windows and the drag icon that intersect it, and the cursor if inside. Windows are clipped to their own output, as in Wayfire; `workarounds/remove_output_limits` is imported to turn that off. A window being dragged is drawn on every output it crosses.
+- **One scene per output.** `Frontend::render(host, output, target)` builds the scene of one output, in that output's logical coordinates, from `Compositor::visible_surfaces(output)`: the windows of its attached set, its layer surfaces, override-redirect X windows and the drag icon that intersect it, and the cursor if inside. Windows are clipped to their own output, as in Wayfire; `workarounds/remove_output_limits` is imported as `behavior.remove_output_limits` to turn that off. A window being dragged is drawn on every output it crosses.
 - **Per-output frontend state.** Zoom, the workspace transition and damage are per output; Scale, Expo and the switchers run on one output at a time, the active one when they start, which is what Wayfire's per-output plugins do when started from a binding ([open question 7](#open-questions)).
 - **Host seam.** `Host::request_redraw(output)` names the output, and the host keeps one `RenderTarget` (render_target.rs:14) per output on the shared `GpuContext` (NB-1). Damage marks every output a changed surface intersects.
 - **Frame callbacks.** `Compositor::frame_presented(output, info)` releases frame callbacks of surfaces visible on that output; a surface on two outputs gets its callback from whichever presents first, as in Wayfire. Hidden surfaces keep their callbacks, as now.
@@ -265,7 +268,7 @@ Details that apply to all three:
 
 ### Decision: nested
 
-Nested opens one host window per output, as wlroots' Wayland backend does. `WindowHost` becomes a map from winit `WindowId` to an output, a window and its renderer surface; winit 0.30 supports several windows in one event loop. Each window's size sets its output's size, each window's input is in its output's coordinates (`output` set on absolute events), and each window presents and calls `frame_presented` for its own output. The number of windows at start is `--outputs N` (default 1), or `WLR_WL_OUTPUTS` when the option is absent, for scripts written for Wayfire. `stipc/create_wayland_output` opens another window (`Event::CreateHostOutput`) and `stipc/destroy_wayland_output` closes one. Closing a window removes its output under `outputs.unplug`; closing the last one quits, as now. Outputs are named `HEADLESS-1`, `HEADLESS-2`, and so on, so existing configs and sessions that name `HEADLESS-1` keep working ([open question 2](#open-questions) asks whether to use Wayfire's `WL-N`).
+Nested opens one host window per output, as wlroots' Wayland backend does. `WindowHost` becomes a map from winit `WindowId` to an output, a window and its renderer surface; winit 0.30 supports several windows in one event loop. Each window's size sets its output's size, each window's input is in its output's coordinates (`output` set on absolute events), and each window presents and calls `frame_presented` for its own output. The number of windows at start is `--outputs N` (default 1), or `WLR_WL_OUTPUTS` when the option is absent, for scripts written for Wayfire. `stipc/create_wayland_output` opens another window (`Event::CreateHostOutput`) and `stipc/destroy_wayland_output` closes one. Closing a window removes its output under `output_layout.unplug`; closing the last one quits, as now. Outputs are named `HEADLESS-1`, `HEADLESS-2`, and so on, so existing configs and sessions that name `HEADLESS-1` keep working ([open question 2](#open-questions) asks whether to use Wayfire's `WL-N`).
 
 ### Decision: native (extends NB-9)
 
@@ -360,14 +363,14 @@ Wayfire's names and payloads, from plugins/ipc-rules (`output_to_json` and `wset
 
 All of it inside the namespaces the existing harnesses build (`unshare -U -r -m -n -p -f --mount-proc`, private `/tmp`, empty `/dev/dri` and `/dev/input`, the host's Wayland and X variables removed): `tools/output_test/run.py` gains a multi-output check set, and the XWayland and GPU harnesses gain a few checks each.
 
-- **Headless with several outputs** (`--headless --outputs 2 --ipc`): `wlr-randr` lists two heads and can move, disable and re-enable one; `wayland-info` shows two `wl_output`s with names and xdg-output positions; `grim -o HEADLESS-2` and `grim -g` across both outputs through the CPU composite; the probe (`crates/shingle/examples/wl_probe.rs`, which gains `--report-outputs` for enter, leave and preferred scale and a `--layer OUTPUT` mode) sees enter and leave as IPC moves it; `shingle-lock` locks both outputs; the IPC methods and events of [section 10](#10-ipc) from a Python client, including `wayfire/create-headless-output`, removal of a created output under each `outputs.unplug` policy, and a session saved with two outputs and restored with one and then two.
+- **Headless with several outputs** (`--headless --outputs 2 --ipc`): `wlr-randr` lists two heads and can move, disable and re-enable one; `wayland-info` shows two `wl_output`s with names and xdg-output positions; `grim -o HEADLESS-2` and `grim -g` across both outputs through the CPU composite; the probe (`crates/shingle/examples/wl_probe.rs`, which gains `--report-outputs` for enter, leave and preferred scale and a `--layer OUTPUT` mode) sees enter and leave as IPC moves it; `shingle-lock` locks both outputs; the IPC methods and events of [section 10](#10-ipc) from a Python client, including `wayfire/create-headless-output`, removal of a created output under each `output_layout.unplug` policy, and a session saved with two outputs and restored with one and then two.
 - **Xwayland** (tools/xwayland_test/run.py with two outputs): `xrandr --listmonitors` lists both at their positions, `xdpyinfo` reports the union size, and an X window moved to the second output maps there.
 - **Offscreen in the GPU namespace** (tools/gpu_test/run.py, `--backend offscreen --outputs 2`): each output's frames are drawn and paced on their own, `grim` per output shows each output's own windows clipped at the boundary, and presentation feedback names the right `wl_output`.
 - **Nested with two windows**: nested Shingle with `--outputs 2` runs as a client of a headless Shingle inside the namespace, as output_test already does for one window (on lavapipe); the headless host sees two toplevels, input fed to each through the host's `stipc` reaches the right nested output, `stipc/create_wayland_output` adds a third, and closing one window transfers its windows.
 
 ### Layer 3: the test machine
 
-Steps added to [native-testing.md](../native-testing.md) by MO-7: two and three monitors lit at once with their preferred modes; more monitors than CRTCs; a second monitor plugged in and out while clients run, under each `outputs.unplug` policy; a monitor moved to another connector returning its windows by EDID identity; a dock disconnect and reconnect; mode, position and disable changes through `wlr-randr` with two heads; flips and presentation per CRTC at different refresh rates (`tools/native_test/present_check.py`); DPMS per output; a VT switch away and back with two outputs lit.
+Steps added to [native-testing.md](../native-testing.md) by MO-7: two and three monitors lit at once with their preferred modes; more monitors than CRTCs; a second monitor plugged in and out while clients run, under each `output_layout.unplug` policy; a monitor moved to another connector returning its windows by EDID identity; a dock disconnect and reconnect; mode, position and disable changes through `wlr-randr` with two heads; flips and presentation per CRTC at different refresh rates (`tools/native_test/present_check.py`); DPMS per output; a VT switch away and back with two outputs lit.
 
 ### Rejected test strategies
 
@@ -380,7 +383,7 @@ The workspaces are ordered by dependency; each can be finished and verified on i
 
 ### MO-1 `shingle-wsets-core`: workspace sets, away records and sessions
 
-Split workspace sets from outputs in `shingle-core` ([section 2](#2-workspace-sets-and-tiling-trees)): `WsetId`, `WsetState` with `home` and `identity`, attach and detach, lowest-free allocation, `move_window_to_wset`, `transfer_wset` with away records, `return_windows`, `destroy_wset`, and the output-keyed wrappers so `shingle` builds unchanged. Session snapshot version 2 with version 1 loading ([section 6](#6-sessions)). In `shingle-config`: `position: auto | {x, y}`, `outputs.unplug`, the `oswitch` and `wsets` sections, `input_devices.NAME.output`, `workarounds.remove_output_limits`, and their Wayfire and i3 imports (including `preserve-output` in `core/plugins`); the pure layout, closest-point and direction functions.
+Split workspace sets from outputs in `shingle-core` ([section 2](#2-workspace-sets-and-tiling-trees)): `WsetId`, `WsetState` with `home` and `identity`, attach and detach, lowest-free allocation, `move_window_to_wset`, `transfer_wset` with away records, `return_windows`, `destroy_wset`, and the output-keyed wrappers so `shingle` builds unchanged. Session snapshot version 2 with version 1 loading ([section 6](#6-sessions)). In `shingle-config`: `position: auto | {x, y}`, `output_layout.unplug`, the `oswitch` and `wsets` sections, `input_devices.NAME.output`, `workarounds.remove_output_limits`, and their Wayfire and i3 imports (including `preserve-output` in `core/plugins`); the pure layout, closest-point and direction functions.
 
 Acceptance:
 
@@ -388,6 +391,18 @@ Acceptance:
 - Every existing test passes unchanged, and the session round trip of [status.md](../status.md#with-real-clients) is repeated with nested Shingle with identical results.
 - A version 1 session file from `master` restores in nested with every window in place.
 - Verified on this host only; nothing needs the test machine.
+
+### MO-1 as built
+
+Built on branch `shingle-wsets-core`, 2026-11-26. The core (crates/shingle-core/src/core.rs, crates/shingle-core/src/wset.rs, crates/shingle-core/src/session.rs) holds `WsetState`s keyed by `WsetId`; which output shows a set is the set's `output`, and the output-keyed calls resolve it, so `shingle`, the frontend and the backends build unchanged apart from three readers of the snapshot's set list (`simple-tile/get-layout` and `set-layout`, the session launcher's tile order and one headless test). The configuration parts are in crates/shingle-config/src/output.rs (`OutputPosition`), crates/shingle-config/src/layout.rs (the pure functions) and crates/shingle-config/src/multi_output.rs (the new sections). Where the code differs from the sections above:
+
+- **`WorkspaceRef` keeps its output.** The design made it `{ wset, workspace }`, but about twenty places in `shingle` read `location.output` and existing tests build it with `output`. It stays `{ output, workspace }`, where `output` is the output showing the set or, while the set is parked, its home (empty for a set never shown), and `WindowInfo` gains `wset` and `away_from`. `Shingle::window_location` returns the reference by value, since it is now computed.
+- **Snapshots record which output shows a set.** `WsetSnapshot` has `output: Option<OutputId>` besides `home`, and a restore attaches each set to it. Without it a restored model would differ from the saved one, and until MO-2 moves the restore into `Frontend::start_clients`, the compositor's start-up merge (state.rs:298-313) needs restored sets on their outputs to work unchanged. MO-2 may detach them all on restore and match them to outputs as section 6 describes. `home` is `Option<OutputId>` because `create_wset` makes a set that was never shown.
+- **Moves report what moved.** `move_window_to_wset` and `transfer_wset` return the windows that changed place, which MO-4 needs for `view-set-output` and `view-wset-changed`. A move to the place a window already has changes nothing.
+- **Away records.** Any move by the user or a client to another workspace clears `away_from` (`drop_window`, `swap_windows` and `move_window_to_wset` across workspaces, and `detach_window` then `reattach_window`); a window that arrives in the set it is away from is home and its record ends. `destroy_wset` refuses a shown or non-empty set and clears the records that name it, so `away_from` always names an existing set other than the window's own; the restore checks the same. A returned window takes the leaf state it had in the copy, except `held`, which belongs to its current map. With `remember`, `transfer_wset` replaces an earlier copy only when the set still holds windows.
+- **Finding a parked set.** `find_parked_wset` implements section 5's matching: identity first, when it has a serial or is unique among parked sets, else the home name. It also skips, in the name fallback, a parked set whose identity has a serial that differs from the new output's, so that another monitor plugged into the same connector does not take the first monitor's windows.
+- **Config names.** `outputs` is already the list of `[output:NAME]` entries, so the unplug policy is `output_layout.unplug`, with preserve-output's `last_output_focus_timeout` beside it; Wayfire's `[workarounds]` options live in `behavior`, so `remove_output_limits` is `behavior.remove_output_limits`. A Wayfire file whose `[core] plugins` lacks `preserve-output` keeps the `return` default rather than importing Wayfire's `move`, since every `wayfire.ini` lists its plugins and decision 1 chose `return`. `OutputConfig` keeps `x` and `y` beside `position`, set from it, for the code that places one output; YAML takes either `position` or the old keys, not both, and writes only `position`. The i3 importer also reads `focus output`, `move container to output`, `input NAME map_to_output`, Shingle's own `wset N` and `move container to wset N` bindings and `$output_unplug`, `$last_output_focus_timeout`, `$remove_output_limits` and `$wsets_label_duration`.
+- **Session saves.** Building the real-client round trip found two more ways a change reached the session file only at the next save or at exit: `simple-tile/set-layout` changing only weights or nesting, and `window-rules/configure-view` moving a window that already floated. Both now send `Event::LayoutChanged`, on which the frontend saves.
 
 ### MO-2 `shingle-output-registry`: several outputs in the compositor
 
@@ -462,7 +477,7 @@ MO-1 comes first. MO-2 needs MO-1, MO-3 and MO-4 need MO-2 (they touch the same 
 
 The operator asked for the work to continue without stopping for questions, so on 2026-11-26 the proposed defaults below were adopted on the operator's behalf. Each can be revisited before the workspace that depends on it lands.
 
-1. **Unplug:** `outputs.unplug` defaults to `return`; `move` and `park` are available, and `park` is imported when a Wayfire config loads preserve-output.
+1. **Unplug:** `output_layout.unplug` defaults to `return`; `move` and `park` are available, and `park` is imported when a Wayfire config loads preserve-output.
 2. **Nested output names** stay `HEADLESS-N`.
 3. **Nested windows at start:** one, more with `--outputs N`; `WLR_WL_OUTPUTS` is read only when the option is absent.
 4. **Mirroring** is left out (MO-8 later) and still imported as `off`.
@@ -475,7 +490,7 @@ The operator asked for the work to continue without stopping for questions, so o
 
 ## Open questions (answered above)
 
-1. **Unplug default.** `outputs.unplug: return` (windows join the active output and go back when their monitor returns), or Wayfire's default `move`, or `park` (Wayfire with preserve-output)? Proposed: `return`, with the other two available and `park` imported when a Wayfire config loads `preserve-output`.
+1. **Unplug default.** `output_layout.unplug: return` (windows join the active output and go back when their monitor returns), or Wayfire's default `move`, or `park` (Wayfire with preserve-output)? Proposed: `return`, with the other two available and `park` imported when a Wayfire config loads `preserve-output`.
 2. **Nested output names.** Keep `HEADLESS-1`, `HEADLESS-2` for nested windows, as today, or use Wayfire's `WL-1`, `WL-2` and migrate saved sessions and `[output:HEADLESS-1]` entries? Proposed: keep `HEADLESS-N`, so existing configs, sessions and harnesses need no change.
 3. **Nested outputs at start.** One window by default, more with `--outputs N` or `WLR_WL_OUTPUTS`? Proposed: yes, one by default, and the environment variable read only when the option is absent.
 4. **Mirroring.** Is Wayfire's `mirror` mode wanted (MO-8), or does it stay imported as `off`? Proposed: leave it out of this item and keep importing it as `off`.
