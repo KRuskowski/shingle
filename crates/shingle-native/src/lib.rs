@@ -19,6 +19,7 @@
 
 #![warn(missing_docs)]
 
+pub mod crtcs;
 mod diagnostics;
 pub mod display;
 pub mod gpu;

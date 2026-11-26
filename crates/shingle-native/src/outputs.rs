@@ -53,30 +53,88 @@ impl OutputPolicy {
 
   /// How to choose the mode of output `name`, or `None` if it is off.
   pub fn choice(&self, name: &str) -> Option<ModeChoice> {
-    match self.mode(name) {
-      OutputMode::Off => None,
-      OutputMode::Auto => Some(ModeChoice::Auto),
-      OutputMode::HighRes => Some(ModeChoice::HighRes),
-      OutputMode::HighRr => Some(ModeChoice::HighRr),
-      OutputMode::Explicit {
-        width,
-        height,
-        refresh_mhz,
-      } => Some(ModeChoice::Explicit {
-        width,
-        height,
-        refresh_mhz,
-      }),
-    }
+    mode_choice(self.mode(name))
   }
 
   /// The mode `choice` would light first on `connector`.
   pub fn preferred_mode(&self, connector: &ConnectorInfo) -> Option<Mode> {
     let choice = self.choice(&connector.name)?;
-    modes::candidates(&connector.modes, choice, None)
-      .into_iter()
-      .next()
+    first_mode(connector, choice)
   }
+}
+
+/// How to choose a mode configured as `mode`, or `None` for `off`.
+pub fn mode_choice(mode: OutputMode) -> Option<ModeChoice> {
+  match mode {
+    OutputMode::Off => None,
+    OutputMode::Auto => Some(ModeChoice::Auto),
+    OutputMode::HighRes => Some(ModeChoice::HighRes),
+    OutputMode::HighRr => Some(ModeChoice::HighRr),
+    OutputMode::Explicit {
+      width,
+      height,
+      refresh_mhz,
+    } => Some(ModeChoice::Explicit {
+      width,
+      height,
+      refresh_mhz,
+    }),
+  }
+}
+
+/// The mode `choice` lights first on `connector`.
+pub fn first_mode(
+  connector: &ConnectorInfo,
+  choice: ModeChoice,
+) -> Option<Mode> {
+  modes::candidates(&connector.modes, choice, None)
+    .into_iter()
+    .next()
+}
+
+/// The connected connectors to light, in priority order, as multi-output
+/// lights them (docs/design/multi-output.md, section 7, "Decision:
+/// native"): those in `lit` (in its order), then those the configuration
+/// names (in its order), then internal panels, then the rest in the
+/// card's order, skipping every connector for which `off` is true. The
+/// caller lights as many as it has CRTCs for, from the front.
+pub fn rank<'a>(
+  card: &'a Card,
+  policy: &OutputPolicy,
+  lit: &[&str],
+  off: &dyn Fn(&str) -> bool,
+) -> Vec<&'a ConnectorInfo> {
+  let usable: Vec<&ConnectorInfo> = card
+    .connectors
+    .iter()
+    .map(|(info, _)| info)
+    .filter(|info| info.connection == Connection::Connected)
+    .filter(|info| !off(&info.name))
+    .collect();
+  let named =
+    |name: &str| usable.iter().copied().find(|info| info.name == name);
+  let mut ranked: Vec<&ConnectorInfo> = Vec::new();
+  let mut push = |info: &'a ConnectorInfo| {
+    if !ranked.iter().any(|known| known.id == info.id) {
+      ranked.push(info);
+    }
+  };
+  lit
+    .iter()
+    .filter_map(|name| named(name))
+    .for_each(&mut push);
+  policy
+    .named
+    .iter()
+    .filter_map(|(name, _)| named(name))
+    .for_each(&mut push);
+  usable
+    .iter()
+    .copied()
+    .filter(|info| info.internal)
+    .for_each(&mut push);
+  usable.iter().copied().for_each(&mut push);
+  ranked
 }
 
 /// The connector to light: `keep` if it is still connected and not off,
@@ -88,24 +146,9 @@ pub fn choose<'a>(
   policy: &OutputPolicy,
   keep: Option<&str>,
 ) -> Option<&'a ConnectorInfo> {
-  let usable = || {
-    card
-      .connectors
-      .iter()
-      .map(|(info, _)| info)
-      .filter(|info| info.connection == Connection::Connected)
-      .filter(|info| policy.choice(&info.name).is_some())
-  };
-  keep
-    .and_then(|name| usable().find(|info| info.name == name))
-    .or_else(|| {
-      policy
-        .named
-        .iter()
-        .find_map(|(name, _)| usable().find(|info| &info.name == name))
-    })
-    .or_else(|| usable().find(|info| info.internal))
-    .or_else(|| usable().next())
+  let keep: Vec<&str> = keep.into_iter().collect();
+  let off = |name: &str| policy.choice(name).is_none();
+  rank(card, policy, &keep, &off).into_iter().next()
 }
 
 /// A connector as one probe saw it.
@@ -255,6 +298,42 @@ mod tests {
     let named = policy(&[("DP-9", "auto"), ("DP-1", "highres")]);
     assert_eq!(chosen(&card, &named, None), "DP-1");
     assert_eq!(chosen(&card, &named, Some("HDMI-A-1")), "HDMI-A-1");
+  }
+
+  #[test]
+  fn connectors_rank_lit_then_named_then_internal_then_card_order() {
+    let mut device = FakeKms::single_output();
+    device.add_connector(connector_info(10, "DP-1"));
+    let mut panel = connector_info(11, "eDP-1");
+    panel.internal = true;
+    device.add_connector(panel);
+    device.add_connector(connector_info(12, "DP-2"));
+    let mut gone = connector_info(13, "DP-3");
+    gone.connection = Connection::Disconnected;
+    device.add_connector(gone);
+    let card = probe(&mut device).unwrap();
+    let names = |lit: &[&str], policy: &OutputPolicy, off: &[&str]| {
+      let off = |name: &str| off.contains(&name);
+      rank(&card, policy, lit, &off)
+        .into_iter()
+        .map(|info| info.name.clone())
+        .collect::<Vec<_>>()
+    };
+    let none = policy(&[]);
+    assert_eq!(
+      names(&[], &none, &[]),
+      ["eDP-1", "HDMI-A-1", "DP-1", "DP-2"]
+    );
+    let named = policy(&[("DP-2", "auto"), ("DP-9", "auto")]);
+    assert_eq!(
+      names(&["DP-1"], &named, &[]),
+      ["DP-1", "DP-2", "eDP-1", "HDMI-A-1"]
+    );
+    assert_eq!(
+      names(&["DP-3"], &named, &["eDP-1", "DP-2"]),
+      ["HDMI-A-1", "DP-1"],
+      "disconnected and off connectors are left out"
+    );
   }
 
   #[test]

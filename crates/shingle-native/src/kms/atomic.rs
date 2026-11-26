@@ -2,8 +2,9 @@
 //!
 //! An [`AtomicRequest`] is a list of `(object, property, value)` triples.
 //! The builders here produce every request the backend sends, so their
-//! exact contents are unit-tested: a full modeset ([`modeset`]), a page
-//! flip ([`flip`]) and DPMS ([`set_active`]).
+//! exact contents are unit-tested: a full modeset of one output
+//! ([`modeset`]) or of several at once ([`modeset_all`]), a page flip
+//! ([`flip`]) and DPMS ([`set_active`]).
 
 use super::{
   BlobId, FramebufferId, Object, PropertyId,
@@ -104,7 +105,44 @@ pub fn modeset(
   state: &ModesetState,
   teardown: &Teardown,
 ) -> AtomicRequest {
+  modeset_all(&[(output, *state)], teardown)
+}
+
+/// One `ALLOW_MODESET` commit for several outputs at once: the full state
+/// of each, in order, as [`modeset`] sets it for one, then everything in
+/// `teardown` turned off. The kernel tests and applies the configuration
+/// as a whole, so a limit shared by the outputs, such as memory bandwidth,
+/// shows in its `TEST_ONLY`.
+pub fn modeset_all(
+  outputs: &[(&OutputProps, ModesetState)],
+  teardown: &Teardown,
+) -> AtomicRequest {
   let mut request = AtomicRequest::new();
+  for (output, state) in outputs {
+    set_output(&mut request, output, state);
+  }
+  for other in &teardown.connectors {
+    request.set(Object::Connector(other.id), other.crtc_id, 0);
+  }
+  for other in &teardown.crtcs {
+    let object = Object::Crtc(other.id);
+    request.set(object, other.active, 0);
+    request.set(object, other.mode_id, 0);
+  }
+  for other in &teardown.planes {
+    let object = Object::Plane(other.id);
+    request.set(object, other.fb_id, 0);
+    request.set(object, other.crtc_id, 0);
+  }
+  request
+}
+
+/// Adds the full state of `output` to `request`.
+fn set_output(
+  request: &mut AtomicRequest,
+  output: &OutputProps,
+  state: &ModesetState,
+) {
   let connector = Object::Connector(output.connector.id);
   let crtc = Object::Crtc(output.crtc.id);
   let plane = Object::Plane(output.plane.id);
@@ -131,20 +169,6 @@ pub fn modeset(
   request.set(plane, p.crtc_y, 0);
   request.set(plane, p.crtc_w, u64::from(width));
   request.set(plane, p.crtc_h, u64::from(height));
-  for other in &teardown.connectors {
-    request.set(Object::Connector(other.id), other.crtc_id, 0);
-  }
-  for other in &teardown.crtcs {
-    let object = Object::Crtc(other.id);
-    request.set(object, other.active, 0);
-    request.set(object, other.mode_id, 0);
-  }
-  for other in &teardown.planes {
-    let object = Object::Plane(other.id);
-    request.set(object, other.fb_id, 0);
-    request.set(object, other.crtc_id, 0);
-  }
-  request
 }
 
 /// A page flip: the primary plane shows `framebuffer`. Everything else
@@ -298,6 +322,62 @@ pub(crate) mod tests {
     assert_eq!(
       request.get(Object::Crtc(CrtcId(2)), PropertyId(21)),
       Some(0)
+    );
+  }
+
+  #[test]
+  fn one_modeset_sets_every_output_then_turns_off_the_rest() {
+    let first = output_props(false);
+    let second = OutputProps {
+      connector: ConnectorProps {
+        id: ConnectorId(7),
+        crtc_id: PropertyId(10),
+      },
+      crtc: CrtcProps {
+        id: CrtcId(8),
+        ..first.crtc
+      },
+      plane: PlaneProps {
+        id: PlaneId(9),
+        ..first.plane
+      },
+    };
+    let small = ModesetState {
+      mode: BlobId(51),
+      framebuffer: FramebufferId(61),
+      size: (1280, 720),
+      ..state()
+    };
+    let teardown = Teardown {
+      crtcs: vec![CrtcProps {
+        id: CrtcId(5),
+        mode_id: PropertyId(41),
+        active: PropertyId(42),
+        vrr_enabled: None,
+      }],
+      ..Teardown::default()
+    };
+    let request =
+      modeset_all(&[(&first, state()), (&second, small)], &teardown);
+    let one = modeset(&first, &state(), &Teardown::default());
+    assert_eq!(&request.entries()[..13], one.entries(), "the first output");
+    let crtc = Object::Crtc(CrtcId(8));
+    assert_eq!(request.get(crtc, PropertyId(20)), Some(51));
+    assert_eq!(
+      request.get(Object::Connector(ConnectorId(7)), PropertyId(10)),
+      Some(8)
+    );
+    assert_eq!(
+      request.get(Object::Plane(PlaneId(9)), PropertyId(38)),
+      Some(1280)
+    );
+    assert_eq!(request.entries().len(), 13 * 2 + 2);
+    assert_eq!(
+      request.entries()[26..],
+      [
+        (Object::Crtc(CrtcId(5)), PropertyId(42), 0),
+        (Object::Crtc(CrtcId(5)), PropertyId(41), 0),
+      ]
     );
   }
 

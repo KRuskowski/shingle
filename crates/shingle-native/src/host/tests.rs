@@ -255,7 +255,7 @@ impl Fixture {
 
   /// Whether a flip waits for its event.
   fn flip_pending(&self) -> bool {
-    self.card.borrow().flip_pending
+    self.card.borrow().flip_pending()
   }
 
   /// Completes the pending page flip at `time` and runs a turn.

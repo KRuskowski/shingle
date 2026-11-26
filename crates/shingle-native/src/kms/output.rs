@@ -13,7 +13,7 @@ use std::{fmt, io};
 
 use super::{
   ConnectorId, ConnectorInfo, CrtcId, CrtcInfo, FORMAT_XRGB8888, KmsDevice,
-  Mode, Object, PlaneInfo,
+  Mode, Object, PlaneId, PlaneInfo,
   atomic::{OutputProps, Teardown},
   edid::{self, Edid},
   in_formats::{self, InFormats},
@@ -22,7 +22,7 @@ use super::{
     PropertyTable,
   },
 };
-use crate::kms::Connection;
+use crate::{crtcs, kms::Connection};
 
 /// Everything read from a card in one probe.
 #[derive(Clone, Debug, Default)]
@@ -178,7 +178,96 @@ impl Card {
           .find(|crtc| usable(crtc))
       })
       .ok_or_else(|| OutputError::NoCrtc(connector.name.clone()))?;
-    let Some((plane, plane_table)) = self.primary_plane(crtc) else {
+    let Some((plane, _)) = self.primary_plane(crtc) else {
+      return Err(OutputError::NoCrtc(connector.name.clone()));
+    };
+    self.output_on(connector, crtc, plane.id, reading)
+  }
+
+  /// The CRTC and primary plane for each of `wants`, in priority order,
+  /// or `None` for those that stay dark: lit outputs keep theirs, and the
+  /// others share the CRTCs left as [`crtcs::match_crtcs`] matches them,
+  /// each with a primary plane that can scan out XRGB8888 and that no
+  /// other output uses, preferring the one attached to its CRTC already.
+  pub fn allocate(
+    &self,
+    wants: &[Wanted<'_>],
+  ) -> Vec<Option<(CrtcId, PlaneId)>> {
+    let index =
+      |crtc: CrtcId| self.crtcs.iter().position(|(info, _)| info.id == crtc);
+    let scanout = |crtc: CrtcId| {
+      self.planes.iter().any(|(info, table)| {
+        table.value("type") == Some(PLANE_TYPE_PRIMARY)
+          && info.possible_crtcs.contains(&crtc)
+          && info.formats.contains(&FORMAT_XRGB8888)
+      })
+    };
+    let matching: Vec<crtcs::Want> = wants
+      .iter()
+      .map(|want| crtcs::Want {
+        possible: want
+          .connector
+          .possible_crtcs
+          .iter()
+          .copied()
+          .filter(|crtc| scanout(*crtc))
+          .filter_map(index)
+          .collect(),
+        current: want.connector.current_crtc.and_then(index),
+        lit: want.lit.and_then(|(crtc, _)| index(crtc)),
+      })
+      .collect();
+    let matched = crtcs::match_crtcs(&matching, self.crtcs.len());
+    let mut taken: Vec<PlaneId> = wants
+      .iter()
+      .filter_map(|want| want.lit)
+      .map(|(_, p)| p)
+      .collect();
+    let mut allocated = Vec::with_capacity(wants.len());
+    for (want, crtc) in wants.iter().zip(matched) {
+      let crtc = crtc.map(|index| self.crtcs[index].0.id);
+      let pair = match (want.lit, crtc) {
+        (Some(lit), Some(crtc)) if lit.0 == crtc => Some(lit),
+        (_, Some(crtc)) => self.free_primary(crtc, &taken).map(|plane| {
+          taken.push(plane);
+          (crtc, plane)
+        }),
+        (_, None) => None,
+      };
+      allocated.push(pair);
+    }
+    allocated
+  }
+
+  /// A primary plane of `crtc` that can scan out XRGB8888 and is not in
+  /// `taken`, preferring the one attached to `crtc` already.
+  fn free_primary(&self, crtc: CrtcId, taken: &[PlaneId]) -> Option<PlaneId> {
+    let mut free = self.planes.iter().filter(|(info, table)| {
+      table.value("type") == Some(PLANE_TYPE_PRIMARY)
+        && info.possible_crtcs.contains(&crtc)
+        && info.formats.contains(&FORMAT_XRGB8888)
+        && !taken.contains(&info.id)
+    });
+    let first = free.clone().next().map(|(info, _)| info.id);
+    free
+      .find(|(info, _)| info.current_crtc == Some(crtc))
+      .map(|(info, _)| info.id)
+      .or(first)
+  }
+
+  /// `connector` driven by `crtc` through primary plane `plane`, which
+  /// the caller chose ([`Card::output`], [`Card::allocate`]). Its
+  /// teardown is everything else that is lit.
+  pub fn output_on(
+    &self,
+    connector: &ConnectorInfo,
+    crtc: CrtcId,
+    plane: PlaneId,
+    reading: &mut dyn FnMut(u64) -> Option<Vec<u8>>,
+  ) -> Result<Output, OutputError> {
+    let Some((plane, plane_table)) =
+      self.planes.iter().find(|(info, _)| info.id == plane)
+    else {
       return Err(OutputError::NoCrtc(connector.name.clone()));
     };
     if !plane.formats.contains(&FORMAT_XRGB8888) {
@@ -217,9 +306,20 @@ impl Card {
   /// Everything lit by someone else: other connectors on a CRTC, other
   /// active CRTCs, and planes on a CRTC other than our primary plane.
   fn teardown(&self, ours: &OutputProps) -> Result<Teardown, MissingProperty> {
+    self.teardown_except(&[ours])
+  }
+
+  /// Everything this probe saw lit that none of `ours` uses: connectors on
+  /// a CRTC, active CRTCs, and planes on a CRTC, including the cursor and
+  /// overlay planes of our CRTCs. A modeset of all of `ours` turns these
+  /// off, so only Shingle's outputs stay lit.
+  pub fn teardown_except(
+    &self,
+    ours: &[&OutputProps],
+  ) -> Result<Teardown, MissingProperty> {
     let mut teardown = Teardown::default();
     for (info, table) in &self.connectors {
-      if info.id != ours.connector.id
+      if ours.iter().all(|ours| info.id != ours.connector.id)
         && table.value("CRTC_ID").is_some_and(|crtc| crtc != 0)
       {
         teardown
@@ -228,14 +328,14 @@ impl Card {
       }
     }
     for (info, table) in &self.crtcs {
-      if info.id != ours.crtc.id
+      if ours.iter().all(|ours| info.id != ours.crtc.id)
         && table.value("ACTIVE").is_some_and(|active| active != 0)
       {
         teardown.crtcs.push(CrtcProps::new(info.id, table)?);
       }
     }
     for (info, table) in &self.planes {
-      if info.id != ours.plane.id
+      if ours.iter().all(|ours| info.id != ours.plane.id)
         && table.value("CRTC_ID").is_some_and(|crtc| crtc != 0)
       {
         teardown.planes.push(PlaneProps::new(info.id, table)?);
@@ -243,6 +343,16 @@ impl Card {
     }
     Ok(teardown)
   }
+}
+
+/// A connector [`Card::allocate`] finds a CRTC and plane for.
+#[derive(Clone, Copy, Debug)]
+pub struct Wanted<'a> {
+  /// The connector.
+  pub connector: &'a ConnectorInfo,
+  /// The CRTC and primary plane that drive it, if it is lit; it keeps
+  /// them.
+  pub lit: Option<(CrtcId, PlaneId)>,
 }
 
 #[cfg(test)]
@@ -308,6 +418,69 @@ mod tests {
     assert_eq!(
       ids(&output.teardown),
       (vec![other_connector], vec![other_crtc], vec![cursor])
+    );
+  }
+
+  fn wanted(card: &Card, name: &str) -> ConnectorInfo {
+    card
+      .connectors
+      .iter()
+      .map(|(info, _)| info.clone())
+      .find(|info| info.name == name)
+      .expect("a known connector")
+  }
+
+  #[test]
+  fn each_monitor_gets_a_crtc_and_primary_plane_of_its_own() {
+    let mut device = FakeKms::single_output();
+    let dp_crtc = device.add_pipe(connector_info(20, "DP-1"));
+    // A third connector that only the first CRTC can drive.
+    device.add_connector(connector_info(21, "DP-2"));
+    let card = probe(&mut device).unwrap();
+    let (hdmi, dp1, dp2) = (
+      wanted(&card, "HDMI-A-1"),
+      wanted(&card, "DP-1"),
+      wanted(&card, "DP-2"),
+    );
+    let want = |connector| Wanted {
+      connector,
+      lit: None,
+    };
+    let allocated = card.allocate(&[want(&hdmi), want(&dp1), want(&dp2)]);
+    assert_eq!(allocated[0], Some((device.crtc_id, device.plane_id)));
+    assert_eq!(allocated[1].map(|(crtc, _)| crtc), Some(dp_crtc));
+    assert_ne!(allocated[1].map(|(_, plane)| plane), Some(device.plane_id));
+    assert_eq!(allocated[2], None, "its only CRTC is taken");
+    // Lit outputs keep theirs: DP-2, lit on the first CRTC, keeps it.
+    let lit = Wanted {
+      connector: &dp2,
+      lit: Some((device.crtc_id, device.plane_id)),
+    };
+    let allocated = card.allocate(&[want(&hdmi), lit]);
+    assert_eq!(allocated, [None, Some((device.crtc_id, device.plane_id))]);
+  }
+
+  #[test]
+  fn the_teardown_of_several_outputs_spares_all_of_them() {
+    let mut device = FakeKms::single_output();
+    let (other_connector, other_crtc, cursor) = device.add_lit_neighbours();
+    let card = probe(&mut device).unwrap();
+    let hdmi = card
+      .output(&wanted(&card, "HDMI-A-1"), &mut |_| None)
+      .unwrap();
+    let teardown = card.teardown_except(&[&hdmi.props]).unwrap();
+    assert_eq!(teardown, hdmi.teardown);
+    assert_eq!(teardown.connectors[0].id, other_connector);
+    // With DP-1's connector and CRTC in use too, only the cursor plane
+    // is left to turn off.
+    let mut dp = hdmi.props.clone();
+    dp.connector.id = other_connector;
+    dp.crtc.id = other_crtc;
+    let teardown = card.teardown_except(&[&hdmi.props, &dp]).unwrap();
+    assert!(teardown.connectors.is_empty() && teardown.crtcs.is_empty());
+    assert_eq!(
+      teardown.planes.iter().map(|p| p.id).collect::<Vec<_>>(),
+      [cursor]
     );
   }
 

@@ -4,7 +4,7 @@
 
 use std::{
   cell::RefCell,
-  collections::{BTreeMap, HashMap, VecDeque},
+  collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
   io,
   os::fd::BorrowedFd,
   rc::Rc,
@@ -107,8 +107,8 @@ pub(crate) struct FakeKms {
   next_id: u32,
   /// Dumb buffers that exist, with their contents.
   pub(crate) buffers: BTreeMap<u32, (DumbFramebuffer, Vec<u8>)>,
-  /// Whether a commit with `PAGE_FLIP_EVENT` awaits its event.
-  pub(crate) flip_pending: bool,
+  /// The CRTCs whose commit with `PAGE_FLIP_EVENT` awaits its event.
+  pub(crate) pending: BTreeSet<CrtcId>,
   /// Events waiting to be read.
   pub(crate) events: VecDeque<PageFlip>,
   /// Whether dumb buffer allocation fails.
@@ -143,7 +143,7 @@ impl FakeKms {
       blobs: BTreeMap::new(),
       next_id: 100,
       buffers: BTreeMap::new(),
-      flip_pending: false,
+      pending: BTreeSet::new(),
       events: VecDeque::new(),
       no_buffers: false,
       edids: HashMap::new(),
@@ -243,20 +243,90 @@ impl FakeKms {
     self.reject = Box::new(|_, _| None);
   }
 
-  /// Completes the pending flip at `time` with vblank `sequence`.
+  /// Whether any CRTC has a flip pending.
+  pub(crate) fn flip_pending(&self) -> bool {
+    !self.pending.is_empty()
+  }
+
+  /// Completes the one pending flip at `time` with vblank `sequence`.
   pub(crate) fn complete_flip(&mut self, time: Duration, sequence: u32) {
-    assert!(self.flip_pending, "no flip is pending");
-    self.flip_pending = false;
+    assert_eq!(self.pending.len(), 1, "one flip is pending");
+    let crtc = *self.pending.first().expect("a pending flip");
+    self.complete_flip_on(crtc, time, sequence);
+  }
+
+  /// Completes the flip pending on `crtc`.
+  pub(crate) fn complete_flip_on(
+    &mut self,
+    crtc: CrtcId,
+    time: Duration,
+    sequence: u32,
+  ) {
+    assert!(self.pending.remove(&crtc), "no flip is pending on {crtc:?}");
     self.events.push_back(PageFlip {
-      crtc: self.crtc_id,
+      crtc,
       sequence,
       time,
     });
   }
 
-  /// Loses the pending flip's event, as a hung driver does.
+  /// Loses every pending flip's event, as a hung driver does.
   pub(crate) fn lose_flip(&mut self) {
-    self.flip_pending = false;
+    self.pending.clear();
+  }
+
+  /// Adds a CRTC with a primary plane of its own, and returns both ids.
+  pub(crate) fn add_crtc(&mut self) -> (CrtcId, PlaneId) {
+    let crtc = CrtcId(self.alloc());
+    let plane = PlaneId(self.alloc());
+    self.extra_crtcs.push(crtc);
+    self.extra_planes.push((plane, 1, vec![crtc]));
+    (crtc, plane)
+  }
+
+  /// Adds connector `info` with a CRTC and primary plane of its own that
+  /// only it can use, as a card with one CRTC per port has. Returns the
+  /// CRTC.
+  pub(crate) fn add_pipe(&mut self, mut info: ConnectorInfo) -> CrtcId {
+    let (crtc, _) = self.add_crtc();
+    info.possible_crtcs = vec![crtc];
+    self.extra_connectors.push(info);
+    crtc
+  }
+
+  /// The CRTCs a request touches: those it sets, and those of the planes
+  /// and connectors it sets, as they are or will be attached.
+  fn touched(
+    &self,
+    request: &AtomicRequest,
+    names: &HashMap<PropertyId, String>,
+  ) -> BTreeSet<CrtcId> {
+    let mut crtcs = BTreeSet::new();
+    for (object, property, value) in request.entries() {
+      let name = names.get(property).map(String::as_str);
+      match (object, name) {
+        (Object::Crtc(crtc), _) => {
+          crtcs.insert(*crtc);
+        }
+        (Object::Plane(_) | Object::Connector(_), Some("CRTC_ID")) => {
+          if *value != 0 {
+            crtcs.insert(CrtcId(*value as u32));
+          }
+          let now = self.value(object.id(), "CRTC_ID");
+          if now != 0 {
+            crtcs.insert(CrtcId(now as u32));
+          }
+        }
+        (Object::Plane(plane), _) => {
+          let now = self.value(plane.0, "CRTC_ID");
+          if now != 0 {
+            crtcs.insert(CrtcId(now as u32));
+          }
+        }
+        _ => {}
+      }
+    }
+    crtcs
   }
 
   /// The commits that were not `TEST_ONLY`.
@@ -382,12 +452,15 @@ impl KmsDevice for FakeKms {
       info.current_crtc = (crtc != 0).then_some(CrtcId(crtc as u32));
       return Ok(info);
     }
-    self
+    let crtc = self.value(id.0, "CRTC_ID");
+    let mut info = self
       .extra_connectors
       .iter()
       .find(|info| info.id == id)
       .cloned()
-      .ok_or_else(|| io::ErrorKind::NotFound.into())
+      .ok_or(io::ErrorKind::NotFound)?;
+    info.current_crtc = (crtc != 0).then_some(CrtcId(crtc as u32));
+    Ok(info)
   }
 
   fn crtc(&mut self, id: CrtcId) -> io::Result<CrtcInfo> {
@@ -484,8 +557,9 @@ impl KmsDevice for FakeKms {
       .map(|(name, id)| (*id, name.clone()))
       .collect();
     let mut error = (self.reject)(request, flags);
+    let touched = self.touched(request, &names);
     if error.is_none()
-      && self.flip_pending
+      && !touched.is_disjoint(&self.pending)
       && !flags.contains(CommitFlags::TEST_ONLY)
     {
       // The kernel allows one pending commit per CRTC.
@@ -513,7 +587,7 @@ impl KmsDevice for FakeKms {
       self.value_mut(object.id(), &name, *value);
     }
     if flags.contains(CommitFlags::PAGE_FLIP_EVENT) {
-      self.flip_pending = true;
+      self.pending.extend(touched);
     }
     Ok(())
   }
