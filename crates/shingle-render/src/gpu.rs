@@ -285,6 +285,8 @@ impl GpuContext {
   }
 
   /// Sets the wlr-gamma-control ramp: 256 red, then green, then blue values.
+  /// It maps each tile's sRGB bytes, as a display's gamma LUT maps the
+  /// bytes it is sent.
   pub fn set_gamma_ramp(&mut self, ramp: &[u16]) -> Result<(), RenderError> {
     self.gamma_lut.set(&self.queue, ramp)
   }
@@ -834,15 +836,15 @@ mod tests {
     let target = OffscreenTarget::new(&gpu, 3, 1).expect("target");
     target.render(&gpu, &RenderState::default(), &tiles, [1.0; 4]);
     let rgba = target.read_rgba(&gpu).expect("readback");
-    // The gamma LUT is indexed by 8-bit linear values, which loses a few
-    // steps of dark sRGB values.
+    // The gamma LUT is indexed by sRGB bytes, so a texel's bytes come
+    // out as they went in.
     let close = |actual: &[u8], expected: [u8; 4]| {
       actual
         .iter()
         .zip(expected)
-        .all(|(&actual, expected)| actual.abs_diff(expected) <= 4)
+        .all(|(&actual, expected)| actual.abs_diff(expected) <= 1)
     };
-    assert!(close(&rgba[0..4], [100, 50, 25, 255]), "{:?}", &rgba[0..4]);
+    assert_eq!(&rgba[0..4], [100, 50, 25, 255]);
     assert_eq!(&rgba[4..8], [255, 255, 255, 255]);
     assert!(
       close(&rgba[8..12], [128, 128, 128, 255]),

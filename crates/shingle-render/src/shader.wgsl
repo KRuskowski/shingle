@@ -26,6 +26,12 @@ fn srgb_to_linear(value: vec3<f32>) -> vec3<f32> {
     return select(high, low, value <= vec3<f32>(0.04045));
 }
 
+fn linear_to_srgb(value: vec3<f32>) -> vec3<f32> {
+    let low = value * 12.92;
+    let high = 1.055 * pow(value, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(high, low, value <= vec3<f32>(0.0031308));
+}
+
 @group(0) @binding(0) var tile_texture: texture_2d<f32>;
 @group(0) @binding(1) var tile_sampler: sampler;
 @group(1) @binding(0) var gamma_lut: texture_2d<f32>;
@@ -56,10 +62,18 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         texel.a = 1.0;
     }
     let color = texel * input.color;
-    let red = textureLoad(gamma_lut, vec2<i32>(i32(color.r * 255.0), 0), 0).r;
-    let green = textureLoad(gamma_lut, vec2<i32>(i32(color.g * 255.0), 0), 0).g;
-    let blue = textureLoad(gamma_lut, vec2<i32>(i32(color.b * 255.0), 0), 0).b;
-    let corrected = vec4<f32>(red, green, blue, color.a);
+    // A gamma ramp maps the bytes sent to the display, so the LUT is
+    // indexed by the colour's sRGB byte, and its entry, a byte too, is
+    // decoded again for the sRGB target. With the identity ramp every byte
+    // comes out as it went in.
+    let encoded =
+        linear_to_srgb(clamp(color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    let index = vec3<i32>(round(encoded * 255.0));
+    let red = textureLoad(gamma_lut, vec2<i32>(index.r, 0), 0).r;
+    let green = textureLoad(gamma_lut, vec2<i32>(index.g, 0), 0).g;
+    let blue = textureLoad(gamma_lut, vec2<i32>(index.b, 0), 0).b;
+    let corrected =
+        vec4<f32>(srgb_to_linear(vec3<f32>(red, green, blue)), color.a);
     if (effects.inverted == 1u) {
         if (effects.preserve_hue == 1u) {
             let hue = corrected.a - min(corrected.r, min(corrected.g, corrected.b))
