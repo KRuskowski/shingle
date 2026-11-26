@@ -71,7 +71,7 @@ class PresentCheckTest(unittest.TestCase):
   """present_check.py's comparison of feedback with page flips."""
 
   LOG = [
-      'shingle: output HDMI-A-1: 1920x1080 at 60.000 Hz, copy scanout',
+      'shingle: output HDMI-A-1: 1920x1080 at 60.000 Hz',
       'shingle: page flip seq=10 at 100.016000000 s',
       'shingle: page flip seq=11 at 100.032666000 s',
   ]
@@ -134,6 +134,28 @@ class PresentCheckTest(unittest.TestCase):
     flips = present_check.parse_flips(self.LOG)
     problems, _ = present_check.check(flips, self.events(seq=12, flags=1))
     self.assertEqual(len(problems), 2)
+
+  def test_zero_copy_is_counted_and_can_be_required(self):
+    flips = present_check.parse_flips(self.LOG)
+    events = self.events(flags=0xf)
+    problems, statistics = present_check.check(flips, events)
+    self.assertEqual((problems, statistics['zero_copy']), ([], 1))
+    problems, _ = present_check.check(flips, events, 'zero-copy')
+    self.assertEqual(problems, [])
+    problems, _ = present_check.check(flips, events, 'copy')
+    self.assertEqual(problems, ['frame 0: presented as zero-copy'])
+    problems, statistics = present_check.check(
+        flips, self.events(), 'zero-copy')
+    self.assertEqual(problems, ['frame 0: not presented as zero-copy'])
+    self.assertEqual(statistics['zero_copy'], 0)
+
+  def test_options_are_parsed(self):
+    args = present_check.parse_args(
+        ['--output', 'DP-1', '--scanout', 'copy', 'log', 'probe'])
+    self.assertEqual((args.output, args.scanout, args.native_log,
+                      args.probe_output), ('DP-1', 'copy', 'log', 'probe'))
+    self.assertIsNone(present_check.parse_args(['--scanout', 'gbm', 'a', 'b']))
+    self.assertIsNone(present_check.parse_args(['only-one']))
 
   def test_no_feedback_fails(self):
     problems, _ = present_check.check({}, [])

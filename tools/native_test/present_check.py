@@ -2,7 +2,8 @@
 """Checks presentation feedback and frame callbacks against page flips.
 
 Usage:
-  tools/native_test/present_check.py [--output NAME] NATIVE_LOG PROBE_OUTPUT
+  tools/native_test/present_check.py [--output NAME]
+      [--scanout zero-copy|copy] NATIVE_LOG PROBE_OUTPUT
 
 NATIVE_LOG is Shingle's native.log from a run with SHINGLE_TRACE_FLIPS=1,
 which has a line `shingle: OUTPUT: page flip seq=S at SEC.NSEC s` for
@@ -17,16 +18,20 @@ JSON-line output of the present_probe example
 - every frame callback's time is a logged flip's time in milliseconds, at
   or after the commit it answers, and callbacks never go back in time;
 - presented sequences strictly increase and carry the flags
-  vsync | hw_clock | hw_completion.
+  vsync | hw_clock | hw_completion;
+- with `--scanout zero-copy`, every presented frame also carries
+  zero_copy, and with `--scanout copy` none does (NB-8's zero-copy
+  scanout, and copy scanout as SHINGLE_SCANOUT=copy forces it).
 
-It prints the number of flips and of presented and discarded feedback,
-the largest difference between a feedback and its flip, and the median
-time between frame callbacks, which is one refresh when every frame
-makes the next vblank.
+It prints the number of flips, of presented and discarded feedback and of
+frames presented as zero-copy, the largest difference between a feedback
+and its flip, and the median time between frame callbacks, which is one
+refresh when every frame makes the next vblank.
 
 It only reads two files and is safe anywhere.
 """
 
+import argparse
 import json
 import re
 import sys
@@ -35,9 +40,9 @@ FLIP = re.compile(
     r'(?:shingle: )?(?:(\S+): )?page flip seq=(\d+) at (\d+)\.(\d{9}) s')
 # wp_presentation_feedback.kind: vsync, hw_clock and hw_completion.
 FLIP_FLAGS = 0x1 | 0x2 | 0x4
+# wp_presentation_feedback.kind.zero_copy.
+ZERO_COPY = 0x8
 TOLERANCE_NS = 1_000_000
-USAGE = ('usage: present_check.py [--output NAME] NATIVE_LOG '
-         'PROBE_OUTPUT')
 
 def parse_flips(lines, output=None):
   """Returns {sequence: time in ns} from native.log lines, only of the
@@ -62,8 +67,10 @@ def parse_probe(lines):
       events.append(json.loads(line))
   return events
 
-def check(flips, events):
-  """Returns (problems, statistics) for the probe's events."""
+def check(flips, events, scanout=None):
+  """Returns (problems, statistics) for the probe's events. `scanout` is
+  'zero-copy' or 'copy' to require every presented frame to carry the
+  zero_copy flag or none to, or None to accept either."""
   problems = []
   commits = {}
   flip_ms = {(time // 1_000_000) & 0xffffffff for time in flips.values()}
@@ -100,6 +107,11 @@ def check(flips, events):
       last_seq = seq
       if event['flags'] & FLIP_FLAGS != FLIP_FLAGS:
         problems.append(f'frame {n}: flags {event["flags"]:#x}')
+      zero_copy = bool(event['flags'] & ZERO_COPY)
+      if scanout == 'zero-copy' and not zero_copy:
+        problems.append(f'frame {n}: not presented as zero-copy')
+      if scanout == 'copy' and zero_copy:
+        problems.append(f'frame {n}: presented as zero-copy')
   frame_times = [e['time_ms'] for e in events if e.get('event') == 'frame']
   intervals = sorted(
       later - earlier for earlier, later in zip(frame_times, frame_times[1:]))
@@ -108,6 +120,8 @@ def check(flips, events):
       'flips': len(flips),
       'presented': sum(1 for e in events if e.get('event') == 'presented'),
       'discarded': sum(1 for e in events if e.get('event') == 'discarded'),
+      'zero_copy': sum(1 for e in events if e.get('event') == 'presented'
+                       and e['flags'] & ZERO_COPY),
       'max_difference_ns': max(differences, default=0),
       'median_frame_interval_ms': median,
   }
@@ -115,19 +129,29 @@ def check(flips, events):
     problems.append('no presented feedback')
   return problems, statistics
 
+def parse_args(argv):
+  """Returns the parsed arguments, or None after printing the usage."""
+  parser = argparse.ArgumentParser(prog='present_check.py')
+  parser.add_argument('--output', help='check only this output\'s flips')
+  parser.add_argument('--scanout', choices=('zero-copy', 'copy'),
+                      help='require every frame to be presented this way')
+  parser.add_argument('native_log')
+  parser.add_argument('probe_output')
+  try:
+    return parser.parse_args(argv)
+  except SystemExit:
+    return None
+
 def main(argv):
   """Runs the check on the files in `argv`; returns the exit status."""
-  output = None
-  if len(argv) == 4 and argv[0] == '--output':
-    output, argv = argv[1], argv[2:]
-  if len(argv) != 2:
-    print(USAGE, file=sys.stderr)
+  args = parse_args(argv)
+  if args is None:
     return 2
-  with open(argv[0], encoding='utf-8', errors='replace') as log:
-    flips = parse_flips(log, output)
-  with open(argv[1], encoding='utf-8') as probe:
+  with open(args.native_log, encoding='utf-8', errors='replace') as log:
+    flips = parse_flips(log, args.output)
+  with open(args.probe_output, encoding='utf-8') as probe:
     events = parse_probe(probe)
-  problems, statistics = check(flips, events)
+  problems, statistics = check(flips, events, args.scanout)
   print(json.dumps(statistics))
   for problem in problems:
     print(problem)
