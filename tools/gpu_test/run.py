@@ -29,7 +29,7 @@ namespaces:
       --checks offscreen|nested|baseline|buffers|dmabuf|browsers|xwayland|
                nested-gpu|nodmabuf|weston|syncobj|nosyncobj|outputs|
                nested-outputs|nested-smoke|wayfire-plugins|wayfire-shell|
-               vswipe|decoration ...
+               vswipe|decoration|switcher ...
 
 For example, DB-1's import test:
 
@@ -57,8 +57,10 @@ a headless Shingle, and of the nested smoke test with one window
 WG-2's checks under a wayfire.ini (wayfire_checks.py) are `--checks
 wayfire-plugins wayfire-shell`, WG-5's touchpad workspace swipes
 through `stipc/feed_gesture` (vswipe_checks.py) are `--checks vswipe`,
-and WG-6's server-side frames, drawn and clicked through STIPC
-(decoration_checks.py), are `--checks decoration`.
+WG-6's server-side frames, drawn and clicked through STIPC
+(decoration_checks.py), are `--checks decoration`, and WG-7's Alt+Tab
+thumbnails, through STIPC keys (switcher_checks.py), are `--checks
+switcher`.
 
 It exits with the command's status, or 1 when a check failed. With
 `--checks` it prints one PASS or FAIL line per check and INFO lines for
@@ -68,7 +70,8 @@ through `signal_checked`. The pure helpers are tested by
 `python3 -m unittest` in this directory (test_run.py, test_checks.py,
 test_dmabuf_checks.py, test_output_checks.py,
 test_nested_output_checks.py, test_wayfire_checks.py,
-test_vswipe_checks.py, test_decoration_checks.py).
+test_vswipe_checks.py, test_decoration_checks.py,
+test_switcher_checks.py).
 The work directory under `target/` is removed afterwards unless `--keep`
 is given.
 """
@@ -94,13 +97,14 @@ PRIVATE_ENTRIES = ('pts', 'ptmx', 'shm', 'fd', 'stdin', 'stdout', 'stderr')
 SAMPLE_INTERVAL = 0.05
 # checks.GROUPS, dmabuf_checks.GROUPS, output_checks.GROUPS,
 # nested_output_checks.GROUPS, wayfire_checks.GROUPS,
-# vswipe_checks.GROUPS and decoration_checks.GROUPS, kept here so that
+# vswipe_checks.GROUPS, decoration_checks.GROUPS and
+# switcher_checks.GROUPS, kept here so that
 # `--help` works without importing them.
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
                 'weston', 'syncobj', 'nosyncobj', 'outputs', 'nested-outputs',
                 'nested-smoke', 'wayfire-plugins', 'wayfire-shell', 'vswipe',
-                'decoration')
+                'decoration', 'switcher')
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset; `syncobj` runs no Vulkan client.
 MODESET_GROUPS = ('dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
