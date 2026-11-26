@@ -30,7 +30,7 @@ There is one binary, `shingle`, which picks its backend the way Wayfire does:
 
 Shingle reads `$XDG_CONFIG_HOME/shingle/shingle.yaml`, or `~/.config/shingle/shingle.yaml` when `XDG_CONFIG_HOME` is unset. [data/shingle.yaml](data/shingle.yaml) lists the available settings and default shortcuts.
 
-YAML is the native format, and misspelled options are rejected. Wayfire and i3 configuration can be imported: files ending in `.ini`, or starting with an INI section, are read as Wayfire configuration, and `.conf` and `.i3` files as i3 configuration. Not every Wayfire or i3 option is supported yet.
+YAML is the native format, and misspelled options are rejected. Wayfire and i3 configuration can be imported: files ending in `.ini`, or starting with an INI section, are read as Wayfire configuration, and `.conf` and `.i3` files as i3 configuration. Not every Wayfire or i3 option is supported yet. A `wayfire.ini` is read as Wayfire reads it, including the one WCM writes: a value Shingle cannot use keeps its default and is reported with its line, so the file still loads; `shingle-wcm --check` lists those warnings.
 
 WCM is a graphical configuration editor that can also validate and convert files:
 

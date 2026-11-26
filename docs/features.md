@@ -2,6 +2,12 @@
 
 Detailed behaviour of the features Shingle implements, with their configuration. The Wayfire IPC surface is described separately in [ipc.md](ipc.md).
 
+## Importing Wayfire configuration
+
+A `wayfire.ini` is read line by line as Wayfire's wf-config reads it: every `#` not preceded by `\` starts a comment, `\#` is a literal `#` (WCM writes every hex colour as `\#RRGGBBAA`), a line ending in `\` continues on the next, as in Wayfire's own `plugins = \` list, and names and values are trimmed. A value Shingle cannot use keeps its default and is reported as a warning with its line, section and option, as Wayfire logs it, and the rest of the file still loads; so is each section of a plugin Shingle does not have (`[blur]`, `[cube]`, `[decoration]`, `[vswipe]`, `[wayfire-shell]`, `[wobbly]` and others), once. Activators keep their keys and buttons; a modifier alone (`toggle_menu = <super>`), touch gestures (`pinch in 4`, `swipe up 3`, `edge-swipe left 2`) and hotspots (`hotspot top-left 10x10 500`) are recognised, reported as not supported yet and never bound. Where Shingle's option takes one binding, the first key or button is used. The animations Shingle lacks fall back with a warning: `squeezimize` to `zoom`, and `fire`, `zap` and `spin` to `fade`. View matchers take Wayfire's `focusable equals true` form, so Wayfire's default `animate/enabled_for` works. Colours may be `#RRGGBBAA`, `#RGBA`, `#RRGGBB` or four numbers. i3 files warn the same way; YAML stays strict and rejects any bad value.
+
+`shingle` prints the warnings once when it starts and again on a reload, as `shingle: PATH: line N: MESSAGE`. `shingle-wcm --config PATH --check` prints them and exits 0, or 1 when the file cannot be read.
+
 ## Overviews and effects
 
 ### Scale overview

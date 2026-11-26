@@ -27,9 +27,9 @@ Ranked by how much a daily Wayfire user with the tiling plugin would notice them
 
 ### Blocking
 
-**B1. The INI reader is not wf-config's, and a WCM-written `wayfire.ini` does not load.** WCM writes every colour with an escaped sharp, `\#RRGGBBAA` (wf-config:src/file.cpp:84 `remove_escaped_sharps`, and :481 when writing). Shingle's `strip_comment` (wayfire.rs:776) leaves the backslash in place, and `parse_color` (config/lib.rs:670) only accepts a value starting with `#` or four numbers, so `[core] background_color = \#101010FF` is an error, and the importer returns it (wayfire.rs:529) and Shingle refuses to start (crates/shingle-bin/src/main.rs:117). The operator's file has nine such colours that the importer reads (`core`, `expo`, `scale`, `scale-title-filter`, `simple-tile`, `vswitch`). Two smaller parser differences go with it: wf-config joins lines ending in `\` (wf-config:src/file.cpp:134 `join_lines`), which Wayfire's own wayfire.ini uses for `plugins = \` (wayfire:wayfire.ini:49), and Shingle reads only the first line; and wf-config treats every unescaped `#` as a comment (wf-config:src/file.cpp:109), where Shingle needs whitespace before it and keeps hexadecimal colours.
+**B1. The INI reader is not wf-config's, and a WCM-written `wayfire.ini` does not load.** (Fixed by WG-1, see [WG-1 as built](#wg-1-as-built).) WCM writes every colour with an escaped sharp, `\#RRGGBBAA` (wf-config:src/file.cpp:84 `remove_escaped_sharps`, and :481 when writing). Shingle's `strip_comment` (wayfire.rs:776) leaves the backslash in place, and `parse_color` (config/lib.rs:670) only accepts a value starting with `#` or four numbers, so `[core] background_color = \#101010FF` is an error, and the importer returns it (wayfire.rs:529) and Shingle refuses to start (crates/shingle-bin/src/main.rs:117). The operator's file has nine such colours that the importer reads (`core`, `expo`, `scale`, `scale-title-filter`, `simple-tile`, `vswitch`). Two smaller parser differences go with it: wf-config joins lines ending in `\` (wf-config:src/file.cpp:134 `join_lines`), which Wayfire's own wayfire.ini uses for `plugins = \` (wayfire:wayfire.ini:49), and Shingle reads only the first line; and wf-config treats every unescaped `#` as a comment (wf-config:src/file.cpp:109), where Shingle needs whitespace before it and keeps hexadecimal colours.
 
-**B2. One value Shingle does not support rejects the whole file.** wf-config logs an option it cannot parse and keeps the default (wf-config:src/file.cpp:339, `OPTION_PARSED_INVALID_CONTENTS`), and Wayfire's matcher falls back to the option's default (wayfire:src/core/matcher.cpp:36). Shingle's importer returns the first error and its `validate` (config/lib.rs:413) rejects whole configurations, so Shingle does not start. Values a real `wayfire.ini` holds that do this:
+**B2. One value Shingle does not support rejects the whole file.** (Fixed by WG-1, see [WG-1 as built](#wg-1-as-built).) wf-config logs an option it cannot parse and keeps the default (wf-config:src/file.cpp:339, `OPTION_PARSED_INVALID_CONTENTS`), and Wayfire's matcher falls back to the option's default (wayfire:src/core/matcher.cpp:36). Shingle's importer returns the first error and its `validate` (config/lib.rs:413) rejects whole configurations, so Shingle does not start. Values a real `wayfire.ini` holds that do this:
 
 - Wayfire's own default `[animate] enabled_for`, `(type equals "toplevel" | (type equals "x-or" & focusable equals true))` (wayfire:metadata/animate.xml:87), which WCM wrote into the operator's file: Shingle's matcher accepts a predicate only bare or with `is true|false` (crates/shingle-config/src/view_matcher.rs:294), so `focusable equals true` is a parse error.
 - The animation names Wayfire has and Shingle lacks: `fire`, `zap`, `spin` and `squeezimize`, which is Wayfire's default `minimize_animation` (wayfire:metadata/animate.xml), fail `validate` (config/lib.rs:559-582).
@@ -92,8 +92,8 @@ Every plugin and object in wayfire:metadata/ and every plugin in wayfire:plugins
 
 | Option | Status | Evidence |
 | --- | --- | --- |
-| `open_animation`, `close_animation`, `minimize_animation` | partly: only `none`, `fade` and `zoom`; `fire`, `zap`, `spin` and `squeezimize` (the minimize default) are rejected (B2) | 391-399; config/lib.rs:559-582 |
-| `enabled_for` | partly: imported, but Wayfire's default text does not parse (B2) | 388; crates/shingle-config/src/view_matcher.rs:294 |
+| `open_animation`, `close_animation`, `minimize_animation` | partly: only `none`, `fade` and `zoom`; since WG-1 `squeezimize` (the minimize default) becomes `zoom` and `fire`, `zap` and `spin` become `fade`, each with a warning (B2 before WG-1) | 391-399; config/lib.rs:559-582 |
+| `enabled_for` | implemented since WG-1, which parses Wayfire's default text (B2 before) | 388; crates/shingle-config/src/view_matcher.rs:294 |
 | `duration` | implemented (easing curve ignored) | 400; crates/shingle-frontend/src/frontend/animation.rs:154 |
 | `startup_duration`, `fade_enabled_for`, `fade_duration`, `zoom_enabled_for`, `zoom_duration`, `fire_enabled_for`, `fire_duration`, `fire_particles`, `fire_particle_size`, `random_fire_color`, `fire_color`, `squeezimize_duration`, `zap_duration`, `spin_duration`, `spin_rotations` | missing | no arm; config/lib.rs:1272 `AnimateConfig` has none of them |
 
@@ -114,7 +114,7 @@ Every plugin and object in wayfire:metadata/ and every plugin in wayfire:plugins
 
 | Option | Status | Evidence |
 | --- | --- | --- |
-| `bindings`, `repeatable_bindings`, `always_bindings`, `release_bindings` (`binding_N`/`repeatable_binding_N`/`always_binding_N`/`release_binding_N` with `command_N`) | implemented for keys and buttons; partly for activators that are gestures, hotspots or a bare modifier (B2) | 622-644, 722-734; crates/shingle-frontend/src/frontend/bindings.rs:252 |
+| `bindings`, `repeatable_bindings`, `always_bindings`, `release_bindings` (`binding_N`/`repeatable_binding_N`/`always_binding_N`/`release_binding_N` with `command_N`) | implemented for keys and buttons; gestures, hotspots and a bare modifier are recognised and warned about since WG-1, and never bound (B2 before) | 622-644, 722-734; crates/shingle-frontend/src/frontend/bindings.rs:252 |
 
 ### core
 
@@ -123,7 +123,7 @@ Every plugin and object in wayfire:metadata/ and every plugin in wayfire:plugins
 | `plugins` | partly: only `preserve-output` is honoured (B4) | 645 |
 | `close_top_view`, `exit` | implemented | 538, 547 |
 | `vwidth`, `vheight` | implemented (default differs, B3) | 597, 600 |
-| `background_color` | implemented, but `\#` values fail (B1) | 528 |
+| `background_color` | implemented; `\#` values since WG-1 (B1 before) | 528 |
 | `preferred_decoration_mode` | partly: `server` is announced but nothing is drawn (A4) | 508; crates/shingle/src/decoration.rs:22 |
 | `xwayland`, `xwayland_startup_script` | implemented | 511, 519 |
 | `focus_button_with_modifiers`, `focus_buttons`, `focus_buttons_passthrough` | implemented | 531-537; crates/shingle/src/input.rs:1080 |
@@ -272,7 +272,7 @@ Missing: no `org_kde_kwin_appmenu_manager` (wayfire:plugins/protocols/kde-appmen
 
 | Option | Status | Evidence |
 | --- | --- | --- |
-| `toggle`, `toggle_all`, `duration`, `allow_zoom`, `middle_click_close`, `include_minimized`, `close_on_new_view`, `spacing`, `outer_margin`, `inactive_alpha`, `minimized_alpha`, `title_overlay`, `title_font_size`, `title_position`, `bg_color`, `text_color` | implemented (colours fail when escaped, B1) | 324-387; crates/shingle-frontend/src/scale.rs:89 |
+| `toggle`, `toggle_all`, `duration`, `allow_zoom`, `middle_click_close`, `include_minimized`, `close_on_new_view`, `spacing`, `outer_margin`, `inactive_alpha`, `minimized_alpha`, `title_overlay`, `title_font_size`, `title_position`, `bg_color`, `text_color` | implemented (escaped colours since WG-1, B1 before) | 324-387; crates/shingle-frontend/src/scale.rs:89 |
 
 ### scale-title-filter
 
@@ -297,7 +297,7 @@ Missing: no `org_kde_kwin_appmenu_manager` (wayfire:plugins/protocols/kde-appmen
 
 | Option | Status | Evidence |
 | --- | --- | --- |
-| `tile_by_default`, `keep_fullscreen_on_adjacent`, `button_move`, `button_resize`, `key_toggle`, `key_focus_left`, `key_focus_right`, `key_focus_above`, `key_focus_below`, `key_toggle_maximized`, `inner_gap_size`, `outer_horiz_gap_size`, `outer_vert_gap_size`, `animation_duration`, `preview_base_color`, `preview_base_border`, `preview_border_width` | implemented (colours fail when escaped, B1); `get-layout`, `set-layout` and `set-show-maximized` over IPC | 33-79, 113, 140-145; crates/shingle-core/src/tree.rs, crates/shingle/src/state.rs:153 |
+| `tile_by_default`, `keep_fullscreen_on_adjacent`, `button_move`, `button_resize`, `key_toggle`, `key_focus_left`, `key_focus_right`, `key_focus_above`, `key_focus_below`, `key_toggle_maximized`, `inner_gap_size`, `outer_horiz_gap_size`, `outer_vert_gap_size`, `animation_duration`, `preview_base_color`, `preview_base_border`, `preview_border_width` | implemented (escaped colours since WG-1, B1 before); `get-layout`, `set-layout` and `set-show-maximized` over IPC | 33-79, 113, 140-145; crates/shingle-core/src/tree.rs, crates/shingle/src/state.rs:153 |
 
 Shingle also reads `key_move_*` and `key_resize_*` from `[simple-tile]` (116-137); they are not Wayfire options.
 
@@ -436,6 +436,22 @@ Acceptance:
 - Unit tests: each wf-config rule above; Wayfire's stock wayfire:wayfire.ini at the pinned commit imports with no warning except unsupported plugins' options; a fixture written the way WCM writes (every section, `\#` colours, `400ms circle` durations, Wayfire's default `enabled_for`, `toggle_menu = <super>`, a `pinch in 4` activator) imports with the expected warnings and values; `squeezimize`, `fire`, `zap` and `spin` warn and fall back; the old silent `4` binding from `pinch in 4` is gone.
 - `shingle-wcm --check` prints the warnings with line numbers and exits 0 for both files, and non-zero for an unreadable file.
 - Real run: headless Shingle in tools/output_test/run.py's namespace starts with `--config` pointing at the WCM-style fixture, logs the warnings once, and `wayfire/get-config-option` returns the imported `core/background_color` and `simple-tile/inner_gap_size`.
+
+#### WG-1 as built
+
+The importer reads lines as wf-config does (crates/shingle-config/src/ini.rs): the first `#` not preceded by `\` ends the line, `\#` becomes `#`, trailing whitespace goes, a line ending in `\` is joined to the next (a trailing `\\`, which WCM writes for a value ending in a backslash, is one literal `\` and does not continue), and names and values are trimmed with wf-config's quirks. Each option is applied on its own (crates/shingle-config/src/import.rs): when its value does not parse, or the result fails a range check of `ShingleConfig::validate`, the option goes back to what it was and a `ConfigWarning` names its line, section and option; `ShingleConfig::load_with_warnings` and `parse_with_warnings` return the warnings with the configuration, and `load` and `parse` drop them. Lines before any section and lines without `=` warn as wf-config's do, a section of a plugin Shingle does not have warns once with its option count, and Expo workspace bindings and `assign_workspace` rules outside the workspace grid are dropped with a warning once the whole file is read, so the order of `[core]` and `[expo]` does not matter. The i3 importer applies lines the same way, as decision 1 says. `shingle` prints each warning once at start (and on a reload) as `shingle: PATH: line N: MESSAGE`; `shingle-wcm --check` prints them and exits 0, and 1 when the file cannot be read.
+
+Activators are split into alternatives (crates/shingle-config/src/activator.rs) as wf-config:src/types.cpp splits them: keys and buttons, `none`/`disabled`, a modifier alone, touch gestures and hotspots, and anything else, which wf-config keeps as an extension. The view matcher takes `PREDICATE is|equals true|false`, and its `type` compares any of Wayfire's view types.
+
+Where the code differs from the plan above, and why:
+
+- The binding kinds are recognised inside the importer and are not part of `Binding` or the YAML model: nothing can act on them yet, a model field would have to be written back to YAML, and WG-4 adds modifier-only bindings to the model together with the code that matches them. A field that takes one binding uses the first key or button and warns about the others; an activator with no key or button disables the binding, since the user bound no key, and a command bound that way stays in the list with a disabled binding.
+- Options of plugins Shingle has but that it does not read (`[animate] fire_duration`, `[autostart] autostart_wf_shell`) are still silent. Telling them from typing mistakes needs WG-2's table of Wayfire's options.
+- wf-config's `#RGBA` colours are read too; Shingle's own `#RRGGBB` stays. An unescaped `#` after `=` is now a comment, as in wf-config, so a hand-written `background_color = #FF0000FF`, which Shingle used to read, now warns and keeps the default.
+- The frontend still calls every layer-shell surface `overlay` when it evaluates `animate/enabled_for`; telling `background` and `panel` apart needs the surface's layer in its snapshot, left for later. `x-or` was already reported for override-redirect X windows.
+- `wayfire/get-config-option` and `set-config-options` read and wrote the outer gaps for `simple-tile/inner_gap_size`; writing the real-run check found it, and they now use the inner gap.
+
+Tested by the unit tests in crates/shingle-config (ini.rs for each line rule, activator.rs for each binding kind, import.rs, wayfire.rs and i3.rs for the warnings, view_matcher.rs), with Wayfire's stock wayfire.ini at the pinned commit (crates/shingle-config/testdata/wayfire-stock.ini, which warns only about `[cube]` and `[wayfire-shell]`) and a synthetic WCM-style file at Wayfire's metadata defaults (testdata/wayfire-wcm.ini). The real run is tools/output_test/run.py's `wcm_ini_checks`, recorded in docs/status.md.
 
 ### WG-2 `shingle-wayfire-defaults`: Wayfire's defaults and plugin list under a Wayfire file
 

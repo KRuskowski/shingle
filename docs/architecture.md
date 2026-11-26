@@ -113,7 +113,7 @@
 | shm textures in the client's byte order, damage writes with the client's stride, rebinding and GPU copies (`TextureUploader`) | `crates/shingle-render/src/upload.rs`; pixel tests in `tests/offscreen_pixels.rs` |
 | GPU test namespace with a private `/dev` (render node and NVIDIA nodes only) | `tools/gpu_test/run.py` |
 | Native config model and XKB generation | `crates/shingle-config/src/lib.rs` |
-| Wayfire INI import | `crates/shingle-config/src/wayfire.rs` |
+| Wayfire INI import | `crates/shingle-config/src/wayfire.rs`; wf-config's line rules `ini.rs`; activator kinds `activator.rs`; options applied one at a time with warnings, shared with i3, `import.rs`; fixtures `testdata/` |
 | i3 import | `crates/shingle-config/src/i3.rs` |
 
 ## Design rules
