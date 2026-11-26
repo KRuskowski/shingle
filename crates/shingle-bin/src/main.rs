@@ -61,14 +61,18 @@ fn plan(
         Err(error) => Plan::Fail(no_seat(&error, &selection.reason), 1),
       }
     }
-    // Offscreen and nested get several outputs with MO-5 and MO-6.
+    // Nested gets several outputs with MO-6, native with MO-7.
     Ok(selection)
       if options.outputs.is_some()
-        && selection.backend != Backend::Headless =>
+        && !matches!(
+          selection.backend,
+          Backend::Headless | Backend::Offscreen
+        ) =>
     {
       Plan::Fail(
         format!(
-          "shingle: --outputs needs the headless backend, not {}\n",
+          "shingle: --outputs needs the headless or offscreen backend, not \
+           {}\n",
           selection.backend
         ),
         USAGE_STATUS,
@@ -142,12 +146,19 @@ fn start(
       )?;
       headless::run(config, options.ipc.as_deref(), options.spawn, outputs)
     }
-    Backend::Offscreen => offscreen::run(
-      config,
-      options.config,
-      options.ipc.as_deref(),
-      options.spawn,
-    ),
+    Backend::Offscreen => {
+      let outputs = headless::output_count(
+        options.outputs,
+        std::env::var("WLR_HEADLESS_OUTPUTS").ok().as_deref(),
+      )?;
+      offscreen::run(
+        config,
+        options.config,
+        options.ipc.as_deref(),
+        options.spawn,
+        outputs,
+      )
+    }
     Backend::Native => shingle_native::run(
       config,
       options.config,
@@ -290,14 +301,17 @@ mod tests {
   // These tests only plan: no seat, device or VT is touched.
 
   #[test]
-  fn outputs_need_the_headless_backend() {
+  fn outputs_need_the_headless_or_offscreen_backend() {
     let (backend, options) =
       started(planned(&["--headless", "--outputs", "2"], &[]));
     assert_eq!((backend, options.outputs), (Backend::Headless, Some(2)));
+    let (backend, options) =
+      started(planned(&["--backend", "offscreen", "--outputs", "3"], &[]));
+    assert_eq!((backend, options.outputs), (Backend::Offscreen, Some(3)));
     let session = [("WAYLAND_DISPLAY", "wayland-1")];
     for arguments in [
       &["--outputs", "2"][..],
-      &["--backend", "offscreen", "--outputs", "2"],
+      &["--backend", "nested", "--outputs", "2"],
     ] {
       assert!(matches!(
         planned(arguments, &session),

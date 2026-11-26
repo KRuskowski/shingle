@@ -1,5 +1,5 @@
 //! The offscreen backend: the frontend drawing with the GPU into an
-//! offscreen target, without a display or input devices.
+//! offscreen target per output, without a display or input devices.
 //!
 //! It is what wlroots' headless backend is to Wayfire, a compositor that
 //! renders although nothing shows its frames: the outer compositor of the
@@ -10,21 +10,28 @@
 //!
 //! The device is wgpu's high-performance adapter, opened for DMA-BUF
 //! import where it allows it, before the Wayland socket exists, so a
-//! start without a GPU leaves no clients behind. Frames are drawn when
-//! the frontend asks for one, at most once per refresh interval of the
-//! configured output, at its physical size. A frame counts as presented
-//! when the GPU has finished it: clients get their frame callbacks and
-//! presentation feedback with that time and a frame counter. Screencopy
-//! shows the drawn frames. Input comes only from STIPC.
+//! start without a GPU leaves no clients behind. `--outputs N` starts it
+//! with `HEADLESS-1` to `HEADLESS-N`, each sized, placed and paced by its
+//! `[output:HEADLESS-N]` entry (docs/design/multi-output.md, section 7).
+//! Each output is drawn when the frontend asks for a frame of it, at most
+//! once per refresh interval of that output, at its physical size, into a
+//! target of its own on the one device. A frame counts as presented when
+//! the GPU has finished it: clients on that output get their frame
+//! callbacks and presentation feedback with that time and the output's
+//! own frame counter. Screencopy shows the drawn frames. Input comes only
+//! from STIPC.
 
 use std::{
+  collections::{BTreeMap, HashSet},
   error::Error,
   ffi::OsString,
   path::{Path, PathBuf},
   time::{Duration, Instant},
 };
 
-use shingle::{PresentInfo, PresentationFlags};
+use shingle::{
+  Compositor, OutputHandle, OutputKind, PresentInfo, PresentationFlags,
+};
 use shingle_config::ShingleConfig;
 use shingle_frontend::{Frontend, host::Host, render_target::RenderTarget};
 use shingle_render::{
@@ -32,7 +39,7 @@ use shingle_render::{
   RenderState, RenderTile, TextureTransform,
 };
 
-use crate::headless::{frame_interval, register_stipc_devices};
+use crate::headless::{add_outputs, frame_interval, register_stipc_devices};
 
 /// How long a frame may take on the GPU before it is given up.
 const GPU_WAIT: Duration = Duration::from_secs(1);
@@ -42,14 +49,15 @@ const GPU_WAIT: Duration = Duration::from_secs(1);
 /// ([`Frontend::next_deadline`]).
 const TICK: Duration = Duration::from_millis(16);
 
-/// Runs Shingle offscreen with `config` until SIGINT, SIGTERM or a quit
-/// request, then saves the session. The arguments are those of
-/// `shingle_nested::run`.
+/// Runs Shingle offscreen with `config` and `outputs` outputs until
+/// SIGINT, SIGTERM or a quit request, then saves the session. The other
+/// arguments are those of `shingle_nested::run`.
 pub fn run(
   config: ShingleConfig,
   config_path: Option<PathBuf>,
   ipc_path: Option<&Path>,
   spawn: Vec<OsString>,
+  outputs: u32,
 ) -> Result<(), Box<dyn Error>> {
   let gpu = open_gpu()?;
   eprintln!(
@@ -58,56 +66,68 @@ pub fn run(
   );
   eprintln!("shingle: {}", gpu.dmabuf_summary());
   let mut frontend = Frontend::new(config, spawn, config_path, ipc_path)?;
+  add_outputs(frontend.compositor_mut(), outputs)?;
   register_stipc_devices(frontend.compositor_mut());
   frontend.attach_gpu(&gpu);
   frontend.start_clients()?;
-  let mut output = OffscreenOutput::new(gpu);
-  let mut host = OffscreenHost {
-    redraw: true,
-    exit: false,
-  };
-  let interval =
-    frame_interval(frontend.compositor().output_info().refresh_mhz);
-  let mut pacer = Pacer::new(interval, Instant::now());
+  let mut display = Outputs::new(gpu);
+  let mut host = OffscreenHost::default();
+  display.sync(frontend.compositor(), Instant::now());
+  // Every output draws its first frame at once.
+  host.redraw.extend(display.handles());
   let mut errors = ErrorLog::default();
-  let mut sequence = 0;
   loop {
     frontend.process(&mut host);
     if host.exit {
       break;
     }
     let now = Instant::now();
-    if host.redraw && pacer.ready(now) {
-      host.redraw = false;
-      output.resize(frontend.compositor().output_physical_size());
-      // The offscreen target is the first output's.
-      let primary = frontend.compositor().primary_output();
-      match frontend.render(&mut host, &primary, &mut output) {
-        Ok(()) => errors.clear(),
-        Err(error) => {
-          errors.log(&error.to_string());
-        }
-      }
-      if output.take_presented() {
-        sequence += 1;
-        let compositor = frontend.compositor_mut();
-        compositor.frame_presented(
-          &primary,
-          PresentInfo {
-            time: shingle::monotonic_time(),
-            refresh_ns: refresh_ns(interval),
-            seq: sequence,
-            flags: PresentationFlags::empty(),
-          },
-        );
-      }
+    display.sync(frontend.compositor(), now);
+    for output in display.ready(now, &mut host.redraw) {
+      draw(&mut frontend, &mut host, &mut display, &output, &mut errors);
     }
     let timeout =
-      pacer.wait(Instant::now(), host.redraw, frontend.next_deadline());
+      display.wait(Instant::now(), &host.redraw, frontend.next_deadline());
     frontend.compositor_mut().poll(Some(timeout))?;
   }
   frontend.shutdown();
   Ok(())
+}
+
+/// Draws one frame of `output` and, once the GPU has finished it, reports
+/// it presented on that output with the output's own frame counter.
+fn draw(
+  frontend: &mut Frontend,
+  host: &mut OffscreenHost,
+  display: &mut Outputs,
+  output: &OutputHandle,
+  errors: &mut ErrorLog,
+) {
+  let size = frontend.compositor().physical_size_of(output);
+  let Some(mut target) = display.target(output) else {
+    return;
+  };
+  if let Some(size) = size {
+    target.resize(size);
+  }
+  match frontend.render(host, output, &mut target) {
+    Ok(()) => errors.clear(),
+    Err(error) => {
+      errors.log(&format!("{}: {error}", output.name()));
+    }
+  }
+  let Some(presented) = target.take_presented() else {
+    return;
+  };
+  frontend.compositor_mut().frame_presented(
+    output,
+    PresentInfo {
+      time: shingle::monotonic_time(),
+      refresh_ns: refresh_ns(presented.interval),
+      seq: presented.sequence,
+      flags: PresentationFlags::empty(),
+    },
+  );
 }
 
 /// Opens wgpu's high-performance adapter for DMA-BUF import.
@@ -127,28 +147,23 @@ fn refresh_ns(interval: Duration) -> u32 {
   u32::try_from(interval.as_nanos()).unwrap_or(0)
 }
 
-/// What the frontend asks of the offscreen backend: frames and an exit.
-/// There is no pointer to warp, no VT and no device to configure.
+/// What the frontend asks of the offscreen backend: frames of its outputs
+/// and an exit. There is no pointer to warp, no VT and no device to
+/// configure.
 #[derive(Debug, Default)]
 struct OffscreenHost {
-  /// Whether a frame was asked for and not drawn yet.
-  redraw: bool,
+  /// The outputs a frame was asked for and not drawn yet.
+  redraw: HashSet<OutputHandle>,
   /// Whether the frontend asked to exit.
   exit: bool,
 }
 
 impl Host for OffscreenHost {
-  fn request_redraw(&mut self, _output: &shingle::OutputHandle) {
-    self.redraw = true;
+  fn request_redraw(&mut self, output: &OutputHandle) {
+    self.redraw.insert(output.clone());
   }
 
-  fn warp_pointer(
-    &mut self,
-    _output: &shingle::OutputHandle,
-    _x: f64,
-    _y: f64,
-  ) {
-  }
+  fn warp_pointer(&mut self, _output: &OutputHandle, _x: f64, _y: f64) {}
 
   fn switch_vt(&mut self, _vt: u32) -> bool {
     false
@@ -240,35 +255,167 @@ impl ErrorLog {
   }
 }
 
-/// The frontend's render target: an offscreen texture of the output's
-/// physical size, whose frames nobody reads unless screencopy asks.
-struct OffscreenOutput {
-  gpu: GpuContext,
+/// One output's frames: an offscreen texture of the output's physical
+/// size, whose frames nobody reads unless screencopy asks, its render
+/// state, pacer and frame counter.
+struct OutputTarget {
   state: RenderState,
   target: Option<OffscreenTarget>,
+  /// The output's refresh interval.
+  interval: Duration,
+  pacer: Pacer,
+  /// Frames presented so far.
+  sequence: u64,
   /// Whether a frame finished on the GPU since the last
   /// [`OffscreenOutput::take_presented`].
   presented: bool,
 }
 
-impl OffscreenOutput {
-  fn new(gpu: GpuContext) -> Self {
+impl OutputTarget {
+  /// A target for an output refreshed every `interval`, whose first frame
+  /// may be drawn at `now`.
+  fn new(interval: Duration, now: Instant) -> Self {
     Self {
-      gpu,
       state: RenderState::default(),
       target: None,
+      interval,
+      pacer: Pacer::new(interval, now),
+      sequence: 0,
       presented: false,
     }
   }
+}
 
+/// A presented frame of one output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Presented {
+  /// Its number, counted from 1 per output.
+  sequence: u64,
+  /// The output's refresh interval.
+  interval: Duration,
+}
+
+/// The GPU and the targets of the outputs the backend draws: every output
+/// it added that is lit, by name. Outputs created over IPC are drawn by
+/// the frontend for screencopy only.
+struct Outputs {
+  gpu: GpuContext,
+  outputs: BTreeMap<OutputHandle, OutputTarget>,
+}
+
+impl Outputs {
+  fn new(gpu: GpuContext) -> Self {
+    Self {
+      gpu,
+      outputs: BTreeMap::new(),
+    }
+  }
+
+  /// Follows the compositor's outputs at `now`: a target for each lit
+  /// output the backend added, paced at its refresh rate, and none for
+  /// outputs that went, are dark or are turned off.
+  fn sync(&mut self, compositor: &Compositor, now: Instant) {
+    let lit = compositor
+      .outputs()
+      .into_iter()
+      .filter(|view| {
+        view.kind == OutputKind::Backend
+          && !view.dark
+          && compositor.output_powered(&view.handle)
+      })
+      .map(|view| (view.handle, frame_interval(view.info.refresh_mhz)))
+      .collect::<BTreeMap<_, _>>();
+    self.outputs.retain(|output, _| lit.contains_key(output));
+    for (output, interval) in lit {
+      let target = self
+        .outputs
+        .entry(output)
+        .or_insert_with(|| OutputTarget::new(interval, now));
+      if target.interval != interval {
+        target.interval = interval;
+        target.pacer = Pacer::new(interval, now);
+      }
+    }
+  }
+
+  /// The outputs drawn.
+  fn handles(&self) -> Vec<OutputHandle> {
+    self.outputs.keys().cloned().collect()
+  }
+
+  /// The outputs among `wanted` whose next frame may be drawn at `now`,
+  /// taken out of `wanted`. Wanted outputs that are not drawn are
+  /// forgotten.
+  fn ready(
+    &mut self,
+    now: Instant,
+    wanted: &mut HashSet<OutputHandle>,
+  ) -> Vec<OutputHandle> {
+    ready(&mut self.outputs, now, wanted)
+  }
+
+  /// How long to wait at `now`: until the next frame of an output in
+  /// `wanted`, otherwise at most [`TICK`], and never past `deadline`.
+  fn wait(
+    &self,
+    now: Instant,
+    wanted: &HashSet<OutputHandle>,
+    deadline: Option<Instant>,
+  ) -> Duration {
+    self
+      .outputs
+      .iter()
+      .map(|(output, target)| {
+        target.pacer.wait(now, wanted.contains(output), deadline)
+      })
+      .min()
+      .unwrap_or_else(|| Pacer::new(TICK, now).wait(now, false, deadline))
+  }
+
+  /// The render target of `output`, if it is drawn.
+  fn target(&mut self, output: &OutputHandle) -> Option<OffscreenOutput<'_>> {
+    let target = self.outputs.get_mut(output)?;
+    Some(OffscreenOutput {
+      gpu: &mut self.gpu,
+      output: target,
+    })
+  }
+}
+
+/// The outputs among `wanted` whose next frame may be drawn at `now`,
+/// for [`Outputs::ready`]; each output's pacer moves to its next frame.
+fn ready(
+  outputs: &mut BTreeMap<OutputHandle, OutputTarget>,
+  now: Instant,
+  wanted: &mut HashSet<OutputHandle>,
+) -> Vec<OutputHandle> {
+  wanted.retain(|output| outputs.contains_key(output));
+  let mut ready = Vec::new();
+  for (output, target) in outputs {
+    if wanted.contains(output) && target.pacer.ready(now) {
+      wanted.remove(output);
+      ready.push(output.clone());
+    }
+  }
+  ready
+}
+
+/// The frontend's render target for one output: that output's target on
+/// the shared GPU.
+struct OffscreenOutput<'a> {
+  gpu: &'a mut GpuContext,
+  output: &'a mut OutputTarget,
+}
+
+impl OffscreenOutput<'_> {
   /// Makes the target `size` pixels, reallocating it only when the size
   /// changed. Zero sizes are ignored.
   fn resize(&mut self, (width, height): (u32, u32)) {
     if width == 0 || height == 0 || self.size() == Some((width, height)) {
       return;
     }
-    match OffscreenTarget::new(&self.gpu, width, height) {
-      Ok(target) => self.target = Some(target),
+    match OffscreenTarget::new(self.gpu, width, height) {
+      Ok(target) => self.output.target = Some(target),
       Err(error) => {
         eprintln!("shingle: no {width}x{height} offscreen target: {error}");
       }
@@ -277,30 +424,37 @@ impl OffscreenOutput {
 
   /// The target's size, if it has one.
   fn size(&self) -> Option<(u32, u32)> {
-    self.target.as_ref().map(OffscreenTarget::size)
+    self.output.target.as_ref().map(OffscreenTarget::size)
   }
 
-  /// Whether a frame was presented since the last call.
-  fn take_presented(&mut self) -> bool {
-    std::mem::take(&mut self.presented)
+  /// The frame presented since the last call, if one was.
+  fn take_presented(&mut self) -> Option<Presented> {
+    if !std::mem::take(&mut self.output.presented) {
+      return None;
+    }
+    self.output.sequence += 1;
+    Some(Presented {
+      sequence: self.output.sequence,
+      interval: self.output.interval,
+    })
   }
 }
 
-impl RenderTarget for OffscreenOutput {
+impl RenderTarget for OffscreenOutput<'_> {
   fn set_scale_factor(&mut self, scale: f64) {
-    self.state.set_scale_factor(scale);
+    self.output.state.set_scale_factor(scale);
   }
 
   fn set_output_transform(&mut self, transform: TextureTransform) {
-    self.state.set_output_transform(transform);
+    self.output.state.set_output_transform(transform);
   }
 
   fn set_nearest_filter(&mut self, nearest: bool) -> bool {
-    self.state.set_nearest_filter(nearest)
+    self.output.state.set_nearest_filter(nearest)
   }
 
   fn set_zoom(&mut self, factor: f32, origin_x: f32, origin_y: f32) {
-    self.state.set_zoom(factor, origin_x, origin_y);
+    self.output.state.set_zoom(factor, origin_x, origin_y);
   }
 
   fn set_gamma_ramp(&mut self, ramp: &[u16]) -> Result<(), RenderError> {
@@ -320,9 +474,12 @@ impl RenderTarget for OffscreenOutput {
     height: u32,
     rgba: &[u8],
   ) -> Result<GpuTexture, RenderError> {
-    self
-      .gpu
-      .create_texture(width, height, rgba, self.state.texture_filter())
+    self.gpu.create_texture(
+      width,
+      height,
+      rgba,
+      self.output.state.texture_filter(),
+    )
   }
 
   fn update_texture(
@@ -341,10 +498,10 @@ impl RenderTarget for OffscreenOutput {
     tiles: &[RenderTile<'_>],
     clear: [f64; 4],
   ) -> Result<bool, RenderError> {
-    let Some(target) = &self.target else {
+    let Some(target) = &self.output.target else {
       return Err(RenderError::EmptyTexture);
     };
-    let submission = target.render(&self.gpu, &self.state, tiles, clear);
+    let submission = target.render(self.gpu, &self.output.state, tiles, clear);
     self
       .gpu
       .device()
@@ -356,7 +513,7 @@ impl RenderTarget for OffscreenOutput {
         wgpu::PollError::Timeout => RenderError::Timeout(GPU_WAIT),
         error => RenderError::Readback(error.to_string()),
       })?;
-    self.presented = true;
+    self.output.presented = true;
     Ok(false)
   }
 
@@ -366,7 +523,13 @@ impl RenderTarget for OffscreenOutput {
     clear: [f64; 4],
     size: (u32, u32),
   ) -> Result<Vec<u8>, RenderError> {
-    shingle_render::capture_frame(&self.gpu, &self.state, size, tiles, clear)
+    shingle_render::capture_frame(
+      self.gpu,
+      &self.output.state,
+      size,
+      tiles,
+      clear,
+    )
   }
 }
 
@@ -431,14 +594,41 @@ mod tests {
   }
 
   #[test]
-  fn the_host_records_redraws_and_exits_and_cannot_switch_vt() {
+  fn the_host_records_redraws_per_output_and_exits_and_cannot_switch_vt() {
     let mut host = OffscreenHost::default();
-    let output = shingle::OutputHandle::new("HEADLESS-1");
-    host.request_redraw(&output);
-    host.warp_pointer(&output, 1.0, 2.0);
+    let second = OutputHandle::new("HEADLESS-2");
+    host.request_redraw(&second);
+    host.request_redraw(&second);
+    host.warp_pointer(&second, 1.0, 2.0);
     assert!(!host.switch_vt(2));
     host.exit();
-    assert!(host.redraw && host.exit);
+    assert_eq!(host.redraw, HashSet::from([second]));
+    assert!(host.exit);
+  }
+
+  #[test]
+  fn each_output_is_paced_on_its_own() {
+    let start = Instant::now();
+    let fast = OutputHandle::new("HEADLESS-1");
+    let slow = OutputHandle::new("HEADLESS-2");
+    let mut targets = BTreeMap::new();
+    targets.insert(fast.clone(), OutputTarget::new(FRAME, start));
+    targets.insert(slow.clone(), OutputTarget::new(FRAME * 2, start));
+    let mut wanted = HashSet::from([fast.clone(), slow.clone()]);
+    assert_eq!(
+      ready(&mut targets, start, &mut wanted),
+      [fast.clone(), slow]
+    );
+    wanted.extend(targets.keys().cloned());
+    let one = start + FRAME;
+    assert_eq!(
+      ready(&mut targets, one, &mut wanted),
+      std::slice::from_ref(&fast)
+    );
+    assert_eq!(wanted.len(), 1, "the slow output still wants its frame");
+    wanted.insert(OutputHandle::new("HEADLESS-9"));
+    assert!(ready(&mut targets, one, &mut wanted).is_empty());
+    assert_eq!(wanted.len(), 1, "outputs not drawn are forgotten");
   }
 
   #[test]
@@ -468,7 +658,13 @@ mod tests {
     let Some(gpu) = gpu() else {
       return;
     };
-    let mut output = OffscreenOutput::new(gpu);
+    let mut display = Outputs::new(gpu);
+    let handle = OutputHandle::new("HEADLESS-1");
+    display
+      .outputs
+      .insert(handle.clone(), OutputTarget::new(FRAME, Instant::now()));
+    assert!(display.target(&OutputHandle::new("HEADLESS-2")).is_none());
+    let mut output = display.target(&handle).expect("a target");
     let tiles = [RenderTile::solid(
       RenderRect {
         x: 2,
@@ -479,7 +675,7 @@ mod tests {
       [1.0, 0.0, 0.0, 1.0],
     )];
     assert!(output.render(&tiles, [0.0; 4]).is_err(), "no size yet");
-    assert!(!output.take_presented());
+    assert_eq!(output.take_presented(), None);
     output.resize((8, 4));
     assert_eq!(output.size(), Some((8, 4)));
     output.resize((0, 4));
@@ -489,8 +685,14 @@ mod tests {
       output.render(&tiles, [0.0, 0.0, 1.0, 1.0]).ok(),
       Some(false)
     );
-    assert!(output.take_presented());
-    assert!(!output.take_presented(), "taken once");
+    assert_eq!(
+      output.take_presented(),
+      Some(Presented {
+        sequence: 1,
+        interval: FRAME,
+      })
+    );
+    assert_eq!(output.take_presented(), None, "taken once");
     // The capture is in logical pixels, whatever the scale.
     let rgba = output
       .capture(&tiles, [0.0, 0.0, 1.0, 1.0], (4, 3))

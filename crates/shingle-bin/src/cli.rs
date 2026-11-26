@@ -19,8 +19,8 @@ Options:
   --ipc PATH         serve Wayfire IPC on PATH and export it to
                      clients as WAYFIRE_SOCKET
   --outputs N        start with N outputs, HEADLESS-1 to HEADLESS-N
-                     (headless only; default WLR_HEADLESS_OUTPUTS,
-                     else 1)
+                     (headless and offscreen only; default
+                     WLR_HEADLESS_OUTPUTS, else 1)
   --spawn PROGRAM [ARG]...
                      start PROGRAM as a client; every later argument
                      is passed to it

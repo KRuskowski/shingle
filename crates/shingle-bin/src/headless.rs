@@ -136,7 +136,7 @@ fn shut_down<E>(
 
 /// Adds `HEADLESS-2` to `HEADLESS-count` beside the compositor's first
 /// output, each at the size its configuration entry gives.
-fn add_outputs(
+pub(crate) fn add_outputs(
   compositor: &mut Compositor,
   count: u32,
 ) -> Result<(), shingle::Error> {

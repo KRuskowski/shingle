@@ -24,7 +24,7 @@ There is one binary, `shingle`, which picks its backend the way Wayfire does:
 | headless, no display or input devices | `--headless` |
 | offscreen, headless but drawing with the GPU into an offscreen target that only screencopy shows, for GPU clients in tests | `--backend offscreen` |
 
-`--backend nested|native|headless|offscreen` overrides the choice, and so does the `SHINGLE_BACKEND` environment variable with the same values; the command line wins over the variable. Other options are `--config PATH`, `--ipc PATH` (Wayfire IPC, exported to clients as `WAYFIRE_SOCKET`), `--outputs N` (headless only so far: `HEADLESS-1` to `HEADLESS-N`, else `WLR_HEADLESS_OUTPUTS`) and `--spawn PROGRAM [ARG]...`, which starts a client; `shingle --help` lists them all. The separate `shingle-nested` binary is gone: run `shingle`, or `shingle --backend nested` to be explicit.
+`--backend nested|native|headless|offscreen` overrides the choice, and so does the `SHINGLE_BACKEND` environment variable with the same values; the command line wins over the variable. Other options are `--config PATH`, `--ipc PATH` (Wayfire IPC, exported to clients as `WAYFIRE_SOCKET`), `--outputs N` (headless and offscreen so far: `HEADLESS-1` to `HEADLESS-N`, else `WLR_HEADLESS_OUTPUTS`) and `--spawn PROGRAM [ARG]...`, which starts a client; `shingle --help` lists them all. The separate `shingle-nested` binary is gone: run `shingle`, or `shingle --backend nested` to be explicit.
 
 ## Configuration
 
