@@ -1,16 +1,18 @@
 //! The per-surface commit queue (docs/design/dmabuf.md, section 4).
 //!
-//! A commit whose content is not ready, because a fence has not
-//! signalled yet, waits here with its blockers, and every later commit of
-//! the surface waits behind it. When the blockers of the first entry
-//! clear, it and the ready entries after it go through the usual commit
-//! path in order, where synchronized subsurfaces, FIFO and commit timing
-//! still apply. Entries are never merged: a later buffer may be ready
-//! before an earlier one. Destroying the surface drops its entries, which
-//! releases their buffers.
+//! A commit that may not apply yet, because a fence has not signalled,
+//! a FIFO barrier is set or its commit-timing deadline has not come,
+//! waits here with its blockers, and every later commit of the surface
+//! waits behind it. When the blockers of the first entry clear, it and
+//! the ready entries after it go through the usual commit path in order,
+//! where synchronized subsurfaces still apply. Entries are never merged:
+//! a later buffer may be ready before an earlier one. Destroying the
+//! surface drops its entries, which releases their buffers.
 //!
-//! DB-4's implicit-sync wait (crate::linux_dmabuf) is a
-//! [`BlockerSource`]; DB-5's syncobj waits will be another.
+//! FIFO barriers (crate::fifo) and commit-timing deadlines
+//! (crate::commit_timing) wait here too, as wlroots queues them, and
+//! DB-4's implicit-sync wait (crate::linux_dmabuf) is a [`BlockerSource`];
+//! DB-5's syncobj waits will be another.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -70,16 +72,25 @@ impl CommitQueues {
 /// `wl_surface.commit`: applies the pending state at once when nothing
 /// blocks it and nothing waits before it, and queues it otherwise.
 pub(crate) fn commit(state: &mut CompositorState, object: &ObjectId) {
+  if !state.surfaces.contains_key(object) {
+    return;
+  }
+  // FIFO barriers and commit-timing deadlines, as wlroots queues them.
+  let mut blockers = crate::fifo::blocker(state, object)
+    .into_iter()
+    .chain(crate::commit_timing::blocker(state, object))
+    .collect::<Vec<_>>();
   let Some(surface) = state.surfaces.get(object) else {
     return;
   };
-  let blockers = state
-    .commit_queue
-    .sources
-    .iter()
-    .flat_map(|source| source.blockers(object, &surface.pending))
-    .filter(|blocker| !blocker.ready())
-    .collect::<Vec<_>>();
+  blockers.extend(
+    state
+      .commit_queue
+      .sources
+      .iter()
+      .flat_map(|source| source.blockers(object, &surface.pending)),
+  );
+  blockers.retain(|blocker| !blocker.ready());
   if blockers.is_empty() && !state.commit_queue.surfaces.contains_key(object) {
     state.commit_inner(object, false);
     return;

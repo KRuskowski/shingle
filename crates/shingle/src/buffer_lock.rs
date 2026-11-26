@@ -122,8 +122,24 @@ mod tests {
 
   use crate::{test_client::TestClient, tests::test_compositor};
 
+  /// The id of `surface` in the compositor.
+  fn object_of(
+    compositor: &crate::Compositor,
+    surface: &wayland_client::protocol::wl_surface::WlSurface,
+  ) -> wayland_server::backend::ObjectId {
+    compositor
+      .state
+      .surfaces
+      .values()
+      .find(|candidate| {
+        candidate.resource.id().protocol_id() == surface.id().protocol_id()
+      })
+      .map(|surface| surface.resource.id())
+      .expect("the surface exists")
+  }
+
   #[test]
-  fn a_buffer_replaced_behind_a_fifo_barrier_is_released() {
+  fn updates_behind_a_fifo_barrier_queue_in_order_and_are_each_released() {
     let (mut compositor, path) = test_compositor();
     let mut client = TestClient::connect(&mut compositor, &path);
     let toplevel = client.toplevel(&mut compositor, "fifo");
@@ -143,21 +159,51 @@ mod tests {
       surface.commit();
     }
     client.roundtrip(&mut compositor);
-    // The first commit applied; the third replaced the second while both
-    // waited for the barrier.
+    // The first commit applied; the other two wait, unmerged, holding
+    // their buffers (wlroots' fifo-v1 queues them the same way).
     assert!(compositor.needs_frame());
-    assert_eq!(
-      client.events.buffer_releases,
-      [buffers[0].id(), buffers[1].id()]
-    );
+    let object = object_of(&compositor, surface);
+    assert_eq!(compositor.state.commit_queue.waiting(&object), 2);
+    assert_eq!(client.events.buffer_releases, [buffers[0].id()]);
     compositor.frame();
     client.roundtrip(&mut compositor);
-    assert_eq!(client.events.buffer_releases.len(), 3);
-    assert_eq!(client.events.buffer_releases[2], buffers[2].id());
+    // Neither set the barrier again, so the frame released both, in order.
+    assert_eq!(
+      client.events.buffer_releases,
+      buffers.iter().map(Proxy::id).collect::<Vec<_>>()
+    );
+    assert!(!compositor.needs_frame());
   }
 
   #[test]
-  fn a_buffer_replaced_while_waiting_for_its_timestamp_is_released() {
+  fn each_update_that_sets_the_barrier_again_waits_for_its_own_frame() {
+    let (mut compositor, path) = test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let (toplevel, fifo) = fifo_toplevel(&mut compositor, &mut client);
+    let surface = &toplevel.surface;
+    let buffers = [10, 20, 30].map(|size| client.shm_buffer(size, size));
+    surface.attach(Some(&buffers[0]), 0, 0);
+    fifo.set_barrier();
+    surface.commit();
+    for buffer in &buffers[1..] {
+      surface.attach(Some(buffer), 0, 0);
+      fifo.wait_barrier();
+      fifo.set_barrier();
+      surface.commit();
+    }
+    client.roundtrip(&mut compositor);
+    assert_eq!(shown_size(&compositor, surface), Some((10, 10)));
+    compositor.frame();
+    client.roundtrip(&mut compositor);
+    assert_eq!(shown_size(&compositor, surface), Some((20, 20)));
+    compositor.frame();
+    client.roundtrip(&mut compositor);
+    assert_eq!(shown_size(&compositor, surface), Some((30, 30)));
+    assert_eq!(client.events.buffer_releases.len(), 3);
+  }
+
+  #[test]
+  fn an_update_behind_one_waiting_for_its_timestamp_waits_behind_it() {
     let (mut compositor, path) = test_compositor();
     let mut client = TestClient::connect(&mut compositor, &path);
     let wl_compositor = client.bind::<WlCompositor>(4);
@@ -176,8 +222,16 @@ mod tests {
     surface.attach(Some(&second), 0, 0);
     surface.commit();
     client.roundtrip(&mut compositor);
+    // Neither is merged into the other or shown early; both keep their
+    // buffers until they are shown, or until the surface goes.
     assert!(compositor.needs_frame());
-    assert_eq!(client.events.buffer_releases, [first.id()]);
+    let object = object_of(&compositor, &surface);
+    assert_eq!(compositor.state.commit_queue.waiting(&object), 2);
+    assert!(client.events.buffer_releases.is_empty());
+    timer.destroy();
+    surface.destroy();
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.buffer_releases.len(), 2);
   }
 
   #[test]

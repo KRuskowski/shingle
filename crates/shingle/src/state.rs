@@ -96,6 +96,12 @@ pub(crate) struct PendingSurface {
   pub(crate) alpha: Option<u32>,
   pub(crate) tearing: Option<bool>,
   pub(crate) input_region: Option<Option<WlRegion>>,
+  /// `wp_fifo_v1.set_barrier` for this update.
+  pub(crate) fifo_set_barrier: bool,
+  /// `wp_fifo_v1.wait_barrier` for this update.
+  pub(crate) fifo_wait_barrier: bool,
+  /// `wp_commit_timer_v1.set_timestamp` for this update.
+  pub(crate) timestamp: Option<std::time::Duration>,
 }
 
 impl Default for PendingSurface {
@@ -112,6 +118,9 @@ impl Default for PendingSurface {
       alpha: None,
       tearing: None,
       input_region: None,
+      fifo_set_barrier: false,
+      fifo_wait_barrier: false,
+      timestamp: None,
     }
   }
 }
@@ -1332,21 +1341,13 @@ impl CompositorState {
       }
       return;
     }
-    if crate::fifo::commit(self, object) {
-      let Some(pending) = self.take_pending(object) else {
-        return;
-      };
-      crate::fifo::defer(self, object, pending);
-      crate::commit_timing::latch(self, object);
-      return;
-    }
-    if crate::commit_timing::commit(self, object) {
-      let Some(pending) = self.take_pending(object) else {
-        return;
-      };
-      crate::commit_timing::defer(self, object, pending);
-      return;
-    }
+    // FIFO and commit-timing waits happen in the commit queue, before this.
+    let sets_barrier = self.surfaces.get_mut(object).is_some_and(|surface| {
+      surface.pending.fifo_wait_barrier = false;
+      surface.pending.timestamp = None;
+      std::mem::take(&mut surface.pending.fifo_set_barrier)
+    });
+    crate::fifo::applied(self, object, sets_barrier);
     crate::region::commit_input(self, object);
     let viewport = crate::viewport::pending(self, object).unwrap_or_default();
     let Some(surface) = self.surfaces.get_mut(object) else {
@@ -1520,6 +1521,11 @@ pub(crate) fn merge_pending(
   }
   if pending.input_region.is_some() {
     cached.input_region = pending.input_region.take();
+  }
+  cached.fifo_set_barrier |= std::mem::take(&mut pending.fifo_set_barrier);
+  cached.fifo_wait_barrier |= std::mem::take(&mut pending.fifo_wait_barrier);
+  if pending.timestamp.is_some() {
+    cached.timestamp = pending.timestamp.take();
   }
 }
 
