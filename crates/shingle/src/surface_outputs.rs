@@ -237,23 +237,24 @@ fn outputs_at_depth(
 
 /// The output whose scale surface `object` should draw at: a window's
 /// set's output (else the active one), a layer or lock surface's output,
-/// a popup's or subsurface's parent's, else its primary output.
+/// a popup's or subsurface's parent's, else the first output it is on.
+/// `None` for a surface without any, such as a closed layer surface.
 pub(crate) fn scale_output(
   state: &CompositorState,
   object: &ObjectId,
-) -> OutputId {
+) -> Option<OutputId> {
   let mut current = object.clone();
   for _ in 0..MAX_DEPTH {
     let Some(surface) = state.surfaces.get(&current) else {
       break;
     };
     if let Some(window) = surface.role.toplevel().and_then(|t| t.window()) {
-      return state.output_of_window(window).id.clone();
+      return Some(state.output_of_window(window).id.clone());
     }
     match &surface.role {
-      Role::Layer(layer) => return layer.output.clone(),
-      Role::SessionLock { output, .. } => return output.clone(),
-      Role::Cursor => return pointer_output(state),
+      Role::Layer(layer) => return Some(layer.output.clone()),
+      Role::SessionLock { output, .. } => return Some(output.clone()),
+      Role::Cursor => return Some(pointer_output(state)),
       _ => {}
     }
     match parent(state, &current) {
@@ -261,7 +262,7 @@ pub(crate) fn scale_output(
       _ => break,
     }
   }
-  primary_of(state, object)
+  outputs_of(state, object).into_iter().next()
 }
 
 /// The primary output of surface `object`, whose frames deliver its
@@ -285,15 +286,15 @@ pub(crate) fn primary_of(
 struct Wanted {
   outputs: Vec<OutputId>,
   rect: Option<Rect>,
-  scale: f64,
+  /// The scale to prefer, or `None` to keep what was sent.
+  scale: Option<f64>,
 }
 
 fn wanted(state: &CompositorState, object: &ObjectId) -> Wanted {
   let outputs = outputs_of(state, object);
-  let scale = state
-    .outputs
-    .get(&scale_output(state, object))
-    .map_or(1.0, |output| output.scale);
+  let scale = scale_output(state, object)
+    .and_then(|id| state.outputs.get(&id))
+    .map(|output| output.scale);
   Wanted {
     outputs,
     rect: shell::surface_geometry(state, object),
@@ -364,13 +365,20 @@ pub(crate) fn sync(state: &mut CompositorState) {
     }
     tracked.primary =
       choose_primary(wanted.rect, &rects, tracked.primary.as_ref());
-    let buffer_scale = wanted.scale.ceil().clamp(1.0, i32::MAX as f64) as i32;
+    // A surface without an output of its own, such as one that has no
+    // role yet, is first told the first output's scale.
+    let Some(scale) = wanted.scale.or_else(|| {
+      (fractional.is_some() && tracked.fractional.is_none())
+        .then(|| state.outputs.first().scale)
+    }) else {
+      continue;
+    };
+    let buffer_scale = scale.ceil().clamp(1.0, i32::MAX as f64) as i32;
     if resource.version() >= 6 && buffer_scale != tracked.buffer_scale {
       resource.preferred_buffer_scale(buffer_scale);
       tracked.buffer_scale = buffer_scale;
     }
-    let preferred =
-      (wanted.scale * 120.0).round().clamp(1.0, u32::MAX as f64) as u32;
+    let preferred = (scale * 120.0).round().clamp(1.0, u32::MAX as f64) as u32;
     if let Some(fractional) = fractional
       && tracked.fractional != Some(preferred)
     {
