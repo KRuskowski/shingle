@@ -28,6 +28,12 @@ user namespaces (needs python3-fuse and a readable `/dev/fuse`):
   tools/session_test/run.py [--binary target/debug/shingle]
       [--wl-probe target/debug/examples/wl_probe] [--delay 1.5] [--keep]
 
+`--checks round-trip` instead runs the session round trips of
+tools/session_test/round_trip.py, which need no FUSE: five clients'
+layout survives SIGKILL and SIGTERM with a restart after each, and with
+`--master-binary` (a `shingle` built from `master`) a version 1 session
+saved by it restores unchanged. `--checks slow round-trip` runs both.
+
 It prints one line per check and exits 0 when all pass. Signals go only
 to processes started here, through `signal_checked`. The pure helpers
 are tested by `python3 -m unittest` in this directory (test_run.py).
@@ -120,9 +126,10 @@ def root_direction(reply):
 def saved_shares(session, first, second):
   """The width shares of windows `first` and `second` in a saved
   session's first workspace, as (share, share) summing to 1, or None if
-  they are not the two children of one split there."""
-  for output in session.get('outputs', []):
-    for workspace in output.get('workspaces', []):
+  they are not the two children of one split there. Version 2 sessions
+  keep workspaces per set, version 1 per output."""
+  for record in session.get('wsets', session.get('outputs', [])):
+    for workspace in record.get('workspaces', []):
       split = workspace.get('root', {})
       shares = _split_shares(split, first, second)
       if shares:
@@ -370,7 +377,33 @@ def slow_write_checks(results, binary, wl_probe, delay):
       signal_checked(slowfs.pid, signal.SIGKILL, 'python3')
       slowfs.wait()
 
-def inner(binary, wl_probe, delay):
+def _load_round_trip():
+  """tools/session_test/round_trip.py."""
+  path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      'round_trip.py')
+  spec = importlib.util.spec_from_file_location('round_trip', path)
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+def check_groups(names, binary, wl_probe, delay, master_binary):
+  """The (name, function of results returning a log) of each group in
+  `names`, in order."""
+  round_trip = _load_round_trip()
+  harness = sys.modules[__name__]
+  groups = {
+      'slow': lambda results: slow_write_checks(results, binary, wl_probe,
+                                                delay),
+      'round-trip': lambda results: round_trip.round_trip_checks(
+          harness, results, binary, wl_probe),
+  }
+  selected = [(name, groups[name]) for name in names]
+  if master_binary and 'round-trip' in names:
+    selected.append(('version-1', lambda results: round_trip.version_1_checks(
+        harness, results, binary, master_binary, wl_probe)))
+  return selected
+
+def inner(binary, wl_probe, delay, names=('slow',), master_binary=None):
   """Runs the checks inside the namespace; returns the exit status."""
   work = os.environ['SESSION_TEST_WORK']
   private_tmp = os.path.join(work, 'tmp')
@@ -384,13 +417,15 @@ def inner(binary, wl_probe, delay):
                 not os.path.isdir('/dev/dri') or not os.listdir('/dev/dri'))
   results.check('no host display variable is set',
                 not any(name in os.environ for name in HOST_VARIABLES))
-  log = ''
-  try:
-    log = slow_write_checks(results, binary, wl_probe, delay)
-  except Exception as error:  # pylint: disable=broad-except
-    results.check('slow_write_checks ran', False, repr(error))
-  if not results.all_passed():
-    print(f'--- nested log ---\n{log}--- end ---', flush=True)
+  for name, checks in check_groups(names, binary, wl_probe, delay,
+                                   master_binary):
+    log = ''
+    try:
+      log = checks(results)
+    except Exception as error:  # pylint: disable=broad-except
+      results.check(f'{name} checks ran', False, repr(error))
+    if not results.all_passed():
+      print(f'--- {name}: nested log ---\n{log}--- end ---', flush=True)
   passed = sum(1 for _, ok, _ in results.checks if ok)
   print(f'{passed}/{len(results.checks)} checks passed', flush=True)
   return 0 if results.all_passed() else 1
@@ -401,19 +436,26 @@ def main():
   parser.add_argument('--binary', default='target/debug/shingle')
   parser.add_argument('--wl-probe', default='target/debug/examples/wl_probe')
   parser.add_argument('--delay', type=float, default=1.5)
+  parser.add_argument('--checks', nargs='+', default=['slow'],
+                      choices=['slow', 'round-trip'])
+  parser.add_argument('--master-binary')
   parser.add_argument('--keep', action='store_true')
   parser.add_argument(INNER_FLAG, action='store_true')
   options = parser.parse_args()
   binary = os.path.abspath(options.binary)
   wl_probe = os.path.abspath(options.wl_probe)
+  master_binary = (os.path.abspath(options.master_binary)
+                   if options.master_binary else None)
   if options.inner:
-    return inner(binary, wl_probe, options.delay)
-  if importlib.util.find_spec('fuse') is None:
-    print('python3-fuse is not installed', file=sys.stderr)
-    return 2
-  if not os.access('/dev/fuse', os.R_OK | os.W_OK):
-    print('/dev/fuse is not usable', file=sys.stderr)
-    return 2
+    return inner(binary, wl_probe, options.delay, options.checks,
+                 master_binary)
+  if 'slow' in options.checks:
+    if importlib.util.find_spec('fuse') is None:
+      print('python3-fuse is not installed', file=sys.stderr)
+      return 2
+    if not os.access('/dev/fuse', os.R_OK | os.W_OK):
+      print('/dev/fuse is not usable', file=sys.stderr)
+      return 2
   work = os.path.abspath(os.path.join('target',
                                       f'session_test-{os.getpid()}'))
   os.makedirs(work)
@@ -426,7 +468,9 @@ def main():
                '--pid', '--fork', '--mount-proc', '--',
                sys.executable, os.path.abspath(__file__),
                '--binary', binary, '--wl-probe', wl_probe,
-               '--delay', str(options.delay), INNER_FLAG]
+               '--delay', str(options.delay), '--checks', *options.checks,
+               *(['--master-binary', master_binary] if master_binary
+                 else []), INNER_FLAG]
     return subprocess.run(command, env=environment).returncode
   finally:
     if not options.keep:

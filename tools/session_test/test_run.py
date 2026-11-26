@@ -12,6 +12,7 @@ def _load(name):
   return module
 
 run = _load('run.py')
+round_trip = _load('round_trip.py')
 
 def leaf(window):
   """A saved leaf node for `window`."""
@@ -78,11 +79,58 @@ class LayoutTest(unittest.TestCase):
         {'weight': 1, 'node': inner}]}
     self.assertEqual(run.saved_shares(session(root), 1, 2), (0.25, 0.75))
 
+  def test_shares_are_read_from_version_2_sets(self):
+    root = {'direction': 'vertical', 'children': [
+        {'weight': 1, 'node': leaf(1)}, {'weight': 1, 'node': leaf(2)}]}
+    saved = {'version': 2, 'wsets': [{'wset': 1, 'workspaces': [
+        {'root': root}]}]}
+    self.assertEqual(run.saved_shares(saved, 1, 2), (0.5, 0.5))
+
   def test_a_floating_window_has_no_share(self):
     root = {'direction': 'vertical', 'children': [
         {'weight': 1, 'node': leaf(1)}]}
     self.assertIsNone(run.saved_shares(session(root), 1, 2))
     self.assertIsNone(run.saved_shares({}, 1, 2))
+
+class RoundTripTest(unittest.TestCase):
+  """The pure helpers of round_trip.py."""
+
+  def test_the_tile_layout_nests_bravo_over_charlie(self):
+    views = dict(zip(round_trip.APPS, range(1, 6)))
+    layout = round_trip.tile_layout(views)['layout']['vertical-split']
+    self.assertEqual([child['weight'] for child in layout], [3, 2, 1])
+    self.assertEqual(layout[1]['horizontal-split'],
+                     [{'view-id': 2, 'weight': 1},
+                      {'view-id': 3, 'weight': 2}])
+
+  def test_view_state_keeps_only_session_fields_by_id(self):
+    views = [{'id': 2, 'pid': 7, 'activated': True, 'app-id': 'b'},
+             {'id': 1, 'pid': 8, 'last-focus-timestamp': 5}]
+    state = round_trip.view_state(views)
+    self.assertEqual([view['id'] for view in state], [1, 2])
+    self.assertNotIn('pid', state[0])
+    self.assertNotIn('activated', state[1])
+    self.assertEqual(state[1]['app-id'], 'b')
+
+  def test_trees_and_floating_are_read_from_either_version(self):
+    floating = {'x': 1, 'y': 2, 'width': 3, 'height': 4}
+    root = {'direction': 'vertical', 'children': [
+        {'weight': 1, 'node': {'kind': 'split', 'children': [
+            {'weight': 1, 'node': leaf(1)},
+            {'weight': 1, 'node': {'kind': 'leaf', 'window': 2,
+                                   'state': {'floating': floating}}}]}}]}
+    workspaces = [{'root': root}]
+    for saved in ({'outputs': [{'workspaces': workspaces}]},
+                  {'wsets': [{'workspaces': workspaces}]}):
+      self.assertEqual(round_trip.session_trees(saved), [workspaces])
+      self.assertEqual(round_trip.session_floating(saved, 2), floating)
+      self.assertIsNone(round_trip.session_floating(saved, 1))
+    self.assertEqual(round_trip.session_trees({}), [])
+    saved = {'wsets': [{'workspaces': [
+        {'workspace': {'x': 0, 'y': 0}, 'root': root, 'focused': 1,
+         'stack': [1, 2]}]}]}
+    self.assertEqual(round_trip.session_roots(saved),
+                     [[({'x': 0, 'y': 0}, root)]])
 
 if __name__ == '__main__':
   unittest.main()
