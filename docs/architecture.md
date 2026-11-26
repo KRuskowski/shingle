@@ -45,6 +45,8 @@
 | Launch identity from `/proc` (`capture`, `capture_pid`) | `crates/shingle/src/launch.rs` |
 | Pinned outside view of Wayland toplevels | `crates/shingle/src/wayland_pins.rs`, `crates/shingle/testdata/wayland_pins.txt` |
 | IPC transport, dispatch, method list, events | `crates/shingle/src/ipc.rs` |
+| wayfire-shell-unstable-v2 (`zwf_shell_manager_v2`): fullscreen events, hotspots, `toggle_menu`, inhibits, `interactive_move`; the protocol file and its generated code | `crates/shingle/src/wayfire_shell.rs`, `crates/shingle/protocols/`; tests in `wayfire_shell/tests.rs` |
+| Modifier-alone bindings (`ModifierBindingTracker`) | `crates/shingle/src/modifier_binding.rs`; the frontend's use in `crates/shingle-frontend/src/frontend/bindings.rs` (`track_modifier_binding`) |
 | XWayland glue: display, Xwayland start and exit, XWM connection, `xwayland-ready` | `crates/shingle/src/xwayland/mod.rs` |
 | `xwayland_shell_v1` and `Role::Xwayland` | `crates/shingle/src/xwayland/shell.rs` |
 | Managed X windows: pairing, toplevels, X configure, states and close | `crates/shingle/src/xwayland/windows.rs` |
@@ -98,6 +100,7 @@
 | Output layout, pointer clamping, oswitch's next and directional outputs, layout warnings (pure functions) | `crates/shingle-config/src/layout.rs` |
 | Unplug policy, `oswitch`, `wsets` and per-device output settings | `crates/shingle-config/src/multi_output.rs` |
 | Real-client output-management checks (headless and nested) | `tools/output_test/run.py` |
+| WG-4's real-client wayfire-shell checks and their raw Wayland client | `tools/output_test/wayfire_shell_checks.py`, `tools/output_test/wayland_wire.py` |
 | Real-client check of responsiveness during slow session writes (nested on a FUSE mount with slow fsync) | `tools/session_test/run.py`, `tools/session_test/slowfs.py` |
 | Real-client session round trips through SIGKILL, SIGTERM and a version 1 session from `master` | `tools/session_test/round_trip.py`, run by `tools/session_test/run.py --checks round-trip` |
 | Host keyboard focus changes | `crates/shingle-nested/src/host_keyboard.rs` |

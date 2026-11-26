@@ -8,7 +8,7 @@ cargo run --bin shingle -- --ipc /tmp/shingle-ipc.socket
 
 The socket path is exported as `WAYFIRE_SOCKET` to every client Shingle starts, from restored and autostarted clients and `--spawn` programs to everything launched later, so existing Wayfire scripts work unchanged. Without `--ipc`, `WAYFIRE_SOCKET` is removed from their environment, so a nested Shingle never hands its children the host compositor's socket. Shingle's own environment is not changed; the children's comes from `Compositor::client_environment` (`shingle_session::ClientEnvironment`). Library users can start the same server with `Compositor::enable_ipc(path)`, before starting any client.
 
-`list-methods` returns a sorted inventory of the 85 supported methods. Numeric vswitch activators such as `binding_4` are matched dynamically and are not part of that count. The method table lives in `SUPPORTED_METHODS` in `crates/shingle/src/ipc.rs`.
+`list-methods` returns a sorted inventory of the 86 supported methods. Numeric vswitch activators such as `binding_4` are matched dynamically and are not part of that count. The method table lives in `SUPPORTED_METHODS` in `crates/shingle/src/ipc.rs`.
 
 ## Methods
 
@@ -24,6 +24,7 @@ The socket path is exported as `WAYFIRE_SOCKET` to every client Shingle starts, 
 | `command` | `register-binding`, `unregister-binding`, `clear-bindings` |
 | `input` | `list-devices`, `configure-device` |
 | `scale`, `expo`, `invert` | `scale/toggle`, `scale/toggle_all`, `expo/toggle`, `invert/toggle` |
+| `wayfire-shell` | `toggle_menu`: sends `zwf_output_v2.toggle_menu` to the shell clients of the output `output_id` (or `output-id`) names, else of the active one, without focusing it; an unknown output or view id is an error, as in Wayfire |
 | `stipc` | `feed_key`, `feed_button`, `move_cursor`, `touch`, `touch_release`, `ping`, `run`, `get_display`, `get_xwayland_display`, `get_xwayland_pid`, `layout_views`, `create_wayland_output`, `destroy_wayland_output` |
 | (none) | `list-methods` |
 

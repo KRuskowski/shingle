@@ -4,7 +4,7 @@ Detailed behaviour of the features Shingle implements, with their configuration.
 
 ## Importing Wayfire configuration
 
-A `wayfire.ini` is read line by line as Wayfire's wf-config reads it: every `#` not preceded by `\` starts a comment, `\#` is a literal `#` (WCM writes every hex colour as `\#RRGGBBAA`), a line ending in `\` continues on the next, as in Wayfire's own `plugins = \` list, and names and values are trimmed. A value Shingle cannot use keeps its default and is reported as a warning with its line, section and option, as Wayfire logs it, and the rest of the file still loads; so is each section of a plugin Shingle does not have (`[blur]`, `[cube]`, `[decoration]`, `[vswipe]`, `[wayfire-shell]`, `[wobbly]` and others), once. Activators keep their keys and buttons; a modifier alone (`toggle_menu = <super>`), touch gestures (`pinch in 4`, `swipe up 3`, `edge-swipe left 2`) and hotspots (`hotspot top-left 10x10 500`) are recognised, reported as not supported yet and never bound. Where Shingle's option takes one binding, the first key or button is used. The animations Shingle lacks fall back with a warning: `squeezimize` to `zoom`, and `fire`, `zap` and `spin` to `fade`. View matchers take Wayfire's `focusable equals true` form, so Wayfire's default `animate/enabled_for` works. Colours may be `#RRGGBBAA`, `#RGBA`, `#RRGGBB` or four numbers. i3 files warn the same way; YAML stays strict and rejects any bad value.
+A `wayfire.ini` is read line by line as Wayfire's wf-config reads it: every `#` not preceded by `\` starts a comment, `\#` is a literal `#` (WCM writes every hex colour as `\#RRGGBBAA`), a line ending in `\` continues on the next, as in Wayfire's own `plugins = \` list, and names and values are trimmed. A value Shingle cannot use keeps its default and is reported as a warning with its line, section and option, as Wayfire logs it, and the rest of the file still loads; so is each section of a plugin Shingle does not have (`[blur]`, `[cube]`, `[decoration]`, `[vswipe]`, `[wobbly]` and others), once. Activators keep their keys and buttons; a modifier alone (`<super>`) is bound for `[wayfire-shell] toggle_menu` and commands ([Modifier-alone bindings](#modifier-alone-bindings)) and elsewhere warns; touch gestures (`pinch in 4`, `swipe up 3`, `edge-swipe left 2`) and hotspots (`hotspot top-left 10x10 500`) are recognised, reported as not supported yet and never bound. Where Shingle's option takes one binding, the first key or button is used. The animations Shingle lacks fall back with a warning: `squeezimize` to `zoom`, and `fire`, `zap` and `spin` to `fade`. View matchers take Wayfire's `focusable equals true` form, so Wayfire's default `animate/enabled_for` works. Colours may be `#RRGGBBAA`, `#RGBA`, `#RRGGBB` or four numbers. i3 files warn the same way; YAML stays strict and rejects any bad value.
 
 `shingle` prints the warnings once when it starts and again on a reload, as `shingle: PATH: line N: MESSAGE`. `shingle-wcm --config PATH --check` prints them and exits 0, or 1 when the file cannot be read.
 
@@ -104,6 +104,10 @@ Wayfire's `[wrot]` `activate`, `reset`, `reset-one`, and `reset_radius` options 
 
 ## Input
 
+### Modifier-alone bindings
+
+A binding of modifiers without a key, `super` or `ctrl+alt` in YAML and `<super>` in a `wayfire.ini`, triggers when those modifiers are pressed and released with nothing else in between, as in Wayfire (src/core/seat/keyboard.cpp): the last modifier must be pressed while only modifier keys are held and no pointer button or touch point is down, no other key, button, scroll or touch may come before its release, and the release must come within `input.modifier_binding_timeout` milliseconds (`[input] modifier_binding_timeout`, default 400; 0 never cancels). The keys themselves still reach bindings and clients, so `super+p` is unaffected. Two things act on one: `keybindings.toggle_menu` (`[wayfire-shell] toggle_menu`, default `super`), which tells the active output's shell clients to toggle their menu ([Shell clients](#shell-clients)), and commands, which run once on the release; a common Wayfire setup is `binding_launcher = <super>` with a launcher command. Other bindings do not take a modifier alone. While the session is locked only `always` commands run, and neither runs while a client inhibits shortcuts.
+
 ### XKB symbol commands
 
 Ordinary bindings name physical keys the way Wayfire does, after the `KEY_*` constants of `linux/input-event-codes.h` in lower case without the prefix (`a`, `1`, `left`, `kp7`, `leftmeta`, `dot`, `leftbrace`), and the Wayfire and i3 importers turn `esc` and `return` into `escape` and `enter`. Command bindings may use `xkb:` followed by a case-sensitive XKB keysym name to match the logical key instead of its physical position. The keysym comes from Shingle's own keymap (`input.layout`, `variant`, `options` or `xkb_file`), not the host's, so with a `de` layout `xkb:z` is the key labelled Z on a German keyboard. Character keys and common editing/navigation keys are supported, and modifier, repeat, lock, and `always` policies are shared with ordinary commands.
@@ -156,6 +160,16 @@ Every process Shingle starts (autostart, restored and `--spawn` clients, command
 - `WAYFIRE_CONFIG_FILE`, the absolute path of the configuration file when it is a Wayfire file, as Wayfire exports the file it reads for WCM and scripts. With a YAML or i3 configuration the variable is removed, so a host Wayfire's file never reaches programs started inside Shingle and nothing edits a YAML file as `wayfire.ini`.
 
 data/shingle.desktop is the session file for display managers; the [README](../README.md#starting-from-a-display-manager) says how to install it.
+
+### Shell clients
+
+wf-shell's panel and dock, and other shell clients, bind `zwf_shell_manager_v2` (wayfire-shell-unstable-v2, version 3, as Wayfire; crates/shingle/src/wayfire_shell.rs), which the `wayfire-shell` plugin provides; under a Wayfire file it follows `[core] plugins`, and sandboxed clients may bind it, as in Wayfire.
+
+- A `zwf_output_v2` gets `enter_fullscreen` when its output draws a fullscreen window above the top layer, where panels are, and `leave_fullscreen` when that ends: the window focused on that output, the keyboard's or else the focused tile of its current workspace, is fullscreen. An object created while that is so gets `enter_fullscreen` at once.
+- `create_hotspot` makes an edge or corner hotspot, `create_custom_hotspot` one around a rectangle in output coordinates, each reaching `threshold` pixels out and cut to the output. Once the pointer or the first touch point has stayed inside for `timeout` milliseconds the hotspot gets `enter`, then `proximity_changed` (version 3) with its distance in pixels while it moves inside, and `leave` when it goes. A hotspot of an output that goes leaves.
+- `toggle_menu` (version 2) comes from `keybindings.toggle_menu` and from IPC `wayfire-shell/toggle_menu`.
+- `inhibit_output` makes the output draw black until as many `inhibit_output_done` came, or the client went, as Wayfire 0.9 did; Wayfire's current release ignores both.
+- `zwf_surface_v2.interactive_move` starts a move of the surface's window, as `xdg_toplevel.move` does; Wayfire's current release only logs it.
 
 ### Decorations
 
