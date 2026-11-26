@@ -500,6 +500,20 @@ Acceptance:
 
 Not planned in detail, in rank order: the remaining animations and per-type animation options; `zwp_text_input_manager_v1`; `blur`; per-device `[input:NAME]` sections and the missing input options; `ext_data_control_manager_v1` and the ext image-capture protocols with DMA-BUF and damage in screencopy; `zwp_tablet_manager_v2` with libinput tablets in the native backend; `wobbly`; `cube` with the idle screensaver and wrot's 3D mode; the remaining IPC methods; the rare protocols. Each needs its own design when it comes up.
 
+## Decisions
+
+The operator asked for the work to continue without stopping for questions, so on 2026-11-26 the proposed defaults were adopted on the operator's behalf. Each can be revisited before the workspace that depends on it lands.
+
+1. **Bad values in Wayfire or i3 files** warn and keep the default instead of refusing the file. YAML stays strict.
+2. **A Wayfire import starts from Wayfire's defaults.**
+3. **Shingle-only bindings are off under a Wayfire file**, unless set explicitly.
+4. **`core/plugins` is honoured** for every plugin Shingle implements, including `simple-tile`, but not `ipc`, which `--ipc` governs.
+5. **Unsupported animation names:** `squeezimize` becomes `zoom`; `fire`, `zap` and `spin` become `fade`; one warning each.
+6. **`XDG_CURRENT_DESKTOP`** is set to `wayfire` when unset, as Wayfire does; no Shingle portals file.
+7. **Touchpad gestures in tests:** add a Shingle-only `stipc/feed_gesture`.
+8. **`zwf_shell_manager_v2`** is not restricted for sandboxed clients, as in Wayfire.
+9. **`wayfire-plugins-extra`** (fisheye and others) stays out of scope.
+
 ## Questions for the operator
 
 Each has a proposed default, which the workspaces above assume.
