@@ -1085,6 +1085,12 @@ pub struct BehaviorConfig {
   /// Draw windows on every output they overlap instead of clipping them to
   /// their own output. `[workarounds] remove_output_limits`; default false.
   pub remove_output_limits: bool,
+  /// Nested Shingle only: share the clipboard and, without
+  /// `disable_primary_selection`, the primary selection with the host
+  /// session, through its `ext_data_control_manager_v1` or
+  /// `zwlr_data_control_manager_v1`. Shingle's own option, read at
+  /// startup; default true.
+  pub host_clipboard: bool,
 }
 
 impl Default for BehaviorConfig {
@@ -1101,6 +1107,7 @@ impl Default for BehaviorConfig {
       focus_main_surface_instead_of_popup: false,
       disable_primary_selection: false,
       remove_output_limits: false,
+      host_clipboard: true,
     }
   }
 }
@@ -2981,6 +2988,21 @@ mod tests {
       Binding::modifiers_alone(vec![Modifier::Super])
     );
     assert_eq!(InputConfig::default().modifier_binding_timeout, 400);
+  }
+
+  #[test]
+  fn the_host_clipboard_is_shared_unless_turned_off() {
+    assert!(BehaviorConfig::default().host_clipboard);
+    let (config, _) = ShingleConfig::parse_with_warnings(
+      "behavior:\n  host_clipboard: false\n",
+      ConfigFormat::Yaml,
+    )
+    .unwrap();
+    assert!(!config.behavior.host_clipboard);
+    let sample = include_str!("../../../data/shingle.yaml");
+    let (config, _) =
+      ShingleConfig::parse_with_warnings(sample, ConfigFormat::Yaml).unwrap();
+    assert!(config.behavior.host_clipboard);
   }
 
   #[test]

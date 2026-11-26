@@ -57,6 +57,7 @@ behavior:
   focus_main_surface_instead_of_popup: false
   disable_primary_selection: false
   remove_output_limits: false
+  host_clipboard: true
 
 xwayland:
   mode: lazy
