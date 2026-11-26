@@ -221,6 +221,8 @@ pub(crate) struct CompositorState {
   pub(crate) shm_upload: bool,
   pub(crate) disconnected: Arc<Mutex<Vec<ClientId>>>,
   pub(crate) foreign_toplevels: crate::foreign_toplevel::ForeignToplevels,
+  /// wayfire-shell's outputs, hotspots and surfaces, and the menu key.
+  pub(crate) wayfire_shell: crate::wayfire_shell::WayfireShell,
   pub(crate) foreign: crate::foreign::ForeignHandles,
   pub(crate) ext_workspaces: crate::ext_workspace::ExtWorkspaces,
   pub(crate) ext_toplevels: crate::ext_toplevel::ExtToplevels,
@@ -406,6 +408,10 @@ impl CompositorState {
       shm_upload: false,
       disconnected,
       foreign_toplevels: Default::default(),
+      wayfire_shell: crate::wayfire_shell::WayfireShell::new(
+        config.toggle_menu.clone(),
+        config.modifier_binding_timeout,
+      ),
       foreign: Default::default(),
       ext_workspaces: Default::default(),
       ext_toplevels: Default::default(),
@@ -731,6 +737,9 @@ impl CompositorState {
     if plugins.shortcuts_inhibit {
       crate::shortcuts::create_global(handle);
     }
+    if plugins.wayfire_shell {
+      crate::wayfire_shell::create_global(handle);
+    }
     crate::single_pixel_buffer::create_global(handle);
     crate::toplevel_icon::create_global(handle);
     crate::subsurface::create_global(handle);
@@ -985,9 +994,10 @@ impl CompositorState {
           .is_ok_and(|info| info.location.output == *id)
       })
       .or_else(|| tree.focused())?;
-    let fullscreen = self.core.window_info(focused).is_ok_and(|info| {
-      info.state.fullscreen && !info.state.minimized
-    });
+    let fullscreen = self
+      .core
+      .window_info(focused)
+      .is_ok_and(|info| info.state.fullscreen && !info.state.minimized);
     if !fullscreen {
       return None;
     }

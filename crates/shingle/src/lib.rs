@@ -73,6 +73,7 @@ mod launch;
 mod layer_shell;
 mod linux_dmabuf;
 mod linux_drm_syncobj;
+mod modifier_binding;
 mod output;
 mod output_focus_api;
 mod output_management;
@@ -102,6 +103,7 @@ pub mod trace;
 mod viewport;
 mod virtual_keyboard;
 mod virtual_pointer;
+mod wayfire_shell;
 #[cfg(test)]
 mod wayland_pins;
 mod window_rules;
@@ -123,6 +125,7 @@ use calloop::{
 };
 pub use input::{Axis, AxisSource, Modifiers};
 pub use input_device::{InputDeviceId, InputDeviceInfo, InputDeviceKind};
+pub use modifier_binding::{ModifierBindingTracker, modifier_of_key};
 pub use output::{
   HeadRequest, HeadState, MoveGeometry, OutputAction, OutputHandle, OutputInfo,
   OutputKind, OutputModeInfo, OutputPlacement, OutputRequest, OutputRequestId,
@@ -272,6 +275,13 @@ pub struct Config {
   pub cursor_theme: String,
   /// Nominal XCursor size for compositor-drawn cursors.
   pub cursor_size: u32,
+  /// Wayfire's `wayfire-shell/toggle_menu` activator. The compositor
+  /// matches it only for STIPC keys without a frontend; a frontend
+  /// matches it and calls [`Compositor::toggle_menu`].
+  pub toggle_menu: shingle_config::Binding,
+  /// `input/modifier_binding_timeout` in milliseconds, for
+  /// modifier-alone bindings; 0 never cancels.
+  pub modifier_binding_timeout: u32,
   /// Advertises text-input-v3, input-method v1/v2 and input panels. Read
   /// only when the globals are created.
   pub enable_text_input_v3: bool,
@@ -365,6 +375,8 @@ pub struct ProtocolPlugins {
   pub session_lock: bool,
   /// `zwp_keyboard_shortcuts_inhibit_manager_v1` (`shortcuts-inhibit`).
   pub shortcuts_inhibit: bool,
+  /// `zwf_shell_manager_v2` (`wayfire-shell`).
+  pub wayfire_shell: bool,
 }
 
 impl Default for ProtocolPlugins {
@@ -385,6 +397,7 @@ impl ProtocolPlugins {
       security_context: on("security-context-v1"),
       session_lock: on("session-lock"),
       shortcuts_inhibit: on("shortcuts-inhibit"),
+      wayfire_shell: on("wayfire-shell"),
     }
   }
 }
@@ -412,6 +425,8 @@ impl Default for Config {
       mouse_natural_scroll: false,
       cursor_theme: "default".into(),
       cursor_size: 24,
+      toggle_menu: shingle_config::Binding::disabled(),
+      modifier_binding_timeout: 400,
       enable_text_input_v3: true,
       initial_locked_modifiers: 0,
       idle: IdleConfig::default(),
@@ -488,6 +503,8 @@ impl From<shingle_config::ShingleConfig> for Config {
       mouse_natural_scroll: config.input.mouse_natural_scroll,
       cursor_theme: config.input.cursor_theme,
       cursor_size: config.input.cursor_size,
+      toggle_menu: config.keybindings.toggle_menu,
+      modifier_binding_timeout: config.input.modifier_binding_timeout,
       enable_text_input_v3: config.input.enable_text_input_v3,
       initial_locked_modifiers: (u32::from(config.input.capslock_default) << 1)
         | (u32::from(config.input.numlock_default) << 4),
@@ -978,6 +995,15 @@ pub enum Event {
     /// The output, which no longer exists.
     output: OutputHandle,
   },
+  /// A shell client inhibited `output` (`zwf_output_v2.inhibit_output`),
+  /// which then draws black, or the last inhibit ended. See
+  /// [`Compositor::output_inhibited`].
+  OutputInhibitChanged {
+    /// The output.
+    output: OutputHandle,
+    /// Whether it is inhibited now.
+    inhibited: bool,
+  },
   /// `stipc/create_wayland_output` added `output`, after
   /// [`Compositor::set_host_outputs`]: the host opens a window for it and
   /// gives it the window's size ([`Compositor::set_output_size`]).
@@ -1283,6 +1309,24 @@ impl Compositor {
         },
       )
       .map_err(|error| Error::EventLoop(error.to_string()))?;
+    // Hotspot timeouts (wayfire-shell) wake the loop with a one-shot
+    // timerfd of their own, which `wayfire_shell::sync` arms.
+    let hotspot_timer = one_shot_timer()?;
+    state.wayfire_shell.timer = Some(
+      hotspot_timer
+        .try_clone()
+        .map_err(|error| Error::EventLoop(error.to_string()))?,
+    );
+    handle
+      .insert_source(
+        Generic::new(hotspot_timer, Interest::READ, Mode::Level),
+        |_, timer, _| {
+          let mut expirations = [0; 8];
+          let _ = rustix::io::read(timer.as_fd(), &mut expirations);
+          Ok(PostAction::Continue)
+        },
+      )
+      .map_err(|error| Error::EventLoop(error.to_string()))?;
     let signals = Signals::new(&[Signal::SIGINT, Signal::SIGTERM])
       .map_err(|error| Error::EventLoop(error.to_string()))?;
     handle
@@ -1513,6 +1557,7 @@ impl Compositor {
     data_device::sync_drag(&mut self.state, &self.display.handle());
     data_control::sync(&mut self.state, &self.display.handle());
     primary_selection::sync_selection(&mut self.state, &self.display.handle());
+    wayfire_shell::sync(&mut self.state, std::time::Instant::now());
     if let Some(xwayland) = &mut self.xwayland {
       xwayland.flush(&mut self.state, &self.event_loop.handle());
     }
@@ -1879,6 +1924,8 @@ impl Compositor {
     crate::decoration::apply_preferences(&mut self.state);
     self.state.cursor_theme = config.cursor_theme;
     self.state.cursor_size = config.cursor_size;
+    self.state.wayfire_shell.toggle_menu = config.toggle_menu;
+    self.state.wayfire_shell.modifier_timeout = config.modifier_binding_timeout;
     input::set_scroll(
       &mut self.state,
       config.mouse_scroll_speed,
@@ -2410,6 +2457,23 @@ impl Compositor {
   /// cursor yield `None`.
   pub fn window_at(&self, x: f64, y: f64) -> Option<WindowId> {
     input::window_at(&self.state, x, y)
+  }
+
+  /// Sends `zwf_output_v2.toggle_menu` to the shell clients of `output`,
+  /// or of the active output with `None`, as Wayfire's
+  /// `wayfire-shell/toggle_menu` activator does. A frontend calls it when
+  /// [`Config::toggle_menu`] triggers.
+  pub fn toggle_menu(&mut self, output: Option<&OutputHandle>) {
+    let output =
+      output.map_or_else(|| self.state.active_output.clone(), OutputHandle::id);
+    wayfire_shell::toggle_menu(&self.state, &output);
+  }
+
+  /// Whether a shell client inhibits `output`
+  /// (`zwf_output_v2.inhibit_output`): the frontend then draws it black,
+  /// as Wayfire 0.9 did. [`Event::OutputInhibitChanged`] reports changes.
+  pub fn output_inhibited(&self, output: &OutputHandle) -> bool {
+    wayfire_shell::inhibited(&self.state, &output.id())
   }
 
   /// Starts an interactive move by emitting [`Event::BeginMove`], as if the
@@ -3912,6 +3976,18 @@ impl AsFd for Compositor {
   }
 }
 
+/// Creates a disarmed one-shot timerfd.
+fn one_shot_timer() -> Result<OwnedFd, Error> {
+  use rustix::time::{TimerfdClockId, TimerfdFlags, timerfd_create};
+  Ok(
+    timerfd_create(
+      TimerfdClockId::Monotonic,
+      TimerfdFlags::NONBLOCK | TimerfdFlags::CLOEXEC,
+    )
+    .map_err(std::io::Error::from)?,
+  )
+}
+
 /// Creates the timerfd behind the 50 ms housekeeping tick.
 fn tick_timer() -> Result<OwnedFd, Error> {
   use rustix::time::{
@@ -4047,6 +4123,7 @@ pub(crate) mod tests {
       "wp_security_context_manager_v1",
       "ext_session_lock_manager_v1",
       "zwp_keyboard_shortcuts_inhibit_manager_v1",
+      "zwf_shell_manager_v2",
     ];
     let all = names(Config::default());
     for interface in gated {

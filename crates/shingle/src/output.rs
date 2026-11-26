@@ -443,6 +443,7 @@ pub(crate) fn rename(
     return Err(crate::Error::OutputExists(name.into()));
   }
   state.core.rename_output(id, new_id.clone())?;
+  crate::wayfire_shell::output_removed(state, id);
   retire_global(state, id);
   if let Some(output) = state.outputs.get_mut(id) {
     output.id = new_id.clone();

@@ -1037,6 +1037,7 @@ fn pointer_motion_inner(
   let (x, y) = crate::pointer_protocols::constrain(state, x, y);
   state.input.pointer_x = x;
   state.input.pointer_y = y;
+  crate::wayfire_shell::input_moved(state, x, y);
   let target = surface_at(state, x, y);
   set_pointer_focus(state, target.clone());
   let Some(target) = target else {
@@ -1058,6 +1059,7 @@ pub(crate) fn pointer_button(
   pressed: bool,
 ) {
   activity(state);
+  state.wayfire_shell.modifiers.interrupt();
   let (x, y) = (state.input.pointer_x, state.input.pointer_y);
   let modifiers = state.input.modifiers;
   let modifiers_active =
@@ -1122,6 +1124,7 @@ pub(crate) fn pointer_axis_detailed(state: &mut CompositorState, axis: Axis) {
     vertical_stop,
   } = axis;
   activity(state);
+  state.wayfire_shell.modifiers.interrupt();
   let Some(target) = state.input.pointer_focus.clone() else {
     return;
   };
@@ -1226,6 +1229,7 @@ pub(crate) fn touch_down(state: &mut CompositorState, id: i32, x: f64, y: f64) {
   if state.input.active_touches.contains_key(&id) {
     return;
   }
+  state.wayfire_shell.modifiers.interrupt();
   // A touch down on another output focuses it, as in Wayfire's touch.cpp.
   if state.input.active_touches.is_empty() {
     crate::output::focus_output_at(state, x, y);
@@ -1270,6 +1274,10 @@ pub(crate) fn touch_motion(
   point.x = x;
   point.y = y;
   let object = point.object.clone();
+  // Hotspots follow the first touch point, as Wayfire's follow touch 0.
+  if id == 0 {
+    crate::wayfire_shell::input_moved(state, x, y);
+  }
   let Some(geometry) = shell::surface_geometry(state, &object) else {
     return;
   };

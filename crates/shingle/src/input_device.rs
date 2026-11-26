@@ -263,6 +263,13 @@ fn any_holds(state: &CompositorState, held: impl Fn(&Held) -> bool) -> bool {
     .any(|device| held(&device.held))
 }
 
+/// Whether any device holds a pointer button or a touch point.
+pub(crate) fn any_button_or_touch(state: &CompositorState) -> bool {
+  any_holds(state, |held| {
+    !held.buttons.is_empty() || !held.touches.is_empty()
+  })
+}
+
 fn release_held(state: &mut CompositorState, id: InputDeviceId) {
   let Some(device) = state.input.devices.devices.get_mut(&id) else {
     return;

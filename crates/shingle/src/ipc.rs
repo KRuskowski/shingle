@@ -423,6 +423,7 @@ const SUPPORTED_METHODS: &[&str] = &[
   "vswitch/with_win_left",
   "vswitch/with_win_right",
   "vswitch/with_win_up",
+  "wayfire-shell/toggle_menu",
   "wayfire/create-headless-output",
   "wayfire/destroy-headless-output",
   "wayfire/get-config-option",
@@ -1842,6 +1843,8 @@ fn feed_key(state: &mut CompositorState, data: &Value) -> Value {
   if !input_device::delivers(state, keyboard, InputDeviceKind::Keyboard) {
     return json_ok();
   }
+  let modifiers = stipc_modifiers(state, keyboard);
+  crate::wayfire_shell::stipc_key(state, keyboard, key, modifiers, pressed);
   if !stipc_key_binding(state, keyboard, name, pressed) {
     input_device::keyboard_key(state, keyboard, key, pressed);
   }
@@ -2246,6 +2249,34 @@ fn activator_output(
   };
   crate::output::focus_output(state, &output);
   Ok(())
+}
+
+/// `wayfire-shell/toggle_menu`: toggles the menu of the shell clients on
+/// the output `output_id` or `output-id` names, else on the active one,
+/// as Wayfire's `ipc_activator_t` calls the activator. A view id (`id`,
+/// `view-id` or `view_id`) must name a view, which the menu ignores.
+fn toggle_menu(state: &mut CompositorState, data: &Value) -> Value {
+  if let Some(view) = ["id", "view-id", "view_id"]
+    .into_iter()
+    .find_map(|key| data.get(key))
+    && view
+      .as_u64()
+      .and_then(|id| state.core.window_info(WindowId(id)).ok())
+      .is_none()
+  {
+    return json_error("view id not found!");
+  }
+  let output = match data.get("output_id").or_else(|| data.get("output-id")) {
+    None => state.active_output.clone(),
+    Some(value) => {
+      match value.as_u64().and_then(|id| state.outputs.by_ipc_id(id)) {
+        Some(output) => output.id.clone(),
+        None => return json_error("output id not found!"),
+      }
+    }
+  };
+  crate::wayfire_shell::toggle_menu(state, &output);
+  json_ok()
 }
 
 /// The output with IPC id `field` of `data`.
@@ -3147,6 +3178,7 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
       state.events.push(crate::Event::InvertToggle);
       json_ok()
     }
+    "wayfire-shell/toggle_menu" => toggle_menu(state, data),
     _ if method.starts_with("vswitch/binding_")
       || method.starts_with("vswitch/with_win_")
       || method.starts_with("vswitch/send_win_") =>
@@ -3310,12 +3342,12 @@ mod tests {
   }
 
   #[test]
-  fn list_methods_reports_85_sorted_methods_with_input_devices() {
+  fn list_methods_reports_86_sorted_methods_with_input_devices() {
     let mut state = test_state();
     let reply = call(&mut state, "list-methods", Value::Null);
     let methods = reply["methods"].as_array().unwrap();
-    assert_eq!(methods.len(), 85);
-    assert_eq!(SUPPORTED_METHODS.len(), 85);
+    assert_eq!(methods.len(), 86);
+    assert_eq!(SUPPORTED_METHODS.len(), 86);
     assert!(SUPPORTED_METHODS.windows(2).all(|pair| pair[0] < pair[1]));
     for method in [
       "input/list-devices",

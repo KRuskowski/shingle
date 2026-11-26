@@ -101,7 +101,15 @@ use wayland_protocols_wlr::{
   },
 };
 
-use crate::Compositor;
+use crate::{
+  Compositor,
+  wayfire_shell::protocol::client::{
+    zwf_hotspot_v2::{self, ZwfHotspotV2},
+    zwf_output_v2::{self, ZwfOutputV2},
+    zwf_shell_manager_v2::ZwfShellManagerV2,
+    zwf_surface_v2::ZwfSurfaceV2,
+  },
+};
 
 /// Everything the test client has received, in order per object type.
 #[derive(Default)]
@@ -194,6 +202,10 @@ pub(crate) struct Events {
   /// ext-workspace workspaces as announced, by object.
   pub(crate) workspaces:
     std::collections::HashMap<ObjectId, (ExtWorkspaceHandleV1, WorkspaceSeen)>,
+  /// wayfire-shell events, in order, with their object: `enter_fullscreen`,
+  /// `leave_fullscreen` and `toggle_menu` of outputs, `enter`, `leave`
+  /// and `proximity N` of hotspots.
+  pub(crate) wayfire_shell: Vec<(ObjectId, String)>,
   synced: bool,
 }
 
@@ -1062,6 +1074,44 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for Events {
   }
 }
 
+impl Dispatch<ZwfOutputV2, ()> for Events {
+  fn event(
+    events: &mut Self,
+    output: &ZwfOutputV2,
+    event: zwf_output_v2::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    let name = match event {
+      zwf_output_v2::Event::EnterFullscreen => "enter_fullscreen",
+      zwf_output_v2::Event::LeaveFullscreen => "leave_fullscreen",
+      zwf_output_v2::Event::ToggleMenu => "toggle_menu",
+    };
+    events.wayfire_shell.push((output.id(), name.to_owned()));
+  }
+}
+
+impl Dispatch<ZwfHotspotV2, ()> for Events {
+  fn event(
+    events: &mut Self,
+    hotspot: &ZwfHotspotV2,
+    event: zwf_hotspot_v2::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    let name = match event {
+      zwf_hotspot_v2::Event::Enter => "enter".to_owned(),
+      zwf_hotspot_v2::Event::Leave => "leave".to_owned(),
+      zwf_hotspot_v2::Event::ProximityChanged { proximity } => {
+        format!("proximity {proximity}")
+      }
+    };
+    events.wayfire_shell.push((hotspot.id(), name));
+  }
+}
+
 /// Implements `Dispatch` for objects whose events the tests ignore.
 macro_rules! ignore_events {
   ($($interface:ty),* $(,)?) => {
@@ -1349,6 +1399,8 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for Events {
 }
 
 ignore_events!(
+  ZwfShellManagerV2,
+  ZwfSurfaceV2,
   ZwlrOutputPowerManagerV1,
   ZwlrGammaControlManagerV1,
   wl_compositor::WlCompositor,
