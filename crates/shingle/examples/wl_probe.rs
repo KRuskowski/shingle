@@ -5,9 +5,10 @@
 //! (docs/design/xwayland.md, section 7).
 //!
 //! It runs only inside tools/xwayland_test/run.py's,
-//! tools/gpu_test/run.py's or tools/session_test/run.py's namespace,
-//! which set `SHINGLE_XWAYLAND_TEST_NAMESPACE=1`,
-//! `SHINGLE_GPU_TEST_NAMESPACE=1` or `SHINGLE_SESSION_TEST_NAMESPACE=1`,
+//! tools/gpu_test/run.py's, tools/session_test/run.py's or
+//! tools/output_test/run.py's namespace, which set
+//! `SHINGLE_XWAYLAND_TEST_NAMESPACE=1`, `SHINGLE_GPU_TEST_NAMESPACE=1`,
+//! `SHINGLE_SESSION_TEST_NAMESPACE=1` or `SHINGLE_OUTPUT_TEST_NAMESPACE=1`,
 //! so that it never opens a window on the host's Wayland session.
 //!
 //! ```text
@@ -76,10 +77,11 @@ use wayland_protocols::{
 };
 
 /// The variables the test harnesses set inside their namespaces.
-const NAMESPACE_VARIABLES: [&str; 3] = [
+const NAMESPACE_VARIABLES: [&str; 4] = [
   "SHINGLE_XWAYLAND_TEST_NAMESPACE",
   "SHINGLE_GPU_TEST_NAMESPACE",
   "SHINGLE_SESSION_TEST_NAMESPACE",
+  "SHINGLE_OUTPUT_TEST_NAMESPACE",
 ];
 
 /// The size drawn before the first configure that names one.

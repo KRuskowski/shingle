@@ -15,7 +15,9 @@ Usage, from the repository root and outside any sandbox that forbids
 user namespaces:
 
   cargo build -p shingle-bin
-  tools/output_test/run.py [--binary target/debug/shingle] [--keep]
+  cargo build -p shingle --example wl_probe
+  tools/output_test/run.py [--binary target/debug/shingle]
+      [--wl-probe target/debug/examples/wl_probe] [--keep]
 
 It prints one line per check and exits 0 when all pass. The checks are
 the parts of NB-9 (docs/design/native-backend.md) that are not
@@ -26,8 +28,19 @@ output off, explicit configured modes with their refresh rate, Wayfire
 Shingle does not reload its config, so a nested Shingle on lavapipe,
 running as a client of a headless one inside the namespace, checks the
 configured refresh rate and that a reload applies.
-Signals go only to Shingle, through `signal_checked`. The pure
-helpers are tested by `python3 -m unittest` in this directory
+
+With `--outputs 2` (MO-2, docs/design/multi-output.md) the checks are
+the parts of the output registry clients see: `wlr-randr` and
+`wayland-info` list both outputs at their automatic and at configured
+fixed positions, a head moved with `wlr-randr --pos` moves, outputs
+created with `wayfire/create-headless-output` appear to clients and IPC
+watchers and go again, and a `wl_probe` window restored from a session
+whose set belongs to `HEADLESS-3` waits on the active output, moves to
+`HEADLESS-3` when IPC creates it and back when IPC destroys it. That
+needs `cargo build -p shingle --example wl_probe`.
+
+Signals go only to Shingle and wl_probe, through `signal_checked`. The
+pure helpers are tested by `python3 -m unittest` in this directory
 (test_run.py).
 """
 
@@ -105,6 +118,41 @@ def parse_wlr_randr(text):
     elif key in ('Make', 'Model'):
       head[key.lower()] = value
   return heads
+
+XDG_NAME = re.compile(r"^\s+name: '([^']*)'$")
+XDG_POSITION = re.compile(r'^\s+logical_x: (-?\d+), logical_y: (-?\d+)$')
+XDG_SIZE = re.compile(r'^\s+logical_width: (\d+), logical_height: (\d+)$')
+NAMESPACE_VARIABLE = 'SHINGLE_OUTPUT_TEST_NAMESPACE'
+
+def parse_xdg_outputs(text):
+  """The xdg-outputs in `wayland-info` output, by name, as
+  (x, y, width, height)."""
+  outputs = {}
+  name = None
+  position = None
+  for line in text.splitlines():
+    match = XDG_NAME.match(line)
+    if match:
+      name, position = match.group(1), None
+      continue
+    match = XDG_POSITION.match(line)
+    if match and name is not None:
+      position = (int(match.group(1)), int(match.group(2)))
+      continue
+    match = XDG_SIZE.match(line)
+    if match and name is not None and position is not None:
+      outputs[name] = (*position, int(match.group(1)), int(match.group(2)))
+      name = None
+  return outputs
+
+def swap_outputs(session, first, second):
+  """`session` with the outputs `first` and `second` swapped in every
+  workspace set's `output` and `home`."""
+  swap = {first: second, second: first}
+  for wset in session['wsets']:
+    for key in ('output', 'home'):
+      wset[key] = swap.get(wset[key], wset[key])
+  return session
 
 def current_mode(head):
   """The (width, height, refresh_hz) of the head's current mode, or None."""
@@ -191,10 +239,35 @@ class Headless:
                             capture_output=True, text=True, timeout=10)
     return result.returncode, result.stdout + result.stderr
 
+  def client_environment(self):
+    """The environment for a client of this Shingle."""
+    return {
+        'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+        'XDG_RUNTIME_DIR': self.runtime,
+        'WAYLAND_DISPLAY': self.wayland_display(),
+        'HOME': os.path.join(self.directory, 'home'),
+        NAMESPACE_VARIABLE: '1',
+    }
+
   def heads(self):
     """What `wlr-randr` lists."""
     status, output = self.randr()
     return parse_wlr_randr(output) if status == 0 else {}
+
+  def xdg_outputs(self):
+    """The xdg-outputs `wayland-info` lists, by name."""
+    result = subprocess.run(['wayland-info'], env=self.client_environment(),
+                            capture_output=True, text=True, timeout=10)
+    return parse_xdg_outputs(result.stdout) if result.returncode == 0 else {}
+
+  def positions(self):
+    """Each head's position, as `wlr-randr` lists it."""
+    return {name: head.get('position') for name, head in self.heads().items()}
+
+  def views(self):
+    """The views IPC lists, by app id."""
+    return {view['app-id']: view
+            for view in self.ipc.call('window-rules/list-views')}
 
   def output(self):
     """The IPC description of the output."""
@@ -387,6 +460,216 @@ def wayfire_checks(results, binary):
                 str(status))
   return shingle.log_text()
 
+def multi_config(outputs=None, session_path=None):
+  """A YAML config (as JSON) with Xwayland off, the named `outputs`
+  entries and, with `session_path`, session restore from there."""
+  config = json.loads(yaml_config({}))
+  if outputs:
+    config['outputs'] = outputs
+  if session_path:
+    config['session'] = {'restore': True, 'path': session_path}
+  return json.dumps(config)
+
+def output_ids(shingle):
+  """The IPC output ids by name."""
+  return {output['name']: output['id']
+          for output in shingle.ipc.call('window-rules/list-outputs')}
+
+def watch(shingle, events):
+  """A second IPC connection watching `events`."""
+  watcher = Ipc(shingle.ipc_path)
+  watcher.call('window-rules/events/watch', {'events': events})
+  return watcher
+
+def next_event(watcher, name):
+  """The next event called `name`, or None within the IPC timeout."""
+  try:
+    while True:
+      event = watcher.receive()
+      if event.get('event') == name:
+        return event
+  except (TimeoutError, ConnectionError):
+    return None
+
+def auto_layout_checks(results, binary):
+  """Two automatic outputs side by side, a head moved by `wlr-randr`, and
+  an output created and destroyed over IPC."""
+  shingle = Headless(binary, 'multi-auto', multi_config(), 'yaml',
+                     backend=('--headless', '--outputs', '2'))
+  try:
+    methods = shingle.ipc.call('list-methods').get('methods', [])
+    results.check('MO-2: list-methods returns 81 methods',
+                  len(methods) == 81, str(len(methods)))
+    positions = shingle.positions()
+    results.check('MO-2: wlr-randr lists both outputs at auto positions',
+                  positions == {'HEADLESS-1': (0, 0),
+                                'HEADLESS-2': (1280, 0)}, str(positions))
+    xdg = shingle.xdg_outputs()
+    results.check('MO-2: wayland-info shows both xdg-outputs side by side',
+                  xdg == {'HEADLESS-1': (0, 0, 1280, 720),
+                          'HEADLESS-2': (1280, 0, 1280, 720)}, str(xdg))
+    ids = output_ids(shingle)
+    results.check('MO-2: IPC gives the outputs ids 1 and 2',
+                  ids == {'HEADLESS-1': 1, 'HEADLESS-2': 2}, str(ids))
+    status, output = shingle.randr('--output', 'HEADLESS-2', '--pos', '0,720')
+    positions = shingle.positions()
+    # HEADLESS-2 is fixed now, so the automatic HEADLESS-1 starts at its
+    # right edge and its y, as wlroots places it.
+    results.check('MO-2: wlr-randr --pos moves the second head',
+                  status == 0
+                  and positions == {'HEADLESS-1': (1280, 720),
+                                    'HEADLESS-2': (0, 720)},
+                  f'{output.strip()} {positions}')
+    watcher = watch(shingle, ['output-added', 'output-removed',
+                              'output-layout-changed'])
+    created = shingle.ipc.call('wayfire/create-headless-output',
+                               {'width': 640, 'height': 480})
+    added = next_event(watcher, 'output-added')
+    results.check('MO-2: create-headless-output adds HEADLESS-3 (id 3)',
+                  created.get('result') == 'ok'
+                  and created['output']['name'] == 'HEADLESS-3'
+                  and created['output']['id'] == 3, str(created))
+    results.check('MO-2: watchers get output-added for it',
+                  added is not None
+                  and added['output']['name'] == 'HEADLESS-3', str(added))
+    xdg = shingle.xdg_outputs()
+    results.check('MO-2: clients see the created output',
+                  xdg.get('HEADLESS-3') == (2560, 720, 640, 480)
+                  and 'HEADLESS-3' in shingle.heads(), str(xdg))
+    destroyed = shingle.ipc.call('wayfire/destroy-headless-output',
+                                 {'output': 'HEADLESS-3'})
+    removed = next_event(watcher, 'output-removed')
+    results.check('MO-2: destroy-headless-output removes it again',
+                  destroyed == {'result': 'ok'}
+                  and removed is not None
+                  and removed['output']['id'] == 3
+                  and 'HEADLESS-3' not in wait_for(
+                      lambda: shingle.xdg_outputs() or None)
+                  and 'HEADLESS-3' not in shingle.heads(),
+                  f'{destroyed} {removed}')
+    refused = shingle.ipc.call('wayfire/destroy-headless-output',
+                               {'output': 'HEADLESS-1'})
+    results.check('MO-2: an output IPC did not create is refused',
+                  refused.get('error') == 'Output is not a headless output '
+                  'created from an IPC command!', str(refused))
+    watcher.close()
+  finally:
+    status = shingle.stop()
+  results.check('MO-2: SIGTERM exits with status 0 (auto layout)',
+                status == 0, str(status))
+  return shingle.log_text()
+
+def fixed_layout_checks(results, binary):
+  """Configured fixed positions, with an automatic output after them."""
+  outputs = [
+      {'name': 'HEADLESS-1', 'position': {'x': 0, 'y': 0}},
+      {'name': 'HEADLESS-2', 'position': {'x': -1024, 'y': 200},
+       'mode': '1024x768@60'},
+  ]
+  shingle = Headless(binary, 'multi-fixed', multi_config(outputs), 'yaml',
+                     backend=('--headless', '--outputs', '2'))
+  try:
+    positions = shingle.positions()
+    results.check('MO-2: wlr-randr lists configured fixed positions',
+                  positions == {'HEADLESS-1': (0, 0),
+                                'HEADLESS-2': (-1024, 200)}, str(positions))
+    xdg = shingle.xdg_outputs()
+    results.check('MO-2: wayland-info shows the fixed xdg-output geometry',
+                  xdg == {'HEADLESS-1': (0, 0, 1280, 720),
+                          'HEADLESS-2': (-1024, 200, 1024, 768)}, str(xdg))
+    created = shingle.ipc.call('wayfire/create-headless-output',
+                               {'width': 800, 'height': 600})
+    geometry = created.get('output', {}).get('geometry')
+    results.check('MO-2: an automatic output goes after the fixed ones',
+                  geometry == {'x': 1280, 'y': 0, 'width': 800,
+                               'height': 600}, str(created))
+  finally:
+    status = shingle.stop()
+  results.check('MO-2: SIGTERM exits with status 0 (fixed layout)',
+                status == 0, str(status))
+  return shingle.log_text()
+
+def stop_probe(process):
+  """Ends a wl_probe through `signal_checked` and waits for it."""
+  if process.poll() is None:
+    signal_checked(process.pid, signal.SIGTERM, 'wl_probe')
+    try:
+      process.wait(5)
+    except subprocess.TimeoutExpired:
+      signal_checked(process.pid, signal.SIGKILL, 'wl_probe')
+      process.wait()
+
+def stop_view_process(view):
+  """Ends the wl_probe behind an IPC view, if its pid names one."""
+  pid = view.get('pid') if view else None
+  if isinstance(pid, int) and signal_checked(pid, signal.SIGTERM,
+                                             'wl_probe'):
+    wait_for(lambda: not os.path.exists(f'/proc/{pid}'), timeout=5)
+
+def view_output(shingle, app_id):
+  """(output-name, output-id) of the view with `app_id`, or None."""
+  view = shingle.views().get(app_id)
+  return (view['output-name'], view['output-id']) if view else None
+
+def session_checks(results, binary, wl_probe):
+  """A window saved on HEADLESS-3 waits on the active output until IPC
+  creates HEADLESS-3, moves there, and moves back when it goes."""
+  session_path = '/tmp/multi-session.json'
+  config = multi_config(session_path=session_path)
+  first = Headless(binary, 'multi-save', config, 'yaml',
+                   backend=('--headless', '--outputs', '3'),
+                   extra_environment={NAMESPACE_VARIABLE: '1'})
+  probe = None
+  try:
+    probe = subprocess.Popen(
+        [wl_probe, 'mo2-probe'], env=first.client_environment(),
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    mapped = wait_for(lambda: view_output(first, 'mo2-probe'))
+    results.check('MO-2: the probe maps on the active output',
+                  mapped == ('HEADLESS-1', 1), str(mapped))
+  finally:
+    status = first.stop()
+    if probe is not None:
+      stop_probe(probe)
+      probe.stdin.close()
+  results.check('MO-2: SIGTERM exits with status 0 (session saved)',
+                status == 0, str(status))
+  try:
+    with open(session_path) as file:
+      session = json.load(file)
+  except (OSError, ValueError) as error:
+    results.check('MO-2: the session was saved', False, repr(error))
+    return first.log_text()
+  with open(session_path, 'w') as file:
+    json.dump(swap_outputs(session, 'HEADLESS-1', 'HEADLESS-3'), file)
+  second = Headless(binary, 'multi-restore', config, 'yaml',
+                    backend=('--headless', '--outputs', '2'),
+                    extra_environment={NAMESPACE_VARIABLE: '1'})
+  view = None
+  try:
+    waiting = wait_for(lambda: view_output(second, 'mo2-probe'),
+                       timeout=20)
+    results.check('MO-2: the restored window waits on the active output',
+                  waiting == ('HEADLESS-1', 1), str(waiting))
+    created = second.ipc.call('wayfire/create-headless-output',
+                              {'width': 640, 'height': 480})
+    moved = view_output(second, 'mo2-probe')
+    results.check('MO-2: it returns to HEADLESS-3 when IPC creates it',
+                  created.get('output', {}).get('name') == 'HEADLESS-3'
+                  and moved == ('HEADLESS-3', 3), f'{created} {moved}')
+    second.ipc.call('wayfire/destroy-headless-output', {'output-id': 3})
+    back = view_output(second, 'mo2-probe')
+    results.check('MO-2: destroying it moves the window to the active '
+                  'output', back == ('HEADLESS-1', 1), str(back))
+    view = second.views().get('mo2-probe')
+  finally:
+    status = second.stop()
+    stop_view_process(view)
+  results.check('MO-2: SIGTERM exits with status 0 (session restored)',
+                status == 0, str(status))
+  return second.log_text()
+
 def inner(binary):
   """Runs the checks inside the namespace; returns the exit status."""
   work = os.environ['OUTPUT_TEST_WORK']
@@ -401,15 +684,23 @@ def inner(binary):
                 not os.path.isdir('/dev/dri') or not os.listdir('/dev/dri'))
   results.check('no host display variable is set',
                 not any(name in os.environ for name in HOST_VARIABLES))
+  wl_probe = os.environ.get('OUTPUT_TEST_WL_PROBE')
+  multi = [auto_layout_checks, fixed_layout_checks]
+  if wl_probe:
+    def restored_session_checks(results, binary):
+      return session_checks(results, binary, wl_probe)
+    multi.append(restored_session_checks)
   for checks in (randr_checks, configured_checks, wayfire_checks,
-                 nested_checks):
+                 nested_checks, *multi):
     try:
       log = checks(results, binary)
     except Exception as error:  # pylint: disable=broad-except
-      results.check(f'{checks.__name__} ran', False, repr(error))
+      results.check(f'{getattr(checks, "__name__", "checks")} ran', False,
+                    repr(error))
       continue
     if not results.all_passed():
-      print(f'--- {checks.__name__} log ---\n{log}--- end ---', flush=True)
+      name = getattr(checks, '__name__', 'checks')
+      print(f'--- {name} log ---\n{log}--- end ---', flush=True)
   passed = sum(1 for _, ok, _ in results.checks if ok)
   print(f'{passed}/{len(results.checks)} checks passed', flush=True)
   return 0 if results.all_passed() else 1
@@ -418,6 +709,7 @@ def main():
   """Sets up the work directory and re-runs itself in the namespace."""
   parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   parser.add_argument('--binary', default='target/debug/shingle')
+  parser.add_argument('--wl-probe', default='target/debug/examples/wl_probe')
   parser.add_argument('--keep', action='store_true')
   parser.add_argument(INNER_FLAG, action='store_true')
   options = parser.parse_args()
@@ -432,6 +724,11 @@ def main():
   environment = {key: value for key, value in os.environ.items()
                  if key not in HOST_VARIABLES}
   environment['OUTPUT_TEST_WORK'] = work
+  if os.path.exists(options.wl_probe):
+    environment['OUTPUT_TEST_WL_PROBE'] = os.path.abspath(options.wl_probe)
+  else:
+    print(f'{options.wl_probe} is missing; skipping the session checks',
+          file=sys.stderr)
   try:
     # The PID namespace confines every signal to processes started in it.
     command = ['unshare', '--user', '--map-root-user', '--mount', '--net',

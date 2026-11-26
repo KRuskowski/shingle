@@ -59,6 +59,48 @@ class ParseWlrRandrTest(unittest.TestCase):
     self.assertEqual(run.parse_wlr_randr(''), {})
     self.assertEqual(run.parse_wlr_randr('  Modes:\n'), {})
 
+XDG = """interface: 'zxdg_output_manager_v1',          version:  3, name: 10
+\txdg_output_v1
+\t\toutput: 9
+\t\tname: 'HEADLESS-1'
+\t\tdescription: 'Shingle Headless output (HEADLESS-1)'
+\t\tlogical_x: 0, logical_y: 0
+\t\tlogical_width: 1280, logical_height: 720
+\txdg_output_v1
+\t\toutput: 11
+\t\tname: 'HEADLESS-2'
+\t\tdescription: 'Shingle Headless output (HEADLESS-2)'
+\t\tlogical_x: -1024, logical_y: 200
+\t\tlogical_width: 1024, logical_height: 768
+"""
+
+class MultiOutputHelpersTest(unittest.TestCase):
+  """parse_xdg_outputs and swap_outputs."""
+
+  def test_xdg_outputs_by_name(self):
+    self.assertEqual(run.parse_xdg_outputs(XDG), {
+        'HEADLESS-1': (0, 0, 1280, 720),
+        'HEADLESS-2': (-1024, 200, 1024, 768),
+    })
+    self.assertEqual(run.parse_xdg_outputs(''), {})
+
+  def test_a_size_without_a_position_is_ignored(self):
+    text = "\t\tname: 'X'\n\t\tlogical_width: 1, logical_height: 1\n"
+    self.assertEqual(run.parse_xdg_outputs(text), {})
+
+  def test_swapping_outputs_in_a_session(self):
+    session = {'wsets': [
+        {'output': 'HEADLESS-1', 'home': 'HEADLESS-1'},
+        {'output': None, 'home': 'DP-1'},
+        {'output': 'HEADLESS-3', 'home': 'HEADLESS-3'},
+    ]}
+    swapped = run.swap_outputs(session, 'HEADLESS-1', 'HEADLESS-3')
+    self.assertEqual(swapped['wsets'], [
+        {'output': 'HEADLESS-3', 'home': 'HEADLESS-3'},
+        {'output': None, 'home': 'DP-1'},
+        {'output': 'HEADLESS-1', 'home': 'HEADLESS-1'},
+    ])
+
 class PrivateEnvironmentTest(unittest.TestCase):
   """private_environment."""
 
