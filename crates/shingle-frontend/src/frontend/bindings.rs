@@ -304,9 +304,72 @@ impl Frontend {
     );
     let key = self.keyboard.key(code, state);
     if enabled {
+      self.track_modifier_binding(&key);
       self.keyboard_input(host, device, &key);
       if key.modifiers_changed {
         self.keyboard_modifiers_changed(device);
+      }
+    }
+  }
+
+  /// Follows `key` for modifier-alone bindings, and runs those that a
+  /// release triggers: `toggle_menu`, which toggles the active output's
+  /// shell menu, and commands bound to modifiers alone. The key itself
+  /// goes on to bindings and clients as usual, as in Wayfire.
+  fn track_modifier_binding(&mut self, key: &Key) {
+    let now = Instant::now();
+    match key.state {
+      KeyState::Pressed => {
+        let only_modifiers = self.keyboard.holds_only_modifiers()
+          && !self.compositor.buttons_or_touches_held();
+        self.modifier_bindings.press(key.code, only_modifiers, now);
+      }
+      KeyState::Released => {
+        let Some(modifiers) = self.modifier_bindings.release(
+          key.code,
+          key.modifiers,
+          self.modifier_binding_timeout,
+          now,
+        ) else {
+          return;
+        };
+        self.run_modifier_binding(modifiers);
+      }
+      KeyState::Repeated => {}
+    }
+  }
+
+  /// Runs the modifier-alone bindings of `modifiers`.
+  fn run_modifier_binding(&mut self, modifiers: ConfigModifiers) {
+    if self.compositor.shortcuts_inhibited() {
+      return;
+    }
+    let locked = self.compositor.is_locked();
+    if !locked
+      && self
+        .keybindings
+        .toggle_menu
+        .matches_modifiers_alone(modifiers)
+    {
+      self.compositor.toggle_menu(None);
+    }
+    let commands = self
+      .commands
+      .iter()
+      .filter(|command| {
+        command.binding.matches_modifiers_alone(modifiers)
+          && (!locked || command.always)
+      })
+      .map(|command| command.command.clone())
+      .collect::<Vec<_>>();
+    for command in commands {
+      match launch_command(
+        &command,
+        &self.compositor.client_environment(),
+        self.discard_command_output,
+      ) {
+        Ok(child) => self.session_children.push(child),
+        Err(error) => eprintln!("shingle: command launch failed: {error}"),
       }
     }
   }

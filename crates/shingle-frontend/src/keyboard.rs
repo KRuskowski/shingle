@@ -232,6 +232,15 @@ impl Keyboard {
     self.held.contains(&code)
   }
 
+  /// Returns whether every key that is down is a modifier key
+  /// ([`shingle::modifier_of_key`]), as Wayfire's `has_only_modifiers`.
+  pub fn holds_only_modifiers(&self) -> bool {
+    self
+      .held
+      .iter()
+      .all(|code| shingle::modifier_of_key(*code).is_some())
+  }
+
   /// Returns whether key `code` repeats in the keymap. Modifiers usually
   /// do not.
   pub fn key_repeats(&self, code: u32) -> bool {

@@ -22,6 +22,8 @@ xkbcommon.workspace = true
 pollster.workspace = true
 rustix.workspace = true
 wayland-client = "0.31"
+# The test client's side of crates/shingle/protocols.
+wayland-scanner = "0.31.11"
 wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
 

@@ -858,6 +858,103 @@ fn stipc_keys_are_dropped_while_the_session_is_inactive() {
   assert!(fixture.frontend.scale.is_some());
 }
 
+/// The number of `toggle_menu` events the fixture's shell output got.
+fn menus(fixture: &Fixture) -> usize {
+  fixture
+    .client
+    .shell_events()
+    .iter()
+    .filter(|event| **event == "toggle_menu")
+    .count()
+}
+
+#[test]
+fn a_modifier_pressed_alone_toggles_the_shell_menu() {
+  let mut fixture = Fixture::new(ShingleConfig::default());
+  let _output = fixture
+    .client
+    .shell_output(fixture.frontend.compositor_mut(), 0);
+  fixture.tap(KEY_LEFTMETA, &[]);
+  fixture.process();
+  assert_eq!(menus(&fixture), 1);
+  // Another key, a button or Shift in between.
+  fixture.tap(KEY_P, &[KEY_LEFTMETA]);
+  fixture.key(KEY_LEFTMETA, true);
+  fixture.button(BTN_LEFT, true);
+  fixture.button(BTN_LEFT, false);
+  fixture.key(KEY_LEFTMETA, false);
+  fixture.tap(KEY_LEFTMETA, &[KEY_LEFTSHIFT]);
+  // Pressed while another key is held.
+  fixture.key(KEY_A, true);
+  fixture.tap(KEY_LEFTMETA, &[]);
+  fixture.key(KEY_A, false);
+  fixture.process();
+  assert_eq!(menus(&fixture), 1);
+  // Super+P still opens Scale: the tap does not take the modifier.
+  assert!(fixture.frontend.scale.is_none());
+  fixture.window("alpha");
+  fixture.tap(KEY_P, &[KEY_LEFTMETA]);
+  assert!(fixture.frontend.scale.is_some());
+  // STIPC keys take the same path.
+  fixture.stipc_key("KEY_ESC", true);
+  fixture.stipc_key("KEY_ESC", false);
+  fixture.stipc_tap("KEY_LEFTMETA", &[]);
+  fixture.process();
+  assert_eq!(menus(&fixture), 2);
+}
+
+#[test]
+fn holding_the_modifier_too_long_cancels_the_menu() {
+  let mut config = ShingleConfig::default();
+  config.input.modifier_binding_timeout = 30;
+  let mut fixture = Fixture::new(config);
+  let _output = fixture
+    .client
+    .shell_output(fixture.frontend.compositor_mut(), 0);
+  fixture.key(KEY_LEFTMETA, true);
+  thread::sleep(Duration::from_millis(40));
+  fixture.key(KEY_LEFTMETA, false);
+  fixture.process();
+  assert_eq!(menus(&fixture), 0);
+  fixture.tap(KEY_LEFTMETA, &[]);
+  fixture.process();
+  assert_eq!(menus(&fixture), 1);
+}
+
+#[test]
+fn a_command_bound_to_a_modifier_alone_runs_on_its_release() {
+  let marker = std::env::temp_dir().join(format!(
+    "shingle-frontend-modifier-alone-{}",
+    std::process::id()
+  ));
+  let _ = std::fs::remove_file(&marker);
+  let config = wayfire_config(&format!(
+    concat!(
+      "[core]\nplugins = command\n",
+      "[command]\nbinding_menu = <alt>\ncommand_menu = touch {}\n",
+    ),
+    marker.display()
+  ));
+  let mut fixture = Fixture::new(config);
+  // wayfire-shell is not loaded, so super alone does nothing.
+  assert!(fixture.frontend.keybindings.toggle_menu.key.is_empty());
+  assert!(
+    !fixture
+      .frontend
+      .keybindings
+      .toggle_menu
+      .is_modifiers_alone()
+  );
+  fixture.tap(KEY_LEFTALT, &[]);
+  let deadline = Instant::now() + Duration::from_secs(5);
+  while !marker.exists() && Instant::now() < deadline {
+    fixture.process();
+    thread::sleep(Duration::from_millis(10));
+  }
+  assert!(marker.exists(), "<alt> ran its command");
+  let _ = std::fs::remove_file(&marker);
+}
+
 /// Records the tiles of every frame drawn into a 1000x800 offscreen
 /// target on the test binary's one GPU context, which it holds for as
 /// long as it lives (crates/shingle-frontend/src/test_gpu.rs).
@@ -973,6 +1070,41 @@ fn recording_target() -> Option<RecordingTarget> {
     delay: Duration::ZERO,
     captures: Vec::new(),
   })
+}
+
+#[test]
+fn an_inhibited_output_is_drawn_black() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut config = ShingleConfig::default();
+  config.animate.open_animation = "none".into();
+  let mut fixture = Fixture::new(config);
+  fixture.window("alpha");
+  let output = fixture
+    .client
+    .shell_output(fixture.frontend.compositor_mut(), 0);
+  let frame = |fixture: &mut Fixture, target: &mut RecordingTarget| {
+    fixture.process();
+    fixture
+      .frontend
+      .render(&mut fixture.host, &primary(), target)
+      .expect("the frame renders");
+    target.frames.last().cloned().unwrap_or_default()
+  };
+  assert!(!frame(&mut fixture, &mut target).is_empty());
+  output.inhibit_output();
+  fixture.host.redrawn.clear();
+  fixture.process();
+  assert!(
+    fixture.host.redrawn.contains(&primary()),
+    "a frame is asked for"
+  );
+  assert!(frame(&mut fixture, &mut target).is_empty());
+  let pixels = target.target.read_rgba(target.gpu()).unwrap();
+  assert_eq!(&pixels[..4], &[0, 0, 0, 255]);
+  output.inhibit_output_done();
+  assert!(!frame(&mut fixture, &mut target).is_empty());
 }
 
 #[test]

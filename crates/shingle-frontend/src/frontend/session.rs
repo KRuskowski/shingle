@@ -101,6 +101,7 @@ impl Frontend {
         self.vswitch = config.vswitch.clone();
         self.keybindings = config.keybindings;
         self.commands = config.commands;
+        self.modifier_binding_timeout = config.input.modifier_binding_timeout;
         self.pointer_bindings = config.pointer;
         self.minimum_extent = config.tiling.minimum_extent;
         self.resize = config.resize.clone();

@@ -2469,6 +2469,12 @@ impl Compositor {
     wayfire_shell::toggle_menu(&self.state, &output);
   }
 
+  /// Whether any seat device holds a pointer button or a touch point, as
+  /// a frontend asks before a modifier-alone binding starts.
+  pub fn buttons_or_touches_held(&self) -> bool {
+    input_device::any_button_or_touch(&self.state)
+  }
+
   /// Whether a shell client inhibits `output`
   /// (`zwf_output_v2.inhibit_output`): the frontend then draws it black,
   /// as Wayfire 0.9 did. [`Event::OutputInhibitChanged`] reports changes.

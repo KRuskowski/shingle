@@ -100,6 +100,10 @@ pub struct Frontend {
   lock_client: Option<Child>,
   session_children: Vec<Child>,
   keyboard: Keyboard,
+  /// Modifier-alone bindings: `toggle_menu` and commands.
+  modifier_bindings: shingle::ModifierBindingTracker,
+  /// `input.modifier_binding_timeout` in milliseconds.
+  modifier_binding_timeout: u32,
   key_repeat: KeyRepeat,
   /// The keyboard whose key repeats.
   repeat_device: Option<InputDeviceId>,
@@ -480,6 +484,8 @@ impl Frontend {
       pointer_y: 0.0,
       keybindings: config.keybindings.clone(),
       commands: config.commands.clone(),
+      modifier_bindings: shingle::ModifierBindingTracker::default(),
+      modifier_binding_timeout: config.input.modifier_binding_timeout,
       pointer_bindings: config.pointer.clone(),
       drag: None,
       gestures: extra_gestures::GestureState::new(
@@ -616,6 +622,9 @@ impl Frontend {
         Event::OutputAdded { .. } | Event::OutputRemoved { .. } => {
           self.prune_scenes();
           save = true;
+        }
+        Event::OutputInhibitChanged { output, .. } => {
+          self.request_redraw_on(&output);
         }
         Event::CreateHostOutput { output } => host.open_output(&output),
         Event::DestroyHostOutput { output } => host.close_output(&output),
@@ -1243,11 +1252,22 @@ impl Frontend {
         let (x, y) = self.layout_point(x, y, output.as_ref());
         self.pointer_motion(device, x, y)
       }
+      // Buttons, scrolling and touches end a modifier-alone binding, as
+      // in Wayfire.
       InputEvent::PointerButton { code, pressed } => {
+        self.modifier_bindings.interrupt();
         self.pointer_button(device, code, pressed)
       }
-      InputEvent::PointerAxis(axis) => self.pointer_axis(device, axis),
-      InputEvent::Touch(touch) => self.touch(device, touch),
+      InputEvent::PointerAxis(axis) => {
+        self.modifier_bindings.interrupt();
+        self.pointer_axis(device, axis)
+      }
+      InputEvent::Touch(touch) => {
+        if touch.phase == TouchPhase::Down {
+          self.modifier_bindings.interrupt();
+        }
+        self.touch(device, touch)
+      }
       InputEvent::Swipe(gesture) => match gesture {
         Gesture::Begin { fingers } => {
           self.compositor.pointer_swipe_begin(device, fingers)

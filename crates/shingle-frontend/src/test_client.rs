@@ -26,6 +26,33 @@ use wayland_protocols_wlr::screencopy::v1::client::{
   zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
+/// The client's side of wayfire-shell-unstable-v2, which no protocol
+/// crate has.
+#[allow(missing_docs, clippy::all, dead_code, non_upper_case_globals)]
+#[allow(non_camel_case_types, unused_imports)]
+pub(crate) mod wayfire_shell {
+  use wayland_client;
+  use wayland_client::protocol::*;
+
+  pub(crate) mod __interfaces {
+    use wayland_client::backend as wayland_backend;
+    use wayland_client::protocol::__interfaces::*;
+    wayland_scanner::generate_interfaces!(
+      "../shingle/protocols/wayfire-shell-unstable-v2.xml"
+    );
+  }
+  use self::__interfaces::*;
+
+  wayland_scanner::generate_client_code!(
+    "../shingle/protocols/wayfire-shell-unstable-v2.xml"
+  );
+}
+
+use wayfire_shell::{
+  zwf_output_v2::{self, ZwfOutputV2},
+  zwf_shell_manager_v2::ZwfShellManagerV2,
+};
+
 /// What the client has received.
 #[derive(Default)]
 pub(crate) struct Events {
@@ -38,6 +65,8 @@ pub(crate) struct Events {
   pub(crate) releases: Vec<wayland_client::backend::ObjectId>,
   /// The frame callbacks that are done, by number, in order.
   frames_done: Vec<u32>,
+  /// `zwf_output_v2` events, by name, in order.
+  shell: Vec<&'static str>,
   synced: bool,
 }
 
@@ -170,6 +199,29 @@ impl TestClient {
       _xdg_surface: xdg_surface,
       _toplevel: toplevel,
     }
+  }
+
+  /// A `zwf_output_v2` of version 3 for the `nth` `wl_output` global
+  /// announced, counted from 0.
+  pub(crate) fn shell_output(
+    &mut self,
+    compositor: &mut Compositor,
+    nth: usize,
+  ) -> ZwfOutputV2 {
+    let shell = self.bind::<ZwfShellManagerV2>(3);
+    let name = self
+      .events
+      .globals
+      .iter()
+      .filter(|(_, interface, _)| interface == "wl_output")
+      .nth(nth)
+      .map(|(name, ..)| *name)
+      .expect("the output is announced");
+    let output: wl_output::WlOutput =
+      self.registry.bind(name, 4, &self.handle, ());
+    let shell_output = shell.get_wf_output(&output, &self.handle, ());
+    self.roundtrip(compositor);
+    shell_output
   }
 
   /// Asks wlr-screencopy for the `width` by `height` region at (`x`, `y`)
@@ -314,6 +366,11 @@ impl TestClient {
   /// The screencopy outcomes so far.
   pub(crate) fn captures(&self) -> &[&'static str] {
     &self.events.captures
+  }
+
+  /// The `zwf_output_v2` events so far, by name.
+  pub(crate) fn shell_events(&self) -> &[&'static str] {
+    &self.events.shell
   }
 
   /// Attaches and commits a `width` by `height` shm buffer on `surface`.
@@ -504,7 +561,25 @@ macro_rules! ignore_events {
   };
 }
 
+impl Dispatch<ZwfOutputV2, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ZwfOutputV2,
+    event: zwf_output_v2::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.shell.push(match event {
+      zwf_output_v2::Event::EnterFullscreen => "enter_fullscreen",
+      zwf_output_v2::Event::LeaveFullscreen => "leave_fullscreen",
+      zwf_output_v2::Event::ToggleMenu => "toggle_menu",
+    });
+  }
+}
+
 ignore_events!(
+  ZwfShellManagerV2,
   wl_compositor::WlCompositor,
   wl_surface::WlSurface,
   wl_shm::WlShm,

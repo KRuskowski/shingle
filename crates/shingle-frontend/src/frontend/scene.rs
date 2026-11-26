@@ -913,6 +913,14 @@ impl Frontend {
     } else {
       self.background_color
     };
+    // A shell client inhibits the output: it is cleared to black, as
+    // Wayfire 0.9 drew it (wayfire-shell's `inhibit_output`).
+    let background = if self.compositor.output_inhibited(output) {
+      tiles.clear();
+      [0.0, 0.0, 0.0, 1.0]
+    } else {
+      background
+    };
     if present {
       renderer.set_tearing(self.compositor.allows_tearing_on(output));
       let presented = renderer.render(&tiles, background)?;
