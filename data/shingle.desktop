@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Shingle
+Comment=A tiling Wayland compositor compatible with Wayfire
+Exec=shingle
+TryExec=shingle
+Type=Application
+DesktopNames=Shingle;Wayfire;wlroots

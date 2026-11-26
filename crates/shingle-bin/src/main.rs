@@ -345,6 +345,50 @@ mod tests {
     assert_eq!(backend, Backend::Native);
   }
 
+  /// The session file display managers start Shingle from.
+  const SESSION_FILE: &str = include_str!("../../../data/shingle.desktop");
+
+  /// The value of `key` in the session file's `[Desktop Entry]`.
+  fn session_entry(key: &str) -> Option<&'static str> {
+    SESSION_FILE
+      .lines()
+      .filter_map(|line| line.split_once('='))
+      .find(|(name, _)| *name == key)
+      .map(|(_, value)| value)
+  }
+
+  #[test]
+  fn the_session_file_describes_a_wayland_session() {
+    assert_eq!(SESSION_FILE.lines().next(), Some("[Desktop Entry]"));
+    assert_eq!(session_entry("Type"), Some("Application"));
+    assert_eq!(session_entry("Name"), Some("Shingle"));
+    // The binary of this package, found on the display manager's PATH.
+    assert_eq!(session_entry("TryExec"), Some(env!("CARGO_BIN_NAME")));
+    // xdg-desktop-portal reads the first `NAME-portals.conf` there is,
+    // so Wayfire's comes before the generic wlroots one.
+    assert_eq!(
+      session_entry("DesktopNames"),
+      Some("Shingle;Wayfire;wlroots")
+    );
+  }
+
+  #[test]
+  fn the_session_file_starts_native_from_a_display_manager() {
+    let exec = session_entry("Exec").expect("the session file has Exec");
+    let mut words = exec.split_whitespace();
+    assert_eq!(words.next(), Some(env!("CARGO_BIN_NAME")));
+    let arguments = words.collect::<Vec<_>>();
+    // What GDM or SDDM set for a Wayland session, with no display yet.
+    let login = [
+      ("XDG_SEAT", "seat0"),
+      ("XDG_SESSION_TYPE", "wayland"),
+      ("XDG_SESSION_CLASS", "user"),
+    ];
+    let (backend, options) = started(planned(&arguments, &login));
+    assert_eq!(backend, Backend::Native);
+    assert_eq!(options.config, None, "the user's default config is read");
+  }
+
   #[test]
   fn ssh_without_a_seat_is_refused_before_anything_starts() {
     let Plan::Fail(message, status) =

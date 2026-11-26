@@ -145,6 +145,16 @@ Wayfire's `[extra-gestures]` options import directly. The i3 variables are `$ges
 
 ## Clients and protocols
 
+### Client environment
+
+Every process Shingle starts (autostart, restored and `--spawn` clients, command bindings, `stipc/run`, the lock client and Xwayland) gets Shingle's `WAYLAND_DISPLAY`, its own `DISPLAY` or none, `WAYFIRE_SOCKET` with `--ipc` and `_JAVA_AWT_WM_NONREPARENTING=1`, and never the host session's `WAYLAND_SOCKET`, `DISPLAY` or `WAYFIRE_SOCKET` (crates/shingle-session/src/environment.rs). Since WG-3 it also gets what Wayfire exports:
+
+- `XDG_CURRENT_DESKTOP=wayfire` when Shingle itself was started without the variable, as Wayfire does, so xdg-desktop-portal picks its backends from `wayfire-portals.conf` and scripts that test for Wayfire keep working. A value the login or the session file set, even an empty one, is kept. Shingle has no portals file of its own.
+- `XCURSOR_THEME` from `input.cursor_theme` (`[input] cursor_theme`), unless it is `default`, which keeps the theme Shingle inherited, and `XCURSOR_SIZE` from `input.cursor_size`. At the default size 24 a numeric `XCURSOR_SIZE` Shingle inherited is kept, since Shingle then draws its own cursor at that size. Both follow a configuration reload and `wayfire/set-config-options` for every child started afterwards.
+- `WAYFIRE_CONFIG_FILE`, the absolute path of the configuration file when it is a Wayfire file, as Wayfire exports the file it reads for WCM and scripts. With a YAML or i3 configuration the variable is removed, so a host Wayfire's file never reaches programs started inside Shingle and nothing edits a YAML file as `wayfire.ini`.
+
+data/shingle.desktop is the session file for display managers; the [README](../README.md#starting-from-a-display-manager) says how to install it.
+
 ### Decorations
 
 `behavior.preferred_decoration_mode` accepts `client` (the Wayfire default) or `server`. Explicit client requests are honored unless `behavior.force_preferred_decoration_mode` is enabled. Preference changes are sent to existing XDG decoration objects during live configuration reloads.
