@@ -157,8 +157,9 @@ pub struct Frontend {
   quit: bool,
   /// Whether the host should be asked for a frame at the end of the call.
   redraw_requested: bool,
-  /// Screencopy captures the next frame answers, with their regions.
-  captures: Vec<(CaptureId, shingle_core::Rect)>,
+  /// Screencopy captures the next frame answers, with their outputs and
+  /// regions.
+  captures: Vec<(CaptureId, shingle::OutputHandle, shingle_core::Rect)>,
   /// Imported DMA-BUF textures and the locks of frames in flight, once
   /// linux-dmabuf is offered.
   dmabuf: Option<Rc<RefCell<crate::dmabuf::DmabufTextures>>>,
@@ -712,8 +713,8 @@ impl Frontend {
         | Event::FocusChanged { .. }
         | Event::GeometryChanged { .. }
         | Event::LockStateChanged(_) => {}
-        Event::CaptureRequested { id, region } => {
-          self.captures.push((id, region));
+        Event::CaptureRequested { id, output, region } => {
+          self.captures.push((id, output, region));
         }
       }
     }

@@ -941,14 +941,19 @@ pub enum Event {
     /// Press or release.
     pressed: bool,
   },
-  /// A wlr-screencopy client asked for `region` of the output, in layout
-  /// logical pixels, and frame capture is on
-  /// ([`Compositor::set_frame_capture`]). The frontend draws the frame as
-  /// it shows it and answers with [`Compositor::finish_capture`].
+  /// A wlr-screencopy client asked for `region` of `output`, and frame
+  /// capture is on ([`Compositor::set_frame_capture`]). The frontend
+  /// draws that output's frame as it shows it and answers with
+  /// [`Compositor::finish_capture`].
   CaptureRequested {
     /// The capture to answer.
     id: CaptureId,
-    /// The captured rectangle; the client's buffer has its size.
+    /// The captured output.
+    output: OutputHandle,
+    /// The captured rectangle in the output's logical pixels, with
+    /// (0, 0) at its top-left corner; the frontend answers with this
+    /// many pixels, which the compositor scales into the client's buffer
+    /// of physical pixels.
     region: Rect,
   },
 }
@@ -2140,8 +2145,9 @@ impl Compositor {
   }
 
   /// Answers [`Event::CaptureRequested`] `id` with `result`: the region
-  /// as tightly packed RGBA8 rows, top to bottom, which are written into
-  /// the client's buffer before `ready` is sent, or why it could not be
+  /// in logical pixels as tightly packed RGBA8 rows, top to bottom, which
+  /// are scaled and turned into the client's buffer, in the output's
+  /// physical pixels, before `ready` is sent; or why it could not be
   /// drawn, which sends `failed`. Pixels of the wrong size also fail. An
   /// unknown `id`, or one whose frame was destroyed, is ignored.
   pub fn finish_capture(

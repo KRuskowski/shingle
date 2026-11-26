@@ -895,10 +895,16 @@ impl Frontend {
 
 /// Answers the screencopy `captures` requested since the last frame with
 /// the frame just drawn: drawn once more offscreen, at the output's
-/// logical size, and cut to each capture's region.
+/// logical size, and cut to each capture's region, which the compositor
+/// scales into the client's buffer. Until the frontend draws every output
+/// (MO-5), captures of other outputs fail.
 fn answer_captures(
   compositor: &mut shingle::Compositor,
-  captures: &mut Vec<(shingle::CaptureId, shingle_core::Rect)>,
+  captures: &mut Vec<(
+    shingle::CaptureId,
+    shingle::OutputHandle,
+    shingle_core::Rect,
+  )>,
   target: &mut dyn RenderTarget,
   tiles: &[RenderTile<'_>],
   background: [f64; 4],
@@ -911,13 +917,21 @@ fn answer_captures(
   let frame = target
     .capture(tiles, background, size)
     .map_err(|error| error.to_string());
-  for (id, region) in std::mem::take(captures) {
+  let drawn = compositor.primary_output();
+  for (id, captured, region) in std::mem::take(captures) {
+    if captured != drawn {
+      compositor.finish_capture(
+        id,
+        Err(format!("{} is not drawn yet", captured.name())),
+      );
+      continue;
+    }
     let result = frame.as_ref().map_err(Clone::clone).map(|rgba| {
       crop_rgba(
         rgba,
         size,
-        region.x - output.x,
-        region.y - output.y,
+        region.x,
+        region.y,
         (region.width, region.height),
       )
     });

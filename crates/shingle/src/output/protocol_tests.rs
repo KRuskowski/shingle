@@ -466,3 +466,119 @@ fn fifo_barriers_wait_for_the_frames_of_the_primary_output() {
   assert!(!compositor.needs_frame());
   let _ = std::fs::remove_file(path);
 }
+
+/// Captures `region` of `output`, all of it for `None`, into an shm
+/// buffer of the size the compositor gives. Returns that size and the
+/// pixels as BGRA bytes, or `None` if the capture failed.
+fn capture(
+  compositor: &mut Compositor,
+  client: &mut TestClient,
+  output: &WlOutput,
+  region: Option<(i32, i32, i32, i32)>,
+) -> Option<((i32, i32), Vec<u8>)> {
+  use std::os::fd::AsFd;
+  use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::Event,
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+  };
+  let manager = client.bind::<ZwlrScreencopyManagerV1>(3);
+  client.events.screencopy.clear();
+  let frame = match region {
+    Some((x, y, width, height)) => manager.capture_output_region(
+      0,
+      output,
+      x,
+      y,
+      width,
+      height,
+      &client.handle,
+      (),
+    ),
+    None => manager.capture_output(0, output, &client.handle, ()),
+  };
+  client.roundtrip(compositor);
+  let (width, height) =
+    client
+      .events
+      .screencopy
+      .iter()
+      .find_map(|event| match event {
+        Event::Buffer { width, height, .. } => {
+          Some((*width as i32, *height as i32))
+        }
+        _ => None,
+      })?;
+  let size = width * height * 4;
+  let fd = rustix::fs::memfd_create(
+    "shingle-capture-test",
+    rustix::fs::MemfdFlags::CLOEXEC,
+  )
+  .unwrap();
+  rustix::fs::ftruncate(&fd, size as u64).unwrap();
+  let shm = client.bind::<wayland_client::protocol::wl_shm::WlShm>(1);
+  let pool = shm.create_pool(fd.as_fd(), size, &client.handle, ());
+  let buffer = pool.create_buffer(
+    0,
+    width,
+    height,
+    width * 4,
+    wayland_client::protocol::wl_shm::Format::Argb8888,
+    &client.handle,
+    (),
+  );
+  frame.copy(&buffer);
+  client.roundtrip(compositor);
+  if !client
+    .events
+    .screencopy
+    .iter()
+    .any(|event| matches!(event, Event::Ready { .. }))
+  {
+    return None;
+  }
+  let mut bytes = vec![0; size as usize];
+  rustix::io::pread(&fd, &mut bytes, 0).unwrap();
+  Some(((width, height), bytes))
+}
+
+#[test]
+fn captures_are_in_output_coordinates_and_physical_pixels() {
+  let (mut compositor, path) = two_outputs();
+  compositor
+    .state
+    .set_scale_of(&id("HEADLESS-2"), 2.0)
+    .unwrap();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let toplevel = client.toplevel(&mut compositor, "black");
+  let black = client.opaque_buffer(64, 64);
+  toplevel.surface.attach(Some(&black), 0, 0);
+  toplevel.surface.commit();
+  client.roundtrip(&mut compositor);
+  let window = compositor.focused_window().unwrap();
+  move_to(&mut compositor, window, "HEADLESS-2");
+  client.roundtrip(&mut compositor);
+  let second = &outputs["HEADLESS-2"];
+  let (size, bytes) =
+    capture(&mut compositor, &mut client, second, None).expect("a capture");
+  assert_eq!(size, (1600, 1200), "800x600 logical at scale 2");
+  assert_eq!(bytes[..4], [0, 0, 0, 255], "the black window fills it");
+  let (size, bytes) =
+    capture(&mut compositor, &mut client, second, Some((10, 20, 5, 4)))
+      .expect("a region capture");
+  assert_eq!(size, (10, 8));
+  assert!(bytes.chunks(4).all(|pixel| pixel == [0, 0, 0, 255]));
+  // HEADLESS-1 shows only the background, 0.1 linear or 89 in sRGB.
+  let first = &outputs["HEADLESS-1"];
+  let (size, bytes) =
+    capture(&mut compositor, &mut client, first, Some((1278, 0, 10, 1)))
+      .expect("a region clipped to the output");
+  assert_eq!(size, (2, 1));
+  assert_eq!(bytes, [89, 89, 89, 255, 89, 89, 89, 255]);
+  assert!(
+    capture(&mut compositor, &mut client, first, Some((1280, 0, 10, 10)))
+      .is_none(),
+    "a region beside the output fails"
+  );
+  let _ = std::fs::remove_file(path);
+}
