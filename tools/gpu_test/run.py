@@ -85,13 +85,13 @@ STRIPPED_VARIABLES = ('WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'DISPLAY',
 # What the private /dev may also hold besides the bound nodes.
 PRIVATE_ENTRIES = ('pts', 'ptmx', 'shm', 'fd', 'stdin', 'stdout', 'stderr')
 SAMPLE_INTERVAL = 0.05
-# checks.GROUPS, dmabuf_checks.GROUPS, output_checks.GROUPS and
-# nested_output_checks.GROUPS, kept here
-# so that `--help` works without importing them.
+# checks.GROUPS, dmabuf_checks.GROUPS, output_checks.GROUPS,
+# nested_output_checks.GROUPS and wayfire_checks.GROUPS, kept here so that
+# `--help` works without importing them.
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
                 'weston', 'syncobj', 'nosyncobj', 'outputs', 'nested-outputs',
-                'nested-smoke')
+                'nested-smoke', 'wayfire-plugins', 'wayfire-shell')
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset; `syncobj` runs no Vulkan client.
 MODESET_GROUPS = ('dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',

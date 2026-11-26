@@ -250,7 +250,9 @@ class Shingle:
   home directories, config file and IPC socket."""
 
   def __init__(self, binary, name, config, backend=('--backend', 'offscreen'),
-               extra_environment=None):
+               extra_environment=None, ini=None):
+    """With `ini`, the text of a wayfire.ini, Shingle reads that instead
+    of the YAML `config`, with a `[session]` section added."""
     if not safe_backend(list(backend)):
       raise ValueError(f'refusing to start shingle with {backend}')
     self.directory = os.path.join('/tmp', name)
@@ -258,15 +260,19 @@ class Shingle:
     for sub in ('runtime', 'config', 'state', 'home'):
       os.makedirs(os.path.join(self.directory, sub), mode=0o700)
     self.ipc_path = os.path.join(self.runtime, 'ipc')
-    config = dict(config)
-    config['session'] = {
-        'restore': False,
-        'path': os.path.join(self.directory, 'state', 'session.json'),
-    }
-    config_path = os.path.join(self.directory, 'shingle.yaml')
-    with open(config_path, 'w') as file:
-      # YAML accepts JSON.
-      json.dump(config, file)
+    session_path = os.path.join(self.directory, 'state', 'session.json')
+    if ini is not None:
+      config_path = os.path.join(self.directory, 'wayfire.ini')
+      with open(config_path, 'w') as file:
+        file.write(ini)
+        file.write(f'\n[session]\nrestore = false\npath = {session_path}\n')
+    else:
+      config = dict(config)
+      config['session'] = {'restore': False, 'path': session_path}
+      config_path = os.path.join(self.directory, 'shingle.yaml')
+      with open(config_path, 'w') as file:
+        # YAML accepts JSON.
+        json.dump(config, file)
     environment = {key: value for key, value in os.environ.items()
                    if key not in run.STRIPPED_VARIABLES}
     environment.update({
@@ -743,13 +749,14 @@ CHECKS = {
 
 def all_checks():
   """DB-2's and DB-3's groups here, DB-4's and DB-5's
-  (dmabuf_checks.py), MO-5's (output_checks.py) and MO-6's
-  (nested_output_checks.py)."""
+  (dmabuf_checks.py), MO-5's (output_checks.py), MO-6's
+  (nested_output_checks.py) and WG-2's (wayfire_checks.py)."""
   import dmabuf_checks
   import nested_output_checks
   import output_checks
+  import wayfire_checks
   return {**CHECKS, **dmabuf_checks.CHECKS, **output_checks.CHECKS,
-          **nested_output_checks.CHECKS}
+          **nested_output_checks.CHECKS, **wayfire_checks.CHECKS}
 
 def run_checks(groups, binary, wl_probe, captures_directory=None):
   """Runs the check `groups` in order; returns 0 when all passed."""
