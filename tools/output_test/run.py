@@ -96,6 +96,9 @@ import sys
 import threading
 import time
 
+# WG-4's checks, beside this file.
+import wayfire_shell_checks
+
 def _load_xwayland_harness():
   """tools/xwayland_test/run.py, for its IPC client, results and the
   checked signal helper."""
@@ -1511,9 +1514,22 @@ def inner(binary):
     def mo4_focus_checks(results, binary):
       return focus_checks(results, binary, wl_probe)
     multi += [restored_session_checks, mo3_protocol_checks, mo4_focus_checks]
-  for checks in (randr_checks, configured_checks, wayfire_checks,
-                 wcm_ini_checks, client_environment_checks, nested_checks,
-                 *multi):
+
+  def wg4_headless_checks(results, binary):
+    return wayfire_shell_checks.headless_checks(
+        results, sys.modules[__name__], binary, wl_probe)
+
+  def wg4_offscreen_checks(results, binary):
+    return wayfire_shell_checks.offscreen_checks(
+        results, sys.modules[__name__], binary)
+  groups = (randr_checks, configured_checks, wayfire_checks, wcm_ini_checks,
+            client_environment_checks, nested_checks, *multi,
+            wg4_headless_checks, wg4_offscreen_checks)
+  chosen = [name for name in os.environ.get('OUTPUT_TEST_CHECKS',
+                                            '').split(',') if name]
+  for checks in groups:
+    if chosen and checks.__name__ not in chosen:
+      continue
     try:
       log = checks(results, binary)
     except Exception as error:  # pylint: disable=broad-except
@@ -1534,6 +1550,9 @@ def main():
   parser.add_argument('--wl-probe', default='target/debug/examples/wl_probe')
   parser.add_argument('--lock', default='target/debug/shingle-lock')
   parser.add_argument('--keep', action='store_true')
+  parser.add_argument('--checks', nargs='*', default=[],
+                      help='run only these groups, by function name, '
+                      'such as wg4_headless_checks')
   parser.add_argument(INNER_FLAG, action='store_true')
   options = parser.parse_args()
   binary = os.path.abspath(options.binary)
@@ -1547,6 +1566,7 @@ def main():
   environment = {key: value for key, value in os.environ.items()
                  if key not in HOST_VARIABLES}
   environment['OUTPUT_TEST_WORK'] = work
+  environment['OUTPUT_TEST_CHECKS'] = ','.join(options.checks)
   if os.path.exists(options.wl_probe):
     environment['OUTPUT_TEST_WL_PROBE'] = os.path.abspath(options.wl_probe)
   else:

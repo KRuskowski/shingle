@@ -14,8 +14,14 @@
 //! ```text
 //! wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern] [--fifo]
 //!          [--damage] [--animate FRAMES] [--presentation]
-//!          [--report-outputs] [--layer OUTPUT]
+//!          [--report-outputs] [--layer OUTPUT] [--fullscreen]
 //! ```
+//!
+//! With `--fullscreen`, once mapped the probe asks to be fullscreen on
+//! the output the compositor chooses (`xdg_toplevel.set_fullscreen`
+//! without an output) and reports `fullscreen`, as WG-4's checks of
+//! wayfire-shell's fullscreen events use it
+//! (docs/design/wayfire-gaps.md).
 //!
 //! With `--report-outputs` the probe binds every `wl_output` and reports
 //! the outputs its surface enters and leaves (`output-enter`,
@@ -71,8 +77,8 @@
 //!
 //! Events: `configure` (width, height, activated), `enter`, `leave`,
 //! `key` (key, pressed), `copied`, `send` (mime), `sent`, `cancelled`,
-//! `fifo`, `release` (buffer), `damage` (step), `animated` (frames,
-//! milliseconds), `presented` (output, seq, msec), `discarded`,
+//! `fifo`, `fullscreen`, `release` (buffer), `damage` (step), `animated`
+//! (frames, milliseconds), `presented` (output, seq, msec), `discarded`,
 //! `output-enter` and `output-leave` (output),
 //! `preferred-scale` (scale), `buffer-scale` (factor), `layer-configure`
 //! (width, height), `layer-closed`, `close` and `error`.
@@ -156,6 +162,8 @@ struct Options {
   /// Maps a layer-shell panel on the output of this name instead of a
   /// toplevel.
   layer: Option<String>,
+  /// Asks to be fullscreen once mapped.
+  fullscreen: bool,
 }
 
 /// The XRGB8888 bytes (B, G, R, X) of pixel (`x`, `y`) of a `width` by
@@ -184,7 +192,7 @@ fn buffer_bytes(width: i32, height: i32, pattern: bool) -> Vec<u8> {
 
 /// Parses `wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern]
 /// [--fifo] [--damage] [--animate FRAMES] [--presentation]
-/// [--report-outputs] [--layer OUTPUT]`.
+/// [--report-outputs] [--layer OUTPUT] [--fullscreen]`.
 fn parse(arguments: &[String]) -> Result<Options, String> {
   let mut options = Options::default();
   let mut arguments = arguments.iter();
@@ -208,6 +216,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
           Some(arguments.next().ok_or("--layer needs an output")?.clone());
       }
       "--fifo" => options.fifo = true,
+      "--fullscreen" => options.fullscreen = true,
       "--damage" => options.damage = true,
       "--animate" => {
         let value = arguments.next().ok_or("--animate needs a number")?;
@@ -1075,6 +1084,12 @@ fn run(options: &Options) -> Result<(), String> {
   toplevel.set_title(app_id.into());
   surface.commit();
   probe.surface = Some(surface.clone());
+  if options.fullscreen {
+    wait_mapped(&mut queue, &mut probe)?;
+    toplevel.set_fullscreen(None);
+    queue.flush().map_err(|error| error.to_string())?;
+    report("fullscreen", &[]);
+  }
   // Kept alive for as long as the probe runs.
   let mut _fifo = None;
   if options.fifo {
@@ -1175,8 +1190,10 @@ mod tests {
         presentation: false,
         report_outputs: false,
         layer: None,
+        fullscreen: false,
       }
     );
+    assert!(parse(&arguments(&["--fullscreen"])).unwrap().fullscreen);
     assert!(
       parse(&arguments(&["--report-outputs"]))
         .unwrap()
