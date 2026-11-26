@@ -30,7 +30,10 @@ output off, explicit configured modes with their refresh rate, Wayfire
 crates/shingle-config/testdata/wayfire-wcm.ini: Shingle starts, logs
 each of its warnings once with its line, and `wayfire/get-config-option`
 returns the imported `core/background_color` and
-`simple-tile/inner_gap_size`. Headless
+`simple-tile/inner_gap_size`; since WG-2 `list-config-options` lists
+every option of crates/shingle-config/data/wayfire-options.tsv and an
+option of a plugin the file does not load reports the file's text.
+Headless
 Shingle does not reload its config, so a nested Shingle on lavapipe,
 running as a client of a headless one inside the namespace, checks the
 configured refresh rate and that a reload applies.
@@ -623,8 +626,20 @@ WCM_FIXTURE = os.path.join(
     'shingle-config', 'testdata', 'wayfire-wcm.ini')
 # The warnings Shingle gives for WCM_FIXTURE, by line, as the unit test
 # a_wcm_written_file_imports_with_the_expected_warnings expects them.
-WCM_WARNING_LINES = (14, 24, 40, 61, 93, 110, 141, 154, 175, 305, 332, 376,
-                     412, 417, 430)
+# Scale is not in the fixture's plugin list, so its `pinch in 4` (line
+# 332) is not read since WG-2.
+WCM_WARNING_LINES = (14, 24, 40, 61, 93, 110, 141, 154, 175, 305, 376, 412,
+                     417, 430)
+# Wayfire's options (tools/wayfire_options/generate.py).
+OPTION_TABLE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..', 'crates',
+    'shingle-config', 'data', 'wayfire-options.tsv')
+
+def table_options():
+  """The (section, option) pairs of OPTION_TABLE."""
+  with open(OPTION_TABLE) as file:
+    return {tuple(line.split('\t')[:2]) for line in file
+            if line.strip() and not line.startswith('#')}
 
 def config_warnings(log, path):
   """The `line N: ...` config warnings `log` holds for `path`, in order."""
@@ -664,6 +679,22 @@ def wcm_ini_checks(results, binary):
                            {'option': 'simple-tile/inner_gap_size'})
     results.check('simple-tile/inner_gap_size is 7', gap.get('value') == '7',
                   str(gap))
+    # WG-2: every option of Wayfire's metadata is listed, and the file's
+    # values are what IPC reports.
+    listed = shingle.ipc.call('wayfire/list-config-options')
+    sections = listed.get('options', {})
+    pairs = {(section, option) for section, options in sections.items()
+             for option in options}
+    expected = table_options()
+    results.check('list-config-options lists every option of the table',
+                  expected <= pairs and len(expected) == 332,
+                  f'{len(expected & pairs)} of {len(expected)} listed')
+    toggle = shingle.ipc.call('wayfire/get-config-option',
+                              {'option': 'scale/toggle'})
+    results.check('get-config-option reports an unloaded plugin\'s '
+                  'option as the file wrote it',
+                  toggle.get('value') == '<super> KEY_P | pinch in 4'
+                  and toggle.get('default') == '<super> KEY_P', str(toggle))
     # Wait past auto_reload_config's delay: a reload would warn again.
     time.sleep(1)
     warnings = config_warnings(shingle.log_text(), shingle.config_path)
