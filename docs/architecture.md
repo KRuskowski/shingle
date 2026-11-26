@@ -58,15 +58,16 @@
 | Host seam: `Host` trait, `InputEvent` | `crates/shingle-frontend/src/host.rs` |
 | `Frontend` struct, public API, input dispatch | `crates/shingle-frontend/src/frontend.rs` |
 | Frontend areas: bindings, Scale, Expo, switcher, drags, effects, animations, scene build, session | `crates/shingle-frontend/src/frontend/*.rs` |
+| What the frontend keeps per output (zoom, workspace slides, the wsets label, surfaces drawn last), redraw requests per output, frames of IPC outputs | `crates/shingle-frontend/src/frontend/outputs.rs`; one output's scene in `crates/shingle-frontend/src/frontend/scene.rs` (`draw_scene`) |
 | What the scene is drawn into (`RenderTarget`) | `crates/shingle-frontend/src/render_target.rs` |
 | The frontend's DMA-BUF importer, texture cache by buffer serial, locks of frames in flight, the linux-dmabuf and syncobj decisions | `crates/shingle-frontend/src/dmabuf.rs`; `Frontend::attach_gpu`, `enable_dmabuf` and `start_clients` in `frontend.rs` |
 | The frontend's shm uploads: damage rectangles, the upload after each commit, release | `crates/shingle-frontend/src/shm.rs`; `upload_committed` and `upload_shm` in `frontend.rs` |
-| Frontend input-script tests (`FakeHost`) | `crates/shingle-frontend/src/frontend/tests.rs` |
+| Frontend input-script tests (`FakeHost`) | `crates/shingle-frontend/src/frontend/tests.rs`; with two outputs `crates/shingle-frontend/src/frontend/tests/outputs.rs` |
 | Command line, `--help` text | `crates/shingle-bin/src/cli.rs` |
 | Backend selection from arguments and environment | `crates/shingle-bin/src/backend.rs` |
 | What a start does (print, fail or run a backend) | `crates/shingle-bin/src/main.rs` |
 | Headless backend | `crates/shingle-bin/src/headless.rs` |
-| Offscreen backend: the frontend on the GPU without a display, frame pacing, presentation | `crates/shingle-bin/src/offscreen.rs` |
+| Offscreen backend: the frontend on the GPU without a display, a target and frame pacing per output, presentation | `crates/shingle-bin/src/offscreen.rs` |
 | Screencopy: an output's region in its physical pixels (`CaptureGeometry`), CPU composite, or frame capture answered by the frontend (`set_frame_capture`, `finish_capture`) | `crates/shingle/src/screencopy.rs`; the frontend's capture draw in `crates/shingle-frontend/src/frontend/scene.rs` (`answer_captures`), `shingle_render::capture_frame` in `crates/shingle-render/src/target.rs` |
 | GPU namespace and DB-2's, DB-3's and DB-6's real-client checks (offscreen, nested, baseline, buffers, shm) | `tools/gpu_test/run.py`, `tools/gpu_test/checks.py`; the probe `crates/shingle/examples/wl_probe.rs` |
 | DB-4's and DB-5's real-client checks (dmabuf, browsers, xwayland, nested-gpu, nodmabuf, weston, syncobj, nosyncobj) | `tools/gpu_test/dmabuf_checks.py`; the stall probe `crates/shingle/examples/syncobj_probe.rs` |
