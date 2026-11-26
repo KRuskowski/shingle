@@ -80,6 +80,11 @@ alpha:
 fast_switcher:
   inactive_alpha: 0.7
 
+switcher:
+  duration_ms: 500
+  view_thumbnail_scale: 1.0
+  view_thumbnail_rotation: 30
+
 scale:
   duration_ms: 750
   spacing: 50
