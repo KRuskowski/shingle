@@ -11,7 +11,7 @@
 | `shingle-bin` | The `shingle` binary: argument parsing, backend selection and the headless and offscreen backends. Its own package because the `shingle` library must not depend on the backends that depend on it. |
 | `shingle-native` | Native backend library: libseat session and VT switching, libinput devices with udev hotplug, atomic KMS with zero-copy GBM scanout or copy scanout and page-flip pacing, DRM hotplug and the configured choice of output and mode, the Vulkan renderer for it, and the event loop that runs `Frontend` on a seat, each device interaction behind a trait (`Session`, `InputSource`, `KmsDevice`, `BufferAllocator`, `DeviceMonitor`, `FrameRenderer`) with fakes in the tests. Entry point `shingle_native::run`. |
 | `shingle-nested` | Nested backend library, a thin winit host for `Frontend`: a window per output on one GPU context, winit-to-`InputEvent` translation per window, host focus handling and button emulation. Entry point `shingle_nested::run`. |
-| `shingle-xwayland` | XWayland without `wayland-server`: X display sockets and lock, the supervised Xwayland process with its restart rule, and the X window manager (x11rb) behind an `XConnection` trait: property parsers, classification, `Pairing` of windows and surfaces by serial, the `ConfigureRequest` policy, ICCCM focus and the `FocusIn` guard, client messages, restacking and the root cursor, the clipboard and primary selection bridge with its MIME mapping and non-blocking transfers, and the `xw_probe` test client (examples/). |
+| `shingle-xwayland` | XWayland without `wayland-server`: X display sockets and lock, the supervised Xwayland process with its restart rule, and the X window manager (x11rb) behind an `XConnection` trait: property parsers, classification, `Pairing` of windows and surfaces by serial, the `ConfigureRequest` policy, ICCCM focus and the `FocusIn` guard, client messages, restacking and the root cursor, the clipboard and primary selection bridge with its MIME mapping and non-blocking transfers, the Xdnd drag and drop bridge, and the `xw_probe` test client (examples/). |
 | `shingle-config` | Validated YAML model, Wayfire INI and i3 imports, XKB keymap generation. |
 | `shingle-session` | Atomic session persistence, the background session writer and relaunching saved applications. |
 | `shingle-idle` | Idle, DPMS, fullscreen suppression and lock coordination. |
@@ -63,6 +63,9 @@
 | Unmanaged X windows (menus, tooltips) in the Unmanaged layer | `crates/shingle/src/xwayland/unmanaged.rs` |
 | Clipboard and primary selection with X: X11 sources, reports to the XWM, transfer watches | `crates/shingle/src/xwayland/selection.rs`; sources in `crates/shingle/src/data_device.rs`, `primary_selection.rs`, `data_control.rs` |
 | The XWM's selection bridge: selection windows, XFixes owners, `TARGETS`, INCR transfers; MIME and target mapping | `crates/shingle-xwayland/src/xwm/selection.rs`, `xwm/mime.rs` |
+| Drag and drop with X: Wayland drags reported to the XWM, X drags as Wayland drags, the pointer held during an X drag | `crates/shingle/src/xwayland/dnd.rs`; the drag in `crates/shingle/src/data_device.rs`, the hold in `input.rs` |
+| The XWM's Xdnd bridge: `XdndSelection`, the proxy, Xdnd messages both ways | `crates/shingle-xwayland/src/xwm/dnd.rs` |
+| X drag icons above every layer | `crates/shingle/src/xwayland/unmanaged.rs` |
 | X display sockets, Xwayland process, XWM | `crates/shingle-xwayland/src/sockets.rs`, `server.rs`, `xwm/` |
 | XWayland real-client harness (namespaces), with the Wayland probe client | `tools/xwayland_test/run.py`, `crates/shingle/examples/wl_probe.rs` |
 | Host seam: `Host` trait, `InputEvent` | `crates/shingle-frontend/src/host.rs` |

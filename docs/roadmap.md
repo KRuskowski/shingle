@@ -51,7 +51,7 @@ In short:
 - **Environment.** `DISPLAY` goes into every child's environment and into `stipc/get_display`. Since XW-1 every child gets one client environment, and the host's `DISPLAY` no longer reaches nested children.
 - **XWM.** The XWM uses `x11rb` 0.14 (pure Rust) in a new `shingle-xwayland` crate and ports the ICCCM/EWMH subset of wlroots' XWM, which Wayfire uses. Surfaces are associated only through `xwayland_shell_v1`, which needs Xwayland 23.1 or newer.
 - **Window model.** X11 toplevels share `ToplevelRole` with xdg toplevels through a `ToplevelHandle` enum. Tiling, rules, Scale, Expo, IPC and sessions work unchanged: `app-id` comes from the `WM_CLASS` class, and the PID from XRes. Override-redirect windows are drawn unmanaged above the Top layer.
-- **Selections and scaling.** Clipboard and primary selection are bridged both ways. Scaling matches Wayfire: X11 clients are blurry above scale 1.
+- **Selections, drag and drop, and scaling.** Clipboard and primary selection are bridged both ways, and so is drag and drop. Scaling matches Wayfire: X11 clients are blurry above scale 1.
 - **Testing.** Real-client tests run inside a user, mount, network and PID namespace with a private `/tmp/.X11-unix`.
 
 The work is split into seven workspaces, each with acceptance criteria in the design:
@@ -61,10 +61,10 @@ The work is split into seven workspaces, each with acceptance criteria in the de
 3. XW-3 `shingle-xwayland-windows`: done; `xwayland_shell_v1` pairs X windows with surfaces, and managed X11 toplevels are Shingle windows with configure, `_NET_WM_STATE`, close, IPC (class, title, PID) and session identity. See [status.md](status.md#with-real-clients).
 4. XW-4 `shingle-xwayland-behaviour`: done; ICCCM focus and the `FocusIn` guard, `_NET_ACTIVE_WINDOW`, `_NET_WM_STATE` both ways, `WM_CHANGE_STATE`, move, resize and close requests, X stacking, transients and dialogs, override-redirect windows in the Unmanaged layer and the root cursor; Scale, Expo, the switchers, rules and session restore checked with X windows. See [status.md](status.md#with-real-clients).
 5. XW-5 `shingle-xwayland-selection`: done; the clipboard and primary selection are bridged between X and Wayland in both directions, with INCR and without blocking the compositor, and wlr-data-control clients see X selections. See [status.md](status.md#with-real-clients).
-6. XW-6 `shingle-xwayland-dnd`: Xdnd drag and drop (later).
+6. XW-6 `shingle-xwayland-dnd`: done; drag and drop is bridged between X and Wayland in both directions over Xdnd, through a proxy window for X sources over Wayland windows, and X drag icons are drawn above everything. See [status.md](status.md#with-real-clients).
 7. XW-7 `shingle-xwayland-hidpi`: optional zero-scaling HiDPI mode.
 
-XW-6 is next, when drag and drop between X and Wayland is wanted; XW-7 waits for the multi-output item. The harness's intermittent SIGTERM failures were a session write that took more than 10 s on the busy disk; the X display is now freed before it, and the harness waits up to 60 s. Session writes while Shingle runs have since moved to a background thread, so the disk no longer stalls the compositor ([status.md](status.md#sessions)).
+XW-6 is done; XW-7, the optional zero-scaling mode, is what remains of XWayland; it was deferred until after the multi-output item ([design/xwayland.md](design/xwayland.md#decisions)). The harness's intermittent SIGTERM failures were a session write that took more than 10 s on the busy disk; the X display is now freed before it, and the harness waits up to 60 s. Session writes while Shingle runs have since moved to a background thread, so the disk no longer stalls the compositor ([status.md](status.md#sessions)).
 
 ## 5. Multi-output
 
