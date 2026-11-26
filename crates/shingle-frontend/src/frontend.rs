@@ -777,6 +777,18 @@ impl Frontend {
           device,
           InputEvent::PointerButton { code, pressed },
         ),
+        Event::StipcGesture {
+          device,
+          kind,
+          gesture,
+        } => {
+          let event = match kind {
+            shingle::PointerGesture::Swipe => InputEvent::Swipe(gesture),
+            shingle::PointerGesture::Pinch => InputEvent::Pinch(gesture),
+            shingle::PointerGesture::Hold => InputEvent::Hold(gesture),
+          };
+          self.dispatch_input(host, device, event);
+        }
         Event::DpmsChanged(_)
         | Event::OpacityChanged { .. }
         | Event::Idle

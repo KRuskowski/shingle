@@ -8,7 +8,7 @@
 //! winit; the native backend (NB-6) will implement it on top of libseat and
 //! libinput.
 
-pub use shingle::{Axis, AxisSource};
+pub use shingle::{Axis, AxisSource, Gesture};
 use shingle::{InputDeviceId, OutputHandle};
 
 /// What a frontend binary provides to the shared frontend.
@@ -154,30 +154,4 @@ pub struct Touch {
   /// The output the position is on, for a touch screen mapped to one
   /// output; `None` for layout coordinates.
   pub output: Option<OutputHandle>,
-}
-
-/// One step of a touchpad gesture.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Gesture {
-  /// The gesture began with `fingers` fingers.
-  Begin {
-    /// The number of fingers.
-    fingers: u32,
-  },
-  /// The gesture moved. Swipes use only `dx` and `dy`.
-  Update {
-    /// Horizontal motion of the centre.
-    dx: f64,
-    /// Vertical motion of the centre.
-    dy: f64,
-    /// Pinch scale relative to the start.
-    scale: f64,
-    /// Pinch rotation in degrees since the last update.
-    rotation: f64,
-  },
-  /// The gesture ended, or was cancelled.
-  End {
-    /// Whether it was cancelled.
-    cancelled: bool,
-  },
 }

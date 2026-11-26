@@ -15,6 +15,7 @@ use crate::{
   decoration::Mode as DecorationMode,
   input,
   input_device::{self, InputDeviceId, InputDeviceKind, stipc_device},
+  pointer_gestures::{Gesture, PointerGesture},
   shell,
   state::CompositorState,
 };
@@ -396,6 +397,7 @@ const SUPPORTED_METHODS: &[&str] = &[
   "stipc/create_wayland_output",
   "stipc/destroy_wayland_output",
   "stipc/feed_button",
+  "stipc/feed_gesture",
   "stipc/feed_key",
   "stipc/get_display",
   "stipc/get_xwayland_display",
@@ -2010,6 +2012,73 @@ fn feed_button(state: &mut CompositorState, data: &Value) -> Value {
   json_ok()
 }
 
+/// The gesture of a `stipc/feed_gesture` request, Shingle's own method:
+/// `type` is `swipe`, `pinch` or `hold`, `phase` is `begin` with
+/// `fingers`, `update` with `dx` and `dy` (and a pinch's `scale` and
+/// `rotation`, 1 and 0 when left out), or `end` with `cancelled` (false
+/// when left out).
+fn gesture_request(
+  data: &Value,
+) -> Result<(PointerGesture, Gesture), &'static str> {
+  let kind = match data.get("type").and_then(Value::as_str) {
+    Some("swipe") => PointerGesture::Swipe,
+    Some("pinch") => PointerGesture::Pinch,
+    Some("hold") => PointerGesture::Hold,
+    _ => return Err("missing or invalid type"),
+  };
+  let number = |key: &str, default: f64| match data.get(key) {
+    None => Some(default),
+    Some(value) => value.as_f64().filter(|value| value.is_finite()),
+  };
+  let gesture = match data.get("phase").and_then(Value::as_str) {
+    Some("begin") => Gesture::Begin {
+      fingers: data
+        .get("fingers")
+        .and_then(Value::as_u64)
+        .and_then(|fingers| u32::try_from(fingers).ok())
+        .filter(|fingers| *fingers > 0)
+        .ok_or("missing or invalid fingers")?,
+    },
+    Some("update") => Gesture::Update {
+      dx: number("dx", 0.0).ok_or("invalid dx")?,
+      dy: number("dy", 0.0).ok_or("invalid dy")?,
+      scale: number("scale", 1.0).ok_or("invalid scale")?,
+      rotation: number("rotation", 0.0).ok_or("invalid rotation")?,
+    },
+    Some("end") => Gesture::End {
+      cancelled: match data.get("cancelled") {
+        None => false,
+        Some(value) => value.as_bool().ok_or("invalid cancelled")?,
+      },
+    },
+    _ => return Err("missing or invalid phase"),
+  };
+  Ok((kind, gesture))
+}
+
+/// `stipc/feed_gesture`: one step of a touchpad gesture of the STIPC
+/// pointer, which a frontend gets as [`crate::Event::StipcGesture`] and
+/// a compositor without one sends to clients itself.
+fn feed_gesture(state: &mut CompositorState, data: &Value) -> Value {
+  let (kind, gesture) = match gesture_request(data) {
+    Ok(request) => request,
+    Err(error) => return json_error(error),
+  };
+  let Some(pointer) = stipc_device(state, InputDeviceKind::Pointer) else {
+    return json_ok();
+  };
+  if !state.stipc_pointer_events {
+    crate::pointer_gestures::feed(state, pointer, kind, gesture);
+  } else if input_device::session_active(state) {
+    state.events.push(crate::Event::StipcGesture {
+      device: pointer,
+      kind,
+      gesture,
+    });
+  }
+  json_ok()
+}
+
 fn move_cursor(state: &mut CompositorState, data: &Value) -> Value {
   let Some(x) = data.get("x").and_then(Value::as_f64) else {
     return json_error("missing or invalid x coordinate");
@@ -3143,6 +3212,7 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
     "stipc/destroy_wayland_output" => destroy_wayland_output(state, data),
     "stipc/feed_key" => feed_key(state, data),
     "stipc/feed_button" => feed_button(state, data),
+    "stipc/feed_gesture" => feed_gesture(state, data),
     "stipc/get_display" => json!({
         "wayland": state.socket_name.to_string_lossy(),
         "xwayland": state.xwayland.display.as_deref().unwrap_or_default(),
@@ -3342,12 +3412,12 @@ mod tests {
   }
 
   #[test]
-  fn list_methods_reports_86_sorted_methods_with_input_devices() {
+  fn list_methods_reports_87_sorted_methods_with_input_devices() {
     let mut state = test_state();
     let reply = call(&mut state, "list-methods", Value::Null);
     let methods = reply["methods"].as_array().unwrap();
-    assert_eq!(methods.len(), 86);
-    assert_eq!(SUPPORTED_METHODS.len(), 86);
+    assert_eq!(methods.len(), 87);
+    assert_eq!(SUPPORTED_METHODS.len(), 87);
     assert!(SUPPORTED_METHODS.windows(2).all(|pair| pair[0] < pair[1]));
     for method in [
       "input/list-devices",
@@ -3509,6 +3579,125 @@ mod tests {
     assert!(keys(&mut state).is_empty(), "dropped while inactive");
     let reply = call(&mut state, "stipc/feed_key", json!({"key": "KEY_NOPE"}));
     assert_eq!(reply, json!({"error": "failed to parse evdev key"}));
+  }
+
+  #[test]
+  fn stipc_gestures_reach_the_frontend_or_the_clients() {
+    let mut state = test_state();
+    let swipe = |phase: Value| {
+      let mut data = json!({"type": "swipe"});
+      data
+        .as_object_mut()
+        .unwrap()
+        .extend(phase.as_object().unwrap().clone());
+      data
+    };
+    // Without a frontend the compositor runs the gesture itself.
+    let reply = call(
+      &mut state,
+      "stipc/feed_gesture",
+      swipe(json!({"phase": "begin", "fingers": 3})),
+    );
+    assert_eq!(reply, json!({"result": "ok"}));
+    assert!(crate::pointer_gestures::is_active(&state));
+    call(
+      &mut state,
+      "stipc/feed_gesture",
+      swipe(json!({"phase": "update", "dx": 4.0})),
+    );
+    call(
+      &mut state,
+      "stipc/feed_gesture",
+      swipe(json!({"phase": "end"})),
+    );
+    assert!(!crate::pointer_gestures::is_active(&state));
+    // A frontend gets every step as an event.
+    state.stipc_pointer_events = true;
+    state.drain_events();
+    for (kind, phase) in [
+      ("swipe", json!({"phase": "begin", "fingers": 4})),
+      ("swipe", json!({"phase": "update", "dx": 1.5, "dy": -2})),
+      ("swipe", json!({"phase": "end", "cancelled": true})),
+      (
+        "pinch",
+        json!({"phase": "update", "scale": 2, "rotation": 5}),
+      ),
+      ("hold", json!({"phase": "end"})),
+    ] {
+      let mut data = phase;
+      data["type"] = json!(kind);
+      assert_eq!(
+        call(&mut state, "stipc/feed_gesture", data),
+        json!({"result": "ok"})
+      );
+    }
+    let events = state
+      .drain_events()
+      .into_iter()
+      .filter_map(|event| match event {
+        crate::Event::StipcGesture { kind, gesture, .. } => {
+          Some(format!("{kind:?} {gesture:?}"))
+        }
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(
+      events,
+      [
+        "Swipe Begin { fingers: 4 }",
+        "Swipe Update { dx: 1.5, dy: -2.0, scale: 1.0, rotation: 0.0 }",
+        "Swipe End { cancelled: true }",
+        "Pinch Update { dx: 0.0, dy: 0.0, scale: 2.0, rotation: 5.0 }",
+        "Hold End { cancelled: false }",
+      ]
+    );
+    assert!(!crate::pointer_gestures::is_active(&state));
+    // Nothing while the session is inactive.
+    crate::input_device::set_session_active(&mut state, false);
+    state.drain_events();
+    call(
+      &mut state,
+      "stipc/feed_gesture",
+      swipe(json!({"phase": "begin", "fingers": 4})),
+    );
+    assert!(
+      !state
+        .drain_events()
+        .iter()
+        .any(|event| matches!(event, crate::Event::StipcGesture { .. }))
+    );
+    for (data, error) in [
+      (
+        json!({"phase": "begin", "fingers": 4}),
+        "missing or invalid type",
+      ),
+      (
+        json!({"type": "tap", "phase": "end"}),
+        "missing or invalid type",
+      ),
+      (json!({"type": "swipe"}), "missing or invalid phase"),
+      (
+        json!({"type": "swipe", "phase": "begin"}),
+        "missing or invalid fingers",
+      ),
+      (
+        json!({"type": "swipe", "phase": "begin", "fingers": 0}),
+        "missing or invalid fingers",
+      ),
+      (
+        json!({"type": "swipe", "phase": "update", "dx": "far"}),
+        "invalid dx",
+      ),
+      (
+        json!({"type": "swipe", "phase": "end", "cancelled": 1}),
+        "invalid cancelled",
+      ),
+    ] {
+      assert_eq!(
+        call(&mut state, "stipc/feed_gesture", data),
+        json!({"error": error})
+      );
+    }
   }
 
   #[test]

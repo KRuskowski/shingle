@@ -131,6 +131,7 @@ pub use output::{
   OutputKind, OutputModeInfo, OutputPlacement, OutputRequest, OutputRequestId,
   OutputSwitch, OutputView, RequestedMode,
 };
+pub use pointer_gestures::{Gesture, PointerGesture};
 pub use shingle_core::{Direction, StackingMode, WindowId};
 use shingle_core::{Gaps, OutputId, Rect, Shingle, WorkspaceId};
 use shingle_idle::{Config as IdleConfig, IdleCoordinator};
@@ -1111,6 +1112,18 @@ pub enum Event {
     code: u32,
     /// Press or release.
     pressed: bool,
+  },
+  /// `stipc/feed_gesture` fed one step of a `kind` touchpad gesture of
+  /// the STIPC pointer `device`. Only emitted after
+  /// [`Compositor::set_stipc_pointer_events`]; the frontend handles it as
+  /// that device's gesture, so vswipe sees it.
+  StipcGesture {
+    /// The pointer STIPC feeds.
+    device: InputDeviceId,
+    /// Swipe, pinch or hold.
+    kind: PointerGesture,
+    /// The step.
+    gesture: Gesture,
   },
   /// `output` shows workspace set `wset` after a `wsets` binding or
   /// `wsets/set-output-wset` selected it there, even one it showed
@@ -2304,9 +2317,11 @@ impl Compositor {
     self.state.stipc_key_events = enabled;
   }
 
-  /// Makes `stipc/move_cursor` and `stipc/feed_button` emit
-  /// [`Event::StipcPointerMotion`] and [`Event::StipcButton`] instead of
-  /// moving the pointer and pressing buttons themselves, so that a
+  /// Makes `stipc/move_cursor`, `stipc/feed_button` and
+  /// `stipc/feed_gesture` emit [`Event::StipcPointerMotion`],
+  /// [`Event::StipcButton`] and [`Event::StipcGesture`] instead of
+  /// moving the pointer, pressing buttons and sending gestures
+  /// themselves, so that a
   /// frontend's pointer bindings, drags and overviews see STIPC pointer
   /// input as Wayfire's plugins see its headless pointer. With
   /// [`Compositor::set_stipc_key_events`] too, the `S-` prefix of a

@@ -18,6 +18,86 @@ use crate::{
   state::CompositorState,
 };
 
+/// One step of a touchpad gesture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Gesture {
+  /// The gesture began with `fingers` fingers.
+  Begin {
+    /// The number of fingers.
+    fingers: u32,
+  },
+  /// The gesture moved. Swipes use only `dx` and `dy`.
+  Update {
+    /// Horizontal motion of the centre.
+    dx: f64,
+    /// Vertical motion of the centre.
+    dy: f64,
+    /// Pinch scale relative to the start.
+    scale: f64,
+    /// Pinch rotation in degrees since the last update.
+    rotation: f64,
+  },
+  /// The gesture ended, or was cancelled.
+  End {
+    /// Whether it was cancelled.
+    cancelled: bool,
+  },
+}
+
+/// The kind of a touchpad gesture, as `zwp_pointer_gestures_v1` has them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PointerGesture {
+  /// A swipe.
+  Swipe,
+  /// A pinch.
+  Pinch,
+  /// A hold. Its updates are ignored.
+  Hold,
+}
+
+/// Feeds one step of a `kind` gesture of pointer `device` to the clients,
+/// as the backend's touchpad would.
+pub(crate) fn feed(
+  state: &mut CompositorState,
+  device: InputDeviceId,
+  kind: PointerGesture,
+  gesture: Gesture,
+) {
+  match (kind, gesture) {
+    (PointerGesture::Swipe, Gesture::Begin { fingers }) => {
+      swipe_begin(state, device, fingers)
+    }
+    (PointerGesture::Swipe, Gesture::Update { dx, dy, .. }) => {
+      swipe_update(state, device, dx, dy)
+    }
+    (PointerGesture::Swipe, Gesture::End { cancelled }) => {
+      swipe_end(state, device, cancelled)
+    }
+    (PointerGesture::Pinch, Gesture::Begin { fingers }) => {
+      pinch_begin(state, device, fingers)
+    }
+    (
+      PointerGesture::Pinch,
+      Gesture::Update {
+        dx,
+        dy,
+        scale,
+        rotation,
+      },
+    ) => pinch_update(state, device, dx, dy, scale, rotation),
+    (PointerGesture::Pinch, Gesture::End { cancelled }) => {
+      pinch_end(state, device, cancelled)
+    }
+    (PointerGesture::Hold, Gesture::Begin { fingers }) => {
+      hold_begin(state, device, fingers)
+    }
+    (PointerGesture::Hold, Gesture::Update { .. }) => {}
+    (PointerGesture::Hold, Gesture::End { cancelled }) => {
+      hold_end(state, device, cancelled)
+    }
+  }
+}
+
 #[derive(Default)]
 pub(crate) struct PointerGestures {
   swipes: HashMap<ObjectId, Vec<ZwpPointerGestureSwipeV1>>,
