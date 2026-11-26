@@ -562,3 +562,36 @@ fn a_reload_changes_the_frame_and_can_remove_it() {
     Some((tile.width as i32, tile.height as i32))
   );
 }
+
+#[test]
+fn a_placed_window_and_its_size_limits_include_the_frame() {
+  let mut fixture = Fixture::new(Config {
+    tile_by_default: "none".to_owned().try_into().unwrap(),
+    ..Config::default()
+  });
+  let (toplevel, window) = fixture.ssd("placed");
+  // Placement centres the client's 64x64 buffer with its frame around it.
+  let margins = default_margins();
+  let frame = fixture.geometry(window);
+  assert_eq!(
+    (frame.width, frame.height),
+    (
+      64 + margins.left + margins.right,
+      64 + margins.top + margins.bottom
+    )
+  );
+  assert_eq!(fixture.surface_rect(window), margins.shrink(frame));
+  let workarea = fixture.compositor.workarea();
+  assert_eq!(
+    frame.x,
+    workarea.x + (workarea.width as i32 - frame.width as i32) / 2
+  );
+  // The client's size limits grow by the frame; no limit stays none.
+  toplevel.toplevel.set_min_size(100, 50);
+  toplevel.surface.commit();
+  fixture.roundtrip();
+  assert_eq!(
+    crate::shell::size_constraints(&fixture.compositor.state, window),
+    Some(((108, 88), (0, 0)))
+  );
+}

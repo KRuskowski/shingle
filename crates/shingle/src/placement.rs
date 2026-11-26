@@ -26,6 +26,9 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
   if has_parent {
     return;
   }
+  // The client's size, and its server-side frame's margins, which a
+  // Wayfire view's geometry includes.
+  let mut margins = crate::frame::Margins::ZERO;
   let natural_size = state.surfaces.iter().find_map(|(object, surface)| {
     if surface
       .role
@@ -34,6 +37,7 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
     {
       return None;
     }
+    margins = crate::decorator::margins(state, object);
     if let Some(dimensions) = crate::viewport::dimensions(state, object) {
       return Some(dimensions);
     }
@@ -55,8 +59,8 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
     && width > 0
     && height > 0
   {
-    current.width = width;
-    current.height = height;
+    current.width = width.saturating_add(margins.left + margins.right);
+    current.height = height.saturating_add(margins.top + margins.bottom);
   }
   // The workarea of the window's own set, which a dialog shares with its
   // parent on whichever output that is.

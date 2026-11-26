@@ -1022,6 +1022,37 @@ mod tests {
   }
 
   #[test]
+  fn a_framed_transient_is_centred_on_its_parents_frame() {
+    const DIALOG: Window = 0x700001;
+    let mut fixture = Fixture::decorated();
+    map(&mut fixture, XTERM, "XTerm", 5);
+    let mut dialog = info("XTerm", "dialog");
+    dialog.transient_for = Some(XTERM);
+    dialog.geometry = Geometry::new(0, 0, 200, 100);
+    map_info(&mut fixture, DIALOG, dialog, 6);
+    let state = fixture.state();
+    let window = state
+      .surfaces
+      .values()
+      .filter_map(|surface| surface.role.toplevel())
+      .filter(|toplevel| toplevel.parent.is_some())
+      .find_map(ToplevelRole::window)
+      .expect("the dialog maps");
+    let output = state.active().rect;
+    // The frame, 208x138, is centred on the parent's frame, the output.
+    let frame = Rect::new(
+      output.x + (output.width as i32 - 208) / 2,
+      output.y + (output.height as i32 - 138) / 2,
+      208,
+      138,
+    );
+    assert_eq!(
+      state.core.window_info(window).unwrap().state.floating,
+      Some(frame)
+    );
+  }
+
+  #[test]
   fn a_floating_x_window_gets_its_request_inside_a_clamped_frame() {
     let mut fixture = Fixture::decorated();
     // Before it maps, the frame is around what it asked for.

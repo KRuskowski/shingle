@@ -1360,19 +1360,40 @@ pub(crate) fn close_window(
   Some(())
 }
 
+/// The minimum and maximum size of `window`'s geometry, 0 for none: its
+/// client's, grown by a server-side frame, as Wayfire's toplevel grows
+/// them by its margins.
 pub(crate) fn size_constraints(
   state: &CompositorState,
   window: WindowId,
 ) -> Option<((i32, i32), (i32, i32))> {
-  state
-    .surfaces
-    .values()
-    .find_map(|surface| match surface.role.toplevel() {
-      Some(toplevel) if toplevel.window() == Some(window) => {
-        Some((toplevel.min_size, toplevel.max_size))
+  let (object, min, max) =
+    state.surfaces.iter().find_map(|(object, surface)| {
+      match surface.role.toplevel() {
+        Some(toplevel) if toplevel.window() == Some(window) => {
+          Some((object.clone(), toplevel.min_size, toplevel.max_size))
+        }
+        _ => None,
       }
-      _ => None,
-    })
+    })?;
+  let margins = crate::decorator::margins(state, &object);
+  let grow = |(width, height): (i32, i32)| {
+    let horizontal = (margins.left + margins.right) as i32;
+    let vertical = (margins.top + margins.bottom) as i32;
+    (
+      if width > 0 {
+        width.saturating_add(horizontal)
+      } else {
+        width
+      },
+      if height > 0 {
+        height.saturating_add(vertical)
+      } else {
+        height
+      },
+    )
+  };
+  Some((grow(min), grow(max)))
 }
 
 pub(crate) fn leaf_state(

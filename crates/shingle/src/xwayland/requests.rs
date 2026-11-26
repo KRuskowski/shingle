@@ -174,8 +174,8 @@ pub(crate) fn float(
 }
 
 /// Where a transient X toplevel floats: its size, centred on its parent's
-/// current geometry and clamped into the parent's workarea. `None` for
-/// windows without a parent.
+/// current geometry and clamped into the parent's workarea, frames
+/// included. `None` for windows without a parent.
 fn transient_geometry(
   state: &CompositorState,
   object: &ObjectId,
@@ -191,7 +191,8 @@ fn transient_geometry(
       .is_some_and(|candidate| candidate.window() == Some(parent))
       .then(|| object.clone())
   })?;
-  let parent_geometry = shell::surface_geometry(state, &parent_object)?;
+  // Both geometries include their frames, as Wayfire centres views.
+  let parent_geometry = shell::window_geometry(state, &parent_object)?;
   let workarea = state
     .core
     .window_location(window)
