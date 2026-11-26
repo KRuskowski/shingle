@@ -30,7 +30,7 @@ namespaces:
                nested-gpu|nodmabuf|weston|syncobj|nosyncobj|outputs|
                nested-outputs|nested-smoke|wayfire-plugins|wayfire-shell|
                vswipe|decoration|switcher|colours|minimize-focus|
-               drag-icon|resize ...
+               drag-icon|resize|nested-scaled ...
 
 For example, DB-1's import test:
 
@@ -73,6 +73,11 @@ to show the icon following the pointer and gone after the drop.
 and a `wl_probe` with STIPC's pointer, one motion and eight motions per
 frame, and reports kitty's configures, buffers and settle time from its
 `WAYLAND_DEBUG` log and the configures of a floating probe beside them.
+`--checks nested-scaled` (nested_output_checks.py) runs nested Shingle
+in a headless Shingle whose output has scale 1.5 and then 2: nested's
+output must take the window's scale and logical size, the host pointer
+must land at the same logical point in nested, and a Super+drag through
+the headless Shingle must move the window it starts on.
 
 It exits with the command's status, or 1 when a check failed. With
 `--checks` it prints one PASS or FAIL line per check and INFO lines for
@@ -117,9 +122,9 @@ SAMPLE_INTERVAL = 0.05
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
                 'weston', 'syncobj', 'nosyncobj', 'outputs', 'nested-outputs',
-                'nested-smoke', 'wayfire-plugins', 'wayfire-shell', 'vswipe',
-                'decoration', 'switcher', 'colours', 'minimize-focus',
-                'drag-icon', 'resize')
+                'nested-smoke', 'nested-scaled', 'wayfire-plugins',
+                'wayfire-shell', 'vswipe', 'decoration', 'switcher',
+                'colours', 'minimize-focus', 'drag-icon', 'resize')
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset; `syncobj` runs no Vulkan client.
 MODESET_GROUPS = ('dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',

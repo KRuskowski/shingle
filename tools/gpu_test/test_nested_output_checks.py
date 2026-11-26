@@ -33,5 +33,17 @@ class WindowTest(unittest.TestCase):
     self.assertEqual(nested.to_host((1380, 200), window, output), (800, 250))
     self.assertEqual(nested.offset_of(window, output), (-580, 50))
 
+  def test_wlr_randr_scale_is_read(self):
+    text = ('HEADLESS-1 "Shingle Headless output (HEADLESS-1)"\n'
+            '  Enabled: yes\n  Scale: 1.500000\n')
+    self.assertEqual(nested.randr_scale(text), 1.5)
+    self.assertIsNone(nested.randr_scale('HEADLESS-1\n'))
+
+  def test_scaled_configs_free_super_and_the_buttons_on_the_host(self):
+    outer, inner = nested.scaled_configs(2.0)
+    self.assertEqual(outer['output'], {'scale': 2.0})
+    self.assertEqual(outer['pointer']['move_button'], '')
+    self.assertEqual(inner['pointer']['move_button'], 'super+btn_left')
+
 if __name__ == '__main__':
   unittest.main()

@@ -4,7 +4,7 @@ Work items in priority order. Refer to items by name, not number, from other doc
 
 ## 1. Host input checks after the rename
 
-The smoke test, IPC fixtures, session round trip and Tilefire migration were repeated with real clients on 2026-11-25 ([status.md](status.md#with-real-clients)). What remains needs physical input from the operator: input-device gating of real host keyboard, pointer and touch events, the nested switcher and drag clean-up on disable, modifiers held across host keyboard focus changes, and a clean quit followed by a restore. The steps are in [status.md](status.md#needs-operator-host-input); record the results there and delete this item.
+The smoke test, IPC fixtures, session round trip and Tilefire migration were repeated with real clients on 2026-11-25 ([status.md](status.md#with-real-clients)). What remains needs physical input from the operator: input-device gating of real host keyboard, pointer and touch events, the nested switcher and drag clean-up on disable, modifiers held across host keyboard focus changes, a clean quit followed by a restore, and, since the 2026-11-26 fixes, pointer drags on a scaled host monitor and kitty's redraw during a resize. The steps are in [status.md](status.md#needs-operator-host-input); record the results there and delete this item.
 
 ## 2. Native backend
 

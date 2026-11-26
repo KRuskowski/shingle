@@ -45,7 +45,10 @@ import time
 import checks
 
 xw = checks.xw
-GROUPS = ('nested-outputs', 'nested-smoke')
+GROUPS = ('nested-outputs', 'nested-smoke', 'nested-scaled')
+# The headless Shingle's output scales `nested-scaled` runs nested at: a
+# fractional one and an integer one.
+HOST_SCALES = (1.5, 2.0)
 # What both Shingles run with: checks.py's base, no open animation, no
 # gaps and no tiling animation, so windows sit where they are tiled.
 STILL = {
@@ -154,17 +157,19 @@ def capture(outer):
   parsed = xw.parse_ppm(done.stdout) if done.returncode == 0 else None
   return xw.Capture(*parsed) if parsed else None
 
-def start(binary, name, outputs=None):
+def start(binary, name, outputs=None, outer_config=None,
+          nested_config=None):
   """A headless Shingle and nested Shingle on lavapipe in it, in
-  directories called after `name`, with `outputs` windows if given."""
-  outer = checks.Shingle(binary, f'{name}-host', config(),
+  directories called after `name`, with `outputs` windows if given and
+  each with its own config if given."""
+  outer = checks.Shingle(binary, f'{name}-host', outer_config or config(),
                          backend=('--headless',))
   backend = ('--backend', 'nested')
   if outputs:
     backend += ('--outputs', str(outputs))
   try:
     nested = checks.Shingle(
-        binary, f'{name}-nested', config(), backend=backend,
+        binary, f'{name}-nested', nested_config or config(), backend=backend,
         extra_environment={'WAYLAND_DISPLAY': outer.wayland_display(),
                            'VK_ICD_FILENAMES': checks.LAVAPIPE})
   except Exception:
@@ -483,7 +488,142 @@ def smoke_checks(results, binary, wl_probe, captures):
   results.check('nested-smoke: SIGTERM exits headless with status 0',
                 outer_status == 0, f'status {outer_status}')
 
+def scaled_configs(scale):
+  """The headless Shingle's config, its output at `scale` and without
+  pointer bindings of its own, so that Super and the buttons reach the
+  nested window, and nested's, which moves windows with Super and the
+  left button."""
+  outer = config()
+  outer['output'] = {'scale': scale}
+  outer['pointer'] = {'move_button': '', 'resize_button': '',
+                      'wrot_activate': ''}
+  outer['keybindings'] = {'toggle_menu': ''}
+  inner = config()
+  inner['pointer'] = {'move_button': 'super+btn_left'}
+  return outer, inner
+
+def randr_scale(text):
+  """The scale of the first output in `wlr-randr`'s output, or None."""
+  for line in text.splitlines():
+    if line.strip().startswith('Scale:'):
+      try:
+        return float(line.split(':', 1)[1])
+      except ValueError:
+        return None
+  return None
+
+def output_scale(shingle):
+  """The scale `wlr-randr` reports for `shingle`'s first output."""
+  done = subprocess.run(['wlr-randr'], env=shingle.client_environment(),
+                        capture_output=True, text=True, timeout=20,
+                        stdin=subprocess.DEVNULL)
+  return randr_scale(done.stdout) if done.returncode == 0 else None
+
+def tiles(nested):
+  """Nested's tiled views, left to right, as app ids."""
+  views = [view for view in nested.views()
+           if view.get('mapped', True) and view.get('tiled-edges')]
+  return [view['app-id']
+          for view in sorted(views, key=lambda view: view['geometry']['x'])]
+
+def scaled_checks(results, binary, wl_probe, scale):
+  """Nested in a headless Shingle at `scale`: its output takes the
+  window's scale and logical size, the host pointer lands where it is,
+  and a Super+drag that starts on a window moves that window."""
+  name = f'nested-scaled {scale}'
+  outer_config, nested_config = scaled_configs(scale)
+  outer, nested = start(binary, f'nested-scaled-{scale}',
+                        outer_config=outer_config,
+                        nested_config=nested_config)
+  probes = []
+  try:
+    window = xw.wait_for(lambda: host_windows(outer).get('Shingle'),
+                         timeout=30)
+
+    def output_matches():
+      found = nested.call('window-rules/list-outputs')
+      if len(found) != 1:
+        return None
+      geometry = found[0]['geometry']
+      return found[0] if (output_scale(nested) == scale
+                          and abs(geometry['width'] - window[2]) <= 1
+                          and abs(geometry['height'] - window[3]) <= 1
+                          ) else None
+    output = window and xw.wait_for(output_matches, timeout=15)
+    results.check(
+        f'{name}: nested\'s output has the host window\'s scale and its '
+        'logical size',
+        bool(output),
+        f'window {window}, scale {output_scale(nested)}, outputs '
+        f'{json.dumps(nested.call("window-rules/list-outputs"))}')
+    if not output:
+      return
+    origin = (output['geometry']['x'], output['geometry']['y'])
+    # One after the other, so that they tile in this order.
+    for app_id in ('left', 'right'):
+      probes.append(checks.Client(nested, [wl_probe, app_id], app_id,
+                                  program='wl_probe'))
+      xw.wait_for(lambda app_id=app_id: nested.view(app_id), timeout=15)
+    tiled = xw.wait_for(lambda: tiles(nested) == ['left', 'right'],
+                        timeout=15)
+    results.check(f'{name}: two probes tile side by side in nested',
+                  bool(tiled), json.dumps(nested.views()))
+    if not tiled:
+      return
+    left = nested.view('left')['geometry']
+    right = nested.view('right')['geometry']
+    start_point = (left['x'] + left['width'] // 2,
+                   left['y'] + left['height'] // 2)
+    host = to_host(start_point, window, origin)
+    outer.call('stipc/move_cursor', {'x': host[0], 'y': host[1]})
+
+    def arrived():
+      cursor = nested.call('window-rules/get-cursor-position').get('pos', {})
+      return (abs(cursor.get('x', -1e9) - start_point[0]) <= 1
+              and abs(cursor.get('y', -1e9) - start_point[1]) <= 1)
+    results.check(
+        f'{name}: the host pointer at {host} is at {start_point} in nested, '
+        'under the drawn cursor', bool(xw.wait_for(arrived, timeout=10)),
+        f'{nested.call("window-rules/get-cursor-position")}')
+    # Click to give the nested window the host keyboard, then drag.
+    for mode in ('press', 'release'):
+      outer.call('stipc/feed_button', {'combo': 'BTN_LEFT', 'mode': mode})
+    time.sleep(0.2)
+    outer.call('stipc/feed_key', {'key': 'KEY_LEFTMETA', 'state': True})
+    outer.call('stipc/feed_button', {'combo': 'BTN_LEFT', 'mode': 'press'})
+    end = (right['x'] + right['width'] * 3 // 4,
+           right['y'] + right['height'] // 2)
+    for step in range(1, 11):
+      point = (start_point[0] + (end[0] - start_point[0]) * step // 10,
+               start_point[1] + (end[1] - start_point[1]) * step // 10)
+      host = to_host(point, window, origin)
+      outer.call('stipc/move_cursor', {'x': host[0], 'y': host[1]})
+      time.sleep(0.03)
+    outer.call('stipc/feed_button', {'combo': 'BTN_LEFT', 'mode': 'release'})
+    outer.call('stipc/feed_key', {'key': 'KEY_LEFTMETA', 'state': False})
+    moved = xw.wait_for(lambda: tiles(nested) == ['right', 'left'],
+                        timeout=10)
+    results.check(
+        f'{name}: a Super+drag from the left probe onto the right one moves '
+        'the left probe there', bool(moved), str(tiles(nested)))
+  finally:
+    for probe in probes:
+      probe.stop()
+    status = nested.stop()
+    outer_status = outer.stop()
+  results.check(f'{name}: SIGTERM exits nested with status 0', status == 0,
+                f'status {status}, {checks.tail(nested.log_text())}')
+  results.check(f'{name}: SIGTERM exits headless with status 0',
+                outer_status == 0, f'status {outer_status}')
+
+def nested_scaled_checks(results, binary, wl_probe, captures):
+  """scaled_checks at every scale of HOST_SCALES."""
+  del captures
+  for scale in HOST_SCALES:
+    scaled_checks(results, binary, wl_probe, scale)
+
 CHECKS = {
     'nested-outputs': nested_output_checks,
     'nested-smoke': smoke_checks,
+    'nested-scaled': nested_scaled_checks,
 }
