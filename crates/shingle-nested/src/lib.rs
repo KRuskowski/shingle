@@ -399,7 +399,7 @@ impl ApplicationHandler for App {
     }
     // Clients start only now that linux-dmabuf can be offered: most look
     // for the global once (docs/design/dmabuf.md, section 2).
-    self.frontend.enable_dmabuf(renderer.gpu());
+    self.frontend.attach_gpu(renderer.gpu());
     if let Err(error) = self.frontend.start_clients() {
       eprintln!("shingle: failed to start clients: {error}");
       event_loop.exit();

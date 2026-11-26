@@ -229,8 +229,8 @@ pub trait FrameRenderer {
   /// Changes the frame size, for a new mode.
   fn resize(&mut self, size: (u32, u32)) -> Result<(), RenderFailure>;
 
-  /// The GPU context, for linux-dmabuf ([`Frontend::enable_dmabuf`]);
-  /// `None` for renderers without one.
+  /// The GPU context, for shm uploads and linux-dmabuf
+  /// ([`Frontend::attach_gpu`]); `None` for renderers without one.
   fn gpu(&self) -> Option<&GpuContext> {
     None
   }

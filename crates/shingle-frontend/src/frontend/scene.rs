@@ -320,7 +320,16 @@ impl Frontend {
       ));
       let nearest = self.zoom.interpolation == "nearest";
       if renderer.set_nearest_filter(nearest) {
-        self.textures.clear();
+        // Uploaded shm buffers were given back, so their textures are
+        // rebound with the new sampler rather than uploaded again.
+        if let Some(uploader) = &self.uploader {
+          let filter = self.texture_filter();
+          for texture in self.textures.values_mut() {
+            *texture = uploader.rebind(texture, filter);
+          }
+        } else {
+          self.textures.clear();
+        }
         self.previous_surfaces.clear();
         self.animations.clear();
       }
@@ -397,6 +406,14 @@ impl Frontend {
           }
           continue;
         }
+        if let Some(content) = buffer.shm() {
+          // Uploaded after its commit, unless that failed or the commit
+          // was missed: then all of it, now.
+          if content.is_locked() {
+            self.upload_shm(snapshot.id, buffer, content, false);
+          }
+          continue;
+        }
         let Some(rgba) = buffer.rgba() else {
           continue;
         };
@@ -435,20 +452,34 @@ impl Frontend {
         else {
           continue;
         };
-        let Some(old_rgba) = old_buffer.rgba() else {
-          continue;
-        };
         if *old_geometry == geometry
           || self.animations.contains_key(&snapshot.id)
           || self.animation_duration.is_zero()
         {
           continue;
         }
-        let old_texture = renderer.create_texture(
-          old_buffer.width,
-          old_buffer.height,
-          &old_rgba,
-        )?;
+        let old_texture = if old_buffer.shm().is_some() {
+          // The buffer went back after its upload: the old frame is a
+          // GPU copy of the texture, which still shows it unless the
+          // client committed again since.
+          let copy =
+            self.uploader.as_ref().zip(self.textures.get(&snapshot.id));
+          let Some(copy) = copy.and_then(|(uploader, texture)| {
+            uploader.duplicate(texture, self.texture_filter())
+          }) else {
+            continue;
+          };
+          copy
+        } else {
+          let Some(old_rgba) = old_buffer.rgba() else {
+            continue;
+          };
+          renderer.create_texture(
+            old_buffer.width,
+            old_buffer.height,
+            &old_rgba,
+          )?
+        };
         self.animations.insert(
           snapshot.id,
           GeometryAnimation {
@@ -479,6 +510,7 @@ impl Frontend {
         .collect::<HashSet<_>>();
       self.textures.retain(|id, _| {
         visible.contains(id)
+          || self.uploaded.contains(id)
           || self.closing_animations.contains_key(id)
           || self.minimize_animations.contains_key(id)
       });

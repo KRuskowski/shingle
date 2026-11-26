@@ -277,6 +277,19 @@ impl TestClient {
     width: i32,
     height: i32,
   ) {
+    let buffer = self.shm_buffer(width, height);
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage(0, 0, width, height);
+    surface.commit();
+    self.roundtrip(compositor);
+  }
+
+  /// A `width` by `height` ARGB8888 shm buffer in a pool of its own.
+  pub(crate) fn shm_buffer(
+    &mut self,
+    width: i32,
+    height: i32,
+  ) -> wl_buffer::WlBuffer {
     let shm = self.bind::<wl_shm::WlShm>(1);
     let size = width * height * 4;
     let fd = rustix::fs::memfd_create(
@@ -287,7 +300,7 @@ impl TestClient {
     rustix::fs::ftruncate(&fd, size as u64).expect("ftruncate succeeds");
     let pool =
       shm.create_pool(rustix::fd::AsFd::as_fd(&fd), size, &self.handle, ());
-    let buffer = pool.create_buffer(
+    pool.create_buffer(
       0,
       width,
       height,
@@ -295,11 +308,7 @@ impl TestClient {
       wl_shm::Format::Argb8888,
       &self.handle,
       (),
-    );
-    surface.attach(Some(&buffer), 0, 0);
-    surface.damage(0, 0, width, height);
-    surface.commit();
-    self.roundtrip(compositor);
+    )
   }
 }
 

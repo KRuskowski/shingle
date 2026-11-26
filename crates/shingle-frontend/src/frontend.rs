@@ -34,7 +34,9 @@ use shingle_config::{
   CommandBinding, ConfigWatcher, Keybindings, PointerBindings, ShingleConfig,
 };
 use shingle_core::WindowId as TileWindowId;
-use shingle_render::{GpuContext, GpuTexture, RenderRect};
+use shingle_render::{
+  GpuContext, GpuTexture, RenderRect, TextureFilter, TextureUploader,
+};
 use shingle_session::{
   SessionStore, launch_autostart, launch_program, launch_saved,
 };
@@ -158,6 +160,16 @@ pub struct Frontend {
   /// Imported DMA-BUF textures and the locks of frames in flight, once
   /// linux-dmabuf is offered.
   dmabuf: Option<Rc<RefCell<crate::dmabuf::DmabufTextures>>>,
+  /// Uploads committed shm buffers, once the host attached its GPU
+  /// ([`Frontend::attach_gpu`]).
+  uploader: Option<TextureUploader>,
+  /// Surfaces whose texture holds an uploaded shm buffer that was given
+  /// back. These textures are kept while the surface is mapped, drawn or
+  /// not, since the buffer cannot be read again.
+  uploaded: HashSet<SurfaceId>,
+  /// Every shm upload, with the bytes it copied, for tests.
+  #[cfg(test)]
+  uploads: Vec<(SurfaceId, usize)>,
   /// The clients [`Frontend::start_clients`] starts.
   startup: Option<Startup>,
 }
@@ -183,7 +195,7 @@ impl Frontend {
   /// Creates the frontend: restores the saved session's window model or
   /// creates a new compositor, and serves Wayfire IPC at `ipc` if given.
   /// No client is started yet: the host first enables linux-dmabuf once
-  /// its renderer exists ([`Frontend::enable_dmabuf`]), since most
+  /// its renderer exists ([`Frontend::attach_gpu`]), since most
   /// clients look for the global only once, and then calls
   /// [`Frontend::start_clients`], which launches the restored session's
   /// clients, autostart and `spawn`.
@@ -278,6 +290,19 @@ impl Frontend {
       self.session_children.push(child);
     }
     Ok(())
+  }
+
+  /// Gives the frontend the host's GPU, once its renderer exists and
+  /// before [`Frontend::start_clients`], and again with the new context
+  /// after a GPU loss. Committed `wl_shm` buffers are then uploaded from
+  /// the clients' pools right after the dispatch that committed them and
+  /// given back at once ([`shingle::Compositor::set_shm_upload`],
+  /// docs/design/dmabuf.md, section 5), and linux-dmabuf is offered as
+  /// [`Frontend::enable_dmabuf`] decides, whose answer this returns.
+  pub fn attach_gpu(&mut self, gpu: &GpuContext) -> bool {
+    self.uploader = Some(gpu.texture_uploader());
+    self.compositor.set_shm_upload(true);
+    self.enable_dmabuf(gpu)
   }
 
   /// Offers linux-dmabuf to clients if `gpu` can import DMA-BUFs, has a
@@ -481,6 +506,10 @@ impl Frontend {
       redraw_requested: false,
       captures: Vec::new(),
       dmabuf: None,
+      uploader: None,
+      uploaded: HashSet::new(),
+      #[cfg(test)]
+      uploads: Vec::new(),
       startup: None,
     })
   }
@@ -606,8 +635,10 @@ impl Frontend {
               .or_insert_with(Instant::now);
           }
           self.dirty.insert(snapshot.id);
+          self.upload_committed(&snapshot);
         }
         Event::SurfaceDestroyed { surface } => {
+          self.uploaded.remove(&surface);
           let previous = self.previous_surfaces.get(&surface).cloned();
           if self.animate.close_animation != "none"
             && self.animation_enabled.contains(&surface)
@@ -932,16 +963,20 @@ impl Frontend {
   /// Forgets every GPU texture: surface textures, geometry animations'
   /// old frames, Scale titles, icons and the filter text. The native host
   /// calls it before drawing with a new GPU context after the old device
-  /// was lost; the next frame uploads everything again from the
-  /// compositor's surface snapshots, which keep their pixels, and
-  /// imports DMA-BUFs again from their kept fds. The locks of frames in
-  /// flight are dropped, since a lost device runs nothing more. Closing
-  /// animations whose texture is gone are not drawn.
+  /// was lost, and then [`Frontend::attach_gpu`] with that context; the
+  /// next frame uploads again what the compositor's surface snapshots
+  /// still hold: copied pixels, and shm buffers not uploaded yet. It
+  /// imports DMA-BUFs again from their kept fds. An shm buffer that was
+  /// uploaded has gone back to its client, so its surface draws nothing
+  /// until it commits again. The locks of frames in flight are dropped,
+  /// since a lost device runs nothing more. Closing animations whose
+  /// texture is gone are not drawn.
   pub fn drop_gpu_resources(&mut self) {
     if let Some(cache) = &self.dmabuf {
       cache.borrow_mut().clear();
     }
     self.textures.clear();
+    self.uploaded.clear();
     self.previous_surfaces.clear();
     self.animations.clear();
     self.scale_titles.clear();
@@ -968,6 +1003,82 @@ impl Frontend {
 
   fn request_redraw(&mut self) {
     self.redraw_requested = true;
+  }
+
+  /// The filter new textures are sampled with.
+  fn texture_filter(&self) -> TextureFilter {
+    if self.zoom.interpolation == "nearest" {
+      TextureFilter::Nearest
+    } else {
+      TextureFilter::Linear
+    }
+  }
+
+  /// Uploads the shm buffer a commit showed, if it has one still to be
+  /// uploaded, and forgets that a surface's texture is an upload when it
+  /// committed something else or nothing.
+  fn upload_committed(&mut self, snapshot: &shingle::SurfaceSnapshot) {
+    let shm = snapshot
+      .buffer
+      .as_ref()
+      .and_then(|buffer| Some((buffer, buffer.shm()?)));
+    match shm {
+      Some((buffer, content)) if content.is_locked() => {
+        self.upload_shm(snapshot.id, buffer, content, true);
+      }
+      // The same buffer again, already uploaded: nothing to write.
+      Some(_) => {}
+      None => {
+        self.uploaded.remove(&snapshot.id);
+      }
+    }
+  }
+
+  /// Uploads `content`, which `buffer` of `surface` shows, and gives the
+  /// buffer back to its client. With `damage_known` only the damage is
+  /// written into a texture that fits; otherwise all of it. Returns
+  /// whether it was uploaded; on failure the buffer stays locked, so that
+  /// the next frame can try again.
+  pub(super) fn upload_shm(
+    &mut self,
+    surface: SurfaceId,
+    buffer: &shingle::BufferSnapshot,
+    content: &shingle::ShmContent,
+    damage_known: bool,
+  ) -> bool {
+    let Some(uploader) = &self.uploader else {
+      return false;
+    };
+    let result = crate::shm::upload(
+      uploader,
+      self.textures.get(&surface),
+      buffer,
+      content,
+      self.texture_filter(),
+      damage_known,
+    );
+    match result {
+      Ok(uploaded) => {
+        shingle::trace::buffer(format_args!(
+          "shm upload {} bytes surface={}",
+          uploaded.bytes,
+          surface.get()
+        ));
+        #[cfg(test)]
+        self.uploads.push((surface, uploaded.bytes));
+        self.textures.insert(surface, uploaded.texture);
+        self.uploaded.insert(surface);
+        content.release();
+        true
+      }
+      Err(error) => {
+        eprintln!(
+          "shingle: shm upload of surface {} failed: {error}",
+          surface.get()
+        );
+        false
+      }
+    }
   }
 
   /// Drops the buffer locks of frames the GPU has finished and the

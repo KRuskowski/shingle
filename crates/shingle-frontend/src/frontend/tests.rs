@@ -1192,3 +1192,182 @@ fn a_surface_that_goes_from_dmabuf_to_shm_gets_an_uploaded_texture() {
     .render(&mut fixture.host, &mut target)
     .expect("the frame renders");
 }
+
+/// A frontend that uploads shm buffers on `target`'s device, with
+/// animations off.
+fn shm_fixture(target: &RecordingTarget) -> Fixture {
+  let mut config = ShingleConfig::default();
+  config.animate.open_animation = "none".into();
+  config.animate.close_animation = "none".into();
+  config.tiling.animation_duration = 0;
+  config.vswitch.duration_ms = 0;
+  let mut fixture = Fixture::new(config);
+  fixture.frontend.attach_gpu(target.renderer.gpu());
+  fixture
+}
+
+/// Whether the last frame drew a textured tile.
+fn drew_texture(target: &RecordingTarget) -> bool {
+  target
+    .frames
+    .last()
+    .is_some_and(|frame| frame.iter().any(|tile| tile.1))
+}
+
+#[test]
+fn shm_commits_upload_their_damage_and_are_released_without_a_frame() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut fixture = shm_fixture(&target);
+  let toplevel = fixture.window("shm");
+  let surface = toplevel.surface.clone();
+  let buffer = fixture.client.shm_buffer(100, 80);
+  fixture.client.commit_buffer(
+    fixture.frontend.compositor_mut(),
+    &surface,
+    &buffer,
+  );
+  fixture.frontend.process(&mut fixture.host);
+  let (id, bytes) = *fixture.frontend.uploads.last().expect("an upload");
+  assert_eq!(bytes, 100 * 80 * 4, "a new size is written in full");
+  fixture.process();
+  assert!(
+    fixture.client.releases().contains(&buffer.id()),
+    "released after its upload, before any frame"
+  );
+  // The client draws again into the same buffer and damages a square.
+  surface.attach(Some(&buffer), 0, 0);
+  surface.damage_buffer(10, 20, 5, 5);
+  surface.commit();
+  fixture.process();
+  assert_eq!(fixture.frontend.uploads.last(), Some(&(id, 5 * 5 * 4)));
+  fixture.process();
+  assert_eq!(
+    fixture
+      .client
+      .releases()
+      .iter()
+      .filter(|released| **released == buffer.id())
+      .count(),
+    2
+  );
+  // A commit without a new buffer uploads nothing.
+  let uploads = fixture.frontend.uploads.len();
+  surface.commit();
+  fixture.process();
+  assert_eq!(fixture.frontend.uploads.len(), uploads);
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  assert!(drew_texture(&target), "drawn from the uploaded texture");
+}
+
+#[test]
+fn uploaded_textures_survive_a_filter_change_and_go_when_unmapped() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut fixture = shm_fixture(&target);
+  let toplevel = fixture.window("shm");
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  assert!(drew_texture(&target));
+  let id = fixture.frontend.uploads.last().expect("an upload").0;
+  let uploads = fixture.frontend.uploads.len();
+  fixture.frontend.zoom.interpolation = "nearest".into();
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  assert!(drew_texture(&target), "rebound, not lost");
+  assert_eq!(fixture.frontend.uploads.len(), uploads, "nothing uploaded");
+  assert!(fixture.frontend.textures.contains_key(&id));
+  toplevel.surface.attach(None, 0, 0);
+  toplevel.surface.commit();
+  fixture.process();
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  assert!(
+    !fixture.frontend.textures.contains_key(&id),
+    "dropped once unmapped"
+  );
+}
+
+#[test]
+fn a_buffer_whose_upload_was_missed_is_uploaded_in_full_by_the_frame() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut fixture = shm_fixture(&target);
+  let toplevel = fixture.window("shm");
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  let buffer = fixture.client.shm_buffer(40, 30);
+  let surface = toplevel.surface.clone();
+  surface.attach(Some(&buffer), 0, 0);
+  surface.damage_buffer(0, 0, 1, 1);
+  surface.commit();
+  fixture.client.roundtrip(fixture.frontend.compositor_mut());
+  fixture
+    .frontend
+    .compositor_mut()
+    .dispatch_pending()
+    .unwrap();
+  // Its event is dropped, as if the frontend had missed it.
+  fixture.frontend.compositor_mut().drain_events();
+  let uploads = fixture.frontend.uploads.len();
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  assert_eq!(fixture.frontend.uploads.len(), uploads + 1);
+  assert_eq!(fixture.frontend.uploads.last().unwrap().1, 40 * 30 * 4);
+  fixture.process();
+  assert!(fixture.client.releases().contains(&buffer.id()));
+}
+
+#[test]
+fn an_uploaded_texture_stays_while_its_surface_is_hidden() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut fixture = shm_fixture(&target);
+  let _toplevel = fixture.window("shm");
+  let id = fixture.frontend.uploads.last().expect("an upload").0;
+  fixture
+    .frontend
+    .compositor_mut()
+    .switch_workspace(1)
+    .expect("a second workspace");
+  fixture.process();
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  assert!(!drew_texture(&target), "nothing on the other workspace");
+  assert!(
+    fixture.frontend.textures.contains_key(&id),
+    "kept, since its buffer went back"
+  );
+  let uploads = fixture.frontend.uploads.len();
+  fixture
+    .frontend
+    .compositor_mut()
+    .switch_workspace(0)
+    .expect("the first workspace");
+  fixture.process();
+  fixture
+    .frontend
+    .render(&mut fixture.host, &mut target)
+    .expect("the frame renders");
+  assert!(drew_texture(&target), "shown again without a commit");
+  assert_eq!(fixture.frontend.uploads.len(), uploads);
+}
