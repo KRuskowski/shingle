@@ -29,6 +29,8 @@ pub(crate) fn add(
   if state.outputs.get(&id).is_some() {
     return Err(Error::OutputExists(info.name));
   }
+  // A backend that adds an output that was turned off replugged it.
+  state.outputs.take_disabled(&id);
   let placement = state.placements.get(&info.name);
   if !placement.scale.is_finite() || placement.scale <= 0.0 {
     return Err(Error::InvalidOutputScale);
@@ -100,6 +102,11 @@ pub(crate) fn remove(
   id: &OutputId,
 ) -> Result<(), Error> {
   let Some(output) = state.outputs.get(id) else {
+    // A turned-off output whose monitor or window is gone now.
+    if state.outputs.take_disabled(id).is_some() {
+      crate::output_management::output_removed(state, id);
+      return Ok(());
+    }
     return Err(Error::Core(ShingleError::OutputNotFound(
       id.as_str().into(),
     )));

@@ -2,9 +2,15 @@
 //!
 //! Every manager gets one head per output, with the backend's mode list
 //! ([`crate::OutputInfo::modes`]) or, without one, a single mode that is the
-//! output rectangle in physical pixels. Heads come and go with outputs. An
+//! output rectangle in physical pixels. Heads come and go with outputs;
+//! an output turned off by a configuration stays listed as a disabled head
+//! and can be turned on again (docs/design/multi-output.md, section 8). A
+//! configuration must name every head. Turning an output off removes it
+//! under `output_layout.unplug`, and turning every output off fails. An
 //! applied or tested configuration changes position, scale and transform
-//! itself. A mode change goes to the
+//! itself, and config reloads leave the outputs it configured alone until
+//! Shingle restarts, as Wayfire's `is_externally_managed`. A mode change
+//! goes to the
 //! backend as a [`crate::OutputRequest`] when the backend lists modes, and
 //! the configuration is answered when the backend finishes it
 //! ([`finish_request`]); without a list, as in nested and headless, a
@@ -51,6 +57,36 @@ struct Head {
   manager: ObjectId,
   /// The output the head stands for.
   output: OutputId,
+  /// Whether the head was last told it is enabled.
+  enabled: bool,
+}
+
+/// What a head describes: an output, or one turned off.
+struct Source {
+  info: crate::OutputInfo,
+  /// The size of the mode that stands for the output, in physical pixels.
+  mode_size: (i32, i32),
+  enabled: bool,
+}
+
+/// The output called `id`, live or turned off, as its heads describe it.
+fn source(state: &CompositorState, id: &OutputId) -> Option<Source> {
+  if let Some(output) = state.outputs.get(id) {
+    return Some(Source {
+      info: output.info.clone(),
+      mode_size: output.mode_size(),
+      enabled: true,
+    });
+  }
+  let off = state.outputs.disabled(id)?;
+  Some(Source {
+    info: off.info.clone(),
+    mode_size: (
+      off.physical.0.min(i32::MAX as u32) as i32,
+      off.physical.1.min(i32::MAX as u32) as i32,
+    ),
+    enabled: false,
+  })
 }
 
 struct Mode {
@@ -148,6 +184,9 @@ pub(crate) fn sync(state: &mut CompositorState) {
     let Some(output) = state.outputs.get(&head.output) else {
       continue;
     };
+    if !head.enabled {
+      continue;
+    }
     head.resource.position(output.rect.x, output.rect.y);
     head.resource.transform(output.transform);
     head.resource.scale(output.scale);
@@ -186,8 +225,19 @@ pub(crate) fn modes_changed(state: &mut CompositorState, id: &OutputId) {
 }
 
 /// Finishes the heads of output `id`, which is gone or renamed, and their
-/// modes, then sends the current state.
+/// modes, then sends the current state. The heads of an output that a
+/// configuration turned off stay, disabled.
 pub(crate) fn output_removed(state: &mut CompositorState, id: &OutputId) {
+  if state.outputs.disabled(id).is_some() {
+    for head in state.output_management.heads.values_mut() {
+      if head.output == *id && head.enabled {
+        head.resource.enabled(0);
+        head.enabled = false;
+      }
+    }
+    sync(state);
+    return;
+  }
   let heads = state
     .output_management
     .heads
@@ -210,7 +260,8 @@ pub(crate) fn output_removed(state: &mut CompositorState, id: &OutputId) {
   sync(state);
 }
 
-/// Announces a head for the new output `id` to every manager.
+/// Announces a head for the new output `id` to every manager, or enables
+/// the head it has from when it was turned off.
 pub(crate) fn output_added(state: &mut CompositorState, id: &OutputId) {
   let Some(handle) = state.display.clone() else {
     return;
@@ -218,6 +269,18 @@ pub(crate) fn output_added(state: &mut CompositorState, id: &OutputId) {
   let managers: Vec<ZwlrOutputManagerV1> =
     state.output_management.managers.values().cloned().collect();
   for manager in managers {
+    let existing = state
+      .output_management
+      .heads
+      .values_mut()
+      .find(|head| head.manager == manager.id() && head.output == *id);
+    if let Some(head) = existing {
+      if !head.enabled {
+        head.resource.enabled(1);
+        head.enabled = true;
+      }
+      continue;
+    }
     if let Some(client) = manager.client() {
       announce_head(state, &handle, &client, &manager, id);
     }
@@ -234,13 +297,13 @@ fn send_modes(
   head: &ZwlrOutputHeadV1,
   id: &OutputId,
 ) {
-  let Some(output) = state.outputs.get(id) else {
+  let Some(output) = source(state, id) else {
     return;
   };
   let version = head.version().min(3);
   let listed: Vec<(Option<usize>, crate::OutputModeInfo)> =
     if output.info.modes.is_empty() {
-      let (width, height) = output.mode_size();
+      let (width, height) = output.mode_size;
       vec![(
         None,
         crate::OutputModeInfo {
@@ -300,8 +363,7 @@ fn announce_head(
   manager: &ZwlrOutputManagerV1,
   id: &OutputId,
 ) {
-  let Some(info) = state.outputs.get(id).map(|output| output.info.clone())
-  else {
+  let Some(Source { info, enabled, .. }) = source(state, id) else {
     return;
   };
   let version = manager.version();
@@ -331,7 +393,7 @@ fn announce_head(
       head.serial_number(serial.clone());
     }
   }
-  head.enabled(1);
+  head.enabled(i32::from(enabled));
   if version >= 4 {
     head.adaptive_sync(zwlr_output_head_v1::AdaptiveSyncState::Disabled);
   }
@@ -341,6 +403,7 @@ fn announce_head(
       resource: head.clone(),
       manager: manager.id(),
       output: id.clone(),
+      enabled,
     },
   );
   send_modes(state, handle, client, &head, id);
@@ -366,6 +429,13 @@ impl GlobalDispatch<ZwlrOutputManagerV1, ()> for CompositorState {
       .outputs
       .iter()
       .map(|output| output.id.clone())
+      .chain(
+        state
+          .outputs
+          .disabled
+          .iter()
+          .map(|off| OutputId::new(off.info.name.clone())),
+      )
       .collect::<Vec<_>>();
     for id in &ids {
       announce_head(state, handle, client, &manager, id);
@@ -614,66 +684,109 @@ fn finish(
     );
     return;
   }
-  // Turning outputs off and on comes with MO-3; until then it is DPMS's
-  // job.
-  if !disabled.is_empty() {
-    resource.failed();
-    return;
-  }
   let mut changes = Vec::new();
+  let mut turn_off = Vec::new();
+  let mut turn_on = Vec::new();
   for head in &configured {
-    let Some(output) = state
+    let Some(name) = state
       .output_management
       .heads
       .get(head)
-      .and_then(|head| state.outputs.get(&head.output))
+      .map(|head| head.output.clone())
     else {
       continue;
     };
+    let requested = state
+      .output_management
+      .configuration_heads
+      .values()
+      .find(|configuration_head| {
+        configuration_head.configuration == resource.id()
+          && &configuration_head.head == head
+      })
+      .map(|head| (head.mode, head.position, head.scale, head.transform));
+    let adaptive = state.output_management.configuration_heads.values().any(
+      |configuration_head| {
+        configuration_head.configuration == resource.id()
+          && &configuration_head.head == head
+          && configuration_head.adaptive_sync == Some(true)
+      },
+    );
+    if adaptive {
+      resource.failed();
+      return;
+    }
+    // A backend with a mode list turns its connectors on and off itself,
+    // which comes with MO-7.
+    let listed = |info: &crate::OutputInfo| !info.modes.is_empty();
+    if disabled.contains(head) {
+      if let Some(output) = state.outputs.get(&name) {
+        if listed(&output.info) {
+          resource.failed();
+          return;
+        }
+        turn_off.push(name);
+      }
+      continue;
+    }
+    let (current, kind) = if let Some(output) = state.outputs.get(&name) {
+      ((output.position, output.scale, output.transform), None)
+    } else if let Some(off) = state.outputs.disabled(&name) {
+      if listed(&off.info) {
+        resource.failed();
+        return;
+      }
+      ((off.position, off.scale, off.transform), Some(off.clone()))
+    } else {
+      continue;
+    };
     let mut change = Change {
-      output: output.id.clone(),
+      output: name,
       placement: OutputPlacement {
-        position: output.position,
+        position: current.0,
         width: 0,
         height: 0,
-        scale: output.scale,
-        transform: output.transform,
+        scale: current.1,
+        transform: current.2,
         refresh_mhz: 0,
       },
       mode: None,
     };
-    if let Some(configuration_head) =
-      state.output_management.configuration_heads.values().find(
-        |configuration_head| {
-          configuration_head.configuration == resource.id()
-            && &configuration_head.head == head
-        },
-      )
-    {
-      change.mode = configuration_head.mode;
-      if let Some((x, y)) = configuration_head.position {
+    if let Some((mode, position, scale, transform)) = requested {
+      change.mode = mode;
+      if let Some((x, y)) = position {
         change.placement.position = OutputPosition::Fixed { x, y };
       }
-      if let Some(requested) = configuration_head.scale {
+      if let Some(requested) = scale {
         change.placement.scale = requested;
       }
-      if let Some(requested) = configuration_head.transform {
+      if let Some(requested) = transform {
         change.placement.transform = requested;
       }
-      if configuration_head.adaptive_sync == Some(true) {
-        resource.failed();
-        return;
-      }
     }
-    changes.push(change);
+    match kind {
+      Some(off) => turn_on.push((change, off)),
+      None => changes.push(change),
+    }
+  }
+  // Turning every output off fails, as turning the only one off did.
+  let staying = state
+    .outputs
+    .iter()
+    .filter(|output| !output.dark && !turn_off.contains(&output.id))
+    .count();
+  if staying + turn_on.len() == 0 {
+    resource.failed();
+    return;
   }
   let requests = changes
     .iter()
     .filter_map(|change| requested_mode(state, &change.output, change.mode))
     .collect::<Vec<_>>();
+  let toggles = Toggles { turn_off, turn_on };
   match requests.as_slice() {
-    [] => apply_locally(state, resource, changes, test),
-    [mode] => {
+    [] => apply_locally(state, resource, changes, toggles, test),
+    [mode] if toggles.is_empty() => {
       let id = OutputRequestId(state.next_output_request);
       state.next_output_request += 1;
       state.output_requests.push(OutputRequest {
@@ -693,9 +806,23 @@ fn finish(
         },
       );
     }
-    // A backend changes the mode of one output per configuration until
-    // requests name their output (MO-7).
+    // A backend changes the mode of one output per configuration, and
+    // never with outputs turned on or off, until requests name their
+    // output (MO-7).
     _ => resource.failed(),
+  }
+}
+
+/// The outputs a configuration turns off, and those it turns on with what
+/// it asks of them.
+struct Toggles {
+  turn_off: Vec<OutputId>,
+  turn_on: Vec<(Change, crate::output::DisabledOutput)>,
+}
+
+impl Toggles {
+  fn is_empty(&self) -> bool {
+    self.turn_off.is_empty() && self.turn_on.is_empty()
   }
 }
 
@@ -729,7 +856,9 @@ fn requested_mode(
   }
 }
 
-/// Tests or applies a configuration without the backend: each output's
+/// Tests or applies a configuration without the backend: outputs turned
+/// off are removed under `output_layout.unplug` and listed as disabled
+/// heads, outputs turned on are added again, and each output gets its
 /// placement, and a custom mode as its new physical size and refresh rate.
 /// As in Wayfire, the physical size stays across scale and transform
 /// changes, and the logical size follows from it.
@@ -737,6 +866,7 @@ fn apply_locally(
   state: &mut CompositorState,
   resource: &ZwlrOutputConfigurationV1,
   changes: Vec<Change>,
+  toggles: Toggles,
   test: bool,
 ) {
   if test {
@@ -744,6 +874,32 @@ fn apply_locally(
     return;
   }
   let mut ok = true;
+  for id in &toggles.turn_off {
+    let Some(output) = state.outputs.get(id) else {
+      continue;
+    };
+    let off = crate::output::DisabledOutput::new(output);
+    state.outputs.disabled.push(off);
+    ok &= crate::output::remove(state, id).is_ok();
+  }
+  let mut placed = Vec::new();
+  for (change, off) in toggles.turn_on {
+    let mut info = off.info;
+    let mut physical = off.physical;
+    if let Some(ModeChoice::Custom(width, height, refresh_mhz)) = change.mode {
+      physical = (width, height);
+      if refresh_mhz > 0 {
+        info.refresh_mhz = refresh_mhz;
+      }
+    }
+    match crate::output::add(state, info, physical, off.kind) {
+      Ok(_) => placed.push((change.output, change.placement, physical)),
+      Err(error) => {
+        eprintln!("shingle: turning an output on failed: {error}");
+        ok = false;
+      }
+    }
+  }
   for change in changes {
     let mut physical = crate::output::physical_size(state, &change.output);
     if let Some(ModeChoice::Custom(width, height, refresh_mhz)) = change.mode {
@@ -754,9 +910,13 @@ fn apply_locally(
         output.info.refresh_mhz = refresh_mhz;
       }
     }
-    ok &=
-      crate::output::place(state, &change.output, change.placement, physical)
-        .is_ok();
+    placed.push((change.output, change.placement, physical));
+  }
+  for (output, placement, physical) in placed {
+    ok &= crate::output::place(state, &output, placement, physical).is_ok();
+    if let Some(output) = state.outputs.get_mut(&output) {
+      output.managed = true;
+    }
   }
   if ok {
     resource.succeeded();
@@ -792,6 +952,9 @@ pub(crate) fn finish_request(
   for (output, placement) in pending.placements {
     let physical = crate::output::physical_size(state, &output);
     ok &= crate::output::place(state, &output, placement, physical).is_ok();
+    if let Some(output) = state.outputs.get_mut(&output) {
+      output.managed = true;
+    }
   }
   if ok {
     pending.resource.succeeded();

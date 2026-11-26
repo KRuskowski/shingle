@@ -3,7 +3,7 @@
 //! presentation, FIFO and commit timing by primary output
 //! (docs/design/multi-output.md, MO-3).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use shingle_core::{OutputId, WindowId, WorkspaceId};
 use wayland_client::{
@@ -24,9 +24,12 @@ use wayland_protocols::{
     },
   },
 };
-use wayland_protocols_wlr::layer_shell::v1::client::{
-  zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
-  zwlr_layer_surface_v1::{Anchor, ZwlrLayerSurfaceV1},
+use wayland_protocols_wlr::{
+  layer_shell::v1::client::{
+    zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
+    zwlr_layer_surface_v1::{Anchor, ZwlrLayerSurfaceV1},
+  },
+  output_management::v1::client::zwlr_output_manager_v1::ZwlrOutputManagerV1,
 };
 
 use super::{OutputHandle, OutputInfo};
@@ -580,5 +583,170 @@ fn captures_are_in_output_coordinates_and_physical_pixels() {
       .is_none(),
     "a region beside the output fails"
   );
+  let _ = std::fs::remove_file(path);
+}
+
+/// A client bound to output management, with its manager.
+fn manager_client(
+  compositor: &mut Compositor,
+  path: &std::path::Path,
+) -> (TestClient, ZwlrOutputManagerV1) {
+  let mut client = TestClient::connect(compositor, path);
+  let manager = client.bind::<ZwlrOutputManagerV1>(4);
+  client.roundtrip(compositor);
+  (client, manager)
+}
+
+/// The live heads a client sees, by name, with whether each is enabled.
+fn heads(client: &TestClient) -> BTreeMap<String, bool> {
+  client
+    .events
+    .head_objects
+    .iter()
+    .filter(|(_, finished)| !finished)
+    .map(|(head, _)| {
+      (
+        client.events.head_names[&head.id()].clone(),
+        client.events.head_enabled[&head.id()],
+      )
+    })
+    .collect()
+}
+
+/// Applies a configuration of every live head: those named in `off` are
+/// disabled, the others enabled, at the position `positions` gives them.
+/// Returns the outcome.
+fn apply(
+  compositor: &mut Compositor,
+  client: &mut TestClient,
+  manager: &ZwlrOutputManagerV1,
+  off: &[&str],
+  positions: &[(&str, (i32, i32))],
+) -> &'static str {
+  let configuration = manager.create_configuration(
+    client.events.output_serial,
+    &client.handle,
+    (),
+  );
+  let live = client
+    .events
+    .head_objects
+    .iter()
+    .filter(|(_, finished)| !finished)
+    .map(|(head, _)| head.clone())
+    .collect::<Vec<_>>();
+  for head in live {
+    let name = client.events.head_names[&head.id()].as_str();
+    if off.contains(&name) {
+      configuration.disable_head(&head);
+      continue;
+    }
+    let configured = configuration.enable_head(&head, &client.handle, ());
+    if let Some((_, (x, y))) = positions.iter().find(|(on, _)| *on == name) {
+      configured.set_position(*x, *y);
+    }
+  }
+  configuration.apply();
+  client.events.configuration_results.clear();
+  client.roundtrip(compositor);
+  client
+    .events
+    .configuration_results
+    .last()
+    .copied()
+    .unwrap_or("none")
+}
+
+fn output_names(compositor: &Compositor) -> Vec<String> {
+  compositor
+    .outputs()
+    .into_iter()
+    .map(|output| output.handle.name().to_owned())
+    .collect()
+}
+
+#[test]
+fn a_configuration_turns_outputs_off_and_on_again() {
+  let (mut compositor, path) = two_outputs();
+  let (mut client, manager) = manager_client(&mut compositor, &path);
+  let (_toplevel, window) = mapped(&mut compositor, &mut client, "moved");
+  move_to(&mut compositor, window, "HEADLESS-2");
+  let both = BTreeMap::from([
+    ("HEADLESS-1".to_owned(), true),
+    ("HEADLESS-2".to_owned(), true),
+  ]);
+  assert_eq!(heads(&client), both);
+  let result =
+    apply(&mut compositor, &mut client, &manager, &["HEADLESS-2"], &[]);
+  assert_eq!(result, "succeeded");
+  assert_eq!(output_names(&compositor), ["HEADLESS-1"]);
+  let mut off = both.clone();
+  off.insert("HEADLESS-2".into(), false);
+  assert_eq!(heads(&client), off, "the head stays, disabled");
+  let location = compositor.core().window_location(window).unwrap();
+  assert_eq!(location.output, id("HEADLESS-1"), "unplugged under return");
+  // A manager bound now sees the disabled head too.
+  let (late, _late_manager) = manager_client(&mut compositor, &path);
+  assert_eq!(heads(&late), off);
+  // Its binding sent a new serial.
+  client.roundtrip(&mut compositor);
+  let result = apply(
+    &mut compositor,
+    &mut client,
+    &manager,
+    &[],
+    &[("HEADLESS-2", (-800, 0))],
+  );
+  assert_eq!(result, "succeeded");
+  assert_eq!(heads(&client), both);
+  let second = compositor
+    .outputs()
+    .into_iter()
+    .find(|output| output.handle.name() == "HEADLESS-2")
+    .expect("HEADLESS-2 is on again");
+  assert_eq!(second.rect, shingle_core::Rect::new(-800, 0, 800, 600));
+  let location = compositor.core().window_location(window).unwrap();
+  assert_eq!(location.output, id("HEADLESS-2"), "and its window is back");
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn turning_every_output_off_fails() {
+  let (mut compositor, path) = two_outputs();
+  let (mut client, manager) = manager_client(&mut compositor, &path);
+  let result = apply(
+    &mut compositor,
+    &mut client,
+    &manager,
+    &["HEADLESS-1", "HEADLESS-2"],
+    &[],
+  );
+  assert_eq!(result, "failed");
+  assert_eq!(output_names(&compositor), ["HEADLESS-1", "HEADLESS-2"]);
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_configured_output_keeps_its_place_across_config_reloads() {
+  let (mut compositor, path) = two_outputs();
+  let (mut client, manager) = manager_client(&mut compositor, &path);
+  let result = apply(
+    &mut compositor,
+    &mut client,
+    &manager,
+    &[],
+    &[("HEADLESS-2", (0, 720))],
+  );
+  assert_eq!(result, "succeeded");
+  let place = |compositor: &Compositor| {
+    compositor
+      .outputs()
+      .into_iter()
+      .map(|output| (output.handle.name().to_owned(), output.rect))
+      .collect::<Vec<_>>()
+  };
+  let configured = place(&compositor);
+  compositor.apply_config(Config::default()).unwrap();
+  assert_eq!(place(&compositor), configured);
   let _ = std::fs::remove_file(path);
 }

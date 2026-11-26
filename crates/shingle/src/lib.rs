@@ -1606,7 +1606,9 @@ impl Compositor {
     // Every output is placed again; a backend with a mode list sets the
     // size, the configuration the rest.
     let mut placed = Vec::new();
-    for output in self.state.outputs.iter() {
+    // Outputs an output-management client configured keep its placement
+    // until Shingle restarts, as Wayfire's is_externally_managed.
+    for output in self.state.outputs.iter().filter(|output| !output.managed) {
       let placement = placements.get(&output.info.name);
       if !placement.scale.is_finite() || placement.scale <= 0.0 {
         return Err(Error::InvalidOutputScale);

@@ -54,6 +54,43 @@ pub(crate) struct OutputState {
   pub(crate) generation: u32,
   /// The `wl_output` resources clients bound from the current global.
   pub(crate) bound: HashMap<ObjectId, WlOutput>,
+  /// An output-management client configured it, so config reloads leave
+  /// its placement alone until Shingle restarts, as Wayfire's
+  /// `is_externally_managed` does.
+  pub(crate) managed: bool,
+}
+
+/// An output turned off through output management: still a connector,
+/// window or IPC output, listed as a disabled head, with what it takes to
+/// turn it on again.
+#[derive(Clone)]
+pub(crate) struct DisabledOutput {
+  /// The description clients saw.
+  pub(crate) info: OutputInfo,
+  /// Its size in physical pixels, before the transform.
+  pub(crate) physical: (u32, u32),
+  /// Where it comes from.
+  pub(crate) kind: OutputKind,
+  /// Its position, scale and transform when it was turned off.
+  pub(crate) position: OutputPosition,
+  /// Its scale.
+  pub(crate) scale: f64,
+  /// Its transform.
+  pub(crate) transform: wl_output::Transform,
+}
+
+impl DisabledOutput {
+  /// What turning `output` off keeps of it.
+  pub(crate) fn new(output: &OutputState) -> Self {
+    Self {
+      info: output.info.clone(),
+      physical: output.physical_size(),
+      kind: output.kind,
+      position: output.position,
+      scale: output.scale,
+      transform: output.transform,
+    }
+  }
 }
 
 impl OutputState {
@@ -161,6 +198,9 @@ pub(crate) struct Outputs {
   /// Replaced or removed globals, bindable until
   /// [`crate::output::RETIRED_GLOBAL_DELAY`] has passed.
   pub(crate) retired: Vec<(GlobalId, Instant)>,
+  /// Outputs turned off through output management, in the order they
+  /// were turned off.
+  pub(crate) disabled: Vec<DisabledOutput>,
 }
 
 impl Outputs {
@@ -172,6 +212,7 @@ impl Outputs {
       next_generation: 0,
       last_headless: 0,
       retired: Vec::new(),
+      disabled: Vec::new(),
     }
   }
 
@@ -203,6 +244,7 @@ impl Outputs {
       global: None,
       generation,
       bound: HashMap::new(),
+      managed: false,
     });
     self.list.last_mut().expect("an output was just pushed")
   }
@@ -307,6 +349,26 @@ impl Outputs {
       .max(self.last_headless);
     self.last_headless = highest + 1;
     format!("HEADLESS-{}", self.last_headless)
+  }
+
+  /// The output called `id` that output management turned off.
+  pub(crate) fn disabled(&self, id: &OutputId) -> Option<&DisabledOutput> {
+    self
+      .disabled
+      .iter()
+      .find(|output| output.info.name == id.as_str())
+  }
+
+  /// Takes the output called `id` out of the turned-off ones.
+  pub(crate) fn take_disabled(
+    &mut self,
+    id: &OutputId,
+  ) -> Option<DisabledOutput> {
+    let index = self
+      .disabled
+      .iter()
+      .position(|output| output.info.name == id.as_str())?;
+    Some(self.disabled.remove(index))
   }
 
   /// Every live `wl_output` binding of every output.

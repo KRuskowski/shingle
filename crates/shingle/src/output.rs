@@ -27,7 +27,7 @@ use std::{
 
 pub(crate) use hotplug::{add, park_restored, remove, restore};
 pub use registry::OutputKind;
-pub(crate) use registry::{OutputState, Outputs};
+pub(crate) use registry::{DisabledOutput, OutputState, Outputs};
 use shingle_config::OutputPosition;
 use shingle_core::{OutputId, Rect};
 use wayland_server::{

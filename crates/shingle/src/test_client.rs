@@ -105,6 +105,10 @@ pub(crate) struct Events {
   pub(crate) mode_objects: Vec<(ZwlrOutputModeV1, ModeSeen)>,
   /// The mode each head last named as current.
   pub(crate) current_modes: Vec<ObjectId>,
+  /// Each head's name, and whether it last said it is enabled.
+  pub(crate) head_names: std::collections::HashMap<ObjectId, String>,
+  /// Each head's last `enabled` state.
+  pub(crate) head_enabled: std::collections::HashMap<ObjectId, bool>,
   /// The serial of the last output-manager `done`.
   pub(crate) output_serial: u32,
   /// Outcomes of output configurations: `succeeded`, `failed` or
@@ -811,6 +815,12 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for Events {
       }
       zwlr_output_head_v1::Event::CurrentMode { mode } => {
         events.current_modes.push(mode.id());
+      }
+      zwlr_output_head_v1::Event::Name { name } => {
+        events.head_names.insert(head.id(), name.clone());
+      }
+      zwlr_output_head_v1::Event::Enabled { enabled } => {
+        events.head_enabled.insert(head.id(), *enabled != 0);
       }
       zwlr_output_head_v1::Event::Finished => {
         for (known, finished) in &mut events.head_objects {
