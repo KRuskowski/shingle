@@ -811,6 +811,7 @@ fn set_binding(config: &mut ShingleConfig, action: &str, binding: Binding) {
     "close" => keys.close = binding,
     "reload" => keys.reload = binding,
     "quit" => keys.quit = binding,
+    "toggle_menu" => keys.toggle_menu = binding,
     "grid_slot_top_left" => keys.grid_slot_top_left = vec![binding],
     "grid_slot_top" => keys.grid_slot_top = vec![binding],
     "grid_slot_top_right" => keys.grid_slot_top_right = vec![binding],

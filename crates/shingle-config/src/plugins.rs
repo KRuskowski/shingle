@@ -44,6 +44,7 @@ pub const PLUGINS: &[&str] = &[
   "simple-tile",
   "switcher",
   "vswitch",
+  "wayfire-shell",
   "window-rules",
   "wm-actions",
   "wrot",
@@ -111,6 +112,7 @@ impl ShingleConfig {
     let tile = off("simple-tile");
     let switcher = off("switcher");
     let vswitch = off("vswitch");
+    let shell = off("wayfire-shell");
     let rules = off("window-rules");
     let actions = off("wm-actions");
     let wrot = off("wrot");
@@ -231,6 +233,9 @@ impl ShingleConfig {
     }
     if switcher {
       disable(&mut [&mut keys.focus_next, &mut keys.focus_previous]);
+    }
+    if shell {
+      disable(&mut [&mut keys.toggle_menu]);
     }
     if vswitch {
       disable(&mut [

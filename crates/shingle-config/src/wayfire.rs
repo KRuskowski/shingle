@@ -46,6 +46,7 @@ const SECTIONS: &[&str] = &[
   "simple-tile",
   "switcher",
   "vswitch",
+  "wayfire-shell",
   "window-rules",
   "wm-actions",
   "workarounds",
@@ -347,7 +348,7 @@ pub(crate) fn parse(
     let applied =
       importer.option(entry.line, &entry.context, |config, notes| {
         config.commands.push(crate::CommandBinding {
-          binding: import::binding(&entry.value, notes)?,
+          binding: import::binding_or_modifiers(&entry.value, notes)?,
           command,
           repeatable: entry.repeatable,
           on_release: entry.on_release,
@@ -486,6 +487,10 @@ fn apply(
     ("wm-actions", "toggle_showdesktop") => {
       config.keybindings.show_desktop = import::binding(value, notes)?;
     }
+    ("wayfire-shell", "toggle_menu") => {
+      config.keybindings.toggle_menu =
+        import::binding_or_modifiers(value, notes)?;
+    }
     ("simple-tile", "key_toggle") => {
       config.keybindings.toggle_tiling = import::binding(value, notes)?;
     }
@@ -579,6 +584,12 @@ fn apply(
     ("input", "xkb_options") => config.input.options = value.into(),
     ("input", "kb_repeat_rate") => {
       config.input.repeat_rate = number(value)?;
+    }
+    ("input", "modifier_binding_timeout") => {
+      // Wayfire never cancels at 0 or below.
+      let timeout: i64 = number(value)?;
+      config.input.modifier_binding_timeout =
+        u32::try_from(timeout.max(0)).unwrap_or(u32::MAX);
     }
     ("input", "kb_repeat_delay") => {
       config.input.repeat_delay = number(value)?;
@@ -1204,17 +1215,12 @@ mod tests {
     let (config, warnings) = import(STOCK);
     assert_eq!(
       warnings,
-      [
-        concat!(
-          "line 276: [cube] belongs to a plugin Shingle does not have; ",
-          "its option is ignored"
-        ),
-        concat!(
-          "line 318: [wayfire-shell] belongs to a plugin Shingle does not ",
-          "have; its option is ignored"
-        ),
-      ]
+      [concat!(
+        "line 276: [cube] belongs to a plugin Shingle does not have; ",
+        "its option is ignored"
+      ),]
     );
+    assert_eq!(text(&config.keybindings.toggle_menu), "super");
     assert_eq!(text(&config.keybindings.close), "super+q");
     assert_eq!(text(&config.keybindings.close_alternatives[0]), "alt+f4");
     assert_eq!((config.workspaces.width, config.workspaces.height), (3, 3));
@@ -1252,10 +1258,6 @@ mod tests {
         40,
         "[blur] belongs to a plugin Shingle does not have; its 18",
       ),
-      (
-        61,
-        "[command] binding_menu: \"<super>\" is a modifier-alone",
-      ),
       (93, "[cube] belongs to a plugin"),
       (110, "[decoration] belongs to a plugin"),
       (
@@ -1269,7 +1271,6 @@ mod tests {
         "[place] mode: unknown placement mode; keeping the default",
       ),
       (376, "[vswipe] belongs to a plugin"),
-      (412, "[wayfire-shell] belongs to a plugin"),
       (
         417,
         "window rule workspace 5,5 is outside the 3x3 workspace grid",
@@ -1326,7 +1327,15 @@ mod tests {
         .find(|command| command.command.starts_with(name))
         .unwrap_or_else(|| panic!("no {name} command"))
     };
-    assert_eq!(command("synthetic-menu").binding, Binding::disabled());
+    assert_eq!(
+      command("synthetic-menu").binding,
+      Binding::modifiers_alone(vec![Modifier::Super])
+    );
+    assert_eq!(
+      config.keybindings.toggle_menu,
+      Binding::modifiers_alone(vec![Modifier::Super])
+    );
+    assert_eq!(config.input.modifier_binding_timeout, 400);
     assert_eq!(command("synthetic-shot").command, "synthetic-shot --tag #1");
     assert_eq!(
       command("synthetic-echo").command,
@@ -1756,5 +1765,49 @@ mod tests {
       ]]))
     );
     assert!(values.sections().contains(&"output:DP-1".to_owned()));
+  }
+
+  #[test]
+  fn wayfire_shells_menu_key_takes_a_modifier_alone() {
+    let (config, warnings) = import(concat!(
+      "[core]\nplugins = wayfire-shell command\n",
+      "[input]\nmodifier_binding_timeout = 250\n",
+      "[wayfire-shell]\ntoggle_menu = <alt> <super> | pinch in 4\n",
+      "[command]\nbinding_menu = <super>\ncommand_menu = wofi\n",
+    ));
+    assert_eq!(
+      config.keybindings.toggle_menu,
+      Binding::modifiers_alone(vec![Modifier::Alt, Modifier::Super])
+    );
+    assert_eq!(config.input.modifier_binding_timeout, 250);
+    assert_eq!(
+      config.commands[0].binding,
+      Binding::modifiers_alone(vec![Modifier::Super])
+    );
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("touch gesture"), "{warnings:?}");
+    // A key works too, and Wayfire never cancels at 0 or below.
+    let (config, _) = import(concat!(
+      "[core]\nplugins = wayfire-shell\n",
+      "[input]\nmodifier_binding_timeout = -5\n",
+      "[wayfire-shell]\ntoggle_menu = <super> KEY_M\n",
+    ));
+    assert_eq!(text(&config.keybindings.toggle_menu), "super+m");
+    assert_eq!(config.input.modifier_binding_timeout, 0);
+  }
+
+  #[test]
+  fn wayfire_shells_menu_key_follows_the_plugin_list() {
+    let (listed, _) = import("[core]\nplugins = wayfire-shell\n");
+    assert_eq!(text(&listed.keybindings.toggle_menu), "super");
+    assert_eq!(listed.input.modifier_binding_timeout, 400);
+    let (unlisted, _) =
+      import("[core]\nplugins = expo\n[wayfire-shell]\ntoggle_menu = <ctrl>\n");
+    assert_eq!(unlisted.keybindings.toggle_menu, Binding::disabled());
+    assert!(!unlisted.plugin_enabled("wayfire-shell"));
+    // Wayfire's default list loads it.
+    let (default, _) = import("");
+    assert!(default.plugin_enabled("wayfire-shell"));
+    assert_eq!(text(&default.keybindings.toggle_menu), "super");
   }
 }

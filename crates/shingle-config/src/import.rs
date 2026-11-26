@@ -230,6 +230,28 @@ pub(crate) fn bindings(
   Ok(bindings)
 }
 
+/// The key or button, or the modifiers alone, of a Wayfire activator, for
+/// the options that act on a modifier-alone binding
+/// (`wayfire-shell/toggle_menu` and commands): the first alternative of
+/// either kind, or the disabled binding if there is none. Other
+/// alternatives become notes.
+pub(crate) fn binding_or_modifiers(
+  value: &str,
+  notes: &mut Vec<String>,
+) -> Result<Binding, ConfigError> {
+  let mut bindings = Vec::new();
+  for alternative in activator::parse(value)? {
+    match alternative {
+      activator::Alternative::Binding(binding) => bindings.push(binding),
+      activator::Alternative::Modifiers(modifiers) => {
+        bindings.push(Binding::modifiers_alone(modifiers));
+      }
+      other => notes.extend(other.unsupported()),
+    }
+  }
+  Ok(first_binding(bindings, notes))
+}
+
 /// The key or button of a Wayfire activator, for options that take one:
 /// the first that Shingle can bind, or the disabled binding if there is
 /// none. Other alternatives become notes.
@@ -237,7 +259,14 @@ pub(crate) fn binding(
   value: &str,
   notes: &mut Vec<String>,
 ) -> Result<Binding, ConfigError> {
-  let mut bindings = bindings(value, notes)?.into_iter();
+  let bindings = bindings(value, notes)?;
+  Ok(first_binding(bindings, notes))
+}
+
+/// The first of `bindings`, or the disabled binding without any; a note
+/// names the others, which are ignored.
+fn first_binding(bindings: Vec<Binding>, notes: &mut Vec<String>) -> Binding {
+  let mut bindings = bindings.into_iter();
   let first = bindings.next().unwrap_or_else(Binding::disabled);
   let rest = bindings.map(String::from).collect::<Vec<_>>();
   if !rest.is_empty() {
@@ -247,7 +276,7 @@ pub(crate) fn binding(
       rest.join(", ")
     ));
   }
-  Ok(first)
+  first
 }
 
 #[cfg(test)]

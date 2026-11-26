@@ -259,6 +259,9 @@ keybindings:
   workspace_last: super+grave
   workspace_move_last: super+shift+grave
   workspace_send_last: ""
+  # Pressed and released alone: wf-panel and other shell clients toggle
+  # their menu (zwf_output_v2.toggle_menu).
+  toggle_menu: super
 
 commands:
   - binding: super+enter
@@ -299,4 +302,5 @@ input:
   drag_lock: false
   cursor_theme: default
   cursor_size: 24
+  modifier_binding_timeout: 400
   enable_text_input_v3: true

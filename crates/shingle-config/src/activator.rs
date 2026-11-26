@@ -41,8 +41,8 @@ impl Alternative {
           .collect::<Vec<_>>()
           .join(" ");
         return Some(format!(
-          "{names:?} is a modifier-alone binding, which Shingle does not \
-           support yet; it is ignored"
+          "{names:?} is a modifier-alone binding, which Shingle supports \
+           only for wayfire-shell/toggle_menu and commands; it is ignored"
         ));
       }
       Self::Gesture(text) => (text, "a touch gesture"),

@@ -69,6 +69,7 @@ pub const KEY_ACTIONS: &[(&str, &str)] = &[
   ("close", "Close focused window"),
   ("reload", "Reload configuration"),
   ("quit", "Quit Shingle"),
+  ("toggle_menu", "Toggle shell menu"),
   ("grid_slot_top_left", "Snap top left"),
   ("grid_slot_top", "Snap top"),
   ("grid_slot_top_right", "Snap top right"),
@@ -1167,6 +1168,7 @@ fn binding<'a>(config: &'a ShingleConfig, name: &str) -> &'a Binding {
     "close" => &keys.close,
     "reload" => &keys.reload,
     "quit" => &keys.quit,
+    "toggle_menu" => &keys.toggle_menu,
     _ => unreachable!("unknown keybinding"),
   }
 }

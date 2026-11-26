@@ -1945,6 +1945,10 @@ pub struct Keybindings {
   /// Send the focused window to the previous workspace without switching.
   /// `[vswitch] send_win_last`; disabled by default.
   pub workspace_send_last: Binding,
+  /// Tell shell clients such as wf-panel to open or close their menu
+  /// (`zwf_output_v2.toggle_menu`). `[wayfire-shell] toggle_menu`;
+  /// default `super`, the logo key pressed and released alone.
+  pub toggle_menu: Binding,
 }
 
 impl Default for Keybindings {
@@ -2057,6 +2061,7 @@ impl Default for Keybindings {
         vec![Modifier::Super, Modifier::Shift],
       ),
       workspace_send_last: Binding::disabled(),
+      toggle_menu: Binding::modifiers_alone(vec![Modifier::Super]),
     }
   }
 }
@@ -2186,6 +2191,10 @@ pub struct InputConfig {
   pub cursor_theme: String,
   /// XCursor size. 1–256; `[input] cursor_size`; default 24.
   pub cursor_size: u32,
+  /// Milliseconds within which a modifier pressed and released alone
+  /// triggers a modifier-alone binding such as `toggle_menu`; 0 never
+  /// cancels it. `[input] modifier_binding_timeout`; default 400.
+  pub modifier_binding_timeout: u32,
   /// Enable the text-input-v3 protocol for editable client surfaces.
   pub enable_text_input_v3: bool,
 }
@@ -2221,6 +2230,7 @@ impl Default for InputConfig {
       drag_lock: false,
       cursor_theme: "default".into(),
       cursor_size: 24,
+      modifier_binding_timeout: 400,
       enable_text_input_v3: true,
     }
   }
@@ -2335,7 +2345,8 @@ impl InputConfig {
   }
 }
 
-/// A key or button with the exact set of modifiers that must be held.
+/// A key or button with the exact set of modifiers that must be held, or
+/// modifiers pressed and released alone.
 ///
 /// The text form, used in YAML, is modifiers and key joined by `+`, such as
 /// `super+shift+q`; modifier names are case-insensitive (`super`, `super_key`,
@@ -2344,6 +2355,13 @@ impl InputConfig {
 /// written `xkb:NAME` matches the case-sensitive XKB keysym name instead, so
 /// layout-dependent symbols such as `xkb:XF86AudioMute` can be bound. An empty
 /// string or `none` is the disabled binding.
+///
+/// Modifiers without a key, such as `super`, are a modifier-alone binding,
+/// Wayfire's `<super>`: it triggers when the modifiers are pressed and
+/// released with no other key, button or touch in between, within
+/// [`InputConfig::modifier_binding_timeout`]
+/// ([`Binding::matches_modifiers_alone`]). Only `keybindings.toggle_menu`
+/// and commands act on one; elsewhere it never matches.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Binding {
@@ -2368,6 +2386,24 @@ impl Binding {
   /// The binding that never matches, written `none` in YAML.
   pub fn disabled() -> Self {
     Self::new("", Vec::new())
+  }
+
+  /// The modifier-alone binding of `modifiers`, such as Wayfire's
+  /// `<super>`. Without modifiers it is the disabled binding.
+  pub fn modifiers_alone(modifiers: Vec<Modifier>) -> Self {
+    Self::new("", modifiers)
+  }
+
+  /// Whether this is a modifier-alone binding: modifiers without a key.
+  pub fn is_modifiers_alone(&self) -> bool {
+    self.key.is_empty() && !self.modifiers.is_empty()
+  }
+
+  /// Whether a modifier-alone binding triggers for `modifiers`, the
+  /// modifiers held when the last of them was released, that one
+  /// included. Key bindings never match here.
+  pub fn matches_modifiers_alone(&self, modifiers: Modifiers) -> bool {
+    self.is_modifiers_alone() && self.modifiers_match(modifiers)
   }
 
   /// Whether `key`, a Wayfire key name, pressed with exactly `modifiers`
@@ -2408,7 +2444,9 @@ impl From<Binding> for String {
         Modifier::Shift => "shift",
       })
       .collect::<Vec<_>>();
-    parts.push(&binding.key);
+    if !binding.key.is_empty() || parts.is_empty() {
+      parts.push(&binding.key);
+    }
     parts.join("+")
   }
 }
@@ -2419,6 +2457,13 @@ impl TryFrom<String> for Binding {
   fn try_from(value: String) -> Result<Self, Self::Error> {
     if value.trim().is_empty() || value.trim() == "none" {
       return Ok(Self::disabled());
+    }
+    if let Some(modifiers) = value
+      .split('+')
+      .map(modifier_named)
+      .collect::<Option<Vec<_>>>()
+    {
+      return Ok(Self::modifiers_alone(modifiers));
     }
     let mut parts = value.split('+');
     let key = parts
@@ -2437,16 +2482,23 @@ impl TryFrom<String> for Binding {
       key.to_lowercase()
     };
     let modifiers = parts
-      .map(|part| match part.to_lowercase().as_str() {
-        "super" | "super_key" | "logo" => Ok(Modifier::Super),
-        "ctrl" | "control" => Ok(Modifier::Control),
-        "alt" => Ok(Modifier::Alt),
-        "shift" => Ok(Modifier::Shift),
-        _ => Err(ConfigError::Binding(value.clone())),
+      .map(|part| {
+        modifier_named(part).ok_or_else(|| ConfigError::Binding(value.clone()))
       })
       .collect::<Result<Vec<_>, _>>()?;
     Ok(Self { key, modifiers })
   }
+}
+
+/// The modifier a binding's text names, case-insensitively.
+fn modifier_named(name: &str) -> Option<Modifier> {
+  Some(match name.to_lowercase().as_str() {
+    "super" | "super_key" | "logo" => Modifier::Super,
+    "ctrl" | "control" => Modifier::Control,
+    "alt" => Modifier::Alt,
+    "shift" => Modifier::Shift,
+    _ => return None,
+  })
 }
 
 /// A modifier a [`Binding`] can require. There is no distinction between left
@@ -2631,6 +2683,48 @@ mod tests {
     let (joined, warnings) = parse("[core]\nplugins = \\\n  preserve-output\n");
     assert_eq!(joined.output_layout.unplug, UnplugPolicy::Park);
     assert!(warnings.is_empty(), "{warnings:?}");
+  }
+
+  #[test]
+  fn modifiers_alone_are_a_binding_of_their_own() {
+    let parse = |text: &str| Binding::try_from(text.to_owned()).unwrap();
+    let menu = parse("super");
+    assert!(menu.is_modifiers_alone());
+    assert_eq!(menu, Binding::modifiers_alone(vec![Modifier::Super]));
+    assert_eq!(String::from(menu.clone()), "super");
+    let both = parse("Ctrl+ALT");
+    assert_eq!(String::from(both.clone()), "ctrl+alt");
+    assert!(!parse("super+q").is_modifiers_alone());
+    assert!(!Binding::disabled().is_modifiers_alone());
+    assert_eq!(String::from(Binding::disabled()), "");
+    assert!(Binding::try_from("super+".to_owned()).is_err());
+    let held = |super_key, alt| Modifiers {
+      super_key,
+      alt,
+      ..Modifiers::default()
+    };
+    assert!(menu.matches_modifiers_alone(held(true, false)));
+    assert!(!menu.matches_modifiers_alone(held(true, true)));
+    assert!(both.matches_modifiers_alone(Modifiers {
+      control: true,
+      alt: true,
+      ..Modifiers::default()
+    }));
+    // It is never a key, and a key binding never matches here.
+    assert!(!menu.matches(held(true, false), ""));
+    assert!(!menu.matches(held(false, false), "super"));
+    assert!(!parse("super+q").matches_modifiers_alone(held(true, false)));
+    let yaml: Keybindings =
+      serde_yaml::from_str("toggle_menu: shift+super\n").unwrap();
+    assert_eq!(
+      yaml.toggle_menu,
+      Binding::modifiers_alone(vec![Modifier::Shift, Modifier::Super])
+    );
+    assert_eq!(
+      Keybindings::default().toggle_menu,
+      Binding::modifiers_alone(vec![Modifier::Super])
+    );
+    assert_eq!(InputConfig::default().modifier_binding_timeout, 400);
   }
 
   #[test]
