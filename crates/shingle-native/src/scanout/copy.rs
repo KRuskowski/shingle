@@ -8,7 +8,7 @@
 
 use std::io;
 
-use super::{Frame, Scanout};
+use super::{DrawTarget, Drawn, Scanout};
 use crate::kms::{DumbFramebuffer, FramebufferId, KmsDevice};
 
 /// Copies tightly packed RGBA8 rows of a `width` by `height` image into
@@ -87,11 +87,21 @@ impl Scanout for CopyScanout {
     self.buffers[self.front].framebuffer
   }
 
+  fn target(&self) -> DrawTarget<'_> {
+    DrawTarget::Readback
+  }
+
   fn prepare(
     &mut self,
     device: &mut dyn KmsDevice,
-    frame: &Frame,
+    drawn: &Drawn,
   ) -> io::Result<FramebufferId> {
+    let Drawn::Pixels(frame) = drawn else {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "copy scanout needs the frame's pixels",
+      ));
+    };
     let back = 1 - self.front;
     let buffer = self.buffers[back];
     if (frame.width, frame.height) != (buffer.width, buffer.height) {
@@ -138,14 +148,14 @@ impl Scanout for CopyScanout {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::kms::fake::FakeKms;
+  use crate::{kms::fake::FakeKms, scanout::Frame};
 
-  fn frame(width: u32, height: u32, rgba: [u8; 4]) -> Frame {
-    Frame {
+  fn frame(width: u32, height: u32, rgba: [u8; 4]) -> Drawn {
+    Drawn::Pixels(Frame {
       width,
       height,
       rgba: rgba.repeat((width * height) as usize),
-    }
+    })
   }
 
   #[test]
@@ -179,6 +189,7 @@ mod tests {
     assert_eq!(device.buffers.len(), 2);
     let first = scanout.current();
     assert!(!scanout.zero_copy());
+    assert!(matches!(scanout.target(), DrawTarget::Readback));
     assert_eq!(scanout.size(), (4, 2));
     let back = scanout
       .prepare(&mut device, &frame(4, 2, [9, 8, 7, 6]))
@@ -200,6 +211,7 @@ mod tests {
     let mut device = FakeKms::single_output();
     let mut scanout = CopyScanout::new(&mut device, (4, 2)).unwrap();
     assert!(scanout.prepare(&mut device, &frame(2, 2, [0; 4])).is_err());
+    assert!(scanout.prepare(&mut device, &Drawn::InPlace).is_err());
     scanout.presented();
     assert_eq!(scanout.current(), scanout.buffers[0].framebuffer);
   }

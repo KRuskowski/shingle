@@ -28,8 +28,12 @@ use crate::{
     ScrollAxis, ScrollSource, SendEvents, Setting,
     tests::{FakeInput, POINTER, device, key},
   },
-  kms::{CommitFlags, Connection, fake::FakeKms},
+  kms::{
+    CommitFlags, Connection, FORMAT_XRGB8888, MODIFIER_LINEAR, fake::FakeKms,
+    in_formats::tests::blob as in_formats_blob,
+  },
   outputs::OutputPolicy,
+  scanout::{ScanoutChoice, ScanoutStatus, tests::FakeImporter},
   session::{SeatEvent, tests::FakeSession},
   test_client::{Input, Presented, TestClient, Toplevel},
   tests::{base_path, configure_request, ipc_request, test_config},
@@ -73,6 +77,8 @@ struct Fixture {
   recreated: Rc<RefCell<u32>>,
   /// The output of every frame drawn, in order.
   drawn: Rc<RefCell<Vec<String>>>,
+  /// The renderers' GPU side.
+  gpu: FakeGpu,
   client: TestClient,
   toplevel: Toplevel,
   base: PathBuf,
@@ -92,28 +98,42 @@ pub(crate) fn fake_rendering(
   recreated: &Rc<RefCell<u32>>,
 ) -> Rendering {
   let drawn = Rc::new(RefCell::new(Vec::new()));
-  drawing_rendering(size, failures, frames, recreated, &drawn)
+  let gpu = FakeGpu::default();
+  drawing_rendering(size, failures, frames, recreated, &drawn, &gpu)
 }
 
-/// [`fake_rendering`] that records the output of every frame in `drawn`.
+/// The GPU side the fake renderers share, and the scanout buffers they
+/// drew into.
+#[derive(Clone, Default)]
+struct FakeGpu {
+  importer: Rc<RefCell<FakeImporter>>,
+  drawn_into: Rc<RefCell<Vec<u64>>>,
+}
+
+/// [`fake_rendering`] that records the output of every frame in `drawn`,
+/// with `gpu` as every renderer's GPU side.
 fn drawing_rendering(
   size: (u32, u32),
   failures: &Rc<RefCell<VecDeque<RenderFailure>>>,
   frames: &Rc<RefCell<u32>>,
   recreated: &Rc<RefCell<u32>>,
   drawn: &Rc<RefCell<Vec<String>>>,
+  gpu: &FakeGpu,
 ) -> Rendering {
   let renderer = FakeRenderer {
     size,
     failures: Rc::clone(failures),
     frames: Rc::clone(frames),
     drawn: Rc::clone(drawn),
+    importer: Rc::clone(&gpu.importer),
+    drawn_into: Rc::clone(&gpu.drawn_into),
   };
-  let (failures, frames, recreated, drawn) = (
+  let (failures, frames, recreated, drawn, gpu) = (
     Rc::clone(failures),
     Rc::clone(frames),
     Rc::clone(recreated),
     Rc::clone(drawn),
+    gpu.clone(),
   );
   Rendering {
     renderer: Box::new(renderer),
@@ -124,6 +144,8 @@ fn drawing_rendering(
         failures: Rc::clone(&failures),
         frames: Rc::clone(&frames),
         drawn: Rc::clone(&drawn),
+        importer: Rc::clone(&gpu.importer),
+        drawn_into: Rc::clone(&gpu.drawn_into),
       }))
     }),
   }
@@ -139,6 +161,27 @@ impl Fixture {
   }
 
   fn with_card(config: ShingleConfig, card: FakeKms) -> Self {
+    Self::with_scanout(config, card, None)
+  }
+
+  /// A fixture whose primary plane scans out XRGB8888 with LINEAR and
+  /// whose renderers render to LINEAR, trying zero-copy as `choice` says.
+  fn zero_copy(choice: ScanoutChoice) -> Self {
+    let mut card = FakeKms::single_output();
+    card.in_formats = Some(in_formats_blob(
+      &[FORMAT_XRGB8888],
+      &[(1, 0, MODIFIER_LINEAR)],
+    ));
+    Self::with_scanout(test_config(), card, Some(choice))
+  }
+
+  /// [`Fixture::with_card`], with the display set to `choice` and the
+  /// renderers rendering to LINEAR if it is given.
+  fn with_scanout(
+    config: ShingleConfig,
+    card: FakeKms,
+    choice: Option<ScanoutChoice>,
+  ) -> Self {
     let base = base_path();
     let mut compositor =
       Compositor::with_socket_path(Config::from(config.clone()), &base)
@@ -157,18 +200,23 @@ impl Fixture {
     .expect("the frontend starts");
     let session = Rc::new(RefCell::new(FakeSession::default()));
     let card = card.shared();
-    let display = Display::prepare(
+    let mut display = Display::prepare(
       Box::new(Rc::clone(&card)),
       OutputPolicy::from_config(&config),
     )
     .expect("the display passes its test");
+    let gpu = FakeGpu::default();
+    if let Some(choice) = choice {
+      display.set_scanout_choice(choice);
+      gpu.importer.borrow_mut().modifiers = Some(vec![MODIFIER_LINEAR]);
+    }
     let failures = Rc::new(RefCell::new(VecDeque::new()));
     let frames = Rc::new(RefCell::new(0));
     let recreated = Rc::new(RefCell::new(0));
     let drawn = Rc::new(RefCell::new(Vec::new()));
     let size = display.size().unwrap_or(crate::OUTPUT_SIZE);
     let rendering =
-      drawing_rendering(size, &failures, &frames, &recreated, &drawn);
+      drawing_rendering(size, &failures, &frames, &recreated, &drawn, &gpu);
     let mut backend = Backend::new(
       frontend,
       Rc::clone(&session),
@@ -192,6 +240,7 @@ impl Fixture {
       frames,
       recreated,
       drawn,
+      gpu,
       client,
       toplevel,
       base,
@@ -341,6 +390,8 @@ const FLIP: CommitFlags =
 const MODESET: CommitFlags = CommitFlags::ALLOW_MODESET;
 /// `wp_presentation_feedback.kind` `vsync | hw_clock | hw_completion`.
 const FLIP_FEEDBACK: u32 = 0x1 | 0x2 | 0x4;
+/// `wp_presentation_feedback.kind` `zero_copy`.
+const ZERO_COPY: u32 = 0x8;
 
 fn keys(input: &[Input]) -> Vec<(u32, bool)> {
   input
@@ -1454,4 +1505,107 @@ fn absolute_devices_map_to_their_output_or_the_whole_layout() {
     },
   );
   assert_eq!(fixture.backend.translator.pointer, (1200.0, 540.0));
+}
+
+/// The client's presentation flags of every frame presented so far.
+fn presented_flags(fixture: &Fixture) -> Vec<u32> {
+  let presented = &fixture.client.events.presented;
+  presented.iter().map(|presented| presented.flags).collect()
+}
+
+#[test]
+fn frames_are_drawn_into_gbm_buffers_and_presented_as_zero_copy() {
+  let mut fixture = Fixture::zero_copy(ScanoutChoice::Auto);
+  let test = CommitFlags::TEST_ONLY | CommitFlags::ALLOW_MODESET;
+  let flags: Vec<_> = fixture
+    .card
+    .borrow()
+    .commits
+    .iter()
+    .map(|(_, flags, _)| *flags)
+    .collect();
+  // prepare's test, start's test and modeset, the tested blocking flip to
+  // a cleared GBM buffer, then the window's frame.
+  let blocking = CommitFlags::default();
+  assert_eq!(
+    flags,
+    vec![test, test, MODESET, CommitFlags::TEST_ONLY, blocking, FLIP]
+  );
+  assert_eq!(
+    fixture.backend.display().scanout_status("HDMI-A-1"),
+    Some(ScanoutStatus::ZeroCopy(MODIFIER_LINEAR))
+  );
+  assert_eq!(fixture.gpu.importer.borrow().prepared.len(), 1);
+  assert_eq!(*fixture.gpu.drawn_into.borrow(), [2]);
+  assert!(fixture.card.borrow().buffers.is_empty(), "no dumb buffers");
+  fixture.flip(Duration::from_secs(1), 1);
+  fixture.client_frame();
+  fixture.flip(Duration::from_secs(2), 2);
+  assert_eq!(*fixture.gpu.drawn_into.borrow(), [2, 3]);
+  assert_eq!(presented_flags(&fixture), [FLIP_FEEDBACK | ZERO_COPY]);
+}
+
+#[test]
+fn shingle_scanout_copy_reads_frames_back() {
+  let mut fixture = Fixture::zero_copy(ScanoutChoice::Copy);
+  assert_eq!(
+    fixture.backend.display().scanout_status("HDMI-A-1"),
+    Some(ScanoutStatus::Copy(
+      "SHINGLE_SCANOUT=copy forces copy scanout".into()
+    ))
+  );
+  fixture.flip(Duration::from_secs(1), 1);
+  fixture.client_frame();
+  fixture.flip(Duration::from_secs(2), 2);
+  assert!(fixture.gpu.drawn_into.borrow().is_empty());
+  assert!(fixture.gpu.importer.borrow().prepared.is_empty());
+  assert_eq!(presented_flags(&fixture), [FLIP_FEEDBACK]);
+}
+
+#[test]
+fn buffers_the_renderer_cannot_draw_into_fall_back_to_copy() {
+  let mut fixture = Fixture::zero_copy(ScanoutChoice::Auto);
+  fixture.flip(Duration::from_secs(1), 1);
+  fixture
+    .failures
+    .borrow_mut()
+    .push_back(RenderFailure::Scanout("cannot import".into()));
+  fixture.client_frame();
+  assert!(!fixture.flip_pending(), "the failed frame was not flipped");
+  assert_eq!(*fixture.recreated.borrow(), 0, "no GPU loss");
+  // The next turn falls back and draws the frame by readback.
+  fixture.step();
+  assert_eq!(
+    fixture.backend.display().scanout_status("HDMI-A-1"),
+    Some(ScanoutStatus::Copy("cannot import".into()))
+  );
+  assert!(fixture.flip_pending());
+  assert_eq!(fixture.card.borrow().buffers.len(), 2, "copy buffers");
+  assert!(fixture.card.borrow().framebuffers.is_empty());
+  fixture.flip(Duration::from_secs(2), 2);
+  assert_eq!(presented_flags(&fixture), [FLIP_FEEDBACK]);
+}
+
+#[test]
+fn a_lost_gpu_keeps_drawing_into_the_gbm_buffers() {
+  let mut fixture = Fixture::zero_copy(ScanoutChoice::Auto);
+  fixture.flip(Duration::from_secs(1), 1);
+  fixture
+    .failures
+    .borrow_mut()
+    .push_back(RenderFailure::Lost("test".into()));
+  fixture.client_frame();
+  assert_eq!(*fixture.recreated.borrow(), 1);
+  fixture.step();
+  fixture.flip(Duration::from_secs(2), 2);
+  assert_eq!(
+    *fixture.gpu.drawn_into.borrow(),
+    [2, 3],
+    "the new renderer draws into the same buffers"
+  );
+  assert_eq!(
+    fixture.backend.display().scanout_status("HDMI-A-1"),
+    Some(ScanoutStatus::ZeroCopy(MODIFIER_LINEAR))
+  );
+  assert_eq!(presented_flags(&fixture), [FLIP_FEEDBACK | ZERO_COPY]);
 }

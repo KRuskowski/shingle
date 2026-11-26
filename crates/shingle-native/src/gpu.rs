@@ -10,7 +10,10 @@
 //!
 //! [`FrameRenderer`] is what the host draws frames with. The real one,
 //! [`GpuRenderer`], draws the frontend's scene offscreen and reads it back
-//! for copy scanout; tests use a fake. [`GpuHealth`] decides what a
+//! for copy scanout, or straight into zero-copy scanout's GBM buffers,
+//! which it imports with `DmabufUse::Render` and draws into between the
+//! foreign acquire and release barriers (docs/design/dmabuf.md, section
+//! 7); tests use a fake. [`GpuHealth`] decides what a
 //! failure means: a missed 100 ms wait is skipped, three in a row or a
 //! lost device recreate the renderer, and a third loss within 60 s ends
 //! Shingle.
@@ -30,11 +33,15 @@ use std::{
 use shingle::OutputHandle;
 use shingle_frontend::{Frontend, host::Host, render_target::RenderTarget};
 use shingle_render::{
-  GpuContext, GpuOptions, GpuTexture, OffscreenTarget, RenderError,
-  RenderState, RenderTile, TextureTransform,
+  ForeignAccess, GpuContext, GpuOptions, GpuTexture, OffscreenTarget,
+  RenderError, RenderState, RenderTile, TextureTransform,
+  dmabuf::{DmabufUse, ImportedTexture},
+  draw_with_access,
 };
 
-use crate::scanout::Frame;
+use crate::scanout::{
+  DrawTarget, Drawn, Frame, ScanoutDmabuf, ScanoutImporter,
+};
 
 /// A DRM card as sysfs describes it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -139,6 +146,9 @@ pub enum RenderFailure {
   Lost(String),
   /// The GPU did not finish within [`GPU_WAIT`].
   Timeout,
+  /// A zero-copy scanout buffer could not be imported or drawn into; the
+  /// output falls back to copy scanout.
+  Scanout(String),
   /// Anything else, such as a texture that could not be uploaded.
   Failed(String),
 }
@@ -154,6 +164,12 @@ impl fmt::Display for RenderFailure {
         "the GPU did not finish a frame within {} ms",
         GPU_WAIT.as_millis()
       ),
+      Self::Scanout(reason) => {
+        write!(
+          formatter,
+          "drawing into the scanout buffer failed: {reason}"
+        )
+      }
       Self::Failed(reason) => write!(formatter, "rendering failed: {reason}"),
     }
   }
@@ -187,7 +203,7 @@ impl GpuHealth {
   /// A frame failed at `now` with `failure`.
   pub fn failure(&mut self, failure: &RenderFailure, now: Instant) -> Verdict {
     match failure {
-      RenderFailure::Failed(_) => Verdict::Skip,
+      RenderFailure::Failed(_) | RenderFailure::Scanout(_) => Verdict::Skip,
       RenderFailure::Timeout => {
         self.timeouts += 1;
         if self.timeouts < MAX_GPU_WAITS {
@@ -218,17 +234,20 @@ impl GpuHealth {
   }
 }
 
-/// Draws the frontend's frames for scanout, one output at a time.
-pub trait FrameRenderer {
-  /// Draws `output`'s scene at `size` pixels and returns it as a
-  /// [`Frame`].
+/// Draws the frontend's frames for scanout, one output at a time, and
+/// imports zero-copy scanout's buffers ([`ScanoutImporter`]).
+pub trait FrameRenderer: ScanoutImporter {
+  /// Draws `output`'s scene at `size` pixels into `target`: offscreen,
+  /// returning its pixels, or into a scanout buffer, returning once the
+  /// GPU has finished it.
   fn draw(
     &mut self,
     frontend: &mut Frontend,
     host: &mut dyn Host,
     output: &OutputHandle,
     size: (u32, u32),
-  ) -> Result<Frame, RenderFailure>;
+    target: DrawTarget<'_>,
+  ) -> Result<Drawn, RenderFailure>;
 
   /// Drops what the renderer keeps for `output`, which is no longer lit.
   fn forget(&mut self, output: &OutputHandle) {
@@ -247,30 +266,45 @@ pub trait FrameRenderer {
 pub type RendererFactory =
   Box<dyn FnMut((u32, u32)) -> Result<Box<dyn FrameRenderer>, String>>;
 
-/// What the real renderer keeps per output: an RGBA offscreen target of
-/// the output's size and the output's render state (scale, transform,
-/// zoom).
+/// What the real renderer keeps per output: the output's render state
+/// (scale, transform, zoom) and, for copy scanout, an RGBA offscreen
+/// target of the output's size or, for zero-copy scanout, the imports of
+/// its scanout buffers by serial.
+#[derive(Default)]
 struct OutputTarget {
-  target: OffscreenTarget,
+  offscreen: Option<OffscreenTarget>,
+  imports: Vec<(u64, ImportedTexture)>,
   state: RenderState,
 }
 
-/// The real renderer: each output's scene drawn into an RGBA offscreen
-/// target of its own on one GPU and read back within [`GPU_WAIT`], for
-/// copy scanout.
+/// The real renderer: each output's scene drawn on one GPU into an RGBA
+/// offscreen target of its own and read back within [`GPU_WAIT`] for copy
+/// scanout, or into the output's imported scanout buffer, waiting at most
+/// [`GPU_WAIT`] for the GPU to finish, for zero-copy scanout.
 pub struct GpuRenderer {
   gpu: GpuContext,
   targets: HashMap<OutputHandle, OutputTarget>,
   /// Set by wgpu's device-lost callback.
   lost: Arc<AtomicBool>,
+  /// Why zero-copy scanout is not offered even though the device might
+  /// import DMA-BUFs: the adapter is not on the card's GPU.
+  not_on_card: Option<String>,
 }
 
 impl GpuRenderer {
   /// Opens the Vulkan adapter on PCI slot `pci` (any adapter when there
   /// is none or no slot is known). Targets are made as outputs are drawn;
-  /// `size` is the first output's, for which one is checked at once.
+  /// `size` is the first output's, for which one is checked at once. An
+  /// adapter that is not on the card's slot renders for copy scanout
+  /// only.
   pub fn new(size: (u32, u32), pci: Option<&str>) -> Result<Self, String> {
-    let gpu = open_gpu(pci).map_err(|error| error.to_string())?;
+    let (gpu, matched) = open_gpu(pci).map_err(|error| error.to_string())?;
+    let not_on_card = match pci {
+      Some(slot) if !matched => Some(format!(
+        "the renderer's adapter is not the card's GPU (PCI {slot})"
+      )),
+      _ => None,
+    };
     let lost = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&lost);
     gpu.device().set_device_lost_callback(move |_, _| {
@@ -283,6 +317,7 @@ impl GpuRenderer {
       gpu,
       targets: HashMap::new(),
       lost,
+      not_on_card,
     })
   }
 
@@ -301,7 +336,9 @@ impl GpuRenderer {
   }
 }
 
-fn open_gpu(pci: Option<&str>) -> Result<GpuContext, RenderError> {
+/// Opens the adapter on PCI slot `pci`, else any; says whether it is on
+/// that slot.
+fn open_gpu(pci: Option<&str>) -> Result<(GpuContext, bool), RenderError> {
   if let Some(slot) = pci {
     let filter =
       |info: &wgpu::AdapterInfo| adapter_matches(&info.device_pci_bus_id, slot);
@@ -317,7 +354,7 @@ fn open_gpu(pci: Option<&str>) -> Result<GpuContext, RenderError> {
       Err(RenderError::NoMatchingAdapter) => crate::diagnostics::log(&format!(
         "no Vulkan adapter on PCI {slot}; copy scanout renders on any"
       )),
-      result => return result,
+      result => return result.map(|gpu| (gpu, true)),
     }
   }
   pollster::block_on(GpuContext::new(
@@ -327,33 +364,82 @@ fn open_gpu(pci: Option<&str>) -> Result<GpuContext, RenderError> {
       ..GpuOptions::default()
     },
   ))
+  .map(|gpu| (gpu, false))
 }
 
-/// The frontend's render target for one output's frame: its target on
-/// the shared GPU, and where the frame read back goes.
+/// Draws `tiles` over `clear` into the imported scanout buffer `texture`
+/// of `size` pixels, between its foreign acquire and release, and waits
+/// at most [`GPU_WAIT`] for the GPU to finish, since KMS reads the buffer
+/// as soon as the flip is committed.
+fn draw_into(
+  gpu: &GpuContext,
+  state: &RenderState,
+  texture: &ImportedTexture,
+  size: (u32, u32),
+  tiles: &[RenderTile<'_>],
+  clear: [f64; 4],
+) -> Result<(), RenderFailure> {
+  let view = texture.texture().create_view(&Default::default());
+  let mut access = ForeignAccess::new();
+  access.add(texture.foreign());
+  let index = draw_with_access(gpu, state, &view, size, tiles, clear, access);
+  gpu
+    .device()
+    .poll(wgpu::PollType::Wait {
+      submission_index: Some(index),
+      timeout: Some(GPU_WAIT),
+    })
+    .map(|_| ())
+    .map_err(|error| match error {
+      wgpu::PollError::Timeout => RenderFailure::Timeout,
+      error => RenderFailure::Failed(error.to_string()),
+    })
+}
+
+/// Imports a scanout buffer for rendering.
+fn import_scanout(
+  gpu: &GpuContext,
+  buffer: &ScanoutDmabuf,
+) -> Result<ImportedTexture, String> {
+  gpu
+    .import_dmabuf(&buffer.descriptor(), DmabufUse::Render)
+    .map_err(|error| error.to_string())
+}
+
+/// Where a frame of one output is drawn.
+enum Destination<'a> {
+  /// The copy path's offscreen target, read back afterwards.
+  Offscreen(&'a OffscreenTarget),
+  /// An imported scanout buffer of this size.
+  Imported(&'a ImportedTexture, (u32, u32)),
+}
+
+/// The frontend's render target for one output's frame: where it is
+/// drawn on the shared GPU, and what the frame became.
 struct NativeTarget<'a> {
   gpu: &'a mut GpuContext,
-  output: &'a mut OutputTarget,
+  state: &'a mut RenderState,
+  destination: Destination<'a>,
   lost: &'a AtomicBool,
   /// What the last call of `render` produced.
-  last: Option<Result<Frame, RenderFailure>>,
+  last: Option<Result<Drawn, RenderFailure>>,
 }
 
 impl RenderTarget for NativeTarget<'_> {
   fn set_scale_factor(&mut self, scale: f64) {
-    self.output.state.set_scale_factor(scale);
+    self.state.set_scale_factor(scale);
   }
 
   fn set_output_transform(&mut self, transform: TextureTransform) {
-    self.output.state.set_output_transform(transform);
+    self.state.set_output_transform(transform);
   }
 
   fn set_nearest_filter(&mut self, nearest: bool) -> bool {
-    self.output.state.set_nearest_filter(nearest)
+    self.state.set_nearest_filter(nearest)
   }
 
   fn set_zoom(&mut self, factor: f32, origin_x: f32, origin_y: f32) {
-    self.output.state.set_zoom(factor, origin_x, origin_y);
+    self.state.set_zoom(factor, origin_x, origin_y);
   }
 
   fn set_gamma_ramp(&mut self, ramp: &[u16]) -> Result<(), RenderError> {
@@ -373,12 +459,9 @@ impl RenderTarget for NativeTarget<'_> {
     height: u32,
     rgba: &[u8],
   ) -> Result<GpuTexture, RenderError> {
-    self.gpu.create_texture(
-      width,
-      height,
-      rgba,
-      self.output.state.texture_filter(),
-    )
+    self
+      .gpu
+      .create_texture(width, height, rgba, self.state.texture_filter())
   }
 
   fn update_texture(
@@ -389,9 +472,9 @@ impl RenderTarget for NativeTarget<'_> {
     self.gpu.update_texture(texture, rgba)
   }
 
-  /// Draws and reads the frame back for [`FrameRenderer::draw`]. Returns
-  /// false: the frame is presented when its page flip completes, not
-  /// now.
+  /// Draws the frame for [`FrameRenderer::draw`]: into the scanout
+  /// buffer, waiting for the GPU, or offscreen, reading it back. Returns
+  /// false: the frame is presented when its page flip completes, not now.
   fn render(
     &mut self,
     tiles: &[RenderTile<'_>],
@@ -402,18 +485,30 @@ impl RenderTarget for NativeTarget<'_> {
       self.last = Some(Err(RenderFailure::Lost("device lost".into())));
       return Ok(false);
     }
-    let target = &self.output.target;
-    target.render(self.gpu, &self.output.state, tiles, clear);
-    let (width, height) = target.size();
-    self.last = Some(match target.read_rgba_within(self.gpu, Some(GPU_WAIT)) {
-      Ok(rgba) => Ok(Frame {
-        width,
-        height,
-        rgba,
-      }),
-      Err(RenderError::Timeout(_)) => Err(RenderFailure::Timeout),
-      Err(_) if lost() => Err(RenderFailure::Lost("device lost".into())),
-      Err(error) => Err(RenderFailure::Failed(error.to_string())),
+    let drawn = match self.destination {
+      Destination::Imported(texture, size) => {
+        draw_into(self.gpu, self.state, texture, size, tiles, clear)
+          .map(|()| Drawn::InPlace)
+      }
+      Destination::Offscreen(target) => {
+        target.render(self.gpu, self.state, tiles, clear);
+        let (width, height) = target.size();
+        match target.read_rgba_within(self.gpu, Some(GPU_WAIT)) {
+          Ok(rgba) => Ok(Drawn::Pixels(Frame {
+            width,
+            height,
+            rgba,
+          })),
+          Err(RenderError::Timeout(_)) => Err(RenderFailure::Timeout),
+          Err(error) => Err(RenderFailure::Failed(error.to_string())),
+        }
+      }
+    };
+    self.last = Some(match drawn {
+      Err(RenderFailure::Failed(_)) if lost() => {
+        Err(RenderFailure::Lost("device lost".into()))
+      }
+      drawn => drawn,
     });
     Ok(false)
   }
@@ -424,13 +519,59 @@ impl RenderTarget for NativeTarget<'_> {
     clear: [f64; 4],
     size: (u32, u32),
   ) -> Result<Vec<u8>, RenderError> {
-    shingle_render::capture_frame(
-      self.gpu,
-      &self.output.state,
-      size,
-      tiles,
-      clear,
-    )
+    shingle_render::capture_frame(self.gpu, self.state, size, tiles, clear)
+  }
+}
+
+impl ScanoutImporter for GpuRenderer {
+  /// The render modifiers of the device's DMA-BUF caps that allow `size`;
+  /// none if the adapter is not on the card's GPU or cannot import.
+  fn render_modifiers(
+    &self,
+    fourcc: u32,
+    (width, height): (u32, u32),
+  ) -> Result<Vec<u64>, String> {
+    if let Some(reason) = &self.not_on_card {
+      return Err(reason.clone());
+    }
+    let caps = self.gpu.dmabuf().map_err(|reason| {
+      format!("the renderer cannot import DMA-BUFs: {reason}")
+    })?;
+    Ok(caps.format(fourcc).map_or_else(Vec::new, |format| {
+      format
+        .render
+        .iter()
+        .filter(|caps| caps.max_width >= width && caps.max_height >= height)
+        .map(|caps| caps.modifier)
+        .collect()
+    }))
+  }
+
+  fn prepare_buffers(
+    &mut self,
+    output: &str,
+    buffers: &[&ScanoutDmabuf],
+  ) -> Result<(), String> {
+    let mut imports = Vec::new();
+    for buffer in buffers {
+      let texture = import_scanout(&self.gpu, buffer)?;
+      let size = (buffer.width, buffer.height);
+      let black = [0.0, 0.0, 0.0, 1.0];
+      draw_into(
+        &self.gpu,
+        &RenderState::default(),
+        &texture,
+        size,
+        &[],
+        black,
+      )
+      .map_err(|failure| failure.to_string())?;
+      imports.push((buffer.serial, texture));
+    }
+    let target = self.targets.entry(OutputHandle::new(output)).or_default();
+    target.imports = imports;
+    target.offscreen = None;
+    Ok(())
   }
 }
 
@@ -445,28 +586,60 @@ impl FrameRenderer for GpuRenderer {
     host: &mut dyn Host,
     output: &OutputHandle,
     (width, height): (u32, u32),
-  ) -> Result<Frame, RenderFailure> {
-    let resized = self
-      .targets
-      .get(output)
-      .is_none_or(|target| target.target.size() != (width, height));
-    if resized {
-      let target = OffscreenTarget::new(&self.gpu, width, height)
-        .map_err(|error| RenderFailure::Failed(error.to_string()))?;
-      let state = self
-        .targets
-        .remove(output)
-        .map(|old| old.state)
-        .unwrap_or_default();
-      self
-        .targets
-        .insert(output.clone(), OutputTarget { target, state });
+    target: DrawTarget<'_>,
+  ) -> Result<Drawn, RenderFailure> {
+    let entry = self.targets.entry(output.clone()).or_default();
+    match target {
+      DrawTarget::Readback => {
+        entry.imports.clear();
+        let resized = entry
+          .offscreen
+          .as_ref()
+          .is_none_or(|target| target.size() != (width, height));
+        if resized {
+          entry.offscreen = Some(
+            OffscreenTarget::new(&self.gpu, width, height)
+              .map_err(|error| RenderFailure::Failed(error.to_string()))?,
+          );
+        }
+      }
+      DrawTarget::Dmabuf(buffer) => {
+        entry.offscreen = None;
+        // After a GPU loss the new device imports the buffers again.
+        if !entry
+          .imports
+          .iter()
+          .any(|(serial, _)| *serial == buffer.serial)
+        {
+          let texture = import_scanout(&self.gpu, buffer)
+            .map_err(RenderFailure::Scanout)?;
+          entry.imports.push((buffer.serial, texture));
+        }
+      }
     }
     let lost = self.lost();
-    let target = self.targets.get_mut(output).expect("the target was made");
+    let entry = self.targets.get_mut(output).expect("the target was made");
+    let destination = match target {
+      DrawTarget::Readback => Destination::Offscreen(
+        entry
+          .offscreen
+          .as_ref()
+          .expect("the offscreen target was made"),
+      ),
+      DrawTarget::Dmabuf(buffer) => {
+        let texture = entry
+          .imports
+          .iter()
+          .find(|(serial, _)| *serial == buffer.serial)
+          .map(|(_, texture)| texture)
+          .expect("the buffer was imported");
+        Destination::Imported(texture, (buffer.width, buffer.height))
+      }
+    };
     let mut native = NativeTarget {
       gpu: &mut self.gpu,
-      output: target,
+      state: &mut entry.state,
+      destination,
       lost: &self.lost,
       last: None,
     };
@@ -491,15 +664,38 @@ pub(crate) mod tests {
   use std::{cell::RefCell, rc::Rc};
 
   use super::*;
+  use crate::scanout::tests::FakeImporter;
 
   /// A renderer that draws nothing and returns frames of one colour,
-  /// failing as scripted.
+  /// failing as scripted. Its GPU side is `importer`, which renders to no
+  /// modifier unless a test says otherwise.
   pub(crate) struct FakeRenderer {
     pub(crate) size: (u32, u32),
     pub(crate) failures: Rc<RefCell<VecDeque<RenderFailure>>>,
     pub(crate) frames: Rc<RefCell<u32>>,
     /// The output of each frame drawn, in order.
     pub(crate) drawn: Rc<RefCell<Vec<String>>>,
+    pub(crate) importer: Rc<RefCell<FakeImporter>>,
+    /// The serial of each scanout buffer drawn into, in order.
+    pub(crate) drawn_into: Rc<RefCell<Vec<u64>>>,
+  }
+
+  impl ScanoutImporter for FakeRenderer {
+    fn render_modifiers(
+      &self,
+      fourcc: u32,
+      size: (u32, u32),
+    ) -> Result<Vec<u64>, String> {
+      self.importer.render_modifiers(fourcc, size)
+    }
+
+    fn prepare_buffers(
+      &mut self,
+      output: &str,
+      buffers: &[&ScanoutDmabuf],
+    ) -> Result<(), String> {
+      self.importer.prepare_buffers(output, buffers)
+    }
   }
 
   impl FrameRenderer for FakeRenderer {
@@ -509,7 +705,8 @@ pub(crate) mod tests {
       _host: &mut dyn Host,
       output: &OutputHandle,
       size: (u32, u32),
-    ) -> Result<Frame, RenderFailure> {
+      target: DrawTarget<'_>,
+    ) -> Result<Drawn, RenderFailure> {
       if let Some(failure) = self.failures.borrow_mut().pop_front() {
         return Err(failure);
       }
@@ -517,11 +714,18 @@ pub(crate) mod tests {
       self.drawn.borrow_mut().push(output.name().to_owned());
       self.size = size;
       let (width, height) = size;
-      Ok(Frame {
-        width,
-        height,
-        rgba: [10, 20, 30, 255].repeat((width * height) as usize),
-      })
+      match target {
+        DrawTarget::Dmabuf(buffer) => {
+          assert_eq!((buffer.width, buffer.height), size);
+          self.drawn_into.borrow_mut().push(buffer.serial);
+          Ok(Drawn::InPlace)
+        }
+        DrawTarget::Readback => Ok(Drawn::Pixels(Frame {
+          width,
+          height,
+          rgba: [10, 20, 30, 255].repeat((width * height) as usize),
+        })),
+      }
     }
   }
 
@@ -626,6 +830,11 @@ pub(crate) mod tests {
       health.failure(&RenderFailure::Failed("x".into()), now),
       Verdict::Skip
     );
+    assert_eq!(
+      health.failure(&RenderFailure::Scanout("x".into()), now),
+      Verdict::Skip,
+      "a scanout buffer the renderer cannot use is no GPU loss"
+    );
   }
 
   #[test]
@@ -658,6 +867,10 @@ pub(crate) mod tests {
     assert_eq!(
       RenderFailure::Lost("reset".into()).to_string(),
       "the GPU device was lost (reset)"
+    );
+    assert_eq!(
+      RenderFailure::Scanout("no import".into()).to_string(),
+      "drawing into the scanout buffer failed: no import"
     );
   }
 }

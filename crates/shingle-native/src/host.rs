@@ -11,6 +11,10 @@
 //! libinput, DRM and compositor descriptors in between, until the frontend
 //! asks to exit, and then saves the session and closes every device.
 //!
+//! Before an output's frame, its scanout is moved to zero-copy if that was
+//! not tried for its mode yet, or back to copy scanout if the renderer
+//! could not draw into its GBM buffers ([`Display::upgrade_scanout`]).
+//!
 //! Frames are paced by page flips, per CRTC: a frame of an output is drawn
 //! only when no flip of it is pending, and frame callbacks and
 //! `wp_presentation` feedback of that output are sent with the flip's
@@ -931,23 +935,33 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     }
     for name in self.display.outputs() {
       let output = OutputHandle::new(name.clone());
-      if !self.host.redraw.contains(&output)
-        || !self.display.begin_frame_on(&name)
-      {
+      if !self.host.redraw.contains(&output) {
+        continue;
+      }
+      // Zero-copy is tried, or given up, before the output's next frame.
+      if let Some(renderer) = self.renderer.as_mut() {
+        self.display.upgrade_scanout(&name, renderer.as_mut());
+      }
+      if !self.display.begin_frame_on(&name) {
         continue;
       }
       self.host.redraw.remove(&output);
       let size = self.display.size_of(&name).unwrap_or(self.output_size);
+      let target = self.display.draw_target(&name);
       let result = match self.renderer.as_mut() {
-        Some(renderer) => {
-          renderer.draw(&mut self.frontend, &mut self.host, &output, size)
-        }
+        Some(renderer) => renderer.draw(
+          &mut self.frontend,
+          &mut self.host,
+          &output,
+          size,
+          target,
+        ),
         None => Err(RenderFailure::Lost("no renderer".into())),
       };
       match result {
-        Ok(frame) => {
+        Ok(drawn) => {
           self.health.success();
-          self.display.present_on(&name, &frame, now);
+          self.display.present_on(&name, &drawn, now);
         }
         Err(failure) => {
           self.display.abandon_frame_on(&name);
@@ -968,6 +982,10 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     now: Instant,
   ) {
     diagnostics::log(&format!("{}: {failure}", output.name()));
+    if let RenderFailure::Scanout(reason) = failure {
+      self.display.scanout_failed(output.name(), reason);
+      self.host.redraw.insert(output.clone());
+    }
     match self.health.failure(failure, now) {
       Verdict::Skip => {
         // A slow frame is drawn again; another error waits for the next

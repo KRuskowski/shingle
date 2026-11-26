@@ -3,7 +3,8 @@
 //! It runs [`shingle_frontend::Frontend`] with libseat for the session and
 //! VT switching ([`session`]), libinput for input devices ([`input`]) with
 //! hotplug through libinput's udev backend ([`udev`]), atomic KMS for the
-//! display ([`kms`], [`display`]) with copy scanout ([`scanout`]) and
+//! display ([`kms`], [`display`]) with zero-copy or copy scanout
+//! ([`scanout`]) and
 //! page-flip pacing ([`pacing`]), DRM hotplug ([`hotplug`]) and the
 //! configured choice of output and mode ([`outputs`]), a Vulkan renderer
 //! on the card's GPU ([`gpu`]), and the event loop in [`host`]
@@ -59,6 +60,7 @@ use crate::{
   input::LibinputSource,
   kms::{KmsDevice, drm::DrmDevice},
   outputs::OutputPolicy,
+  scanout::ScanoutChoice,
   session::{
     ENABLE_TIMEOUT, LibSeatSession, Session, check_backend, wait_for_enable,
   },
@@ -142,11 +144,7 @@ fn gpu_rendering(
 ) -> Result<Rendering, StartError> {
   let renderer =
     GpuRenderer::new(size, pci.as_deref()).map_err(StartError::NoAdapter)?;
-  diagnostics::log(&format!(
-    "rendering on {}; zero-copy scanout is not built yet, so frames are \
-     copied",
-    renderer.adapter_name()
-  ));
+  diagnostics::log(&format!("rendering on {}", renderer.adapter_name()));
   diagnostics::log(&renderer.dmabuf_summary());
   let factory: RendererFactory = Box::new(move |size| {
     GpuRenderer::new(size, pci.as_deref())
@@ -213,6 +211,13 @@ pub fn run(
       Ok((frontend, input))
     },
   )?;
+  let (choice, warning) =
+    ScanoutChoice::from_env(std::env::var_os("SHINGLE_SCANOUT").as_deref());
+  if let Some(warning) = warning {
+    diagnostics::log(&warning);
+  }
+  let mut display = display;
+  display.set_scanout_choice(choice);
   let mut backend =
     Backend::new(frontend, session, input, input_config, display, rendering)?;
   // Clients start once linux-dmabuf is offered, which Backend::new does.

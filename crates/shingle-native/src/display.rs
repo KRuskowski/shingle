@@ -21,8 +21,10 @@
 //!   Startup tests before the Wayland socket exists; [`Display::start`]
 //!   then makes the real modeset.
 //! - **Frames** per output: [`Display::begin_frame_on`] when its scheduler
-//!   is idle, [`Display::present_on`] to copy the frame into a buffer and
-//!   flip its CRTC to it with `NONBLOCK | PAGE_FLIP_EVENT`, and
+//!   is idle, [`Display::draw_target`] to learn where to draw it,
+//!   [`Display::present_on`] to take the frame (copying it into a buffer
+//!   on copy scanout) and flip its CRTC to it with
+//!   `NONBLOCK | PAGE_FLIP_EVENT`, and
 //!   [`Display::dispatch_flips`] to route page-flip events by CRTC and turn
 //!   them into [`PresentInfo`] for `wp_presentation`.
 //! - **Failures**: a flip that does not complete within a second is
@@ -33,6 +35,15 @@
 //! - **Pause and resume** ([`Display::pause`], [`Display::resume`]):
 //!   nothing is committed while the seat is disabled; on resume the card
 //!   is probed again and a full modeset follows.
+//! - **Scanout** per output ([`Display::upgrade_scanout`]): each output is
+//!   lit with copy scanout, and moved to zero-copy GBM buffers by a
+//!   blocking flip, after a `TEST_ONLY` one, once its display is ready and
+//!   the renderer can draw into them; whatever fails keeps copy scanout
+//!   with a logged reason ([`Display::scanout_status`]).
+//!   `SHINGLE_SCANOUT=copy` keeps every output on copy scanout
+//!   ([`Display::set_scanout_choice`]). A zero-copy output whose buffers
+//!   the renderer cannot draw into any more, or whose flips the card
+//!   refuses, falls back to copy scanout the same way.
 //! - **DPMS** per output ([`Display::set_output_dpms`],
 //!   [`Display::set_dpms`] for all): `ACTIVE=0`, or a modeset of that
 //!   output with `ACTIVE=1`, never while its flip is pending.
@@ -69,7 +80,10 @@ use crate::{
   },
   outputs::{self, ConnectorChange, ConnectorState, OutputPolicy},
   pacing::{FrameScheduler, State},
-  scanout::{Frame, Scanout, copy::CopyScanout},
+  scanout::{
+    DrawTarget, Drawn, Scanout, ScanoutChoice, ScanoutImporter, ScanoutStatus,
+    allocator::BufferAllocator, copy::CopyScanout, gbm::GbmScanout,
+  },
 };
 
 /// `EPERM`.
@@ -197,6 +211,11 @@ struct Lit {
   dpms_on: bool,
   /// Whether it should be.
   wanted_dpms: bool,
+  /// Which scanout it uses, and why.
+  status: ScanoutStatus,
+  /// Why its zero-copy scanout must give way to copy scanout, once the
+  /// output is ready for the flip that does it.
+  fallback: Option<String>,
 }
 
 impl Lit {
@@ -339,6 +358,17 @@ pub struct Resumed {
 /// The lit outputs' names and modes, in order, to tell what changed.
 type Snapshot = Vec<(String, Mode)>;
 
+/// What a lit output had before a configuration gave it another mode,
+/// kept to restore it if the configuration's modeset fails.
+struct OldMode {
+  index: usize,
+  mode: Mode,
+  blob: BlobId,
+  scanout: Box<dyn Scanout>,
+  status: ScanoutStatus,
+  fallback: Option<String>,
+}
+
 /// What output management asks of the outputs it names.
 struct Plan {
   /// Lit outputs turned off, by index.
@@ -375,6 +405,14 @@ impl Plan {
   }
 }
 
+/// Whether zero-copy scanout can be tried, with the card's GBM.
+enum ZeroCopySetup {
+  /// No: every output uses copy scanout, for this reason.
+  Off(String),
+  /// Yes, with buffers from this allocator.
+  On(Box<dyn BufferAllocator>),
+}
+
 /// The KMS outputs and their frame cycles.
 pub struct Display {
   device: Box<dyn KmsDevice>,
@@ -400,6 +438,10 @@ pub struct Display {
   /// Whether outputs lit from now on start on.
   wanted_dpms: bool,
   monotonic: bool,
+  /// Whether zero-copy scanout can be tried.
+  zero_copy: ZeroCopySetup,
+  /// The serial of the last scanout buffer made.
+  serial: u64,
 }
 
 impl Display {
@@ -448,6 +490,8 @@ impl Display {
       active: true,
       wanted_dpms: true,
       monotonic,
+      zero_copy: ZeroCopySetup::Off("zero-copy scanout was not enabled".into()),
+      serial: 0,
     };
     let ranked = display.ranked();
     if ranked.is_empty() {
@@ -619,6 +663,8 @@ impl Display {
             sequence: Sequence::default(),
             dpms_on: true,
             wanted_dpms: self.wanted_dpms,
+            status: ScanoutStatus::Untried,
+            fallback: None,
           });
           return Ok(());
         }
@@ -694,7 +740,7 @@ impl Display {
   fn log_lit(&self, lit: &Lit) {
     let (width, height) = lit.mode.size();
     diagnostics::log(&format!(
-      "output {}: {width}x{height} at {:.3} Hz, copy scanout",
+      "output {}: {width}x{height} at {:.3} Hz",
       lit.name(),
       f64::from(lit.mode.refresh_mhz()) / 1000.0
     ));
@@ -924,22 +970,32 @@ impl Display {
   }
 
   /// [`Display::present_on`] the first lit output.
-  pub fn present(&mut self, frame: &Frame, now: Instant) {
+  pub fn present(&mut self, drawn: &Drawn, now: Instant) {
     if let Some(name) = self.output_name().map(str::to_owned) {
-      self.present_on(&name, frame, now);
+      self.present_on(&name, drawn, now);
     }
   }
 
-  /// Puts `frame` on screen on output `name` at its next vblank: copies it
-  /// into the buffer off screen and commits a flip of its CRTC to it. A
-  /// refused commit drops the frame; one refused for lack of DRM master
+  /// Where the next frame of output `name` is drawn: into its scanout's
+  /// buffer on zero-copy scanout, else offscreen to be read back.
+  pub fn draw_target(&self, name: &str) -> DrawTarget<'_> {
+    self
+      .find(name)
+      .map_or(DrawTarget::Readback, |lit| lit.scanout.target())
+  }
+
+  /// Puts the frame `drawn` for [`Display::draw_target`] on screen on
+  /// output `name` at its next vblank: copies its pixels into the buffer
+  /// off screen on copy scanout, and commits a flip of its CRTC to the
+  /// buffer. A refused commit drops the frame, and makes a zero-copy
+  /// output fall back to copy scanout; one refused for lack of DRM master
   /// pauses the output until the seat resumes it.
-  pub fn present_on(&mut self, name: &str, frame: &Frame, now: Instant) {
+  pub fn present_on(&mut self, name: &str, drawn: &Drawn, now: Instant) {
     let Some(index) = self.lit.iter().position(|lit| lit.name() == name) else {
       return;
     };
     let lit = &mut self.lit[index];
-    let framebuffer = match lit.scanout.prepare(self.device.as_mut(), frame) {
+    let framebuffer = match lit.scanout.prepare(self.device.as_mut(), drawn) {
       Ok(framebuffer) => framebuffer,
       Err(error) => {
         diagnostics::log(&format!("copying the frame failed: {error}"));
@@ -961,9 +1017,176 @@ impl Display {
       }
       Err(error) => {
         diagnostics::log(&format!("the page flip of {name} failed: {error}"));
+        if lit.scanout.zero_copy() {
+          lit.fallback =
+            Some(format!("the page flip to a GBM buffer failed: {error}"));
+        }
         lit.scheduler.abandon();
       }
     }
+  }
+
+  /// Chooses how outputs scan out from now on: with [`ScanoutChoice::Auto`]
+  /// zero-copy is tried with the card's GBM, if it has one, as each output
+  /// becomes ready ([`Display::upgrade_scanout`]); with
+  /// [`ScanoutChoice::Copy`] (`SHINGLE_SCANOUT=copy`) every output keeps
+  /// copy scanout. Outputs on copy scanout for another reason are tried
+  /// again. Outputs already on zero-copy stay on it.
+  pub fn set_scanout_choice(&mut self, choice: ScanoutChoice) {
+    self.zero_copy = match choice {
+      ScanoutChoice::Copy => {
+        ZeroCopySetup::Off("SHINGLE_SCANOUT=copy forces copy scanout".into())
+      }
+      ScanoutChoice::Auto => match self.device.buffer_allocator() {
+        Ok(allocator) => ZeroCopySetup::On(allocator),
+        Err(error) => {
+          ZeroCopySetup::Off(format!("the card has no GBM device: {error}"))
+        }
+      },
+    };
+    for lit in &mut self.lit {
+      if matches!(lit.status, ScanoutStatus::Copy(_)) {
+        lit.status = ScanoutStatus::Untried;
+      }
+    }
+  }
+
+  /// Which scanout output `name` uses, and why, if it is lit.
+  pub fn scanout_status(&self, name: &str) -> Option<ScanoutStatus> {
+    self.find(name).map(|lit| lit.status.clone())
+  }
+
+  /// Moves output `name` to zero-copy scanout if that was not tried for
+  /// its mode yet, or back to copy scanout if its zero-copy scanout
+  /// failed ([`Display::scanout_failed`]). Waits until the output is
+  /// ready to draw: lit, on, the seat enabled and no flip pending.
+  ///
+  /// Zero-copy takes GBM buffers that `importer` imports and clears
+  /// ([`GbmScanout::create`]), and a `TEST_ONLY` flip to one of them
+  /// before the blocking flip that shows it; only then are the copy
+  /// buffers freed. Any step that fails keeps copy scanout, and the
+  /// reason is logged once and kept in [`Display::scanout_status`]. A
+  /// commit refused for lack of DRM master changes nothing, so that the
+  /// next try repeats it.
+  pub fn upgrade_scanout(
+    &mut self,
+    name: &str,
+    importer: &mut dyn ScanoutImporter,
+  ) {
+    if !self.ready_on(name) {
+      return;
+    }
+    let Some(index) = self.lit.iter().position(|lit| lit.name() == name) else {
+      return;
+    };
+    if let Some(reason) = self.lit[index].fallback.clone() {
+      self.fall_back(index, reason);
+      return;
+    }
+    if self.lit[index].status != ScanoutStatus::Untried {
+      return;
+    }
+    let lit = &self.lit[index];
+    let created = match &mut self.zero_copy {
+      ZeroCopySetup::Off(reason) => Err(reason.clone()),
+      ZeroCopySetup::On(allocator) => GbmScanout::create(
+        self.device.as_mut(),
+        allocator.as_mut(),
+        importer,
+        name,
+        lit.output.in_formats.as_ref(),
+        lit.mode.size(),
+        &mut self.serial,
+      ),
+    };
+    let status = match created {
+      Ok(scanout) => {
+        let modifier = scanout.modifier();
+        match self.switch_scanout(index, Box::new(scanout)) {
+          Ok(()) => ScanoutStatus::ZeroCopy(modifier),
+          Err(error) if not_master(&error) => return,
+          Err(error) => ScanoutStatus::Copy(format!(
+            "the card refuses a flip to a GBM buffer: {error}"
+          )),
+        }
+      }
+      Err(reason) => ScanoutStatus::Copy(reason),
+    };
+    diagnostics::log(&match &status {
+      ScanoutStatus::ZeroCopy(modifier) => format!(
+        "output {name}: zero-copy scanout, modifier {}",
+        shingle_render::dmabuf::modifier_name(*modifier)
+      ),
+      ScanoutStatus::Copy(reason) => {
+        format!("output {name}: copy scanout, because {reason}")
+      }
+      ScanoutStatus::Untried => unreachable!("a scanout was tried"),
+    });
+    self.lit[index].status = status;
+  }
+
+  /// Marks output `name`'s zero-copy scanout as failed for `reason`, as
+  /// when the renderer cannot draw into its buffers any more: its next
+  /// [`Display::upgrade_scanout`] moves it back to copy scanout.
+  pub fn scanout_failed(&mut self, name: &str, reason: &str) {
+    if let Some(lit) = self.find_mut(name)
+      && lit.scanout.zero_copy()
+    {
+      lit.fallback = Some(reason.to_owned());
+    }
+  }
+
+  /// Moves lit output `index` from zero-copy back to copy scanout, for
+  /// `reason`.
+  fn fall_back(&mut self, index: usize, reason: String) {
+    let name = self.lit[index].name().to_owned();
+    let size = self.lit[index].mode.size();
+    let copy = match CopyScanout::new(self.device.as_mut(), size) {
+      Ok(copy) => copy,
+      Err(error) => {
+        diagnostics::log(&format!(
+          "output {name}: no copy buffers to fall back to: {error}"
+        ));
+        return;
+      }
+    };
+    match self.switch_scanout(index, Box::new(copy)) {
+      Ok(()) => {
+        diagnostics::log(&format!(
+          "output {name}: back to copy scanout, because {reason}"
+        ));
+        let lit = &mut self.lit[index];
+        lit.status = ScanoutStatus::Copy(reason);
+        lit.fallback = None;
+      }
+      Err(error) => diagnostics::log(&format!(
+        "output {name}: falling back to copy scanout failed: {error}"
+      )),
+    }
+  }
+
+  /// Shows `scanout`'s current buffer on lit output `index` with a
+  /// blocking flip, after a `TEST_ONLY` one, then frees the old scanout's
+  /// buffers, which are off screen by then. On failure the new scanout is
+  /// freed and the old one stays.
+  fn switch_scanout(
+    &mut self,
+    index: usize,
+    mut scanout: Box<dyn Scanout>,
+  ) -> io::Result<()> {
+    let request =
+      atomic::flip(&self.lit[index].output.props, scanout.current());
+    let result = self
+      .device
+      .commit(&request, CommitFlags::TEST_ONLY)
+      .and_then(|()| self.device.commit(&request, CommitFlags::default()));
+    if let Err(error) = result {
+      scanout.destroy(self.device.as_mut());
+      return Err(error);
+    }
+    let mut old = std::mem::replace(&mut self.lit[index].scanout, scanout);
+    old.destroy(self.device.as_mut());
+    Ok(())
   }
 
   /// [`Display::dispatch_flips`] without the outputs' names, for one
@@ -1377,12 +1600,14 @@ impl Display {
     let mut old_modes = Vec::new();
     for (index, mode, blob, scanout) in changed {
       let lit = &mut self.lit[index];
-      let old = (
+      let old = OldMode {
         index,
-        std::mem::replace(&mut lit.mode, mode),
-        std::mem::replace(&mut lit.blob, blob),
-        std::mem::replace(&mut lit.scanout, Box::new(scanout)),
-      );
+        mode: std::mem::replace(&mut lit.mode, mode),
+        blob: std::mem::replace(&mut lit.blob, blob),
+        scanout: std::mem::replace(&mut lit.scanout, Box::new(scanout)),
+        status: std::mem::replace(&mut lit.status, ScanoutStatus::Untried),
+        fallback: lit.fallback.take(),
+      };
       old_modes.push(old);
     }
     let mut removed = Vec::new();
@@ -1404,13 +1629,15 @@ impl Display {
         sequence: Sequence::default(),
         dpms_on: true,
         wanted_dpms: self.wanted_dpms,
+        status: ScanoutStatus::Untried,
+        fallback: None,
       });
     }
     match self.modeset() {
       Ok(()) => {
-        for (_, _, blob, mut scanout) in old_modes {
-          scanout.destroy(self.device.as_mut());
-          let _ = self.device.destroy_blob(blob);
+        for mut old in old_modes {
+          old.scanout.destroy(self.device.as_mut());
+          let _ = self.device.destroy_blob(old.blob);
         }
         for (_, lit) in removed {
           self.managed.insert(lit.name().to_owned(), OutputMode::Off);
@@ -1451,11 +1678,14 @@ impl Display {
           let index = index.min(self.lit.len());
           self.lit.insert(index, lit);
         }
-        for (index, mode, blob, scanout) in old_modes {
-          let lit = &mut self.lit[index];
-          lit.mode = mode;
-          let new_blob = std::mem::replace(&mut lit.blob, blob);
-          let mut new_scanout = std::mem::replace(&mut lit.scanout, scanout);
+        for old in old_modes {
+          let lit = &mut self.lit[old.index];
+          lit.mode = old.mode;
+          lit.status = old.status;
+          lit.fallback = old.fallback;
+          let new_blob = std::mem::replace(&mut lit.blob, old.blob);
+          let mut new_scanout =
+            std::mem::replace(&mut lit.scanout, old.scanout);
           new_scanout.destroy(self.device.as_mut());
           let _ = self.device.destroy_blob(new_blob);
         }
@@ -1704,3 +1934,5 @@ fn monotonic_now() -> std::time::Duration {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod zero_copy_tests;

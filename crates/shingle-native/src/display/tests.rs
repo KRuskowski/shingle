@@ -9,6 +9,7 @@ use crate::{
     fake::{FakeKms, mode},
   },
   pacing::FLIP_TIMEOUT,
+  scanout::Frame,
 };
 
 type Card = Rc<RefCell<FakeKms>>;
@@ -25,12 +26,12 @@ fn started() -> (Card, Display) {
   (card, display)
 }
 
-fn frame(width: u32, height: u32) -> Frame {
-  Frame {
+fn frame(width: u32, height: u32) -> Drawn {
+  Drawn::Pixels(Frame {
     width,
     height,
     rgba: [10, 20, 30, 255].repeat((width * height) as usize),
-  }
+  })
 }
 
 fn property(card: &Card, name: &str) -> PropertyId {
