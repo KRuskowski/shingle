@@ -23,7 +23,7 @@ group `nested-outputs` checks, with `shingle --backend nested --outputs
   `stipc/create_wayland_output` opens `HEADLESS-2` again, which takes
   the probe back; `stipc/destroy_wayland_output` closes `HEADLESS-3`;
 - Wayfire's errors for an unknown output and from a Shingle that is not
-  nested, and `list-methods` with 86 methods;
+  nested, and `list-methods` with 87 methods;
 - closing the last window quits nested Shingle with status 0.
 
 The group `nested-smoke` repeats the nested smoke test of
@@ -54,7 +54,7 @@ STILL = {
                'gaps': {'top': 0, 'right': 0, 'bottom': 0, 'left': 0,
                         'inner': 0}},
 }
-METHODS = 86
+METHODS = 87
 # Globals the smoke test requires nested to offer.
 REQUIRED_GLOBALS = ('wl_compositor', 'wl_shm', 'wl_seat', 'wl_output',
                     'xdg_wm_base', 'zwlr_layer_shell_v1')

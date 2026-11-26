@@ -654,8 +654,10 @@ WCM_FIXTURE = os.path.join(
 # a_wcm_written_file_imports_with_the_expected_warnings expects them.
 # Scale is not in the fixture's plugin list, so its `pinch in 4` (line
 # 332) is not read since WG-2. Since WG-4 the `<super>` of line 61 and
-# the `[wayfire-shell]` section of line 412 are read.
-WCM_WARNING_LINES = (14, 24, 40, 93, 110, 141, 154, 175, 305, 376, 417, 430)
+# the `[wayfire-shell]` section of line 412 are read, and since WG-5
+# the `[vswipe]` section of line 376 belongs to a plugin Shingle has
+# that the list leaves out, which is not read.
+WCM_WARNING_LINES = (14, 24, 40, 93, 110, 141, 154, 175, 305, 417, 430)
 # Wayfire's options (tools/wayfire_options/generate.py).
 OPTION_TABLE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..', 'crates',
@@ -887,10 +889,10 @@ def auto_layout_checks(results, binary):
   try:
     methods = shingle.ipc.call('list-methods').get('methods', [])
     # 81 after MO-2, 83 with MO-4's wsets methods, 85 with MO-6's
-    # stipc methods for nested windows and 86 with WG-4's
-    # wayfire-shell/toggle_menu.
-    results.check('MO-6: list-methods returns 86 methods',
-                  len(methods) == 86, str(len(methods)))
+    # stipc methods for nested windows, 86 with WG-4's
+    # wayfire-shell/toggle_menu and 87 with WG-5's stipc/feed_gesture.
+    results.check('MO-6: list-methods returns 87 methods',
+                  len(methods) == 87, str(len(methods)))
     positions = shingle.positions()
     results.check('MO-2: wlr-randr lists both outputs at auto positions',
                   positions == {'HEADLESS-1': (0, 0),

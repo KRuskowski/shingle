@@ -89,9 +89,10 @@ def global_checks(results, shingle):
   results.check('WG-4: wayland-info lists zwf_shell_manager_v2 version 3',
                 version == 3, f'version {version}')
   methods = shingle.ipc.call('list-methods').get('methods', [])
-  results.check('WG-4: list-methods has wayfire-shell/toggle_menu (86 '
+  # 87 since WG-5's stipc/feed_gesture.
+  results.check('WG-4: list-methods has wayfire-shell/toggle_menu (87 '
                 'methods)', 'wayfire-shell/toggle_menu' in methods
-                and len(methods) == 86, f'{len(methods)} methods')
+                and len(methods) == 87, f'{len(methods)} methods')
 
 def hotspot_checks(results, shingle, client, shell_outputs, rects):
   """An edge hotspot of HEADLESS-2 enters after its timeout and leaves."""

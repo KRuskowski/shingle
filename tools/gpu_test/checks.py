@@ -750,13 +750,16 @@ CHECKS = {
 def all_checks():
   """DB-2's and DB-3's groups here, DB-4's and DB-5's
   (dmabuf_checks.py), MO-5's (output_checks.py), MO-6's
-  (nested_output_checks.py) and WG-2's (wayfire_checks.py)."""
+  (nested_output_checks.py), WG-2's (wayfire_checks.py) and WG-5's
+  (vswipe_checks.py)."""
   import dmabuf_checks
   import nested_output_checks
   import output_checks
+  import vswipe_checks
   import wayfire_checks
   return {**CHECKS, **dmabuf_checks.CHECKS, **output_checks.CHECKS,
-          **nested_output_checks.CHECKS, **wayfire_checks.CHECKS}
+          **nested_output_checks.CHECKS, **wayfire_checks.CHECKS,
+          **vswipe_checks.CHECKS}
 
 def run_checks(groups, binary, wl_probe, captures_directory=None):
   """Runs the check `groups` in order; returns 0 when all passed."""
