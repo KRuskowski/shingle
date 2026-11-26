@@ -1,6 +1,11 @@
+//! wlr-foreign-toplevel-management: a handle per window for task bars,
+//! with `output_enter` for the output that shows the window's workspace
+//! set and `output_leave` when it moves or that output goes
+//! (docs/design/multi-output.md, section 8).
+
 use std::collections::{HashMap, HashSet};
 
-use shingle_core::WindowId;
+use shingle_core::{OutputId, WindowId};
 use wayland_protocols_wlr::foreign_toplevel::v1::server::{
   zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
   zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
@@ -20,6 +25,8 @@ struct Manager {
 struct Handle {
   resource: ZwlrForeignToplevelHandleV1,
   window: Option<WindowId>,
+  /// The `wl_output`s the handle was told its toplevel is on.
+  entered: HashMap<ObjectId, WlOutput>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,6 +37,8 @@ pub(crate) struct ForeignWindow {
   minimized: bool,
   fullscreen: bool,
   activated: bool,
+  /// The output that shows the window's workspace set, if one does.
+  output: Option<OutputId>,
 }
 
 #[derive(Default)]
@@ -44,35 +53,68 @@ pub(crate) fn create_global(handle: &DisplayHandle) {
     .create_global::<CompositorState, ZwlrForeignToplevelManagerV1, ()>(3, ());
 }
 
-/// Tells the toplevel handles of `output`'s client that their toplevels
-/// left it.
+/// Tells the toplevel handles on `output`, a binding of an output that
+/// went, that their toplevels left it.
 pub(crate) fn output_removed(state: &mut CompositorState, output: &WlOutput) {
-  for_client_handles(state, output, |resource| resource.output_leave(output));
-}
-
-/// Tells the toplevel handles of `output`'s client that their toplevels
-/// are on the newly bound `output`.
-pub(crate) fn output_bound(state: &mut CompositorState, output: &WlOutput) {
-  for_client_handles(state, output, |resource| resource.output_enter(output));
-}
-
-fn for_client_handles(
-  state: &CompositorState,
-  output: &WlOutput,
-  mut send: impl FnMut(&ZwlrForeignToplevelHandleV1),
-) {
-  let Some(client) = output.client().map(|client| client.id()) else {
-    return;
-  };
-  for handle in state.foreign_toplevels.handles.values() {
-    if handle.window.is_some()
-      && handle.resource.client().map(|owner| owner.id())
-        == Some(client.clone())
-    {
-      send(&handle.resource);
+  for handle in state.foreign_toplevels.handles.values_mut() {
+    if handle.entered.remove(&output.id()).is_some() {
+      handle.resource.output_leave(output);
       handle.resource.done();
     }
   }
+}
+
+/// Sends handle `id` `output_enter` for its client's bindings of its
+/// window's output and `output_leave` for those it left; returns whether
+/// it sent anything.
+fn sync_handle_outputs(
+  state: &mut CompositorState,
+  id: &ObjectId,
+  output: Option<&OutputId>,
+) -> bool {
+  let Some(client) = state
+    .foreign_toplevels
+    .handles
+    .get(id)
+    .and_then(|handle| handle.resource.client())
+  else {
+    return false;
+  };
+  let bound = output
+    .and_then(|output| state.outputs.get(output))
+    .into_iter()
+    .flat_map(|output| output.bound.iter())
+    .filter(|(_, output)| {
+      output
+        .client()
+        .is_some_and(|owner| owner.id() == client.id())
+    })
+    .map(|(id, output)| (id.clone(), output.clone()))
+    .collect::<HashMap<_, _>>();
+  let Some(handle) = state.foreign_toplevels.handles.get_mut(id) else {
+    return false;
+  };
+  let mut changed = false;
+  handle.entered.retain(|id, output| {
+    if bound.contains_key(id) {
+      return true;
+    }
+    if output.is_alive() {
+      handle.resource.output_leave(output);
+    }
+    changed = true;
+    false
+  });
+  for (id, output) in bound {
+    if let std::collections::hash_map::Entry::Vacant(entry) =
+      handle.entered.entry(id)
+    {
+      handle.resource.output_enter(&output);
+      entry.insert(output);
+      changed = true;
+    }
+  }
+  changed
 }
 
 pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {
@@ -114,6 +156,35 @@ pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {
     }
     state.foreign_toplevels.known.insert(window, info);
   }
+  let handles = state
+    .foreign_toplevels
+    .handles
+    .iter()
+    .filter_map(|(id, handle)| {
+      let window = handle.window?;
+      let output = state.foreign_toplevels.known.get(&window)?.output.clone();
+      Some((id.clone(), output))
+    })
+    .collect::<Vec<_>>();
+  for (id, output) in handles {
+    if sync_handle_outputs(state, &id, output.as_ref())
+      && let Some(handle) = state.foreign_toplevels.handles.get(&id)
+    {
+      handle.resource.done();
+    }
+  }
+}
+
+/// The output that shows `window`'s workspace set, if one does.
+fn window_output(
+  state: &CompositorState,
+  window: WindowId,
+) -> Option<OutputId> {
+  let info = state.core.window_info(window).ok()?;
+  let output = info.location.output;
+  (state.outputs.get(&output).is_some()
+    && state.core.wset_of(&output) == Some(info.wset))
+  .then_some(output)
 }
 
 pub(crate) fn windows(
@@ -135,6 +206,7 @@ pub(crate) fn windows(
             minimized: leaf.is_some_and(|state| state.minimized),
             fullscreen: leaf.is_some_and(|state| state.fullscreen),
             activated: focused == Some(window),
+            output: window_output(state, window),
           },
         )
       }),
@@ -171,20 +243,18 @@ fn create_handle(
   manager.resource.toplevel(&resource);
   resource.title(info.title.clone());
   resource.app_id(info.app_id.clone());
-  if let Some(output) = state.outputs.bound().find(|output| {
-    output.client().as_ref().map(Client::id) == Some(client.id())
-  }) {
-    resource.output_enter(output);
-  }
   send_state(&resource, info);
-  resource.done();
+  let id = resource.id();
   state.foreign_toplevels.handles.insert(
-    resource.id(),
+    id.clone(),
     Handle {
-      resource,
+      resource: resource.clone(),
       window: Some(window),
+      entered: HashMap::new(),
     },
   );
+  sync_handle_outputs(state, &id, info.output.as_ref());
+  resource.done();
 }
 
 fn update_handles(

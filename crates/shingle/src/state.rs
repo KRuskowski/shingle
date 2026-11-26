@@ -2126,10 +2126,9 @@ impl GlobalDispatch<WlOutput, crate::output::OutputGlobal> for CompositorState {
       state.primary().send(&resource, true);
       return;
     };
+    // Surfaces, toplevel handles and workspace groups on it hear so at
+    // the end of the turn.
     output.send(&resource, true);
-    if output.id == state.primary().id {
-      crate::foreign_toplevel::output_bound(state, &resource);
-    }
     if let Some(output) = state.outputs.by_generation_mut(generation) {
       output.bound.insert(resource.id(), resource);
     }

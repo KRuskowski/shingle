@@ -26,6 +26,7 @@ use wayland_protocols::{
   },
 };
 use wayland_protocols_wlr::{
+  foreign_toplevel::v1::client::zwlr_foreign_toplevel_manager_v1 as toplevels,
   gamma_control::v1::client::zwlr_gamma_control_manager_v1 as gamma,
   layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
@@ -969,5 +970,40 @@ fn every_output_has_a_workspace_group_of_its_own() {
   client.roundtrip(&mut compositor);
   let groups = workspace_groups(&client, &outputs);
   assert_eq!(groups.keys().collect::<Vec<_>>(), ["HEADLESS-1"]);
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_toplevel_handle_is_on_its_windows_output() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let _manager = client.bind::<toplevels::ZwlrForeignToplevelManagerV1>(3);
+  client.roundtrip(&mut compositor);
+  let (_toplevel, window) = mapped(&mut compositor, &mut client, "listed");
+  client.roundtrip(&mut compositor);
+  let on = |client: &TestClient| {
+    let lists = client.events.toplevel_outputs.values().collect::<Vec<_>>();
+    assert_eq!(lists.len(), 1, "one handle");
+    lists[0]
+      .iter()
+      .map(|id| {
+        outputs
+          .iter()
+          .find(|(_, output)| output.id() == *id)
+          .map_or("?", |(name, _)| name.as_str())
+          .to_owned()
+      })
+      .collect::<Vec<_>>()
+  };
+  assert_eq!(on(&client), ["HEADLESS-1"]);
+  move_to(&mut compositor, window, "HEADLESS-2");
+  client.roundtrip(&mut compositor);
+  assert_eq!(on(&client), ["HEADLESS-2"]);
+  compositor
+    .remove_output(&OutputHandle::new("HEADLESS-2"))
+    .unwrap();
+  client.roundtrip(&mut compositor);
+  assert_eq!(on(&client), ["HEADLESS-1"], "it joined the active output");
   let _ = std::fs::remove_file(path);
 }

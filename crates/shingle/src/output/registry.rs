@@ -354,6 +354,12 @@ impl Outputs {
       .find(|output| output.info.name == id.as_str())
   }
 
+  /// Every live `wl_output` binding of every output.
+  #[cfg(test)]
+  pub(crate) fn bound(&self) -> impl Iterator<Item = &WlOutput> {
+    self.list.iter().flat_map(|output| output.bound.values())
+  }
+
   /// Takes the output called `id` out of the turned-off ones.
   pub(crate) fn take_disabled(
     &mut self,
@@ -364,11 +370,6 @@ impl Outputs {
       .iter()
       .position(|output| output.info.name == id.as_str())?;
     Some(self.disabled.remove(index))
-  }
-
-  /// Every live `wl_output` binding of every output.
-  pub(crate) fn bound(&self) -> impl Iterator<Item = &WlOutput> {
-    self.list.iter().flat_map(|output| output.bound.values())
   }
 }
 

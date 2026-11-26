@@ -72,6 +72,10 @@ use wayland_protocols_wlr::{
     zwlr_data_control_offer_v1::{self, ZwlrDataControlOfferV1},
     zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
   },
+  foreign_toplevel::v1::client::{
+    zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
+    zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
+  },
   gamma_control::v1::client::{
     zwlr_gamma_control_manager_v1::ZwlrGammaControlManagerV1,
     zwlr_gamma_control_v1::{self, ZwlrGammaControlV1},
@@ -182,6 +186,9 @@ pub(crate) struct Events {
   pub(crate) power: Vec<(ObjectId, &'static str)>,
   /// wlr-gamma-control events: the control and `size` or `failed`.
   pub(crate) gamma: Vec<(ObjectId, &'static str)>,
+  /// The `wl_output`s each wlr foreign-toplevel handle is on, by handle.
+  pub(crate) toplevel_outputs:
+    std::collections::HashMap<ObjectId, Vec<ObjectId>>,
   /// ext-workspace groups as announced, by object.
   pub(crate) workspace_groups: std::collections::HashMap<ObjectId, GroupSeen>,
   /// ext-workspace workspaces as announced, by object.
@@ -1204,6 +1211,52 @@ impl Dispatch<ZwlrGammaControlV1, ()> for Events {
       _ => return,
     };
     events.gamma.push((control.id(), seen));
+  }
+}
+
+impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ZwlrForeignToplevelManagerV1,
+    event: zwlr_foreign_toplevel_manager_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } =
+      event
+    {
+      events.toplevel_outputs.insert(toplevel.id(), Vec::new());
+    }
+  }
+
+  wayland_client::event_created_child!(Events, ZwlrForeignToplevelManagerV1, [
+    zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE
+      => (ZwlrForeignToplevelHandleV1, ()),
+  ]);
+}
+
+impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    handle: &ZwlrForeignToplevelHandleV1,
+    event: zwlr_foreign_toplevel_handle_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    let Some(outputs) = events.toplevel_outputs.get_mut(&handle.id()) else {
+      return;
+    };
+    match event {
+      zwlr_foreign_toplevel_handle_v1::Event::OutputEnter { output } => {
+        outputs.push(output.id());
+      }
+      zwlr_foreign_toplevel_handle_v1::Event::OutputLeave { output } => {
+        outputs.retain(|id| *id != output.id());
+      }
+      _ => {}
+    }
   }
 }
 
