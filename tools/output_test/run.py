@@ -18,7 +18,7 @@ user namespaces:
   cargo build -p shingle --example wl_probe
   tools/output_test/run.py [--binary target/debug/shingle]
       [--wl-probe target/debug/examples/wl_probe]
-      [--lock target/debug/shingle-lock] [--keep]
+      [--lock target/debug/shingle-lock] [--keep] [--checks NAME ...]
 
 It prints one line per check and exits 0 when all pass. The checks are
 the parts of NB-9 (docs/design/native-backend.md) that are not
@@ -79,6 +79,14 @@ Wayfire's geometry; and `wsets/set-output-wset` swaps the two outputs'
 sets in two calls. IPC watchers see `output-gain-focus`,
 `view-set-output`, `view-wset-changed` and `output-wset-changed`.
 
+WG-4 (docs/design/wayfire-gaps.md) checks `zwf_shell_manager_v2` with
+a raw-protocol client (wayland_wire.py, wayfire_shell_checks.py):
+headless Shingle with two outputs for the global, hotspots, fullscreen
+events of a `wl_probe --fullscreen` and `toggle_menu` from STIPC keys
+and IPC, and offscreen Shingle on lavapipe for `interactive_move` and
+the frontend's `toggle_menu`. `--checks NAME ...` runs only the groups
+of those function names, such as `wg4_headless_checks`.
+
 Signals go only to Shingle, wl_probe and shingle-lock, through
 `signal_checked`. The pure helpers are tested by `python3 -m unittest`
 in this directory (test_run.py).
@@ -96,9 +104,6 @@ import sys
 import threading
 import time
 
-# WG-4's checks, beside this file.
-import wayfire_shell_checks
-
 def _load_xwayland_harness():
   """tools/xwayland_test/run.py, for its IPC client, results and the
   checked signal helper."""
@@ -110,6 +115,15 @@ def _load_xwayland_harness():
   return module
 
 _HARNESS = _load_xwayland_harness()
+
+def _wayfire_shell_checks():
+  """WG-4's checks beside this file, loaded when they run, so that the
+  harnesses that load this file need not find them."""
+  directory = os.path.dirname(os.path.abspath(__file__))
+  if directory not in sys.path:
+    sys.path.insert(0, directory)
+  import wayfire_shell_checks  # pylint: disable=import-outside-toplevel
+  return wayfire_shell_checks
 Ipc = _HARNESS.Ipc
 Results = _HARNESS.Results
 device_fds = _HARNESS.device_fds
@@ -639,9 +653,9 @@ WCM_FIXTURE = os.path.join(
 # The warnings Shingle gives for WCM_FIXTURE, by line, as the unit test
 # a_wcm_written_file_imports_with_the_expected_warnings expects them.
 # Scale is not in the fixture's plugin list, so its `pinch in 4` (line
-# 332) is not read since WG-2.
-WCM_WARNING_LINES = (14, 24, 40, 61, 93, 110, 141, 154, 175, 305, 376, 412,
-                     417, 430)
+# 332) is not read since WG-2. Since WG-4 the `<super>` of line 61 and
+# the `[wayfire-shell]` section of line 412 are read.
+WCM_WARNING_LINES = (14, 24, 40, 93, 110, 141, 154, 175, 305, 376, 417, 430)
 # Wayfire's options (tools/wayfire_options/generate.py).
 OPTION_TABLE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..', 'crates',
@@ -872,10 +886,11 @@ def auto_layout_checks(results, binary):
                      backend=('--headless', '--outputs', '2'))
   try:
     methods = shingle.ipc.call('list-methods').get('methods', [])
-    # 81 after MO-2, 83 with MO-4's wsets methods and 85 with MO-6's
-    # stipc methods for nested windows.
-    results.check('MO-6: list-methods returns 85 methods',
-                  len(methods) == 85, str(len(methods)))
+    # 81 after MO-2, 83 with MO-4's wsets methods, 85 with MO-6's
+    # stipc methods for nested windows and 86 with WG-4's
+    # wayfire-shell/toggle_menu.
+    results.check('MO-6: list-methods returns 86 methods',
+                  len(methods) == 86, str(len(methods)))
     positions = shingle.positions()
     results.check('MO-2: wlr-randr lists both outputs at auto positions',
                   positions == {'HEADLESS-1': (0, 0),
@@ -1516,11 +1531,11 @@ def inner(binary):
     multi += [restored_session_checks, mo3_protocol_checks, mo4_focus_checks]
 
   def wg4_headless_checks(results, binary):
-    return wayfire_shell_checks.headless_checks(
+    return _wayfire_shell_checks().headless_checks(
         results, sys.modules[__name__], binary, wl_probe)
 
   def wg4_offscreen_checks(results, binary):
-    return wayfire_shell_checks.offscreen_checks(
+    return _wayfire_shell_checks().offscreen_checks(
         results, sys.modules[__name__], binary)
   groups = (randr_checks, configured_checks, wayfire_checks, wcm_ini_checks,
             client_environment_checks, nested_checks, *multi,
