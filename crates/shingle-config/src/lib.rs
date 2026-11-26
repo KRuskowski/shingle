@@ -199,6 +199,8 @@ pub struct ShingleConfig {
   pub vswitch: VswitchConfig,
   /// Touchpad workspace swipes (`[vswipe]`).
   pub vswipe: VswipeConfig,
+  /// Server-side window decorations (`[decoration]`).
+  pub decoration: DecorationConfig,
   /// Gaps, tiling policy, minimum tile size and drag previews, mostly from
   /// `[simple-tile]`.
   pub tiling: TilingConfig,
@@ -278,6 +280,7 @@ impl Default for ShingleConfig {
       workspaces: WorkspaceConfig::default(),
       vswitch: VswitchConfig::default(),
       vswipe: VswipeConfig::default(),
+      decoration: DecorationConfig::default(),
       tiling: TilingConfig::default(),
       resize: ResizeConfig::default(),
       idle: IdleConfig::default(),
@@ -655,6 +658,7 @@ impl ShingleConfig {
         .into(),
       ));
     }
+    self.decoration.validate()?;
     if !matches!(self.scale.title_overlay.as_str(), "never" | "mouse" | "all") {
       return Err(ConfigError::Invalid(
         "scale.title_overlay must be never, mouse, or all".into(),
@@ -1615,6 +1619,119 @@ impl Default for VswipeConfig {
       speed_factor: 256.0,
       speed_cap: 0.05,
     }
+  }
+}
+
+/// Server-side window decorations from Wayfire's `decoration` plugin
+/// (metadata/decoration.xml, plugins/decor/). The defaults are Wayfire's.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DecorationConfig {
+  /// The title font as Wayfire names it to Pango. `[decoration] font`;
+  /// default `sans-serif`. Kept for IPC and WCM: Shingle draws every
+  /// title in its bundled Inter.
+  pub font: String,
+  /// Title text colour. `[decoration] font_color`; default white.
+  pub font_color: [f64; 4],
+  /// Title text size as a fraction of `title_height`. `[decoration]
+  /// font_scale`; 0.1–1; default 0.8.
+  pub font_scale: f64,
+  /// `left`, `center` or `right`. `[decoration] title_halign`; default
+  /// `left`.
+  pub title_halign: String,
+  /// `top`, `center` or `bottom`. `[decoration] title_valign`; default
+  /// `top`.
+  pub title_valign: String,
+  /// Height of the title bar in logical pixels; 0 draws none.
+  /// `[decoration] title_height`; 0–100; default 30.
+  pub title_height: u32,
+  /// Width of the border around the window and its title bar, in logical
+  /// pixels. `[decoration] border_size`; 0–100; default 4.
+  pub border_size: u32,
+  /// The buttons from left to right, among `minimize`, `maximize` and
+  /// `close`; other words are ignored. `[decoration] button_order`;
+  /// default `minimize maximize close`.
+  pub button_order: String,
+  /// Button size as a fraction of `title_height`. `[decoration]
+  /// button_scale`; 0.1–1; default 0.7.
+  pub button_scale: f64,
+  /// Pixels on each side of a button. `[decoration] button_padding`;
+  /// default 4.
+  pub button_padding: i32,
+  /// Frame colour of the focused window. `[decoration] active_color`;
+  /// default `#222222AA`.
+  pub active_color: [f64; 4],
+  /// Frame colour of the other windows. `[decoration] inactive_color`;
+  /// default `#333333DD`.
+  pub inactive_color: [f64; 4],
+  /// Views never decorated. `[decoration] ignore_views`; default `none`.
+  pub ignore_views: ViewMatcher,
+  /// Views decorated whatever their client asks. `[decoration]
+  /// forced_views`; default `none`.
+  pub forced_views: ViewMatcher,
+}
+
+impl Default for DecorationConfig {
+  fn default() -> Self {
+    let none =
+      || ViewMatcher::try_from("none".to_owned()).expect("none is a matcher");
+    let gray = |value: u8, alpha: u8| {
+      let value = f64::from(value) / 255.0;
+      [value, value, value, f64::from(alpha) / 255.0]
+    };
+    Self {
+      font: "sans-serif".into(),
+      font_color: [1.0, 1.0, 1.0, 1.0],
+      font_scale: 0.8,
+      title_halign: "left".into(),
+      title_valign: "top".into(),
+      title_height: 30,
+      border_size: 4,
+      button_order: "minimize maximize close".into(),
+      button_scale: 0.7,
+      button_padding: 4,
+      active_color: gray(0x22, 0xaa),
+      inactive_color: gray(0x33, 0xdd),
+      ignore_views: none(),
+      forced_views: none(),
+    }
+  }
+}
+
+impl DecorationConfig {
+  /// Checks the ranges of Wayfire's metadata, which wf-config clamps a
+  /// Wayfire file's values to, and the alignment names.
+  fn validate(&self) -> Result<(), ConfigError> {
+    let colors = [self.font_color, self.active_color, self.inactive_color];
+    if colors.iter().flatten().any(|component| {
+      !component.is_finite() || !(0.0..=1.0).contains(component)
+    }) {
+      return Err(ConfigError::Invalid(
+        "decoration colour components must be between 0 and 1".into(),
+      ));
+    }
+    let fraction = |value: f64| (0.1..=1.0).contains(&value);
+    if !fraction(self.font_scale) || !fraction(self.button_scale) {
+      return Err(ConfigError::Invalid(
+        "decoration.font_scale and button_scale must be 0.1–1".into(),
+      ));
+    }
+    if self.title_height > 100 || self.border_size > 100 {
+      return Err(ConfigError::Invalid(
+        "decoration.title_height and border_size must be 0–100".into(),
+      ));
+    }
+    if !matches!(self.title_halign.as_str(), "left" | "center" | "right") {
+      return Err(ConfigError::Invalid(
+        "decoration.title_halign must be left, center or right".into(),
+      ));
+    }
+    if !matches!(self.title_valign.as_str(), "top" | "center" | "bottom") {
+      return Err(ConfigError::Invalid(
+        "decoration.title_valign must be top, center or bottom".into(),
+      ));
+    }
+    Ok(())
   }
 }
 
@@ -3596,6 +3713,125 @@ mod tests {
         let yaml = format!("scale:\n  {field}: {value}\n");
         assert!(ShingleConfig::parse(&yaml, ConfigFormat::Yaml).is_err());
       }
+    }
+  }
+
+  #[test]
+  fn decoration_imports_every_option_clamps_and_validates() {
+    let text = concat!(
+      "[core]\nplugins = decoration\n[decoration]\n",
+      "font = Serif Bold 12\nfont_color = \\#FF000080\nfont_scale = 0.5\n",
+      "title_halign = center\ntitle_valign = bottom\ntitle_height = 24\n",
+      "border_size = 2\nbutton_order = close maximize\n",
+      "button_scale = 0.9\nbutton_padding = -2\n",
+      "active_color = \\#112233FF\ninactive_color = \\#44556677\n",
+      "ignore_views = app_id is \"panel\"\n",
+      "forced_views = title contains \"term\"\n",
+    );
+    let (config, warnings) =
+      ShingleConfig::parse_with_warnings(text, ConfigFormat::Wayfire).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(config.plugin_enabled("decoration"));
+    let decoration = &config.decoration;
+    assert_eq!(decoration.font, "Serif Bold 12");
+    assert_eq!(decoration.font_color, [1.0, 0.0, 0.0, 128.0 / 255.0]);
+    assert_eq!(decoration.font_scale, 0.5);
+    assert_eq!(decoration.title_halign, "center");
+    assert_eq!(decoration.title_valign, "bottom");
+    assert_eq!(decoration.title_height, 24);
+    assert_eq!(decoration.border_size, 2);
+    assert_eq!(decoration.button_order, "close maximize");
+    assert_eq!(decoration.button_scale, 0.9);
+    assert_eq!(decoration.button_padding, -2);
+    assert_eq!(decoration.active_color[3], 1.0);
+    assert_eq!(decoration.inactive_color[3], f64::from(0x77) / 255.0);
+    let panel = ViewProperties {
+      app_id: "panel",
+      ..ViewProperties::default()
+    };
+    assert!(decoration.ignore_views.matches_view(&panel));
+    let terminal = ViewProperties {
+      title: "a terminal",
+      ..ViewProperties::default()
+    };
+    assert!(decoration.forced_views.matches_view(&terminal));
+    // Wayfire's defaults are Shingle's, and its default lists match no
+    // view.
+    let wayfire = ShingleConfig::parse(
+      "[core]\nplugins = decoration\n",
+      ConfigFormat::Wayfire,
+    )
+    .unwrap();
+    let default = DecorationConfig::default();
+    assert_eq!(wayfire.decoration.title_height, 30);
+    assert_eq!(wayfire.decoration.border_size, 4);
+    assert_eq!(wayfire.decoration.button_order, default.button_order);
+    assert_eq!(wayfire.decoration.active_color, default.active_color);
+    assert_eq!(wayfire.decoration.ignore_views.as_str(), "none");
+    assert!(
+      !wayfire
+        .decoration
+        .forced_views
+        .matches_view(&ViewProperties::default())
+    );
+    // wf-config clamps values outside the metadata's bounds.
+    let clamped = ShingleConfig::parse(
+      concat!(
+        "[core]\nplugins = decoration\n[decoration]\n",
+        "title_height = 500\nborder_size = -3\nfont_scale = 4\n",
+        "button_scale = 0\n",
+      ),
+      ConfigFormat::Wayfire,
+    )
+    .unwrap();
+    assert_eq!(clamped.decoration.title_height, 100);
+    assert_eq!(clamped.decoration.border_size, 0);
+    assert_eq!(clamped.decoration.font_scale, 1.0);
+    assert_eq!(clamped.decoration.button_scale, 0.1);
+    // Without decoration in the list its section is not read.
+    let unlisted = ShingleConfig::parse(
+      "[core]\nplugins = vswitch\n[decoration]\ntitle_height = 10\n",
+      ConfigFormat::Wayfire,
+    )
+    .unwrap();
+    assert!(!unlisted.plugin_enabled("decoration"));
+    assert_eq!(unlisted.decoration.title_height, 30);
+    // Bad values warn and keep the default.
+    for line in [
+      "title_halign = middle",
+      "title_valign = up",
+      "font_scale = nan",
+      "active_color = 2 0 0 1",
+      "ignore_views = app_id frobs x",
+      "button_padding = wide",
+    ] {
+      let text =
+        format!("[core]\nplugins = decoration\n[decoration]\n{line}\n");
+      let (config, warnings) =
+        ShingleConfig::parse_with_warnings(&text, ConfigFormat::Wayfire)
+          .unwrap();
+      assert_eq!(warnings.len(), 1, "{line}: {warnings:?}");
+      let decoration = &config.decoration;
+      assert_eq!(decoration.title_halign, "left", "{line}");
+      assert_eq!(decoration.title_valign, "top", "{line}");
+      assert_eq!(decoration.font_scale, 0.8, "{line}");
+      assert_eq!(decoration.active_color, default.active_color, "{line}");
+      assert_eq!(decoration.ignore_views.as_str(), "none", "{line}");
+      assert_eq!(decoration.button_padding, 4, "{line}");
+    }
+    let yaml = "decoration:\n  title_height: 20\n  title_halign: right\n";
+    let yaml = ShingleConfig::parse(yaml, ConfigFormat::Yaml).unwrap();
+    assert_eq!(yaml.decoration.title_height, 20);
+    assert_eq!(yaml.decoration.title_halign, "right");
+    for bad in [
+      "decoration:\n  title_height: 101\n",
+      "decoration:\n  font_scale: 0\n",
+      "decoration:\n  title_valign: middle\n",
+    ] {
+      assert!(
+        ShingleConfig::parse(bad, ConfigFormat::Yaml).is_err(),
+        "{bad}"
+      );
     }
   }
 

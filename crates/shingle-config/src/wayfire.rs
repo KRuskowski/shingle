@@ -17,6 +17,7 @@ const SECTIONS: &[&str] = &[
   "autostart",
   "command",
   "core",
+  "decoration",
   "expo",
   "ext-toplevel",
   "ext-workspace",
@@ -883,6 +884,48 @@ fn apply(
     ("workarounds", "focus_main_surface_instead_of_popup") => {
       config.behavior.focus_main_surface_instead_of_popup = boolean(value)?
     }
+    ("decoration", "font") => config.decoration.font = value.to_owned(),
+    ("decoration", "font_color") => {
+      config.decoration.font_color = crate::parse_color(value)?
+    }
+    // wf-config clamps a value to the bounds of Wayfire's metadata
+    // (wf-config:include/wayfire/config/option.hpp, `clamp_value`).
+    ("decoration", "font_scale") => {
+      config.decoration.font_scale = clamped(value, 0.1, 1.0)?
+    }
+    ("decoration", "title_halign") => {
+      config.decoration.title_halign = value.to_owned()
+    }
+    ("decoration", "title_valign") => {
+      config.decoration.title_valign = value.to_owned()
+    }
+    ("decoration", "title_height") => {
+      config.decoration.title_height = clamped::<i64>(value, 0, 100)? as u32
+    }
+    ("decoration", "border_size") => {
+      config.decoration.border_size = clamped::<i64>(value, 0, 100)? as u32
+    }
+    ("decoration", "button_order") => {
+      config.decoration.button_order = value.to_owned()
+    }
+    ("decoration", "button_scale") => {
+      config.decoration.button_scale = clamped(value, 0.1, 1.0)?
+    }
+    ("decoration", "button_padding") => {
+      config.decoration.button_padding = number(value)?
+    }
+    ("decoration", "active_color") => {
+      config.decoration.active_color = crate::parse_color(value)?
+    }
+    ("decoration", "inactive_color") => {
+      config.decoration.inactive_color = crate::parse_color(value)?
+    }
+    ("decoration", "ignore_views") => {
+      config.decoration.ignore_views = value.to_owned().try_into()?
+    }
+    ("decoration", "forced_views") => {
+      config.decoration.forced_views = value.to_owned().try_into()?
+    }
     ("core", "preferred_decoration_mode") => {
       config.behavior.preferred_decoration_mode = value.to_lowercase()
     }
@@ -1208,6 +1251,26 @@ fn number<T: std::str::FromStr>(value: &str) -> Result<T, ConfigError> {
     .map_err(|_| ConfigError::Invalid(format!("invalid number {value:?}")))
 }
 
+/// A number clamped to `minimum..=maximum`, as wf-config clamps an option
+/// to its metadata's bounds. NaN is refused.
+fn clamped<T: std::str::FromStr + PartialOrd>(
+  value: &str,
+  minimum: T,
+  maximum: T,
+) -> Result<T, ConfigError> {
+  let parsed: T = number(value)?;
+  if parsed.partial_cmp(&minimum).is_none() {
+    return Err(ConfigError::Invalid(format!("invalid number {value:?}")));
+  }
+  Ok(if parsed < minimum {
+    minimum
+  } else if parsed > maximum {
+    maximum
+  } else {
+    parsed
+  })
+}
+
 fn boolean(value: &str) -> Result<bool, ConfigError> {
   match value.to_lowercase().as_str() {
     "true" | "yes" | "on" | "1" => Ok(true),
@@ -1284,7 +1347,6 @@ mod tests {
         "[blur] belongs to a plugin Shingle does not have; its 18",
       ),
       (93, "[cube] belongs to a plugin"),
-      (110, "[decoration] belongs to a plugin"),
       (
         141,
         "[expo] toggle: \"hotspot top-left 10x10 500\" is a hotspot",

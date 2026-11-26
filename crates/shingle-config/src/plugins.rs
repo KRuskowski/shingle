@@ -8,6 +8,7 @@
 //! autostart entries. The rest is checked where it is used, through
 //! [`ShingleConfig::plugin_enabled`]: tiling (`simple-tile`), touch
 //! gestures (`extra-gestures`), touchpad workspace swipes (`vswipe`),
+//! server-side decorations (`decoration`),
 //! Scale's title filter
 //! (`scale-title-filter`) and the protocols of Wayfire's protocol plugins.
 //! IPC is not a plugin here: `--ipc` governs it, so `ipc` and `ipc-rules`
@@ -22,6 +23,7 @@ pub const PLUGINS: &[&str] = &[
   "animate",
   "autostart",
   "command",
+  "decoration",
   "expo",
   "ext-toplevel",
   "ext-workspace",
