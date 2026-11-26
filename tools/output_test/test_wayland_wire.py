@@ -121,6 +121,24 @@ class ClientTest(unittest.TestCase):
     client.close()
     thread.join(5)
 
+class NewObjectTest(unittest.TestCase):
+  """Objects the compositor creates in an event."""
+
+  def test_an_activate_creates_a_context_that_gets_events(self):
+    client = wayland_wire.Client.__new__(wayland_wire.Client)
+    client.interfaces = {1: 'wl_display', 3: 'zwp_input_method_v1'}
+    client.events = []
+    client.done_callbacks = set()
+    client.error = None
+    client.globals = {}
+    context = 0xff000001
+    client._event(3, 0, struct.pack('=I', context))
+    client._event(context, 4, struct.pack('=I', 7))
+    self.assertEqual(client.interfaces[context],
+                     'zwp_input_method_context_v1')
+    self.assertEqual(client.events_of(context), [('commit_state', [7])])
+    self.assertEqual(client.events_of(3), [('activate', [context])])
+
 class HelperTest(unittest.TestCase):
   """wayfire_shell_checks' parsing."""
 

@@ -1,5 +1,6 @@
 """A raw Wayland wire-protocol client, just enough for WG-4's checks of
-wayfire-shell-unstable-v2 (docs/design/wayfire-gaps.md).
+wayfire-shell-unstable-v2 and the text-input-v1 checks with input
+methods v1 and v2 (docs/design/wayfire-gaps.md).
 
 It speaks the protocol on the socket itself, without libwayland, so that
 the checks see exactly the messages Shingle sends: it binds globals,
@@ -21,7 +22,8 @@ import struct
 import time
 
 # Event signatures by interface and opcode: (name, argument types), with
-# `u` uint, `i` int, `s` string, `o` object, `a` array.
+# `u` uint, `i` int, `s` string, `o` object, `a` array and `n` an object
+# the compositor creates (see NEW_OBJECTS).
 EVENTS = {
     'wl_display': {0: ('error', 'ous'), 1: ('delete_id', 'u')},
     'wl_registry': {0: ('global', 'usu'), 1: ('global_remove', 'u')},
@@ -35,6 +37,27 @@ EVENTS = {
                       2: ('toggle_menu', '')},
     'zwf_hotspot_v2': {0: ('enter', ''), 1: ('leave', ''),
                        2: ('proximity_changed', 'u')},
+    'zwp_text_input_v1': {
+        0: ('enter', 'o'), 1: ('leave', ''), 2: ('modifiers_map', 'a'),
+        3: ('input_panel_state', 'u'), 4: ('preedit_string', 'uss'),
+        5: ('preedit_styling', 'uuu'), 6: ('preedit_cursor', 'i'),
+        7: ('commit_string', 'us'), 8: ('cursor_position', 'ii'),
+        9: ('delete_surrounding_text', 'iu'), 10: ('keysym', 'uuuuu'),
+        11: ('language', 'us'), 12: ('text_direction', 'uu')},
+    'zwp_input_method_v1': {0: ('activate', 'n'), 1: ('deactivate', 'o')},
+    'zwp_input_method_context_v1': {
+        0: ('surrounding_text', 'suu'), 1: ('reset', ''),
+        2: ('content_type', 'uu'), 3: ('invoke_action', 'uu'),
+        4: ('commit_state', 'u'), 5: ('preferred_language', 's')},
+    'zwp_input_method_v2': {
+        0: ('activate', ''), 1: ('deactivate', ''),
+        2: ('surrounding_text', 'suu'), 3: ('text_change_cause', 'u'),
+        4: ('content_type', 'uu'), 5: ('done', ''), 6: ('unavailable', '')},
+}
+
+# The interface of each object an event creates, by interface and event.
+NEW_OBJECTS = {
+    ('zwp_input_method_v1', 'activate'): 'zwp_input_method_context_v1',
 }
 
 # Request opcodes by interface and name.
@@ -52,6 +75,23 @@ REQUESTS = {
     'zwf_output_v2': {'inhibit_output': 0, 'inhibit_output_done': 1,
                       'create_hotspot': 2, 'create_custom_hotspot': 3},
     'zwf_surface_v2': {'interactive_move': 0},
+    'zwp_text_input_manager_v1': {'create_text_input': 0},
+    'zwp_text_input_v1': {
+        'activate': 0, 'deactivate': 1, 'show_input_panel': 2,
+        'hide_input_panel': 3, 'reset': 4, 'set_surrounding_text': 5,
+        'set_content_type': 6, 'set_cursor_rectangle': 7,
+        'set_preferred_language': 8, 'commit_state': 9, 'invoke_action': 10},
+    'zwp_input_method_context_v1': {
+        'destroy': 0, 'commit_string': 1, 'preedit_string': 2,
+        'preedit_styling': 3, 'preedit_cursor': 4,
+        'delete_surrounding_text': 5, 'cursor_position': 6,
+        'modifiers_map': 7, 'keysym': 8, 'grab_keyboard': 9, 'key': 10,
+        'modifiers': 11, 'language': 12, 'text_direction': 13},
+    'zwp_input_method_manager_v2': {'get_input_method': 0, 'destroy': 1},
+    'zwp_input_method_v2': {
+        'commit_string': 0, 'set_preedit_string': 1,
+        'delete_surrounding_text': 2, 'commit': 3,
+        'get_input_popup_surface': 4, 'grab_keyboard': 5, 'destroy': 6},
 }
 
 # `zwf_output_v2.hotspot_edge`.
@@ -91,7 +131,7 @@ def decode_arguments(body, signature):
   values = []
   offset = 0
   for kind in signature:
-    if kind in 'uo':
+    if kind in 'uon':
       values.append(struct.unpack_from('=I', body, offset)[0])
       offset += 4
     elif kind == 'i':
@@ -220,6 +260,9 @@ class Client:
       self.request(sender, 'pong', arguments[0])
     elif interface == 'xdg_surface' and name == 'configure':
       self.request(sender, 'ack_configure', arguments[0])
+    created = NEW_OBJECTS.get((interface, name))
+    if created:
+      self.interfaces[arguments[0]] = created
     self.events.append((sender, interface, name or f'#{opcode}', arguments))
 
   def roundtrip(self, timeout=10.0):

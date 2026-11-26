@@ -84,8 +84,12 @@ a raw-protocol client (wayland_wire.py, wayfire_shell_checks.py):
 headless Shingle with two outputs for the global, hotspots, fullscreen
 events of a `wl_probe --fullscreen` and `toggle_menu` from STIPC keys
 and IPC, and offscreen Shingle on lavapipe for `interactive_move` and
-the frontend's `toggle_menu`. `--checks NAME ...` runs only the groups
-of those function names, such as `wg4_headless_checks`.
+the frontend's `toggle_menu`. WG-8 checks `zwp_text_input_manager_v1`
+the same way (text_input_checks.py): a raw-protocol application with a
+text input and test input methods on input-method v1 and v2, and the
+committed text arriving at the application. `--checks NAME ...` runs
+only the groups of those function names, such as
+`wg4_headless_checks`.
 
 Signals go only to Shingle, wl_probe and shingle-lock, through
 `signal_checked`. The pure helpers are tested by `python3 -m unittest`
@@ -124,6 +128,12 @@ def _wayfire_shell_checks():
     sys.path.insert(0, directory)
   import wayfire_shell_checks  # pylint: disable=import-outside-toplevel
   return wayfire_shell_checks
+
+def _text_input_checks():
+  """WG-8's checks beside this file, loaded like WG-4's."""
+  _wayfire_shell_checks()
+  import text_input_checks  # pylint: disable=import-outside-toplevel
+  return text_input_checks
 Ipc = _HARNESS.Ipc
 Results = _HARNESS.Results
 device_fds = _HARNESS.device_fds
@@ -1546,9 +1556,13 @@ def inner(binary):
   def wg4_offscreen_checks(results, binary):
     return _wayfire_shell_checks().offscreen_checks(
         results, sys.modules[__name__], binary)
+
+  def wg8_text_input_checks(results, binary):
+    return _text_input_checks().headless_checks(
+        results, sys.modules[__name__], binary)
   groups = (randr_checks, configured_checks, wayfire_checks, wcm_ini_checks,
             client_environment_checks, nested_checks, *multi,
-            wg4_headless_checks, wg4_offscreen_checks)
+            wg4_headless_checks, wg4_offscreen_checks, wg8_text_input_checks)
   chosen = [name for name in os.environ.get('OUTPUT_TEST_CHECKS',
                                             '').split(',') if name]
   for checks in groups:
