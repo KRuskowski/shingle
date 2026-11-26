@@ -31,12 +31,20 @@ impl Frontend {
     }
   }
 
+  /// Queues the session for the background writer. Only the model is
+  /// cloned here; validation, serialization and the synced write happen
+  /// on the writer's thread.
   pub(super) fn save(&self) {
-    if self.shut_down {
-      return;
+    if let Some(session) = &self.session {
+      session.submit(self.compositor.core().snapshot());
     }
-    if let Err(error) = self.store.save(self.compositor.core()) {
-      eprintln!("shingle: failed to save session: {error}");
+  }
+
+  /// Waits until the background writer has written every queued session.
+  #[cfg(test)]
+  pub(super) fn flush_session(&self) {
+    if let Some(session) = &self.session {
+      session.flush();
     }
   }
 

@@ -38,7 +38,7 @@ use shingle_render::{
   GpuContext, GpuTexture, RenderRect, TextureFilter, TextureUploader,
 };
 use shingle_session::{
-  SessionStore, launch_autostart, launch_program, launch_saved,
+  SessionStore, SessionWriter, launch_autostart, launch_program, launch_saved,
 };
 
 use crate::{
@@ -73,9 +73,9 @@ const BTN_MIDDLE: u32 = 0x112;
 /// by [`Frontend::next_deadline`].
 pub struct Frontend {
   compositor: Compositor,
-  store: SessionStore,
-  /// [`Frontend::shutdown`] has saved the session for the last time.
-  shut_down: bool,
+  /// Saves sessions off this thread; `None` once [`Frontend::shutdown`]
+  /// has saved the session for the last time.
+  session: Option<SessionWriter>,
   textures: HashMap<SurfaceId, GpuTexture>,
   animations: HashMap<SurfaceId, GeometryAnimation>,
   open_animations: HashMap<SurfaceId, Instant>,
@@ -412,8 +412,7 @@ impl Frontend {
       compositor.current_workspace_index().unwrap_or(0);
     Ok(Self {
       compositor,
-      store,
-      shut_down: false,
+      session: Some(SessionWriter::for_store(store)?),
       textures: HashMap::new(),
       animations: HashMap::new(),
       open_animations: HashMap::new(),
@@ -1008,13 +1007,17 @@ impl Frontend {
   /// seconds on a busy one, and a SIGKILL during it must not leave the
   /// display behind. Stopping Xwayland takes the X windows out of the
   /// model, so a later save would lose them.
+  ///
+  /// The final write waits for a background save still in progress, drops
+  /// one still waiting, and is on disk when this returns
+  /// ([`SessionWriter::finish`]).
   pub fn shutdown(&mut self) {
-    if std::mem::replace(&mut self.shut_down, true) {
+    let Some(session) = self.session.take() else {
       return;
-    }
+    };
     let snapshot = self.compositor.core().snapshot();
     self.compositor.stop_xwayland();
-    if let Err(error) = self.store.save_snapshot(&snapshot) {
+    if let Err(error) = session.finish(snapshot) {
       eprintln!("shingle: failed to save session: {error}");
     }
   }

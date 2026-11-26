@@ -307,6 +307,8 @@ impl Fixture {
 
 impl Drop for Fixture {
   fn drop(&mut self) {
+    // A save still being written would leave the file behind.
+    self.frontend.flush_session();
     for extension in ["session.json", "ipc"] {
       let _ = std::fs::remove_file(self.base.with_extension(extension));
     }
@@ -655,6 +657,7 @@ fn quit_saves_and_asks_the_host_to_exit() {
   assert_eq!(fixture.host.exits, 0);
   fixture.tap(KEY_Q, &[KEY_LEFTMETA, KEY_LEFTSHIFT]);
   assert!(fixture.host.exits > 0, "the host is asked to exit");
+  fixture.frontend.flush_session();
   assert!(fixture.base.with_extension("session.json").exists());
 }
 
@@ -1427,4 +1430,24 @@ fn shutdown_saves_the_mapped_windows() {
   let windows = core.snapshot().windows;
   assert_eq!(windows.len(), 1);
   assert_eq!(windows[0].identity.app_id, "alpha");
+}
+
+#[test]
+fn layout_changes_are_saved_in_the_background() {
+  let mut fixture = Fixture::new(ShingleConfig::default());
+  let session = fixture.base.with_extension("session.json");
+  let saved = |fixture: &Fixture| {
+    fixture.frontend.flush_session();
+    let (core, _) = SessionStore::new(&session).load().unwrap().unwrap();
+    core
+      .snapshot()
+      .windows
+      .into_iter()
+      .map(|window| window.identity.app_id)
+      .collect::<Vec<_>>()
+  };
+  fixture.window("alpha");
+  assert_eq!(saved(&fixture), ["alpha"]);
+  fixture.window("bravo");
+  assert_eq!(saved(&fixture), ["alpha", "bravo"]);
 }
