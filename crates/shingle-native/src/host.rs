@@ -66,7 +66,7 @@ use shingle::{
 };
 use shingle_config::InputConfig;
 use shingle_frontend::{
-  Frontend,
+  CursorPlane, Frontend,
   host::{Host, InputEvent},
   keyboard::Leds,
 };
@@ -198,6 +198,9 @@ pub struct Backend<S: Session, I: InputSource> {
   hotplug_pending: bool,
   /// Reloaded output modes waiting for no flip to be pending.
   policy_pending: Option<OutputPolicy>,
+  /// Why each lit output's cursor is drawn into its frames rather than
+  /// shown on its cursor plane, `None` for the plane, as last logged.
+  cursor_reasons: HashMap<String, Option<String>>,
 }
 
 impl<S: Session, I: InputSource> Backend<S, I> {
@@ -250,6 +253,7 @@ impl<S: Session, I: InputSource> Backend<S, I> {
       output_requests: Vec::new(),
       hotplug_pending: false,
       policy_pending: None,
+      cursor_reasons: HashMap::new(),
     };
     backend.sync_outputs();
     let output = backend.frontend.compositor().output();
@@ -573,6 +577,8 @@ impl<S: Session, I: InputSource> Backend<S, I> {
   fn forget_output(&mut self, output: &OutputHandle) {
     self.sizes.remove(output.name());
     self.powered.remove(output.name());
+    self.cursor_reasons.remove(output.name());
+    self.frontend.set_hardware_cursor(output, false);
     self.host.redraw.remove(output);
     if let Some(renderer) = self.renderer.as_mut() {
       renderer.forget(output);
@@ -928,14 +934,18 @@ impl<S: Session, I: InputSource> Backend<S, I> {
 
   /// Draws and flips a frame of each output that wants one and is ready
   /// for it: the seat is enabled, the output is lit and on and no flip of
-  /// it is pending, and no full modeset waits for the flips to end.
+  /// it is pending, and no full modeset waits for the flips to end. The
+  /// frame carries the cursor plane's change; an output that wants no
+  /// frame but whose cursor plane changed flips the cursor plane alone.
   fn render_if_wanted(&mut self, now: Instant) {
     if !self.active || self.modeset_waiting() {
       return;
     }
     for name in self.display.outputs() {
       let output = OutputHandle::new(name.clone());
+      self.update_cursor(&name, &output);
       if !self.host.redraw.contains(&output) {
+        self.display.commit_cursor(&name, now);
         continue;
       }
       // Zero-copy is tried, or given up, before the output's next frame.
@@ -946,16 +956,22 @@ impl<S: Session, I: InputSource> Backend<S, I> {
         continue;
       }
       self.host.redraw.remove(&output);
+      let tearing = self.frontend.compositor().allows_tearing_on(&output);
+      self.display.set_tearing(&name, tearing);
       let size = self.display.size_of(&name).unwrap_or(self.output_size);
+      let fences = self.display.fences_allowed().is_ok();
       let target = self.display.draw_target(&name);
       let result = match self.renderer.as_mut() {
-        Some(renderer) => renderer.draw(
-          &mut self.frontend,
-          &mut self.host,
-          &output,
-          size,
-          target,
-        ),
+        Some(renderer) => {
+          renderer.set_fences(fences);
+          renderer.draw(
+            &mut self.frontend,
+            &mut self.host,
+            &output,
+            size,
+            target,
+          )
+        }
         None => Err(RenderFailure::Lost("no renderer".into())),
       };
       match result {
@@ -971,6 +987,47 @@ impl<S: Session, I: InputSource> Backend<S, I> {
           }
         }
       }
+    }
+  }
+
+  /// Puts output `name`'s cursor on its cursor plane, or leaves it to the
+  /// frontend to draw: on the plane when the display has a usable one and
+  /// the frontend can hand the cursor over ([`Frontend::cursor_plane`]),
+  /// else drawn into the frame. A change between the two draws a frame,
+  /// which shows the cursor in its new place in the same flip.
+  fn update_cursor(&mut self, name: &str, output: &OutputHandle) {
+    let reason = match self.display.cursor_plane_size(name) {
+      Ok(size) => match self.frontend.cursor_plane(output, size) {
+        CursorPlane::Hidden => {
+          self.display.set_cursor(name, None);
+          None
+        }
+        CursorPlane::Image(image) => {
+          self.display.set_cursor(name, Some(image));
+          None
+        }
+        CursorPlane::Software(reason) => {
+          self.display.set_cursor(name, None);
+          Some(reason)
+        }
+      },
+      Err(reason) => Some(reason),
+    };
+    // The plane may have refused what it was just given.
+    let reason = reason.or_else(|| self.display.cursor_plane_size(name).err());
+    let plane = reason.is_none();
+    if self.cursor_reasons.get(name) != Some(&reason) {
+      diagnostics::log(&match &reason {
+        None => format!("output {name}: the cursor is on the cursor plane"),
+        Some(reason) => {
+          format!("output {name}: the cursor is drawn, because {reason}")
+        }
+      });
+      self.cursor_reasons.insert(name.to_owned(), reason);
+    }
+    if plane != self.frontend.hardware_cursor(output) {
+      self.frontend.set_hardware_cursor(output, plane);
+      self.host.redraw.insert(output.clone());
     }
   }
 
@@ -1080,10 +1137,16 @@ fn absolute_position(
   )
 }
 
-/// The log line for a presented flip: `page flip seq=S at SEC.NSEC s`.
+/// The log line for a presented flip: `page flip seq=S at SEC.NSEC s`,
+/// followed by ` async` for a flip that did not wait for the vblank.
 fn flip_line(info: &shingle::PresentInfo) -> String {
+  let tearing = if info.flags.contains(shingle::PresentationFlags::Vsync) {
+    ""
+  } else {
+    " async"
+  };
   format!(
-    "page flip seq={} at {}.{:09} s",
+    "page flip seq={} at {}.{:09} s{tearing}",
     info.seq,
     info.time.as_secs(),
     info.time.subsec_nanos()

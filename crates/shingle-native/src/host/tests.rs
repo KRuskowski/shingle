@@ -1093,6 +1093,14 @@ fn traced_flips_are_logged_with_their_sequence_and_time() {
     flags: shingle::PresentationFlags::Vsync,
   };
   assert_eq!(super::flip_line(&info), "page flip seq=7 at 12.000003000 s");
+  let torn = shingle::PresentInfo {
+    flags: shingle::PresentationFlags::HwCompletion,
+    ..info
+  };
+  assert_eq!(
+    super::flip_line(&torn),
+    "page flip seq=7 at 12.000003000 s async"
+  );
   let mut fixture = Fixture::new();
   fixture.backend.set_trace_flips(true);
   fixture.flip(Duration::from_secs(1), 1);
@@ -1608,4 +1616,195 @@ fn a_lost_gpu_keeps_drawing_into_the_gbm_buffers() {
     Some(ScanoutStatus::ZeroCopy(MODIFIER_LINEAR))
   );
   assert_eq!(presented_flags(&fixture), [FLIP_FEEDBACK | ZERO_COPY]);
+}
+
+impl Fixture {
+  /// Completes every pending flip, one turn at a time, until none is
+  /// pending, starting at sequence 100.
+  fn settle(&mut self) {
+    let mut sequence = 100;
+    self.step();
+    while self.flip_pending() {
+      sequence += 1;
+      self.flip(Duration::from_millis(u64::from(sequence)), sequence);
+    }
+  }
+
+  /// Moves the pointer by (`dx`, `dy`) through device `event3`.
+  fn move_pointer(&mut self, dx: f64, dy: f64) {
+    self.input(
+      "event3",
+      8_000_000,
+      DeviceInput::Motion {
+        dx,
+        dy,
+        dx_unaccel: dx,
+        dy_unaccel: dy,
+      },
+    );
+  }
+
+  /// The last commit the card accepted that was not a test.
+  fn last_commit(&self) -> (crate::kms::AtomicRequest, CommitFlags) {
+    let card = self.card.borrow();
+    card.real_commits().last().cloned().expect("a commit")
+  }
+}
+
+/// A card whose CRTC has a cursor plane, and that plane.
+fn cursor_card() -> (FakeKms, crate::kms::PlaneId) {
+  let mut card = FakeKms::single_output();
+  let crtc = card.crtc_id;
+  let cursor = card.add_cursor_plane(crtc);
+  (card, cursor)
+}
+
+fn hdmi() -> shingle::OutputHandle {
+  shingle::OutputHandle::new("HDMI-A-1")
+}
+
+#[test]
+fn pointer_motion_redraws_the_drawn_cursor() {
+  let mut fixture = Fixture::new();
+  fixture.add(device("event3", POINTER, 0));
+  fixture.settle();
+  assert!(!fixture.backend.frontend().hardware_cursor(&hdmi()));
+  let drawn = *fixture.frames.borrow();
+  fixture.move_pointer(5.0, 5.0);
+  assert_eq!(
+    *fixture.frames.borrow(),
+    drawn + 1,
+    "the default arrow is drawn into the frame, so it needs one"
+  );
+}
+
+#[test]
+fn on_a_cursor_plane_the_cursor_moves_without_frames() {
+  let (card, cursor) = cursor_card();
+  let mut fixture = Fixture::with_card(test_config(), card);
+  fixture.add(device("event3", POINTER, 0));
+  fixture.settle();
+  assert!(fixture.backend.frontend().hardware_cursor(&hdmi()));
+  let (_, flags) = fixture.last_commit();
+  assert_eq!(flags, FLIP);
+  let drawn = *fixture.frames.borrow();
+  let x_property = fixture.card.borrow_mut().property_id("CRTC_X");
+  let x = |request: &crate::kms::AtomicRequest| {
+    request.get(crate::kms::Object::Plane(cursor), x_property)
+  };
+  let commits = fixture.card.borrow().real_commits().len();
+  fixture.move_pointer(5.0, 7.0);
+  assert_eq!(*fixture.frames.borrow(), drawn, "no frame is drawn");
+  let real = fixture.card.borrow().real_commits();
+  assert_eq!(real.len(), commits + 1, "one commit");
+  let (request, flags) = real.last().cloned().unwrap();
+  assert_eq!(flags, FLIP);
+  assert!(
+    request
+      .entries()
+      .iter()
+      .all(|(object, ..)| *object == crate::kms::Object::Plane(cursor)),
+    "a flip of the cursor plane alone: {request:?}"
+  );
+  let geometry = fixture
+    .backend
+    .frontend()
+    .compositor()
+    .cursor_on(&hdmi())
+    .expect("the default arrow")
+    .geometry;
+  assert_eq!(
+    x(&request),
+    Some(geometry.x as u64),
+    "the plane follows the cursor"
+  );
+  // Its flip presents nothing, and the next motion follows it.
+  let presented = fixture.client.events.presented.len();
+  fixture.settle();
+  assert_eq!(fixture.client.events.presented.len(), presented);
+  fixture.move_pointer(1.0, 0.0);
+  assert_eq!(*fixture.frames.borrow(), drawn);
+  assert_eq!(fixture.card.borrow().real_commits().len(), commits + 2);
+}
+
+#[test]
+fn the_cursor_plane_override_draws_the_cursor() {
+  let (card, _) = cursor_card();
+  let mut fixture = Fixture::with_card(test_config(), card);
+  fixture
+    .backend
+    .display
+    .set_features(crate::features::PlaneFeatures {
+      no_cursor_plane: Some(
+        "SHINGLE_CURSOR_PLANE=0 turns cursor planes off".into(),
+      ),
+      ..Default::default()
+    });
+  fixture.add(device("event3", POINTER, 0));
+  fixture.settle();
+  assert!(!fixture.backend.frontend().hardware_cursor(&hdmi()));
+  let drawn = *fixture.frames.borrow();
+  fixture.move_pointer(5.0, 5.0);
+  assert_eq!(*fixture.frames.borrow(), drawn + 1, "drawn into a frame");
+}
+
+#[test]
+fn inverted_colours_take_the_cursor_back_into_the_frames() {
+  let (card, cursor) = cursor_card();
+  let mut fixture = Fixture::with_card(test_config(), card);
+  fixture.add(device("event3", POINTER, 0));
+  fixture.settle();
+  assert!(fixture.backend.frontend().hardware_cursor(&hdmi()));
+  let drawn = *fixture.frames.borrow();
+  fixture.ipc(r#"{"method":"invert/toggle","data":{}}"#);
+  assert!(!fixture.backend.frontend().hardware_cursor(&hdmi()));
+  assert_eq!(
+    *fixture.frames.borrow(),
+    drawn + 1,
+    "a frame with the cursor"
+  );
+  let (request, _) = fixture.last_commit();
+  let fb_id = fixture.card.borrow_mut().property_id("FB_ID");
+  assert_eq!(
+    request.get(crate::kms::Object::Plane(cursor), fb_id),
+    Some(0),
+    "the same flip turns the plane off"
+  );
+}
+
+#[test]
+fn a_tearing_client_gets_async_flips() {
+  let mut card = FakeKms::single_output();
+  card.async_flips = true;
+  let mut fixture = Fixture::with_card(test_config(), card);
+  fixture.settle();
+  let surface = fixture.toplevel.surface.clone();
+  let _control = fixture.client.tear(&surface);
+  fixture.client_frame();
+  let (_, flags) = fixture.last_commit();
+  assert_eq!(
+    flags,
+    FLIP | CommitFlags::PAGE_FLIP_ASYNC,
+    "its frame flips at once"
+  );
+  fixture.flip(Duration::from_secs(5), 5);
+  let presented = fixture.client.events.presented.last().copied().unwrap();
+  assert_eq!(presented.flags, 0x2 | 0x4, "no vsync flag");
+}
+
+#[test]
+fn vrr_from_the_config_reaches_the_crtc_and_presentation() {
+  let mut card = FakeKms::single_output();
+  card.vrr = true;
+  card.vrr_capable = true;
+  let mut config = test_config();
+  config.output.vrr = true;
+  let mut fixture = Fixture::with_card(config, card);
+  let crtc = fixture.card.borrow().crtc_id;
+  assert_eq!(fixture.card.borrow().value(crtc.0, "VRR_ENABLED"), 1);
+  fixture.settle();
+  fixture.client_frame();
+  fixture.flip(Duration::from_secs(5), 5);
+  let presented = fixture.client.events.presented.last().copied().unwrap();
+  assert_eq!(presented.refresh, 0, "no constant refresh rate");
 }

@@ -17,7 +17,12 @@ use wayland_client::{
   },
 };
 use wayland_protocols::{
-  wp::presentation_time::client::{wp_presentation, wp_presentation_feedback},
+  wp::{
+    presentation_time::client::{wp_presentation, wp_presentation_feedback},
+    tearing_control::v1::client::{
+      wp_tearing_control_manager_v1, wp_tearing_control_v1,
+    },
+  },
   xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
 };
 use wayland_protocols_wlr::{
@@ -313,6 +318,21 @@ impl TestClient {
     surface.frame(&self.handle, FrameCallback);
     presentation.feedback(surface, &self.handle, ());
     self.attach_buffer(compositor, surface, size.0, size.1);
+  }
+
+  /// Asks for asynchronous presentation of `surface` through
+  /// wp_tearing_control; it applies with the surface's next commit. The
+  /// hint lasts as long as the returned object.
+  pub(crate) fn tear(
+    &mut self,
+    surface: &wl_surface::WlSurface,
+  ) -> wp_tearing_control_v1::WpTearingControlV1 {
+    let manager =
+      self.bind::<wp_tearing_control_manager_v1::WpTearingControlManagerV1>(1);
+    let control = manager.get_tearing_control(surface, &self.handle, ());
+    control
+      .set_presentation_hint(wp_tearing_control_v1::PresentationHint::Async);
+    control
   }
 
   /// Sets the output's power mode through wlr-output-power-management.
@@ -796,5 +816,7 @@ ignore_events!(
   wl_buffer::WlBuffer,
   wl_seat::WlSeat,
   wp_presentation::WpPresentation,
+  wp_tearing_control_manager_v1::WpTearingControlManagerV1,
+  wp_tearing_control_v1::WpTearingControlV1,
   zwlr_output_power_manager_v1::ZwlrOutputPowerManagerV1,
 );

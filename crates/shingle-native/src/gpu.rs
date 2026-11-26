@@ -254,6 +254,13 @@ pub trait FrameRenderer: ScanoutImporter {
     let _ = output;
   }
 
+  /// Says whether frames drawn into scanout buffers may end with a render
+  /// fence ([`Drawn::Fenced`]) for the plane to wait for, rather than a
+  /// wait for the GPU; the display says no after the card refused one.
+  fn set_fences(&mut self, enabled: bool) {
+    let _ = enabled;
+  }
+
   /// The GPU context, for shm uploads and linux-dmabuf
   /// ([`Frontend::attach_gpu`]); `None` for renderers without one.
   fn gpu(&self) -> Option<&GpuContext> {
