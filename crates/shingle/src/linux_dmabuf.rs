@@ -16,18 +16,13 @@
 //! commit queue until it does, as smithay's `DmabufBlocker` does it.
 
 use std::{
-  cell::Cell,
   collections::HashSet,
   fmt,
   os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
-  rc::Rc,
   sync::{Arc, Mutex, PoisonError},
-  time::Instant,
 };
 
-use calloop::{
-  Interest, LoopHandle, Mode, PostAction, RegistrationToken, generic::Generic,
-};
+use calloop::LoopHandle;
 use wayland_protocols::wp::linux_dmabuf::zv1::server::{
   zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
   zwp_linux_dmabuf_feedback_v1::{self, ZwpLinuxDmabufFeedbackV1},
@@ -42,7 +37,7 @@ use wayland_server::{
 
 use crate::{
   buffer::{Attachment, BufferContent},
-  commit_queue::{Blocker, BlockerSource},
+  commit_queue::{Blocker, BlockerSource, FdWait},
   state::{BufferData, CompositorState, PendingBuffer, PendingSurface},
 };
 
@@ -789,95 +784,59 @@ impl BlockerSource for ImplicitSync {
     &self,
     surface: &ObjectId,
     pending: &PendingSurface,
-  ) -> Vec<Box<dyn Blocker>> {
+  ) -> Result<Vec<Box<dyn Blocker>>, String> {
     let PendingBuffer::Attach(attachment, _) = &pending.buffer else {
-      return Vec::new();
+      return Ok(Vec::new());
     };
     let BufferContent::Dmabuf(buffer) = &attachment.content else {
-      return Vec::new();
+      return Ok(Vec::new());
     };
-    buffer
-      .planes
-      .iter()
-      .filter(|plane| !readable(plane.fd.as_fd()))
-      .filter_map(|plane| {
-        FenceWait::register(&self.handle, plane.fd.as_fd(), surface, buffer)
-      })
-      .map(|wait| Box::new(wait) as Box<dyn Blocker>)
-      .collect()
+    Ok(
+      buffer
+        .planes
+        .iter()
+        .filter(|plane| !readable(plane.fd.as_fd()))
+        .filter_map(|plane| {
+          fence_wait(&self.handle, plane.fd.as_fd(), surface, buffer.serial)
+        })
+        .map(|wait| Box::new(wait) as Box<dyn Blocker>)
+        .collect(),
+    )
   }
 }
 
-/// One plane's pending fence: a calloop source that applies the
-/// surface's ready commits when the fd polls readable.
-struct FenceWait {
-  fd: OwnedFd,
-  handle: LoopHandle<'static, CompositorState>,
-  /// The source, until it fired.
-  token: Rc<Cell<Option<RegistrationToken>>>,
-}
-
-impl FenceWait {
-  fn register(
-    handle: &LoopHandle<'static, CompositorState>,
-    fd: BorrowedFd<'_>,
-    surface: &ObjectId,
-    buffer: &DmabufBuffer,
-  ) -> Option<Self> {
-    let (Ok(own), Ok(source_fd)) =
-      (fd.try_clone_to_owned(), fd.try_clone_to_owned())
-    else {
-      return None;
-    };
-    let token = Rc::new(Cell::new(None));
-    let fired = Rc::clone(&token);
-    let surface = surface.clone();
-    let serial = buffer.serial;
-    let started = Instant::now();
-    let inserted = handle.insert_source(
-      Generic::new(source_fd, Interest::READ, Mode::OneShot),
-      move |_, _, state: &mut CompositorState| {
-        // Taken first, so that the wait dropped by the commit below does
-        // not remove the source that is running.
-        fired.take();
-        if crate::trace::buffers_enabled() {
+/// One plane's pending fence: a wait on a duplicate of its fd, or None,
+/// so that the commit applies without waiting rather than never, if the
+/// wait cannot be set up.
+fn fence_wait(
+  handle: &LoopHandle<'static, CompositorState>,
+  fd: BorrowedFd<'_>,
+  surface: &ObjectId,
+  serial: u64,
+) -> Option<FdWait> {
+  let waited = fd
+    .try_clone_to_owned()
+    .and_then(|own| Ok((own, fd.try_clone_to_owned()?)))
+    .map_err(|error| error.to_string())
+    .and_then(|(own, source)| {
+      FdWait::register(
+        handle,
+        source,
+        surface,
+        Box::new(move || readable(own.as_fd())),
+        Box::new(move |waited| {
           crate::trace::buffer(format_args!(
             "blocked implicit {} µs dmabuf={serial}",
-            started.elapsed().as_micros()
+            waited.as_micros()
           ));
-        }
-        crate::commit_queue::process(state, &surface);
-        Ok(PostAction::Remove)
-      },
-    );
-    match inserted {
-      Ok(registration) => {
-        token.set(Some(registration));
-        Some(Self {
-          fd: own,
-          handle: handle.clone(),
-          token,
-        })
-      }
-      Err(error) => {
-        // The commit applies without waiting rather than never.
-        eprintln!("shingle: cannot wait for a DMA-BUF fence: {error}");
-        None
-      }
-    }
-  }
-}
-
-impl Blocker for FenceWait {
-  fn ready(&self) -> bool {
-    readable(self.fd.as_fd())
-  }
-}
-
-impl Drop for FenceWait {
-  fn drop(&mut self) {
-    if let Some(token) = self.token.take() {
-      self.handle.remove(token);
+        }),
+      )
+    });
+  match waited {
+    Ok(wait) => Some(wait),
+    Err(error) => {
+      eprintln!("shingle: cannot wait for a DMA-BUF fence: {error}");
+      None
     }
   }
 }

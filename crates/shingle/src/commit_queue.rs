@@ -11,12 +11,27 @@
 //!
 //! FIFO barriers (crate::fifo) and commit-timing deadlines
 //! (crate::commit_timing) wait here too, as wlroots queues them, and
-//! DB-4's implicit-sync wait (crate::linux_dmabuf) is a [`BlockerSource`];
-//! DB-5's syncobj waits will be another.
+//! DB-4's implicit-sync wait (crate::linux_dmabuf) is a [`BlockerSource`]
+//! that waits on an fd through [`FdWait`]; DB-5's syncobj waits will be
+//! another.
 
-use std::collections::{HashMap, VecDeque};
+use std::{
+  cell::Cell,
+  collections::{HashMap, VecDeque},
+  ffi::CString,
+  os::fd::OwnedFd,
+  rc::Rc,
+  time::{Duration, Instant},
+};
 
-use wayland_server::backend::ObjectId;
+use calloop::{
+  Interest, LoopHandle, Mode, PostAction, RegistrationToken, generic::Generic,
+};
+use wayland_server::{
+  Resource,
+  backend::{ObjectId, protocol::Interface},
+  protocol::wl_surface::WlSurface,
+};
 
 use crate::state::{CompositorState, PendingSurface};
 
@@ -29,12 +44,109 @@ pub(crate) trait Blocker {
 /// Decides what a commit waits for.
 pub(crate) trait BlockerSource {
   /// The blockers of `pending`, a commit of `surface`; ready ones may be
-  /// left out.
+  /// left out. An error means that a wait could not be set up; the
+  /// client then gets `no_memory`, as wlroots posts it.
   fn blockers(
     &self,
     surface: &ObjectId,
     pending: &PendingSurface,
-  ) -> Vec<Box<dyn Blocker>>;
+  ) -> Result<Vec<Box<dyn Blocker>>, String>;
+}
+
+/// A wait on an fd that becomes readable when the blocker clears: a
+/// one-shot calloop source that applies the surface's ready commits when
+/// it fires. Dropping it unfired removes the source, as when the surface
+/// is destroyed.
+pub(crate) struct FdWait {
+  handle: LoopHandle<'static, CompositorState>,
+  /// The source, until it fired.
+  token: Rc<Cell<Option<RegistrationToken>>>,
+  fired: Rc<Cell<bool>>,
+  /// Whether the blocker has cleared without the source firing yet.
+  check: Box<dyn Fn() -> bool>,
+}
+
+impl FdWait {
+  /// Waits for `fd` to poll readable, then calls `fired` with the time
+  /// waited and applies the ready commits of `surface`. `check` says
+  /// whether the blocker cleared before that.
+  pub(crate) fn register(
+    handle: &LoopHandle<'static, CompositorState>,
+    fd: OwnedFd,
+    surface: &ObjectId,
+    check: Box<dyn Fn() -> bool>,
+    fired: Box<dyn Fn(Duration)>,
+  ) -> Result<Self, String> {
+    let token = Rc::new(Cell::new(None));
+    let done = Rc::new(Cell::new(false));
+    let (source_token, source_done) = (Rc::clone(&token), Rc::clone(&done));
+    let surface = surface.clone();
+    let started = Instant::now();
+    let registration = handle
+      .insert_source(
+        Generic::new(fd, Interest::READ, Mode::OneShot),
+        move |_, _, state: &mut CompositorState| {
+          // Taken first, so that the wait dropped by the commit below
+          // does not remove the source that is running.
+          source_token.take();
+          source_done.set(true);
+          fired(started.elapsed());
+          process(state, &surface);
+          Ok(PostAction::Remove)
+        },
+      )
+      .map_err(|error| error.to_string())?;
+    token.set(Some(registration));
+    Ok(Self {
+      handle: handle.clone(),
+      token,
+      fired: done,
+      check,
+    })
+  }
+}
+
+impl Blocker for FdWait {
+  fn ready(&self) -> bool {
+    self.fired.get() || (self.check)()
+  }
+}
+
+impl Drop for FdWait {
+  fn drop(&mut self) {
+    if let Some(token) = self.token.take() {
+      self.handle.remove(token);
+    }
+  }
+}
+
+/// `wl_display.error`'s `no_memory`, which wayland-server does not
+/// export.
+const NO_MEMORY: u32 = 2;
+
+/// The display interface, to find a client's `wl_display` object by name.
+static WL_DISPLAY: Interface = Interface {
+  name: "wl_display",
+  version: 1,
+  requests: &[],
+  events: &[],
+  c_ptr: None,
+};
+
+/// Ends `surface`'s client with `wl_display.error` `no_memory` on its
+/// display object, as wlroots' `wl_client_post_no_memory` does.
+fn post_no_memory(surface: &WlSurface, message: &str) {
+  let (Some(client), Some(handle)) =
+    (surface.client(), surface.handle().upgrade())
+  else {
+    return;
+  };
+  let Ok(display) = handle.object_for_protocol_id(client.id(), &WL_DISPLAY, 1)
+  else {
+    return;
+  };
+  let message = CString::new(message.replace('\0', " ")).unwrap_or_default();
+  handle.post_error(display, NO_MEMORY, message);
 }
 
 /// One waiting commit.
@@ -83,13 +195,16 @@ pub(crate) fn commit(state: &mut CompositorState, object: &ObjectId) {
   let Some(surface) = state.surfaces.get(object) else {
     return;
   };
-  blockers.extend(
-    state
-      .commit_queue
-      .sources
-      .iter()
-      .flat_map(|source| source.blockers(object, &surface.pending)),
-  );
+  for source in &state.commit_queue.sources {
+    match source.blockers(object, &surface.pending) {
+      Ok(more) => blockers.extend(more),
+      Err(message) => {
+        eprintln!("shingle: cannot wait for a commit: {message}");
+        post_no_memory(&surface.resource, &message);
+        return;
+      }
+    }
+  }
   blockers.retain(|blocker| !blocker.ready());
   if blockers.is_empty() && !state.commit_queue.surfaces.contains_key(object) {
     state.commit_inner(object, false);
@@ -205,15 +320,17 @@ mod tests {
       &self,
       _surface: &ObjectId,
       _pending: &PendingSurface,
-    ) -> Vec<Box<dyn Blocker>> {
-      self
-        .0
-        .borrow_mut()
-        .pop_front()
-        .flatten()
-        .map(|gate| Box::new(Gate(gate)) as Box<dyn Blocker>)
-        .into_iter()
-        .collect()
+    ) -> Result<Vec<Box<dyn Blocker>>, String> {
+      Ok(
+        self
+          .0
+          .borrow_mut()
+          .pop_front()
+          .flatten()
+          .map(|gate| Box::new(Gate(gate)) as Box<dyn Blocker>)
+          .into_iter()
+          .collect(),
+      )
     }
   }
 
