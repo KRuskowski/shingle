@@ -109,6 +109,9 @@ pub struct Frontend {
   scale_exit: Option<ScaleState>,
   scale_config: shingle_config::ScaleConfig,
   scale_title_filter: shingle_config::ScaleTitleFilterConfig,
+  /// Wayfire's `scale-title-filter` plugin is loaded, so typing in Scale
+  /// filters it.
+  scale_filter_enabled: bool,
   scale_titles: HashMap<TileWindowId, ScaleTitle>,
   scale_icons: HashMap<TileWindowId, GpuTexture>,
   scale_filter: String,
@@ -127,6 +130,8 @@ pub struct Frontend {
   pointer_bindings: PointerBindings,
   drag: Option<DragState>,
   gestures: extra_gestures::GestureState,
+  /// Wayfire's `extra-gestures` plugin is loaded.
+  gestures_enabled: bool,
   rotations: HashMap<TileWindowId, f32>,
   rotation_drag: Option<RotationDrag>,
   wrot_reset_radius: f64,
@@ -453,6 +458,7 @@ impl Frontend {
       scale_exit: None,
       scale_config: config.scale.clone(),
       scale_title_filter: config.scale_title_filter.clone(),
+      scale_filter_enabled: config.plugin_enabled("scale-title-filter"),
       scale_titles: HashMap::new(),
       scale_icons: HashMap::new(),
       scale_filter: String::new(),
@@ -473,6 +479,7 @@ impl Frontend {
       gestures: extra_gestures::GestureState::new(
         config.extra_gestures.clone(),
       ),
+      gestures_enabled: config.plugin_enabled("extra-gestures"),
       rotations: HashMap::new(),
       rotation_drag: None,
       wrot_reset_radius: config.effects.wrot_reset_radius,
@@ -1376,11 +1383,16 @@ impl Frontend {
     let action = match touch.phase {
       TouchPhase::Down => {
         self.compositor.touch_down(device, id, x, y);
-        self.gestures.touch_down(touch.id, x, y, now);
+        if self.gestures_enabled {
+          self.gestures.touch_down(touch.id, x, y, now);
+        }
         None
       }
       TouchPhase::Motion => {
-        let action = self.gestures.touch_motion(touch.id, x, y, now);
+        let action = self
+          .gestures_enabled
+          .then(|| self.gestures.touch_motion(touch.id, x, y, now))
+          .flatten();
         if self.drag.is_some() {
           self.pointer_x = x;
           self.pointer_y = y;
@@ -1391,7 +1403,10 @@ impl Frontend {
         action
       }
       TouchPhase::Up => {
-        let action = self.gestures.touch_up(touch.id, now);
+        let action = self
+          .gestures_enabled
+          .then(|| self.gestures.touch_up(touch.id, now))
+          .flatten();
         if self.drag.is_some() {
           self.pointer_button_action("btn_left", false);
         }

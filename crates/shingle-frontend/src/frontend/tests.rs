@@ -702,6 +702,70 @@ fn yaml_config(text: &str) -> ShingleConfig {
   ShingleConfig::parse(text, ConfigFormat::Yaml).expect("the config parses")
 }
 
+/// Parses a Wayfire config, the way `wayfire.ini` is read.
+fn wayfire_config(text: &str) -> ShingleConfig {
+  ShingleConfig::parse(text, ConfigFormat::Wayfire).expect("the file imports")
+}
+
+#[test]
+fn numbered_vswitch_bindings_switch_carry_and_send() {
+  let config = wayfire_config(concat!(
+    "[core]\n",
+    "plugins = vswitch\n",
+    "[vswitch]\n",
+    "binding_3 = <super> KEY_3\n",
+    "with_win_2 = <super> <shift> KEY_2\n",
+    "send_win_9 = <super> <ctrl> KEY_9\n",
+  ));
+  let mut fixture = Fixture::new(config);
+  fixture.window("alpha");
+  let alpha = fixture.focused().expect("alpha is focused");
+  // send_win_9 sends alpha to the last workspace of the 3x3 grid and
+  // stays.
+  fixture.stipc_tap("KEY_9", &["KEY_LEFTMETA", "KEY_LEFTCTRL"]);
+  assert_eq!(fixture.workspace(), 0);
+  let workspace_of = |fixture: &Fixture, window| {
+    let info = fixture.frontend.compositor().core().window_info(window);
+    let location = info.expect("the window exists").location.workspace;
+    (location.x, location.y)
+  };
+  assert_eq!(workspace_of(&fixture, alpha), (2, 2));
+  // binding_3 switches to workspace 3, the end of the first row.
+  fixture.stipc_tap("KEY_3", &["KEY_LEFTMETA"]);
+  assert_eq!(fixture.workspace(), 2);
+  fixture.window("bravo");
+  let bravo = fixture.focused().expect("bravo is focused");
+  // with_win_2 carries bravo to workspace 2 and follows it.
+  fixture.stipc_tap("KEY_2", &["KEY_LEFTMETA", "KEY_LEFTSHIFT"]);
+  assert_eq!(fixture.workspace(), 1);
+  assert_eq!(workspace_of(&fixture, bravo), (1, 0));
+  assert_eq!(fixture.focused(), Some(bravo));
+}
+
+#[test]
+fn plugins_wayfire_does_not_load_do_nothing() {
+  let config = wayfire_config("[core]\nplugins = vswitch\n");
+  let mut fixture = Fixture::new(config);
+  fixture.window("alpha");
+  fixture.window("bravo");
+  // Without simple-tile nothing tiles.
+  assert!(fixture.tiles().is_empty());
+  // Without scale, Wayfire's default super+p is no binding.
+  fixture.stipc_tap("KEY_P", &["KEY_LEFTMETA"]);
+  assert!(fixture.frontend.scale.is_none());
+  // Shingle's own super+1 is off under a Wayfire file.
+  fixture.stipc_tap("KEY_2", &["KEY_LEFTMETA"]);
+  assert_eq!(fixture.workspace(), 0);
+
+  let config = wayfire_config("[core]\nplugins = scale simple-tile\n");
+  let mut fixture = Fixture::new(config);
+  fixture.window("alpha");
+  fixture.window("bravo");
+  assert_eq!(fixture.tiles().len(), 2);
+  fixture.stipc_tap("KEY_P", &["KEY_LEFTMETA"]);
+  assert!(fixture.frontend.scale.is_some());
+}
+
 #[test]
 fn stipc_keys_fire_key_bindings_from_the_config() {
   let config = yaml_config(concat!(

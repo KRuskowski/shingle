@@ -74,6 +74,8 @@ impl Frontend {
     })();
     match result {
       Ok(config) => {
+        let gestures_enabled = config.plugin_enabled("extra-gestures");
+        let scale_filter_enabled = config.plugin_enabled("scale-title-filter");
         self.reloaded_config = Some(config.clone());
         self.finish_switcher();
         self.cancel_scale();
@@ -91,6 +93,7 @@ impl Frontend {
         self.switcher_inactive_alpha = config.fast_switcher.inactive_alpha;
         self.scale_config = config.scale.clone();
         self.scale_title_filter = config.scale_title_filter.clone();
+        self.scale_filter_enabled = scale_filter_enabled;
         self.expo_config = config.expo.clone();
         self.vswitch = config.vswitch.clone();
         self.keybindings = config.keybindings;
@@ -131,6 +134,7 @@ impl Frontend {
         self.snap_off_threshold = config.grid.snap_off_threshold;
         self.join_views = config.grid.join_views;
         self.gestures.set_config(config.extra_gestures.clone());
+        self.gestures_enabled = gestures_enabled;
         self.wrot_reset_radius = config.effects.wrot_reset_radius;
         self.workspace_switch_after = (config.grid.workspace_switch_after >= 0)
           .then(|| {

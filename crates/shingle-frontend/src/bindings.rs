@@ -1,8 +1,40 @@
 //! Binding helpers shared by keyboard, pointer and wheel dispatch.
 
 use shingle_config::{
-  Binding, Keybindings, Modifier, Modifiers as ConfigModifiers,
+  Binding, Keybindings, Modifier, Modifiers as ConfigModifiers, VswitchConfig,
 };
+
+/// What a numbered vswitch binding does with its workspace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceAction {
+  /// Switch to it (`binding_N`).
+  Switch,
+  /// Carry the focused window there and follow it (`with_win_N`).
+  WithWindow,
+  /// Send the focused window there and stay (`send_win_N`).
+  SendWindow,
+}
+
+/// The numbered vswitch binding that matches `key` with `modifiers`: its
+/// action and its 1-based workspace.
+pub fn workspace_binding(
+  vswitch: &VswitchConfig,
+  modifiers: ConfigModifiers,
+  key: &str,
+) -> Option<(WorkspaceAction, usize)> {
+  [
+    (WorkspaceAction::Switch, &vswitch.workspace_bindings),
+    (WorkspaceAction::WithWindow, &vswitch.workspace_bindings_win),
+    (WorkspaceAction::SendWindow, &vswitch.bindings_win),
+  ]
+  .into_iter()
+  .find_map(|(action, bindings)| {
+    bindings
+      .iter()
+      .find(|entry| entry.binding.matches(modifiers, key))
+      .map(|entry| (action, entry.workspace))
+  })
+}
 
 /// Returns the grid slot whose binding matches `key` with `modifiers`.
 pub fn grid_slot(
@@ -97,6 +129,37 @@ mod tests {
     assert_eq!(grid_slot(&keys, SUPER, "left"), Some("left"));
     assert_eq!(grid_slot(&keys, ConfigModifiers::default(), "kp7"), None);
     assert_eq!(grid_slot(&keys, SUPER, "kp0"), None);
+  }
+
+  #[test]
+  fn workspace_bindings_name_their_action_and_workspace() {
+    let entry = |workspace, key: &str| shingle_config::WorkspaceBinding {
+      workspace,
+      binding: Binding::new(key, vec![Modifier::Super]),
+    };
+    let vswitch = VswitchConfig {
+      workspace_bindings: vec![entry(3, "3")],
+      workspace_bindings_win: vec![entry(2, "2")],
+      bindings_win: vec![entry(9, "9")],
+      ..VswitchConfig::default()
+    };
+    assert_eq!(
+      workspace_binding(&vswitch, SUPER, "3"),
+      Some((WorkspaceAction::Switch, 3))
+    );
+    assert_eq!(
+      workspace_binding(&vswitch, SUPER, "2"),
+      Some((WorkspaceAction::WithWindow, 2))
+    );
+    assert_eq!(
+      workspace_binding(&vswitch, SUPER, "9"),
+      Some((WorkspaceAction::SendWindow, 9))
+    );
+    assert_eq!(workspace_binding(&vswitch, SUPER, "4"), None);
+    assert_eq!(
+      workspace_binding(&vswitch, ConfigModifiers::default(), "3"),
+      None
+    );
   }
 
   #[test]

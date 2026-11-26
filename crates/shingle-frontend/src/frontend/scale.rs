@@ -537,7 +537,7 @@ impl Frontend {
     text: Option<&str>,
     pressed: bool,
   ) {
-    if self.scale.is_none() || !pressed {
+    if self.scale.is_none() || !pressed || !self.scale_filter_enabled {
       return;
     }
     let changed = if key == "backspace" {

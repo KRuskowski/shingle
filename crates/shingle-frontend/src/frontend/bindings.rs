@@ -13,7 +13,7 @@ use super::{
   switcher::SwitcherKind,
 };
 use crate::{
-  bindings::{grid_slot, modifiers_held},
+  bindings::{WorkspaceAction, grid_slot, modifiers_held, workspace_binding},
   host::Host,
   keyboard::{Key, KeyState},
 };
@@ -752,6 +752,26 @@ impl Frontend {
         };
         if let Err(error) = result {
           eprintln!("shingle: relative window move failed: {error}");
+        }
+        self.save();
+        return;
+      }
+      if let Some((action, workspace)) =
+        workspace_binding(&self.vswitch, modifiers, key)
+      {
+        let index = workspace - 1;
+        let result = match action {
+          WorkspaceAction::Switch => self.compositor.switch_workspace(index),
+          WorkspaceAction::WithWindow => self
+            .compositor
+            .move_focused_to_workspace(index)
+            .and_then(|_| self.compositor.switch_workspace(index)),
+          WorkspaceAction::SendWindow => {
+            self.compositor.move_focused_to_workspace(index).map(|_| ())
+          }
+        };
+        if let Err(error) = result {
+          eprintln!("shingle: vswitch workspace binding failed: {error}");
         }
         self.save();
         return;
