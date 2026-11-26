@@ -83,7 +83,8 @@ The work is split into seven workspaces, MO-1 to MO-7, each with acceptance crit
 
 1. MO-1 `shingle-wsets-core`: done; workspace sets, away records and session version 2 in the core, positions, the layout functions and the new config sections ([status.md](status.md#sessions), [MO-1 as built](design/multi-output.md#mo-1-as-built)).
 2. MO-2 `shingle-output-registry`: done; the compositor's output registry with a global, xdg-output and output-management head per output, the layout, unplug policies, restored sessions settling on the outputs, IPC ids, `wayfire/create-headless-output` and `destroy-headless-output`, the output events and headless `--outputs N` ([status.md](status.md#several-outputs), [MO-2 as built](design/multi-output.md#mo-2-as-built)).
-3. MO-3 `shingle-output-protocols`: next.
+3. MO-3 `shingle-output-protocols`: done; enter and leave by visibility with each output's scales, the primary output for presentation, FIFO and commit timing, layer and lock surfaces per output, screencopy in output coordinates and physical pixels, outputs turned off and on through output management, power and gamma per output, ext-workspace groups and foreign-toplevel output events per output, and the probe's `--report-outputs` and `--layer` ([status.md](status.md#several-outputs), [MO-3 as built](design/multi-output.md#mo-3-as-built)).
+4. MO-4 `shingle-output-focus`: next.
 
 ## 6. Remaining Wayfire compatibility
 

@@ -67,7 +67,7 @@
 | What a start does (print, fail or run a backend) | `crates/shingle-bin/src/main.rs` |
 | Headless backend | `crates/shingle-bin/src/headless.rs` |
 | Offscreen backend: the frontend on the GPU without a display, frame pacing, presentation | `crates/shingle-bin/src/offscreen.rs` |
-| Screencopy: CPU composite, or frame capture answered by the frontend (`set_frame_capture`, `finish_capture`) | `crates/shingle/src/screencopy.rs`; the frontend's capture draw in `crates/shingle-frontend/src/frontend/scene.rs` (`answer_captures`), `shingle_render::capture_frame` in `crates/shingle-render/src/target.rs` |
+| Screencopy: an output's region in its physical pixels (`CaptureGeometry`), CPU composite, or frame capture answered by the frontend (`set_frame_capture`, `finish_capture`) | `crates/shingle/src/screencopy.rs`; the frontend's capture draw in `crates/shingle-frontend/src/frontend/scene.rs` (`answer_captures`), `shingle_render::capture_frame` in `crates/shingle-render/src/target.rs` |
 | GPU namespace and DB-2's, DB-3's and DB-6's real-client checks (offscreen, nested, baseline, buffers, shm) | `tools/gpu_test/run.py`, `tools/gpu_test/checks.py`; the probe `crates/shingle/examples/wl_probe.rs` |
 | DB-4's and DB-5's real-client checks (dmabuf, browsers, xwayland, nested-gpu, nodmabuf, weston, syncobj, nosyncobj) | `tools/gpu_test/dmabuf_checks.py`; the stall probe `crates/shingle/examples/syncobj_probe.rs` |
 | winit host: window, input translation, button emulation | `crates/shingle-nested/src/lib.rs` |
@@ -86,6 +86,7 @@
 | Native test plan and tools (test machine only) | `docs/native-testing.md`, `tools/native_test/` |
 | Output description, renaming, mode requests, configured placement | `crates/shingle/src/output.rs`, `output_management.rs`; tests in `output/tests.rs` |
 | The output registry: outputs in add order, IPC ids, globals, adding and removing outputs under the unplug policy, restored sessions | `crates/shingle/src/output/registry.rs`, `output/hotplug.rs`, `output.rs`; tests in `output/multi_tests.rs` |
+| Client protocols per output (MO-3): the outputs each surface is on, its primary output and preferred scales; outputs turned off by output management | `crates/shingle/src/surface_outputs.rs`; `DisabledOutput` in `output/registry.rs` and `output_management.rs`; layer, lock, power, gamma, ext-workspace and foreign-toplevel modules; tests in `output/protocol_tests.rs` |
 | Output configuration, Wayfire's mode syntax and `position` | `crates/shingle-config/src/output.rs` |
 | Output layout, pointer clamping, oswitch's next and directional outputs, layout warnings (pure functions) | `crates/shingle-config/src/layout.rs` |
 | Unplug policy, `oswitch`, `wsets` and per-device output settings | `crates/shingle-config/src/multi_output.rs` |
