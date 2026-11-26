@@ -534,6 +534,14 @@ Workspace sets and session version 2 (MO-1), 2026-11-26, debug builds of the `sh
 - Found and fixed: `configure-view` giving a window that already floats a new rectangle sent no event the frontend saves on, so after a SIGKILL echo came back at the rectangle the layout had floated it at; on `master` too, where the same round trip fails both view checks. It now sends `Event::LayoutChanged`, as `set-layout` does when only weights or nesting change (the first bug above), and the nested split left empty by a second cross-direction layout is removed (the second).
 - tools/session_test/run.py's slow-disk check, which now also reads version 2 sessions, passed 12/12 (worst reply 19.5 ms, 30 changes in 3 writes, SIGTERM after 3.0 s); tools/xwayland_test/run.py passed 199/199, tools/output_test/run.py 24/24 and `tools/gpu_test/run.py --checks offscreen nested baseline buffers shm dmabuf browsers xwayland nested-gpu nodmabuf weston syncobj nosyncobj` 119 of 119 with its device check.
 
+Zero-copy scanout on native (NB-8), 2026-11-26, debug builds of the `shingle-native-zero-copy` branch. Nothing of NB-8's native code ran: GBM buffers, framebuffers of them and their import need a DRM card, which on this host belongs to the operator's Wayfire session, so its checks are steps 36 to 42 of [native-testing.md](native-testing.md) on the test machine, and none has been run yet. NB-8 changes only `shingle-native` and tools/native_test, so the other harnesses were run to show that nothing else moved:
+
+- tools/xwayland_test/run.py 205/205.
+- tools/output_test/run.py 84/84.
+- tools/session_test/run.py `--checks slow round-trip` 27/27 (worst reply 15.1 ms; every layout and view identical after the SIGKILL and SIGTERM restarts).
+- `tools/gpu_test/run.py --checks offscreen nested baseline buffers shm dmabuf browsers xwayland nested-gpu nodmabuf weston syncobj nosyncobj outputs nested-outputs nested-smoke` 160 of 160 with its device check (no process opened a device outside the allowed set).
+- tools/native_test's Python tests, now 17, and flake8 on them, pass; `present_check.py --scanout` was not run against a real log.
+
 Several monitors on native (MO-7), 2026-11-26, debug builds of the `shingle-native-multi-output` branch. Nothing of MO-7's native code ran: it needs a seat and a DRM card, which on this host belong to the operator's Wayfire session, so its checks are steps 25 to 35 of [native-testing.md](native-testing.md) on the test machine, and none has been run yet. What was run here checks that the compositor changes MO-7 brought (output-management configurations handed to the backend as one request across heads, disabled heads, the dark last output lit again) left headless, offscreen and nested Shingle as they were:
 
 - tools/output_test/run.py 84/84, including MO-3's `wlr-randr --off`, `--on` and `--pos` on `HEADLESS-2`, which now go through the new configuration path without a backend request, and MO-2's created and destroyed outputs.
