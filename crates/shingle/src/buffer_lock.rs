@@ -41,6 +41,7 @@ impl ReleaseQueue {
     );
     for buffer in buffers {
       if buffer.is_alive() {
+        crate::trace::buffer(format_args!("release wl_buffer@{}", buffer.id()));
         buffer.release();
       }
     }
@@ -77,9 +78,12 @@ impl BufferLocks {
   }
 }
 
-/// Keeps a `wl_buffer` from going back to its client. Clones are further
-/// locks; the buffer is released when the last one drops.
-pub(crate) struct BufferLock(Arc<BufferLocks>);
+/// Keeps a `wl_buffer` from going back to its client
+/// (docs/design/dmabuf.md, section 4). Clones are further locks; the
+/// buffer is released when the last one drops, at the end of the
+/// compositor's next turn. A frontend clones the lock of every DMA-BUF it
+/// samples and drops the clone once the GPU has finished that frame.
+pub struct BufferLock(Arc<BufferLocks>);
 
 impl Clone for BufferLock {
   fn clone(&self) -> Self {

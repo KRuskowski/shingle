@@ -67,6 +67,7 @@ mod input_panel;
 mod ipc;
 mod launch;
 mod layer_shell;
+mod linux_dmabuf;
 mod output;
 mod output_management;
 mod output_power;
@@ -90,6 +91,7 @@ mod tearing;
 mod test_client;
 mod text_input;
 mod toplevel_icon;
+pub mod trace;
 mod viewport;
 mod virtual_keyboard;
 mod virtual_pointer;
@@ -128,6 +130,11 @@ use wayland_server::{
   backend::{ClientData, ClientId, DisconnectReason},
 };
 
+pub use buffer_lock::BufferLock;
+pub use linux_dmabuf::{
+  DmabufBuffer, DmabufFeedback, DmabufFormat, DmabufImporter, DmabufPlane,
+  fourcc_name,
+};
 pub use screencopy::CaptureId;
 pub use state::SurfaceId;
 use state::{ClientDataImpl, CompositorState};
@@ -475,8 +482,7 @@ pub enum SurfaceRole {
 }
 
 /// What a [`BufferSnapshot`] holds of its buffer (docs/design/dmabuf.md,
-/// section 4). DB-6 adds a view of an shm buffer to upload, and DB-4 a
-/// DMA-BUF.
+/// section 4). DB-6 adds a view of an shm buffer to upload.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum SnapshotContent {
@@ -486,6 +492,21 @@ pub enum SnapshotContent {
   /// premultiplied as `wl_shm` defines it. Shared-memory and single-pixel
   /// buffers are copied like this.
   Pixels(Arc<[u8]>),
+  /// A client DMA-BUF, which only the GPU reads: the frontend imports it
+  /// (or finds it in its cache by serial) and samples it.
+  Dmabuf(DmabufContent),
+}
+
+/// A committed DMA-BUF and the lock that keeps it from its client while
+/// it is shown. Every clone of the snapshot is a further lock: a frontend
+/// keeps one for every frame that samples the buffer until the GPU has
+/// finished that frame, and must not keep snapshots longer than that.
+#[derive(Clone, Debug)]
+pub struct DmabufContent {
+  /// The buffer, with its planes' fds.
+  pub buffer: Arc<DmabufBuffer>,
+  /// The buffer's lock.
+  pub lock: BufferLock,
 }
 
 /// A surface's committed buffer, as a frontend draws it.
@@ -531,6 +552,9 @@ impl std::fmt::Debug for BufferSnapshot {
       .field("transform", &self.transform);
     match &self.content {
       SnapshotContent::Pixels(rgba) => debug.field("rgba", rgba),
+      SnapshotContent::Dmabuf(content) => {
+        debug.field("dmabuf", &content.buffer)
+      }
     };
     debug
       .field("damage", &self.damage)
@@ -548,10 +572,19 @@ impl BufferSnapshot {
 
   /// The buffer as tightly packed RGBA rows, as described for
   /// [`SnapshotContent::Pixels`], or `None` for content the CPU cannot
-  /// read. Every buffer has CPU pixels today.
+  /// read: a DMA-BUF.
   pub fn rgba(&self) -> Option<Arc<[u8]>> {
     match &self.content {
       SnapshotContent::Pixels(rgba) => Some(Arc::clone(rgba)),
+      SnapshotContent::Dmabuf(_) => None,
+    }
+  }
+
+  /// The DMA-BUF this snapshot shows, if it is one.
+  pub fn dmabuf(&self) -> Option<&DmabufContent> {
+    match &self.content {
+      SnapshotContent::Dmabuf(content) => Some(content),
+      SnapshotContent::Pixels(_) => None,
     }
   }
 }
@@ -901,6 +934,9 @@ pub enum Error {
   /// already exists.
   #[error("IPC error: {0}")]
   Ipc(String),
+  /// `zwp_linux_dmabuf_v1` could not be offered.
+  #[error("DMA-BUF error: {0}")]
+  Dmabuf(String),
 }
 
 /// A Wayland compositor with one output, run by a host frontend; see the
@@ -1861,6 +1897,39 @@ impl Compositor {
   /// session is inactive or no keyboard is registered.
   pub fn set_stipc_key_events(&mut self, enabled: bool) {
     self.state.stipc_key_events = enabled;
+  }
+
+  /// Offers `zwp_linux_dmabuf_v1` version 5 with `feedback` to clients,
+  /// importing their buffers through `importer`, and makes commits of
+  /// DMA-BUFs wait for their implicit write fences
+  /// (docs/design/dmabuf.md, sections 2 and 3). A frontend calls it once
+  /// its renderer exists and before it starts clients, since most
+  /// clients look for the global only once. Calling it again, as after a
+  /// GPU loss, replaces the feedback and the importer for later requests
+  /// and keeps the global.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::Dmabuf`] when `feedback` lists no format or the format table
+  /// cannot be made.
+  pub fn enable_dmabuf(
+    &mut self,
+    feedback: DmabufFeedback,
+    importer: Box<dyn DmabufImporter>,
+  ) -> Result<(), Error> {
+    linux_dmabuf::enable(
+      &mut self.state,
+      &self.display.handle(),
+      &self.event_loop.handle(),
+      feedback,
+      importer,
+    )
+    .map_err(Error::Dmabuf)
+  }
+
+  /// Whether `zwp_linux_dmabuf_v1` is offered.
+  pub fn dmabuf_enabled(&self) -> bool {
+    self.state.dmabuf.is_some()
   }
 
   /// Makes wlr-screencopy `copy` and `copy_with_damage` emit

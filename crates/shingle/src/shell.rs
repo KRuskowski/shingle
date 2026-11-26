@@ -683,9 +683,14 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
       && surface.buffer.as_ref().is_some_and(|buffer| {
         buffer.width == state.output.width
           && buffer.height == state.output.height
-          && buffer.rgba().is_some_and(|rgba| {
-            rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255)
-          })
+          && match &buffer.content {
+            crate::SnapshotContent::Pixels(rgba) => {
+              rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255)
+            }
+            // The GPU content cannot be read on the CPU, so a DMA-BUF
+            // covering the output counts as ready, whatever its format.
+            crate::SnapshotContent::Dmabuf(_) => true,
+          }
       })
   });
   if ready {

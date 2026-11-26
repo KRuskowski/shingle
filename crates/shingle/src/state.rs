@@ -177,6 +177,8 @@ pub(crate) struct CompositorState {
   /// Buffers whose last lock dropped, released at the end of each turn.
   pub(crate) buffer_releases: ReleaseQueue,
   pub(crate) commit_queue: crate::commit_queue::CommitQueues,
+  /// `zwp_linux_dmabuf_v1`, once a frontend enabled it.
+  pub(crate) dmabuf: Option<crate::linux_dmabuf::DmabufState>,
   pub(crate) outputs: HashMap<ObjectId, WlOutput>,
   pub(crate) xdg_outputs: HashMap<ObjectId, ZxdgOutputV1>,
   pub(crate) events: Vec<Event>,
@@ -342,6 +344,7 @@ impl CompositorState {
       pools: HashMap::new(),
       buffers: HashMap::new(),
       buffer_releases: ReleaseQueue::default(),
+      dmabuf: None,
       commit_queue: Default::default(),
       outputs: HashMap::new(),
       xdg_outputs: HashMap::new(),
@@ -1369,7 +1372,7 @@ impl CompositorState {
     };
     let surface_damage = std::mem::take(&mut surface.pending.damage);
     let mut buffer_damage = std::mem::take(&mut surface.pending.buffer_damage);
-    if let Some(Some((attachment, _))) = &attachment {
+    if let Some(Some((attachment, lock))) = &attachment {
       if attachment.width % scale as u32 != 0
         || attachment.height % scale as u32 != 0
       {
@@ -1404,7 +1407,7 @@ impl CompositorState {
       ));
       let offset_x = surface.pending.offset_x;
       let offset_y = surface.pending.offset_y;
-      match attachment.snapshot(damage, offset_x, offset_y) {
+      match attachment.snapshot(damage, offset_x, offset_y, Some(lock)) {
         Ok(mut snapshot) => {
           snapshot.scale = scale;
           snapshot.transform = surface.pending.transform;
@@ -1444,7 +1447,8 @@ impl CompositorState {
         buffer.transform = surface.pending.transform;
       }
     }
-    // The pixels are copied, so the buffer goes back to its client.
+    // The pixels are copied, so the buffer goes back to its client, unless
+    // a DMA-BUF's snapshot holds it.
     drop(attachment);
 
     if let Some(viewport) = crate::viewport::commit(self, object, scale)

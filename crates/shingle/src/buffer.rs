@@ -23,8 +23,9 @@ use wayland_server::{
 };
 
 use crate::{
-  BufferSnapshot, SnapshotContent,
+  BufferSnapshot, DmabufContent, SnapshotContent,
   buffer_lock::{BufferLock, BufferLocks, ReleaseQueue},
+  linux_dmabuf::DmabufBuffer,
 };
 
 pub(crate) struct ShmPool {
@@ -89,13 +90,15 @@ impl ShmPool {
 }
 
 /// Where an attached buffer's pixels live (docs/design/dmabuf.md,
-/// section 4). DB-4 adds DMA-BUFs.
+/// section 4).
 #[derive(Clone)]
 pub(crate) enum BufferContent {
   /// A `wl_shm` buffer in its client's pool.
   Shm(ShmView),
   /// A `wp_single_pixel_buffer_v1` colour, already RGBA.
   SinglePixel([u8; 4]),
+  /// A `zwp_linux_dmabuf_v1` buffer, which only the GPU reads.
+  Dmabuf(Arc<DmabufBuffer>),
 }
 
 /// Where a `wl_shm` buffer sits in its pool, and how.
@@ -196,6 +199,21 @@ impl Attachment {
     }
   }
 
+  /// A `zwp_linux_dmabuf_v1` buffer.
+  pub(crate) fn dmabuf(
+    resource: WlBuffer,
+    buffer: Arc<DmabufBuffer>,
+    releases: &ReleaseQueue,
+  ) -> Self {
+    Self {
+      locks: BufferLocks::new(resource.clone(), releases.clone()),
+      resource,
+      width: buffer.width,
+      height: buffer.height,
+      content: BufferContent::Dmabuf(buffer),
+    }
+  }
+
   /// Locks the buffer: it is not released while the lock lives.
   pub(crate) fn lock(&self) -> BufferLock {
     self.locks.lock()
@@ -214,15 +232,27 @@ impl Attachment {
 
   /// Copies the buffer's pixels into a snapshot. This sends no release:
   /// whoever holds the buffer's lock drops it once the copy is complete.
+  /// A DMA-BUF is not copied; its snapshot keeps a clone of `lock`, so
+  /// the buffer stays with the compositor while it is shown, and needs
+  /// one.
   pub(crate) fn snapshot(
     &self,
     damage: Vec<Rect>,
     offset_x: i32,
     offset_y: i32,
+    lock: Option<&BufferLock>,
   ) -> Result<BufferSnapshot, String> {
-    let rgba = match &self.content {
-      BufferContent::SinglePixel(rgba) => rgba.to_vec(),
-      BufferContent::Shm(view) => view.rgba(self.width, self.height)?,
+    let content = match &self.content {
+      BufferContent::SinglePixel(rgba) => {
+        SnapshotContent::Pixels(rgba.to_vec().into())
+      }
+      BufferContent::Shm(view) => {
+        SnapshotContent::Pixels(view.rgba(self.width, self.height)?.into())
+      }
+      BufferContent::Dmabuf(buffer) => SnapshotContent::Dmabuf(DmabufContent {
+        buffer: Arc::clone(buffer),
+        lock: lock.ok_or("a DMA-BUF is shown only while locked")?.clone(),
+      }),
     };
     Ok(BufferSnapshot {
       width: self.width,
@@ -230,7 +260,7 @@ impl Attachment {
       source: None,
       scale: 1,
       transform: wl_output::Transform::Normal,
-      content: SnapshotContent::Pixels(rgba.into()),
+      content,
       damage,
       offset_x,
       offset_y,

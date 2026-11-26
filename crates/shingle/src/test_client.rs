@@ -24,6 +24,10 @@ use wayland_protocols::{
       wp_commit_timer_v1, wp_commit_timing_manager_v1,
     },
     fifo::v1::client::{wp_fifo_manager_v1, wp_fifo_v1},
+    linux_dmabuf::zv1::client::{
+      zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1,
+      zwp_linux_dmabuf_v1,
+    },
     presentation_time::client::{wp_presentation, wp_presentation_feedback},
     single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1,
     viewporter::client::{wp_viewport, wp_viewporter},
@@ -119,6 +123,15 @@ pub(crate) struct Events {
   pub(crate) screencopy: Vec<zwlr_screencopy_frame_v1::Event>,
   /// The `wl_buffer`s that received `release`, in order.
   pub(crate) buffer_releases: Vec<ObjectId>,
+  /// `zwp_linux_dmabuf_v1` `format` and `modifier` events, as (format,
+  /// modifier), with `None` for `format`.
+  pub(crate) dmabuf_formats: Vec<(u32, Option<u64>)>,
+  /// Every `zwp_linux_dmabuf_feedback_v1` event, with its object.
+  pub(crate) dmabuf_feedback:
+    Vec<(ObjectId, zwp_linux_dmabuf_feedback_v1::Event)>,
+  /// `zwp_linux_buffer_params_v1` answers: the params and the created
+  /// buffer, or `None` for `failed`.
+  pub(crate) dmabuf_created: Vec<(ObjectId, Option<wl_buffer::WlBuffer>)>,
   synced: bool,
 }
 
@@ -420,6 +433,79 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for Events {
       events.buffer_releases.push(buffer.id());
     }
   }
+}
+
+impl Dispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+    event: zwp_linux_dmabuf_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      zwp_linux_dmabuf_v1::Event::Format { format } => {
+        events.dmabuf_formats.push((format, None));
+      }
+      zwp_linux_dmabuf_v1::Event::Modifier {
+        format,
+        modifier_hi,
+        modifier_lo,
+      } => events.dmabuf_formats.push((
+        format,
+        Some((u64::from(modifier_hi) << 32) | u64::from(modifier_lo)),
+      )),
+      _ => {}
+    }
+  }
+}
+
+impl Dispatch<zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1, ()>
+  for Events
+{
+  fn event(
+    events: &mut Self,
+    feedback: &zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1,
+    event: zwp_linux_dmabuf_feedback_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.dmabuf_feedback.push((feedback.id(), event));
+  }
+}
+
+impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, ()>
+  for Events
+{
+  fn event(
+    events: &mut Self,
+    params: &zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
+    event: zwp_linux_buffer_params_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      zwp_linux_buffer_params_v1::Event::Created { buffer } => {
+        events.dmabuf_created.push((params.id(), Some(buffer)));
+      }
+      zwp_linux_buffer_params_v1::Event::Failed => {
+        events.dmabuf_created.push((params.id(), None));
+      }
+      _ => {}
+    }
+  }
+
+  wayland_client::event_created_child!(
+    Events,
+    zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
+    [
+      zwp_linux_buffer_params_v1::EVT_CREATED_OPCODE
+        => (wl_buffer::WlBuffer, ()),
+    ]
+  );
 }
 
 impl Dispatch<wl_keyboard::WlKeyboard, ()> for Events {

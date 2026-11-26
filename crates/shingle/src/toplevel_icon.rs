@@ -210,7 +210,7 @@ impl Dispatch<XdgToplevelIconV1, ()> for CompositorState {
           return;
         }
         // Icons keep their buffers, which are never released.
-        let snapshot = match attachment.snapshot(Vec::new(), 0, 0) {
+        let snapshot = match attachment.snapshot(Vec::new(), 0, 0, None) {
           Ok(snapshot) => snapshot,
           Err(message) => {
             resource

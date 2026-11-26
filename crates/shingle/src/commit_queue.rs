@@ -9,9 +9,8 @@
 //! before an earlier one. Destroying the surface drops its entries, which
 //! releases their buffers.
 //!
-//! DB-3 has the queue and the blocker interface but no real blockers;
-//! DB-4's implicit-sync and DB-5's syncobj waits become
-//! [`BlockerSource`]s.
+//! DB-4's implicit-sync wait (crate::linux_dmabuf) is a
+//! [`BlockerSource`]; DB-5's syncobj waits will be another.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -57,10 +56,6 @@ pub(crate) struct CommitQueues {
 
 impl CommitQueues {
   /// Adds a source that every later commit is asked about.
-  #[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "DB-4 adds the first real source")
-  )]
   pub(crate) fn add_source(&mut self, source: Box<dyn BlockerSource>) {
     self.sources.push(source);
   }
