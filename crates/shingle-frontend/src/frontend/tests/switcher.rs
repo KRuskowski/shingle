@@ -151,9 +151,28 @@ fn one_view_is_selected_and_stays_selected() {
 }
 
 #[test]
+fn minimizing_the_focused_view_leaves_the_focus_order_alone() {
+  let mut fixture = Fixture::new(config());
+  let [alpha, bravo, charlie] = fixture.windows(["alpha", "bravo", "charlie"]);
+  // Most recently focused first, by `last-focus-timestamp`.
+  let order =
+    |fixture: &Fixture| fixture.frontend.compositor().switchable_windows();
+  assert_eq!(order(&fixture), [charlie, bravo, alpha]);
+  fixture
+    .frontend
+    .compositor_mut()
+    .set_minimized(charlie, true)
+    .expect("charlie minimizes");
+  fixture.process();
+  // Bravo gets the focus but, as in Wayfire, not a newer focus time.
+  assert_eq!(fixture.focused(), Some(bravo));
+  assert_eq!(order(&fixture), [charlie, bravo, alpha]);
+}
+
+#[test]
 fn a_minimized_view_can_be_selected_and_is_restored() {
   let mut fixture = Fixture::new(config());
-  let [_, bravo, charlie] = fixture.windows(["alpha", "bravo", "charlie"]);
+  let [alpha, bravo, charlie] = fixture.windows(["alpha", "bravo", "charlie"]);
   fixture
     .frontend
     .compositor_mut()
@@ -161,12 +180,16 @@ fn a_minimized_view_can_be_selected_and_is_restored() {
     .expect("charlie minimizes");
   fixture.process();
   assert_eq!(fixture.focused(), Some(bravo));
-  // Shingle's refocus after a minimize does not count as focusing bravo,
-  // where Wayfire's does; a click does.
-  fixture.frontend.compositor_mut().focus_window(bravo);
-  fixture.process();
-  // Bravo, then the minimized charlie, by focus order.
+  // The refocus after a minimize does not count as focusing bravo, as in
+  // Wayfire, whose `seat_t::refocus` leaves the focus timestamps alone:
+  // by focus order the minimized charlie is in the middle, so the first
+  // press selects bravo, as Wayfire 0.9 does (tools/gpu_test/
+  // focus_checks.py), then alpha and charlie.
   fixture.key(KEY_LEFTALT, true);
+  fixture.tap(KEY_TAB, &[]);
+  assert_eq!(fixture.selected(), Some(bravo));
+  fixture.tap(KEY_TAB, &[]);
+  assert_eq!(fixture.selected(), Some(alpha));
   fixture.tap(KEY_TAB, &[]);
   assert_eq!(fixture.selected(), Some(charlie));
   fixture.key(KEY_LEFTALT, false);
