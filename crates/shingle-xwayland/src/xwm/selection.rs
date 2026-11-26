@@ -19,6 +19,11 @@
 //!   a transfer window of its own and copies the property, or the `INCR`
 //!   chunks, into the client's descriptor.
 //!
+//! `XdndSelection` is bridged the same way for drag and drop
+//! ([`super::dnd`]), except that an X owner's types come from its
+//! `XdndEnter` rather than `TARGETS`, and that its owner changes are
+//! reported as [`super::XwmEvent::DragOwnerChanged`].
+//!
 //! Every descriptor is non-blocking. The compositor watches the ones
 //! [`super::Xwm::transfer_watches`] lists and calls
 //! [`super::Xwm::pump_transfers`] each turn, so a slow writer or reader
@@ -60,6 +65,10 @@ pub enum Selection {
   Clipboard,
   /// `PRIMARY` and the primary selection protocol.
   Primary,
+  /// `XdndSelection` and `wl_data_device`'s drag. The drag and drop
+  /// bridge ([`super::dnd`]) owns it in X for a Wayland drag and converts
+  /// it from an X drag source; it is not reported as a Wayland selection.
+  Dnd,
 }
 
 impl Selection {
@@ -68,6 +77,7 @@ impl Selection {
     match self {
       Self::Clipboard => atoms.get(Name::CLIPBOARD),
       Self::Primary => atoms.get(Name::PRIMARY),
+      Self::Dnd => atoms.get(Name::XDND_SELECTION),
     }
   }
 }
@@ -121,6 +131,9 @@ struct Bridged {
   x_generation: u64,
   /// The X owner's MIME types and the target for each.
   x_offer: Vec<(String, u32)>,
+  /// The time conversions from the X owner are asked for: `CurrentTime`,
+  /// or for `XdndSelection` the time of the drop, as Xdnd asks.
+  convert_time: u32,
 }
 
 /// A transfer from a Wayland source to an X requestor.
@@ -256,14 +269,41 @@ impl Selections {
         x_owned: false,
         x_generation: 0,
         x_offer: Vec::new(),
+        convert_time: x11rb::CURRENT_TIME,
       });
     }
     Ok(())
   }
 
-  /// The selections bridged.
+  /// The selections bridged, apart from `XdndSelection`, which is not a
+  /// Wayland selection.
   pub(super) fn bridged(&self) -> Vec<Selection> {
-    self.bridged.iter().map(|bridged| bridged.kind).collect()
+    self
+      .bridged
+      .iter()
+      .map(|bridged| bridged.kind)
+      .filter(|kind| *kind != Selection::Dnd)
+      .collect()
+  }
+
+  /// Sets what an X owner of `selection` offers, as MIME types with the
+  /// target to convert for each, and the time to convert at. The
+  /// clipboard and primary selection learn it from `TARGETS`; an X drag
+  /// source names its types in `XdndEnter`.
+  pub(super) fn set_x_offer(
+    &mut self,
+    selection: Selection,
+    offer: Vec<(String, u32)>,
+    time: u32,
+  ) {
+    if let Some(bridged) = self
+      .bridged
+      .iter_mut()
+      .find(|bridged| bridged.kind == selection)
+    {
+      bridged.x_offer = offer;
+      bridged.convert_time = time;
+    }
   }
 
   /// The window that owns `selection` for Wayland.
@@ -286,7 +326,7 @@ impl Selections {
 
   /// The atoms for target `names`, from what is known and one pipelined
   /// batch for the rest.
-  fn intern<C: XConnection>(
+  pub(super) fn intern<C: XConnection>(
     &mut self,
     connection: &mut C,
     atoms: &Atoms,
@@ -325,7 +365,7 @@ impl Selections {
 
   /// The names of `values`, from what is known and one pipelined batch
   /// for the rest; `None` for an atom the server does not know.
-  fn names_of<C: XConnection>(
+  pub(super) fn names_of<C: XConnection>(
     &mut self,
     connection: &mut C,
     atoms: &Atoms,
@@ -413,6 +453,13 @@ impl Selections {
       bridged.x_owned = false;
       bridged.x_offer.clear();
       return Ok(None);
+    }
+    if bridged.kind == Selection::Dnd {
+      // An X drag source names its types in XdndEnter, not TARGETS.
+      bridged.x_owned = event.owner != x11rb::NONE;
+      bridged.x_offer.clear();
+      let owner = (event.owner != x11rb::NONE).then_some(event.owner);
+      return Ok(Some(super::XwmEvent::DragOwnerChanged { owner }));
     }
     if event.owner == x11rb::NONE {
       // The X owner went away, or gave the selection up.
@@ -713,6 +760,7 @@ impl Selections {
       return Ok(());
     }
     let selection_atom = bridged.atom;
+    let time = bridged.convert_time;
     let window = connection.generate_id()?;
     connection.create_window(window, connection.root(), WINDOW_GEOMETRY)?;
     connection.watch_window(window, EventMask::PROPERTY_CHANGE)?;
@@ -721,7 +769,7 @@ impl Selections {
       selection_atom,
       target,
       atoms.get(Name::WL_SELECTION),
-      x11rb::CURRENT_TIME,
+      time,
     )?;
     self.next_id += 1;
     self.incoming.push(Incoming {

@@ -24,6 +24,8 @@ enum Request {
   Redirect(Window),
   SelectEvents(Window, EventMask),
   CreateWindow(Window, Window),
+  CreateInputWindow(Window, Window),
+  Unmap(Window),
   SelectionOwner(Window, u32),
   Property32(Window, u32, u32, Vec<u32>),
   Property8(Window, u32, u32, Vec<u8>),
@@ -129,6 +131,21 @@ impl XConnection for Recording {
     _geometry: (i16, i16, u16, u16),
   ) -> Result<(), XwmError> {
     self.requests.push(Request::CreateWindow(id, parent));
+    Ok(())
+  }
+
+  fn create_input_window(
+    &mut self,
+    id: Window,
+    parent: Window,
+    _geometry: (i16, i16, u16, u16),
+  ) -> Result<(), XwmError> {
+    self.requests.push(Request::CreateInputWindow(id, parent));
+    Ok(())
+  }
+
+  fn unmap_window(&mut self, window: Window) -> Result<(), XwmError> {
+    self.requests.push(Request::Unmap(window));
     Ok(())
   }
 
@@ -379,6 +396,7 @@ fn atom(name: AtomName) -> u32 {
   1000 + name as u32
 }
 
+mod dnd;
 mod selection;
 
 #[test]

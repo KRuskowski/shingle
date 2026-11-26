@@ -17,10 +17,17 @@
 //! [`Xwm::set_selection`], [`Xwm::receive_selection`],
 //! [`Xwm::take_selection_sends`], [`Xwm::pump_transfers`] and
 //! [`Xwm::transfer_watches`].
+//!
+//! And it bridges drag and drop over Xdnd in both directions ([`dnd`]):
+//! [`Xwm::bridge_dnd`], [`Xwm::drag_start`], [`Xwm::drag_motion`],
+//! [`Xwm::drag_drop`] and [`Xwm::drag_end`] for a Wayland drag over X
+//! windows, and [`Xwm::x11_drag`] and [`Xwm::x11_drag_end`] for an X
+//! client's drag over Wayland surfaces.
 
 mod atoms;
 mod connection;
 pub mod cursor;
+pub mod dnd;
 pub mod messages;
 pub mod mime;
 pub mod pairing;
@@ -37,6 +44,7 @@ pub use connection::{
   XwmError,
 };
 pub use cursor::CursorImage;
+pub use dnd::{DndAction, DndActions, XDND_VERSION};
 pub use messages::{MoveResize, StateChange};
 pub use pairing::{Paired, Pairing};
 pub use policy::{Placement, configure_reply};
@@ -163,6 +171,47 @@ pub enum XwmEvent {
     /// The selection.
     selection: Selection,
   },
+  /// An X client took `XdndSelection`, which it does when a drag starts,
+  /// or the owner gave it up or went away (`None`). The compositor starts
+  /// a Wayland drag for it, with [`Xwm::x11_drag`], while a button is
+  /// held on an X window.
+  DragOwnerChanged {
+    /// The owner's window.
+    owner: Option<Window>,
+  },
+  /// The X window a Wayland drag is over accepts it, or no longer does
+  /// (`XdndStatus`, or leaving the window).
+  DragStatus {
+    /// Whether it accepts the drop.
+    accepted: bool,
+    /// The action it would perform; `None` when it does not accept.
+    action: DndAction,
+  },
+  /// The X window a Wayland drag was dropped on is done with it
+  /// (`XdndFinished`).
+  DragFinished {
+    /// Whether it took the data.
+    performed: bool,
+    /// The action it performed.
+    action: DndAction,
+  },
+  /// An X drag source over the proxy named its types (`XdndEnter`), as
+  /// MIME types; reported when they change.
+  DragOffered {
+    /// The MIME types.
+    mime_types: Vec<String>,
+  },
+  /// The X drag source proposes another action (`XdndPosition`).
+  DragSourceAction {
+    /// The action.
+    action: DndAction,
+  },
+  /// The X drag source left the proxy (`XdndLeave`), because the drag is
+  /// over an X window now, or was cancelled.
+  DragLeft,
+  /// The X drag source dropped on the proxy (`XdndDrop`). The compositor
+  /// drops on the Wayland target and ends with [`Xwm::x11_drag_end`].
+  DragDropped,
 }
 
 /// What the window manager keeps per child of the root.
@@ -230,6 +279,8 @@ pub struct Xwm<C: XConnection> {
   warned_surface_id: bool,
   /// The clipboard and primary selection bridge.
   selections: Selections,
+  /// The drag and drop bridge.
+  dnd: dnd::Dnd,
 }
 
 impl<C: XConnection> Xwm<C> {
@@ -332,6 +383,7 @@ impl<C: XConnection> Xwm<C> {
       focus_sequence: 0,
       warned_surface_id: false,
       selections: Selections::default(),
+      dnd: dnd::Dnd::default(),
     })
   }
 
@@ -375,6 +427,7 @@ impl<C: XConnection> Xwm<C> {
         if event.window == self.check_window
           || event.parent != self.root
           || self.selections.owns_window(event.window)
+          || self.dnd.owns_window(event.window)
         {
           return Ok(());
         }
@@ -526,6 +579,9 @@ impl<C: XConnection> Xwm<C> {
           &self.atoms,
           &event,
         )? {
+          if let XwmEvent::DragOwnerChanged { owner } = event {
+            self.dnd.owner_changed(&mut self.connection, owner)?;
+          }
           events.push(event);
         }
       }
@@ -573,6 +629,15 @@ impl<C: XConnection> Xwm<C> {
     let data = event.data.as_data32();
     let window = event.window;
     let kind = event.type_;
+    if self.dnd.client_message(
+      &mut self.connection,
+      &self.atoms,
+      &mut self.selections,
+      event,
+      events,
+    )? {
+      return Ok(());
+    }
     let atom = |name| self.atoms.get(name);
     if kind == atom(AtomName::WL_SURFACE_SERIAL) {
       let Some(tracked) = self.windows.get_mut(&window) else {
@@ -1188,6 +1253,159 @@ impl<C: XConnection> Xwm<C> {
     self
       .selections
       .bridge(&mut self.connection, &self.atoms, selections)
+  }
+
+  /// Bridges drag and drop: the `XdndSelection` window and the proxy an X
+  /// drag source finds over Wayland surfaces. The compositor calls it
+  /// after [`Xwm::bridge_selections`].
+  ///
+  /// # Errors
+  ///
+  /// When the requests cannot be queued.
+  pub fn bridge_dnd(&mut self) -> Result<(), XwmError> {
+    self
+      .dnd
+      .bridge(&mut self.connection, &self.atoms, &mut self.selections)
+  }
+
+  /// The `XdndSelection` window, which Wayland drags come from in X, and
+  /// the proxy, once [`Xwm::bridge_dnd`] made them.
+  pub fn dnd_windows(&self) -> (Option<Window>, Option<Window>) {
+    self.dnd.windows()
+  }
+
+  /// Whether the proxy is mapped.
+  pub fn dnd_proxy_mapped(&self) -> bool {
+    self.dnd.proxy_mapped()
+  }
+
+  /// A Wayland client started a drag offering `mime_types` and
+  /// `actions`: the window manager takes `XdndSelection` for it. X
+  /// targets' requests for the data come as [`SelectionSend`]s for
+  /// [`Selection::Dnd`].
+  ///
+  /// # Errors
+  ///
+  /// When the requests cannot be queued.
+  pub fn drag_start(
+    &mut self,
+    mime_types: Vec<String>,
+    actions: DndActions,
+  ) -> Result<(), XwmError> {
+    self.dnd.wayland_start(
+      &mut self.connection,
+      &self.atoms,
+      &mut self.selections,
+      mime_types,
+      actions,
+    )
+  }
+
+  /// The Wayland drag is over X window `target`, or no X window, at root
+  /// position (`x`, `y`) at server time `time`. Leaving an X window that
+  /// accepted the drag returns an [`XwmEvent::DragStatus`] saying that
+  /// nothing does; the X windows' own answers come from
+  /// [`Xwm::dispatch`].
+  ///
+  /// # Errors
+  ///
+  /// When the requests cannot be queued.
+  pub fn drag_motion(
+    &mut self,
+    target: Option<Window>,
+    x: i32,
+    y: i32,
+    time: u32,
+  ) -> Result<Vec<XwmEvent>, XwmError> {
+    let mut events = Vec::new();
+    self.dnd.wayland_motion(
+      &mut self.connection,
+      &self.atoms,
+      target,
+      x,
+      y,
+      time,
+      &mut events,
+    )?;
+    Ok(events)
+  }
+
+  /// The Wayland drag was dropped at server time `time`: an X window
+  /// under it that accepted it gets `XdndDrop`, and its `XdndFinished`
+  /// comes as [`XwmEvent::DragFinished`]. Returns whether the drop went
+  /// to an X window.
+  ///
+  /// # Errors
+  ///
+  /// When the requests cannot be queued.
+  pub fn drag_drop(&mut self, time: u32) -> Result<bool, XwmError> {
+    self
+      .dnd
+      .wayland_drop(&mut self.connection, &self.atoms, time)
+  }
+
+  /// The Wayland drag ended: an X window it is still over gets
+  /// `XdndLeave`, and the window manager gives up `XdndSelection`.
+  ///
+  /// # Errors
+  ///
+  /// When the requests cannot be queued.
+  pub fn drag_end(&mut self) -> Result<(), XwmError> {
+    self.dnd.wayland_end(
+      &mut self.connection,
+      &self.atoms,
+      &mut self.selections,
+    )
+  }
+
+  /// Whether a Wayland drag runs, as far as the window manager knows.
+  pub fn drag_active(&self) -> bool {
+    self.dnd.wayland_active()
+  }
+
+  /// The compositor runs a Wayland drag for the X client that owns
+  /// `XdndSelection`: `proxy` maps the proxy while the drag is not over an
+  /// X window, and `accepted` and `action` are the Wayland target's
+  /// verdict, which the X source gets in `XdndStatus`. Called every turn
+  /// while the drag runs; without an X owner it does nothing.
+  ///
+  /// # Errors
+  ///
+  /// When the requests cannot be queued.
+  pub fn x11_drag(
+    &mut self,
+    proxy: bool,
+    accepted: bool,
+    action: DndAction,
+  ) -> Result<(), XwmError> {
+    self.dnd.x11_update(
+      &mut self.connection,
+      &self.atoms,
+      proxy,
+      accepted,
+      action,
+    )
+  }
+
+  /// The X client's drag ended: if it was dropped on the proxy, the
+  /// source gets `XdndFinished`, performed with `performed`'s action or
+  /// refused with `None`. The proxy is unmapped.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  pub fn x11_drag_end(
+    &mut self,
+    performed: Option<DndAction>,
+  ) -> Result<(), XwmError> {
+    self
+      .dnd
+      .x11_end(&mut self.connection, &self.atoms, performed)
+  }
+
+  /// Whether an X client's drag runs, as far as the window manager knows.
+  pub fn x11_drag_active(&self) -> bool {
+    self.dnd.x11_active()
   }
 
   /// The selections bridged.

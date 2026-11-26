@@ -50,6 +50,7 @@ fn owner(selection: Selection, owner: Window) -> Event {
   let (window, atom_name) = match selection {
     Selection::Clipboard => (CLIPBOARD_WINDOW, AtomName::CLIPBOARD),
     Selection::Primary => (PRIMARY_WINDOW, AtomName::PRIMARY),
+    Selection::Dnd => unreachable!("the drag tests have their own"),
   };
   Event::XfixesSelectionNotify(OwnerNotify {
     subtype: SelectionEvent::SET_SELECTION_OWNER,

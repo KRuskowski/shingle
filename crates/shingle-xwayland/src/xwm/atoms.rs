@@ -19,8 +19,7 @@ macro_rules! atoms {
 }
 
 // wlroots' list (xwayland/xwm.c, `atom_map`), without `WL_SURFACE_ID`,
-// which Shingle does not support, and the Xdnd atoms, which come with drag
-// and drop (XW-6).
+// which Shingle does not support.
 atoms! {
   WM_PROTOCOLS = "WM_PROTOCOLS",
   WM_HINTS = "WM_HINTS",
@@ -89,6 +88,20 @@ atoms! {
   NET_CLIENT_LIST = "_NET_CLIENT_LIST",
   NET_CLIENT_LIST_STACKING = "_NET_CLIENT_LIST_STACKING",
   WL_SURFACE_SERIAL = "WL_SURFACE_SERIAL",
+  XDND_SELECTION = "XdndSelection",
+  XDND_AWARE = "XdndAware",
+  XDND_STATUS = "XdndStatus",
+  XDND_POSITION = "XdndPosition",
+  XDND_ENTER = "XdndEnter",
+  XDND_LEAVE = "XdndLeave",
+  XDND_DROP = "XdndDrop",
+  XDND_FINISHED = "XdndFinished",
+  XDND_PROXY = "XdndProxy",
+  XDND_TYPE_LIST = "XdndTypeList",
+  XDND_ACTION_MOVE = "XdndActionMove",
+  XDND_ACTION_COPY = "XdndActionCopy",
+  XDND_ACTION_ASK = "XdndActionAsk",
+  XDND_ACTION_PRIVATE = "XdndActionPrivate",
 }
 
 /// The interned values of every [`Name`].
@@ -158,9 +171,12 @@ mod tests {
   }
 
   #[test]
-  fn wl_surface_id_and_xdnd_are_left_out() {
+  fn wl_surface_id_is_left_out_and_xdnd_is_in() {
     assert!(!NAMES.contains(&"WL_SURFACE_ID"));
-    assert!(!NAMES.iter().any(|name| name.starts_with("Xdnd")));
+    // wlroots' fourteen Xdnd atoms (xwm.c, `atom_map`).
+    let xdnd = NAMES.iter().filter(|name| name.starts_with("Xdnd"));
+    assert_eq!(xdnd.count(), 14);
+    assert_eq!(NAMES[Name::XDND_SELECTION as usize], "XdndSelection");
   }
 
   #[test]

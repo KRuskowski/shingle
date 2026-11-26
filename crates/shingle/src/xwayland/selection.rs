@@ -39,6 +39,8 @@ pub(crate) fn offered(
     Selection::Primary => {
       primary_selection::set_x11_selection(state, mime_types);
     }
+    // An X drag's types come with its XdndEnter.
+    Selection::Dnd => {}
   }
 }
 
@@ -48,6 +50,7 @@ pub(crate) fn cleared(state: &mut CompositorState, selection: Selection) {
   match selection {
     Selection::Clipboard => data_device::clear_x11_selection(state),
     Selection::Primary => primary_selection::clear_x11_selection(state),
+    Selection::Dnd => {}
   }
 }
 
@@ -60,6 +63,8 @@ pub(crate) fn wayland_side(
   let current = match selection {
     Selection::Clipboard => data_device::selection(state),
     Selection::Primary => primary_selection::selection(state),
+    // A drag is not a selection.
+    Selection::Dnd => None,
   };
   match current {
     Some((key, mime_types)) => {
@@ -84,6 +89,7 @@ pub(crate) fn send(state: &mut CompositorState, send: SelectionSend) {
     Selection::Primary => {
       primary_selection::receive_from(state, &key, send.mime_type, send.fd);
     }
+    Selection::Dnd => {}
   }
 }
 

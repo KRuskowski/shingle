@@ -37,10 +37,10 @@ pub use server::{
 };
 pub use sockets::DisplaySockets;
 pub use xwm::{
-  CursorImage, Geometry, INCR_CHUNK_SIZE, InputModel, Kind, MoveResize,
-  NetWmState, Paired, Pairing, Placement, Selection, SelectionSend,
-  StateChange, TransferWatch, Window, WindowInfo, WindowType, X11Connection,
-  XConnection, Xwm, XwmError, XwmEvent, configure_reply,
+  CursorImage, DndAction, DndActions, Geometry, INCR_CHUNK_SIZE, InputModel,
+  Kind, MoveResize, NetWmState, Paired, Pairing, Placement, Selection,
+  SelectionSend, StateChange, TransferWatch, Window, WindowInfo, WindowType,
+  X11Connection, XConnection, Xwm, XwmError, XwmEvent, configure_reply,
 };
 
 /// How a server process ended, and what happens next.

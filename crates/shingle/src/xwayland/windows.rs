@@ -135,6 +135,14 @@ pub(crate) fn apply(state: &mut CompositorState, event: XwmEvent) {
     XwmEvent::SelectionCleared { selection } => {
       super::selection::cleared(state, selection);
     }
+    // No drag and drop bridge is set up yet.
+    XwmEvent::DragOwnerChanged { .. }
+    | XwmEvent::DragStatus { .. }
+    | XwmEvent::DragFinished { .. }
+    | XwmEvent::DragOffered { .. }
+    | XwmEvent::DragSourceAction { .. }
+    | XwmEvent::DragLeft
+    | XwmEvent::DragDropped => {}
   }
 }
 

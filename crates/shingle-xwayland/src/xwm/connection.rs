@@ -146,6 +146,27 @@ pub trait XConnection {
     geometry: (i16, i16, u16, u16),
   ) -> Result<(), XwmError>;
 
+  /// Creates an unmapped `InputOnly` child `id` of `parent` with the given
+  /// geometry, which takes pointer input but is never drawn: the drag and
+  /// drop proxy.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn create_input_window(
+    &mut self,
+    id: Window,
+    parent: Window,
+    geometry: (i16, i16, u16, u16),
+  ) -> Result<(), XwmError>;
+
+  /// Unmaps `window`.
+  ///
+  /// # Errors
+  ///
+  /// When the request cannot be queued.
+  fn unmap_window(&mut self, window: Window) -> Result<(), XwmError>;
+
   /// Makes `owner` the owner of `selection`, at `CurrentTime`.
   ///
   /// # Errors
@@ -517,6 +538,39 @@ impl XConnection for X11Connection {
         COPY_FROM_PARENT,
         &CreateWindowAux::new(),
       )
+      .map(drop)
+      .map_err(connection_error)
+  }
+
+  fn create_input_window(
+    &mut self,
+    id: Window,
+    parent: Window,
+    (x, y, width, height): (i16, i16, u16, u16),
+  ) -> Result<(), XwmError> {
+    self
+      .connection
+      .create_window(
+        0,
+        id,
+        parent,
+        x,
+        y,
+        width,
+        height,
+        0,
+        WindowClass::INPUT_ONLY,
+        COPY_FROM_PARENT,
+        &CreateWindowAux::new(),
+      )
+      .map(drop)
+      .map_err(connection_error)
+  }
+
+  fn unmap_window(&mut self, window: Window) -> Result<(), XwmError> {
+    self
+      .connection
+      .unmap_window(window)
       .map(drop)
       .map_err(connection_error)
   }
