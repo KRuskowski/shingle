@@ -742,9 +742,11 @@ CHECKS = {
 }
 
 def all_checks():
-  """DB-2's and DB-3's groups here, and DB-4's (dmabuf_checks.py)."""
+  """DB-2's and DB-3's groups here, DB-4's and DB-5's
+  (dmabuf_checks.py) and MO-5's (output_checks.py)."""
   import dmabuf_checks
-  return {**CHECKS, **dmabuf_checks.CHECKS}
+  import output_checks
+  return {**CHECKS, **dmabuf_checks.CHECKS, **output_checks.CHECKS}
 
 def run_checks(groups, binary, wl_probe, captures_directory=None):
   """Runs the check `groups` in order; returns 0 when all passed."""

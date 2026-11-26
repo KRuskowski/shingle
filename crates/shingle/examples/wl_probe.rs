@@ -13,8 +13,8 @@
 //!
 //! ```text
 //! wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern] [--fifo]
-//!          [--damage] [--animate FRAMES] [--report-outputs]
-//!          [--layer OUTPUT]
+//!          [--damage] [--animate FRAMES] [--presentation]
+//!          [--report-outputs] [--layer OUTPUT]
 //! ```
 //!
 //! With `--report-outputs` the probe binds every `wl_output` and reports
@@ -55,7 +55,13 @@
 //! frames at the size last drawn, each a different grey, fully damaged,
 //! from two buffers of a sealed pool, one per frame callback and each
 //! only once it was released. It then reports `animated` (frames,
-//! milliseconds), for the harness's CPU measurement (DB-6).
+//! milliseconds), for the harness's CPU measurement (DB-6). With
+//! `--presentation` too, each frame asks for `wp_presentation` feedback,
+//! and the probe reports `presented` (output, the name of its
+//! `sync_output`; seq; msec, the presentation time in milliseconds) or
+//! `discarded` for each, so that the harness can count the frames each
+//! output presents and check that feedback names the output the window
+//! is on (docs/design/multi-output.md, MO-5).
 //!
 //! With `--copy`, the probe also makes a `wl_data_source` offering
 //! `text/plain;charset=utf-8` the clipboard, and answers each `send` with
@@ -66,7 +72,8 @@
 //! Events: `configure` (width, height, activated), `enter`, `leave`,
 //! `key` (key, pressed), `copied`, `send` (mime), `sent`, `cancelled`,
 //! `fifo`, `release` (buffer), `damage` (step), `animated` (frames,
-//! milliseconds), `output-enter` and `output-leave` (output),
+//! milliseconds), `presented` (output, seq, msec), `discarded`,
+//! `output-enter` and `output-leave` (output),
 //! `preferred-scale` (scale), `buffer-scale` (factor), `layer-configure`
 //! (width, height), `layer-closed`, `close` and `error`.
 
@@ -92,6 +99,7 @@ use wayland_protocols::{
     fractional_scale::v1::client::{
       wp_fractional_scale_manager_v1, wp_fractional_scale_v1,
     },
+    presentation_time::client::{wp_presentation, wp_presentation_feedback},
   },
   xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
 };
@@ -141,6 +149,8 @@ struct Options {
   damage: bool,
   /// Draws this many full-size frames once mapped.
   animate: Option<u32>,
+  /// Asks for presentation feedback of each animated frame.
+  presentation: bool,
   /// Reports the outputs the surface enters and leaves and its scales.
   report_outputs: bool,
   /// Maps a layer-shell panel on the output of this name instead of a
@@ -173,8 +183,8 @@ fn buffer_bytes(width: i32, height: i32, pattern: bool) -> Vec<u8> {
 }
 
 /// Parses `wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern]
-/// [--fifo] [--damage] [--animate FRAMES] [--report-outputs]
-/// [--layer OUTPUT]`.
+/// [--fifo] [--damage] [--animate FRAMES] [--presentation]
+/// [--report-outputs] [--layer OUTPUT]`.
 fn parse(arguments: &[String]) -> Result<Options, String> {
   let mut options = Options::default();
   let mut arguments = arguments.iter();
@@ -192,6 +202,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
       }
       "--pattern" => options.pattern = true,
       "--report-outputs" => options.report_outputs = true,
+      "--presentation" => options.presentation = true,
       "--layer" => {
         options.layer =
           Some(arguments.next().ok_or("--layer needs an output")?.clone());
@@ -247,6 +258,12 @@ struct Probe {
   outputs: Vec<(wl_output::WlOutput, Option<String>)>,
   /// Whether the toplevel's surface reports outputs and scales.
   report_outputs: bool,
+  /// `wp_presentation`, bound with `--presentation`.
+  presentation: Option<wp_presentation::WpPresentation>,
+  /// Whether `--presentation` asked for it, which binds the outputs too.
+  wants_presentation: bool,
+  /// The `sync_output` of the feedback being reported.
+  sync_output: Option<String>,
   keyboard: Option<wl_keyboard::WlKeyboard>,
   /// The text the selection offers and how long each send waits.
   copy: Option<(String, u64)>,
@@ -411,7 +428,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
         };
         probe.compositor = Some(registry.bind(name, version, handle, ()));
       }
-      "wl_output" if probe.report_outputs => {
+      "wl_output" if probe.report_outputs || probe.wants_presentation => {
         let output = registry.bind(name, version.min(4), handle, ());
         probe.outputs.push((output, None));
       }
@@ -430,6 +447,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
       }
       "wp_fifo_manager_v1" => {
         probe.fifo_manager = Some(registry.bind(name, 1, handle, ()));
+      }
+      "wp_presentation" if probe.wants_presentation => {
+        probe.presentation = Some(registry.bind(name, 1, handle, ()));
       }
       _ => {}
     }
@@ -914,6 +934,9 @@ fn animate(
       .write_all_at(&pixels, (frame_size * index as i32) as u64)
       .map_err(|error| error.to_string())?;
     probe.frame_done = false;
+    if let Some(presentation) = &probe.presentation {
+      presentation.feedback(&surface, &handle, ());
+    }
     surface.frame(&handle, ());
     surface.attach(Some(&buffers[index]), 0, 0);
     surface.damage_buffer(0, 0, width, height);
@@ -929,6 +952,49 @@ fn animate(
   );
   pool.destroy();
   Ok(())
+}
+
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for Probe {
+  fn event(
+    probe: &mut Self,
+    _: &wp_presentation_feedback::WpPresentationFeedback,
+    event: wp_presentation_feedback::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      wp_presentation_feedback::Event::SyncOutput { output } => {
+        probe.sync_output = Some(probe.output_name(&output));
+      }
+      wp_presentation_feedback::Event::Presented {
+        tv_sec_hi,
+        tv_sec_lo,
+        tv_nsec,
+        seq_hi,
+        seq_lo,
+        ..
+      } => {
+        let seconds = (u64::from(tv_sec_hi) << 32) | u64::from(tv_sec_lo);
+        let msec = seconds * 1000 + u64::from(tv_nsec) / 1_000_000;
+        let seq = (u64::from(seq_hi) << 32) | u64::from(seq_lo);
+        let output = probe.sync_output.take().unwrap_or_else(|| "?".into());
+        report(
+          "presented",
+          &[
+            ("output", format!("{output:?}")),
+            ("seq", seq.to_string()),
+            ("msec", msec.to_string()),
+          ],
+        );
+      }
+      wp_presentation_feedback::Event::Discarded => {
+        probe.sync_output = None;
+        report("discarded", &[]);
+      }
+      _ => {}
+    }
+  }
 }
 
 /// Objects whose events the probe ignores.
@@ -960,7 +1026,8 @@ ignore_events!(
   wl_data_device_manager::WlDataDeviceManager,
   wl_data_offer::WlDataOffer,
   wp_fifo_manager_v1::WpFifoManagerV1,
-  wp_fifo_v1::WpFifoV1
+  wp_fifo_v1::WpFifoV1,
+  wp_presentation::WpPresentation
 );
 
 /// Maps the toplevel, sets the selection with `--copy`, and serves events
@@ -976,12 +1043,13 @@ fn run(options: &Options) -> Result<(), String> {
     copy: options.copy.clone().map(|text| (text, options.delay_ms)),
     pattern: options.pattern,
     report_outputs: options.report_outputs || options.layer.is_some(),
+    wants_presentation: options.presentation,
     ..Probe::default()
   };
   queue
     .roundtrip(&mut probe)
     .map_err(|error| error.to_string())?;
-  if probe.report_outputs {
+  if probe.report_outputs || probe.wants_presentation {
     // The outputs' names.
     queue
       .roundtrip(&mut probe)
@@ -1104,6 +1172,7 @@ mod tests {
         fifo: false,
         damage: false,
         animate: None,
+        presentation: false,
         report_outputs: false,
         layer: None,
       }
@@ -1128,6 +1197,7 @@ mod tests {
       parse(&arguments(&["--animate", "60"])).unwrap().animate,
       Some(60)
     );
+    assert!(parse(&arguments(&["--presentation"])).unwrap().presentation);
     assert!(parse(&arguments(&["--animate", "many"])).is_err());
     assert!(parse(&arguments(&["--animate"])).is_err());
     assert!(parse(&arguments(&["a", "b"])).is_err());

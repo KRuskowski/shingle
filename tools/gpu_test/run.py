@@ -27,7 +27,7 @@ namespaces:
   tools/gpu_test/run.py [--modeset] [--keep] [--binary target/debug/shingle]
       [--wl-probe target/debug/examples/wl_probe] [--captures DIR]
       --checks offscreen|nested|baseline|buffers|dmabuf|browsers|xwayland|
-               nested-gpu|nodmabuf|weston|syncobj|nosyncobj ...
+               nested-gpu|nodmabuf|weston|syncobj|nosyncobj|outputs ...
 
 For example, DB-1's import test:
 
@@ -47,14 +47,16 @@ groups nvidia-modeset is exposed as with `--modeset`, because NVIDIA's
 Vulkan WSI cannot create a swapchain without it. DB-5's syncobj checks
 are `--checks syncobj nosyncobj` (after `cargo build -p shingle --example
 syncobj_probe`), and `dmabuf`, `xwayland` and `nested-gpu` check syncobj
-use too.
+use too. MO-5's checks of offscreen Shingle with two outputs at
+different refresh rates (output_checks.py) are `--checks outputs`.
 
 It exits with the command's status, or 1 when a check failed. With
 `--checks` it prints one PASS or FAIL line per check and INFO lines for
 what is only recorded, and `--captures` saves the settled captures there
 as PPM files. Signals go only to processes inside the PID namespace,
 through `signal_checked`. The pure helpers are tested by
-`python3 -m unittest` in this directory (test_run.py, test_checks.py).
+`python3 -m unittest` in this directory (test_run.py, test_checks.py,
+test_dmabuf_checks.py, test_output_checks.py).
 The work directory under `target/` is removed afterwards unless `--keep`
 is given.
 """
@@ -78,11 +80,11 @@ STRIPPED_VARIABLES = ('WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'DISPLAY',
 # What the private /dev may also hold besides the bound nodes.
 PRIVATE_ENTRIES = ('pts', 'ptmx', 'shm', 'fd', 'stdin', 'stdout', 'stderr')
 SAMPLE_INTERVAL = 0.05
-# checks.GROUPS and dmabuf_checks.GROUPS, kept here so that `--help` works
-# without importing them.
+# checks.GROUPS, dmabuf_checks.GROUPS and output_checks.GROUPS, kept here
+# so that `--help` works without importing them.
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
-                'weston', 'syncobj', 'nosyncobj')
+                'weston', 'syncobj', 'nosyncobj', 'outputs')
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset; `syncobj` runs no Vulkan client.
 MODESET_GROUPS = ('dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
