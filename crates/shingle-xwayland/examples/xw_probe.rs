@@ -18,10 +18,25 @@
 //!     [--no-input] [--take-focus] [--no-delete] [--override-redirect]
 //!     [--state fullscreen,maximized,hidden] [--color RRGGBB]
 //!     [--no-background] [--no-map] [--no-decorations]
+//!     [--xdnd-source TEXT [--drag-icon]] [--xdnd-target]
 //! ```
 //!
 //! `--no-decorations` sets `_MOTIF_WM_HINTS` to ask for no decorations,
 //! as a client that draws its own frame does.
+//!
+//! `--xdnd-source TEXT` makes the window an Xdnd version 5 drag source
+//! (XW-6): a press of the first button and a motion of more than three
+//! pixels take `XdndSelection`, and from then on every motion looks for
+//! the `XdndAware` child of the root under the pointer and sends it
+//! `XdndEnter` (with `UTF8_STRING`), `XdndPosition` and `XdndLeave`; the
+//! release sends `XdndDrop` to a window that accepted, or `XdndLeave`.
+//! Conversions of `XdndSelection` to `UTF8_STRING` or `TEXT` get TEXT.
+//! With `--drag-icon` an override-redirect window of type
+//! `_NET_WM_WINDOW_TYPE_DND` follows the pointer during the drag, 8
+//! pixels below and to the right of it. `--xdnd-target` makes the window
+//! `XdndAware`: it accepts drags that offer `UTF8_STRING` with
+//! `XdndActionCopy`, converts `XdndSelection` on the drop and answers
+//! with `XdndFinished`.
 //!
 //! Commands: `map`, `unmap`, `destroy`, `exit`, `title TEXT`,
 //! `configure X Y W H`, `state add|remove|toggle NAME`, `activate`,
@@ -35,9 +50,14 @@
 //! Events: `window`, `mapped`, `unmapped`, `configure`, `focus_in`,
 //! `focus_out`, `delete`, `take_focus`, `net_wm_state`, `wm_state`,
 //! `geometry`, `focus`, `pointer`, `cursor`, `echo`, `destroyed` and
-//! `error`.
+//! `error`; as a drag source `drag_started`, `drag_target` (window),
+//! `drag_status` (accepted, action), `drag_dropped`, `drag_cancelled`,
+//! `drag_send` (target) and `drag_finished` (performed, action); as a
+//! drop target `drag_enter` (source, types), `drag_position` (x, y),
+//! `drag_leave`, `drag_drop` and `dropped` (text).
 
 use std::{
+  cell::RefCell,
   io::{BufRead, Write},
   sync::mpsc,
   time::Duration,
@@ -51,7 +71,8 @@ use x11rb::{
     xfixes::ConnectionExt as _,
     xproto::{
       AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt,
-      CreateWindowAux, EventMask, InputFocus, PropMode, Window, WindowClass,
+      CreateWindowAux, EventMask, InputFocus, PropMode, SELECTION_NOTIFY_EVENT,
+      SelectionNotifyEvent, SelectionRequestEvent, Window, WindowClass,
     },
   },
   rust_connection::RustConnection,
@@ -85,6 +106,12 @@ struct Options {
   map: bool,
   /// Asks for no decorations through `_MOTIF_WM_HINTS`.
   no_decorations: bool,
+  /// Makes the window an Xdnd source of this text.
+  xdnd_source: Option<String>,
+  /// Shows a drag icon during the drag.
+  drag_icon: bool,
+  /// Makes the window an Xdnd target.
+  xdnd_target: bool,
 }
 
 impl Default for Options {
@@ -108,6 +135,9 @@ impl Default for Options {
       background: true,
       map: true,
       no_decorations: false,
+      xdnd_source: None,
+      drag_icon: false,
+      xdnd_target: false,
     }
   }
 }
@@ -172,6 +202,9 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
       "--no-background" => options.background = false,
       "--no-map" => options.map = false,
       "--no-decorations" => options.no_decorations = true,
+      "--xdnd-source" => options.xdnd_source = Some(value()?),
+      "--drag-icon" => options.drag_icon = true,
+      "--xdnd-target" => options.xdnd_target = true,
       _ => return Err(format!("unknown option {argument}")),
     }
   }
@@ -217,6 +250,66 @@ fn atom(connection: &RustConnection, name: &str) -> Result<u32, String> {
     .map_err(|error| error.to_string())
 }
 
+/// The Xdnd version the probe speaks.
+const XDND_VERSION: u32 = 5;
+
+/// How far the pointer moves with the button held before a drag starts.
+const DRAG_THRESHOLD: i32 = 3;
+
+/// The atoms of Xdnd and the conversions it needs.
+struct XdndAtoms {
+  selection: u32,
+  aware: u32,
+  enter: u32,
+  position: u32,
+  status: u32,
+  leave: u32,
+  drop: u32,
+  finished: u32,
+  copy: u32,
+  utf8: u32,
+  text: u32,
+  targets: u32,
+  property: u32,
+}
+
+impl XdndAtoms {
+  fn new(connection: &RustConnection) -> Result<Self, String> {
+    Ok(Self {
+      selection: atom(connection, "XdndSelection")?,
+      aware: atom(connection, "XdndAware")?,
+      enter: atom(connection, "XdndEnter")?,
+      position: atom(connection, "XdndPosition")?,
+      status: atom(connection, "XdndStatus")?,
+      leave: atom(connection, "XdndLeave")?,
+      drop: atom(connection, "XdndDrop")?,
+      finished: atom(connection, "XdndFinished")?,
+      copy: atom(connection, "XdndActionCopy")?,
+      utf8: atom(connection, "UTF8_STRING")?,
+      text: atom(connection, "TEXT")?,
+      targets: atom(connection, "TARGETS")?,
+      property: atom(connection, "XW_PROBE_DROP")?,
+    })
+  }
+}
+
+/// Where a drag the probe makes or receives is.
+#[derive(Default)]
+struct DragState {
+  /// Where the first button went down, while it is held.
+  pressed: Option<(i32, i32)>,
+  /// A drag from the probe is running.
+  dragging: bool,
+  /// The `XdndAware` window under the pointer.
+  target: Option<Window>,
+  /// Whether it accepted the drag in its last `XdndStatus`.
+  accepted: bool,
+  /// The drag icon, once created.
+  icon: Option<Window>,
+  /// As a target: the source of the drag over the probe.
+  source: Option<Window>,
+}
+
 /// The probe: its connection, window and atoms.
 struct Probe {
   connection: RustConnection,
@@ -227,6 +320,11 @@ struct Probe {
   wm_take_focus: u32,
   net_wm_state: u32,
   wm_state: u32,
+  xdnd: XdndAtoms,
+  /// The text to drag, for an Xdnd source.
+  drag_text: Option<String>,
+  drag_icon: bool,
+  drag: RefCell<DragState>,
 }
 
 impl Probe {
@@ -238,13 +336,17 @@ impl Probe {
     let root = screen.root;
     let white = screen.white_pixel;
     let window = connection.generate_id().map_err(|e| e.to_string())?;
+    let mut mask = EventMask::STRUCTURE_NOTIFY
+      | EventMask::FOCUS_CHANGE
+      | EventMask::PROPERTY_CHANGE
+      | EventMask::EXPOSURE;
+    if options.xdnd_source.is_some() {
+      mask |= EventMask::BUTTON_PRESS
+        | EventMask::BUTTON_RELEASE
+        | EventMask::BUTTON_MOTION;
+    }
     let mut aux = CreateWindowAux::new()
-      .event_mask(
-        EventMask::STRUCTURE_NOTIFY
-          | EventMask::FOCUS_CHANGE
-          | EventMask::PROPERTY_CHANGE
-          | EventMask::EXPOSURE,
-      )
+      .event_mask(mask)
       .override_redirect(u32::from(options.override_redirect));
     if options.background {
       aux = aux.background_pixel(options.color.unwrap_or(white));
@@ -271,11 +373,27 @@ impl Probe {
       wm_take_focus: atom(&connection, "WM_TAKE_FOCUS")?,
       net_wm_state: atom(&connection, "_NET_WM_STATE")?,
       wm_state: atom(&connection, "WM_STATE")?,
+      xdnd: XdndAtoms::new(&connection)?,
+      drag_text: options.xdnd_source.clone(),
+      drag_icon: options.drag_icon,
+      drag: RefCell::default(),
       connection,
       root,
       window,
     };
     probe.set_properties(options)?;
+    if options.xdnd_target {
+      probe
+        .connection
+        .change_property32(
+          PropMode::REPLACE,
+          window,
+          probe.xdnd.aware,
+          AtomEnum::ATOM,
+          &[XDND_VERSION],
+        )
+        .map_err(|error| error.to_string())?;
+    }
     Ok(probe)
   }
 
@@ -664,12 +782,411 @@ impl Probe {
           .map_or("null".to_string(), |value| value.to_string());
         report("wm_state", &[("value", value)]);
       }
+      Event::ButtonPress(event) if event.detail == 1 => {
+        self.drag.borrow_mut().pressed =
+          Some((event.root_x.into(), event.root_y.into()));
+      }
+      Event::MotionNotify(event) => {
+        self.drag_motion(
+          event.root_x.into(),
+          event.root_y.into(),
+          event.time,
+        )?;
+      }
+      Event::ButtonRelease(event) if event.detail == 1 => {
+        self.drag_release(event.time)?;
+      }
+      Event::ClientMessage(event) if event.format == 32 => {
+        self.xdnd_message(&event)?;
+      }
+      Event::SelectionRequest(event) => self.selection_request(&event)?,
+      Event::SelectionNotify(event) => self.selection_notify(&event)?,
       Event::Error(error) => {
         report("error", &[("text", quote(&format!("{error:?}")))]);
       }
       _ => {}
     }
     Ok(true)
+  }
+
+  /// Sends an Xdnd message of type `kind` to `window`.
+  fn xdnd_send(
+    &self,
+    window: Window,
+    kind: u32,
+    data: [u32; 5],
+  ) -> Result<(), String> {
+    let event = ClientMessageEvent::new(32, window, kind, data);
+    self
+      .connection
+      .send_event(false, window, EventMask::NO_EVENT, event)
+      .map(drop)
+      .map_err(|error| error.to_string())
+  }
+
+  /// The `XdndAware` child of the root at root position (`x`, `y`),
+  /// other than the probe's own windows.
+  fn aware_window_at(&self, x: i32, y: i32) -> Result<Option<Window>, String> {
+    let error = |error: x11rb::errors::ConnectionError| error.to_string();
+    let reply_error = |error: x11rb::errors::ReplyError| error.to_string();
+    let child = self
+      .connection
+      .translate_coordinates(self.root, self.root, x as i16, y as i16)
+      .map_err(error)?
+      .reply()
+      .map_err(reply_error)?
+      .child;
+    let icon = self.drag.borrow().icon;
+    if child == NONE || child == self.window || Some(child) == icon {
+      return Ok(None);
+    }
+    let aware = self
+      .connection
+      .get_property(false, child, self.xdnd.aware, AtomEnum::ATOM, 0, 1)
+      .map_err(error)?
+      .reply()
+      .map_err(reply_error)?;
+    let version = aware.value32().and_then(|mut values| values.next());
+    Ok(version.filter(|version| *version >= 3).map(|_| child))
+  }
+
+  /// A motion with the first button held: starts the drag past the
+  /// threshold, follows the target and moves the icon.
+  fn drag_motion(&self, x: i32, y: i32, time: u32) -> Result<(), String> {
+    if self.drag_text.is_none() {
+      return Ok(());
+    }
+    let error = |error: x11rb::errors::ConnectionError| error.to_string();
+    let (pressed, dragging) = {
+      let drag = self.drag.borrow();
+      (drag.pressed, drag.dragging)
+    };
+    let Some((press_x, press_y)) = pressed else {
+      return Ok(());
+    };
+    if !dragging {
+      if (x - press_x).abs() <= DRAG_THRESHOLD
+        && (y - press_y).abs() <= DRAG_THRESHOLD
+      {
+        return Ok(());
+      }
+      self
+        .connection
+        .set_selection_owner(self.window, self.xdnd.selection, time)
+        .map_err(error)?;
+      self.drag.borrow_mut().dragging = true;
+      report("drag_started", &[]);
+      if self.drag_icon {
+        self.show_icon()?;
+      }
+    }
+    if let Some(icon) = self.drag.borrow().icon {
+      self
+        .connection
+        .configure_window(icon, &ConfigureWindowAux::new().x(x + 8).y(y + 8))
+        .map_err(error)?;
+    }
+    let target = self.aware_window_at(x, y)?;
+    let previous = self.drag.borrow().target;
+    if previous != target {
+      if let Some(previous) = previous {
+        self.xdnd_send(previous, self.xdnd.leave, [self.window, 0, 0, 0, 0])?;
+      }
+      if let Some(target) = target {
+        self.xdnd_send(
+          target,
+          self.xdnd.enter,
+          [self.window, XDND_VERSION << 24, self.xdnd.utf8, 0, 0],
+        )?;
+      }
+      let mut drag = self.drag.borrow_mut();
+      drag.target = target;
+      drag.accepted = false;
+      report(
+        "drag_target",
+        &[("window", target.unwrap_or(NONE).to_string())],
+      );
+    }
+    if let Some(target) = target {
+      let packed = ((x.max(0) as u32) << 16) | (y.max(0) as u32 & 0xffff);
+      self.xdnd_send(
+        target,
+        self.xdnd.position,
+        [self.window, 0, packed, time, self.xdnd.copy],
+      )?;
+    }
+    self.connection.flush().map_err(|error| error.to_string())
+  }
+
+  /// Maps the drag icon, creating it the first time.
+  fn show_icon(&self) -> Result<(), String> {
+    let error = |error: x11rb::errors::ConnectionError| error.to_string();
+    let existing = self.drag.borrow().icon;
+    let icon = match existing {
+      Some(icon) => icon,
+      None => {
+        let icon = self.connection.generate_id().map_err(|e| e.to_string())?;
+        let aux = CreateWindowAux::new()
+          .override_redirect(1)
+          .background_pixel(0x00ff00ff);
+        self
+          .connection
+          .create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            icon,
+            self.root,
+            0,
+            0,
+            32,
+            32,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            x11rb::COPY_FROM_PARENT,
+            &aux,
+          )
+          .map_err(error)?;
+        let kind = atom(&self.connection, "_NET_WM_WINDOW_TYPE")?;
+        let dnd = atom(&self.connection, "_NET_WM_WINDOW_TYPE_DND")?;
+        self
+          .connection
+          .change_property32(
+            PropMode::REPLACE,
+            icon,
+            kind,
+            AtomEnum::ATOM,
+            &[dnd],
+          )
+          .map_err(error)?;
+        self.drag.borrow_mut().icon = Some(icon);
+        report("drag_icon", &[("window", icon.to_string())]);
+        icon
+      }
+    };
+    self.connection.map_window(icon).map_err(error)?;
+    Ok(())
+  }
+
+  /// The first button went up: drops on a target that accepted, or
+  /// leaves it.
+  fn drag_release(&self, time: u32) -> Result<(), String> {
+    let (dragging, target, accepted, icon) = {
+      let mut drag = self.drag.borrow_mut();
+      drag.pressed = None;
+      let dragging = std::mem::take(&mut drag.dragging);
+      (dragging, drag.target.take(), drag.accepted, drag.icon)
+    };
+    if !dragging {
+      return Ok(());
+    }
+    if let Some(icon) = icon {
+      self
+        .connection
+        .unmap_window(icon)
+        .map_err(|error| error.to_string())?;
+    }
+    match target {
+      Some(target) if accepted => {
+        self.xdnd_send(target, self.xdnd.drop, [self.window, 0, time, 0, 0])?;
+        report("drag_dropped", &[("window", target.to_string())]);
+      }
+      Some(target) => {
+        self.xdnd_send(target, self.xdnd.leave, [self.window, 0, 0, 0, 0])?;
+        report("drag_cancelled", &[]);
+      }
+      None => report("drag_cancelled", &[]),
+    }
+    self.connection.flush().map_err(|error| error.to_string())
+  }
+
+  /// The name of `atom`, or its number.
+  fn atom_name(&self, atom: u32) -> String {
+    self
+      .connection
+      .get_atom_name(atom)
+      .ok()
+      .and_then(|cookie| cookie.reply().ok())
+      .map_or(atom.to_string(), |reply| {
+        String::from_utf8_lossy(&reply.name).into_owned()
+      })
+  }
+
+  /// An Xdnd message to the probe's window.
+  fn xdnd_message(&self, event: &ClientMessageEvent) -> Result<(), String> {
+    let data = event.data.as_data32();
+    let xdnd = &self.xdnd;
+    if event.type_ == xdnd.status {
+      let accepted = data[1] & 1 != 0;
+      let mut drag = self.drag.borrow_mut();
+      if drag.target == Some(data[0]) {
+        drag.accepted = accepted;
+      }
+      drop(drag);
+      report(
+        "drag_status",
+        &[
+          ("accepted", accepted.to_string()),
+          ("action", quote(&self.atom_name(data[4]))),
+        ],
+      );
+    } else if event.type_ == xdnd.finished {
+      report(
+        "drag_finished",
+        &[
+          ("performed", (data[1] & 1 != 0).to_string()),
+          ("action", quote(&self.atom_name(data[2]))),
+        ],
+      );
+    } else if event.type_ == xdnd.enter {
+      let types = data[2..]
+        .iter()
+        .filter(|atom| **atom != NONE)
+        .map(|atom| quote(&self.atom_name(*atom)))
+        .collect::<Vec<_>>();
+      self.drag.borrow_mut().source = Some(data[0]);
+      report(
+        "drag_enter",
+        &[
+          ("source", data[0].to_string()),
+          ("version", (data[1] >> 24).to_string()),
+          ("types", format!("[{}]", types.join(", "))),
+        ],
+      );
+      self.drag.borrow_mut().accepted =
+        data[1] & 1 != 0 || data[2..].contains(&xdnd.utf8);
+    } else if event.type_ == xdnd.position {
+      let accepted = self.drag.borrow().accepted;
+      let flags = 2 | u32::from(accepted);
+      let action = if accepted { xdnd.copy } else { NONE };
+      self.xdnd_send(
+        data[0],
+        xdnd.status,
+        [self.window, flags, 0, 0, action],
+      )?;
+      report(
+        "drag_position",
+        &[
+          ("x", (data[2] >> 16).to_string()),
+          ("y", (data[2] & 0xffff).to_string()),
+        ],
+      );
+    } else if event.type_ == xdnd.leave {
+      self.drag.borrow_mut().source = None;
+      report("drag_leave", &[]);
+    } else if event.type_ == xdnd.drop {
+      self
+        .connection
+        .convert_selection(
+          self.window,
+          xdnd.selection,
+          xdnd.utf8,
+          xdnd.property,
+          data[2],
+        )
+        .map_err(|error| error.to_string())?;
+      report("drag_drop", &[]);
+    }
+    self.connection.flush().map_err(|error| error.to_string())
+  }
+
+  /// A conversion of `XdndSelection` from the probe as a drag source.
+  fn selection_request(
+    &self,
+    event: &SelectionRequestEvent,
+  ) -> Result<(), String> {
+    let error = |error: x11rb::errors::ConnectionError| error.to_string();
+    let xdnd = &self.xdnd;
+    let mut property = event.property;
+    let text = self.drag_text.as_deref().unwrap_or("");
+    if event.selection != xdnd.selection || self.drag_text.is_none() {
+      property = NONE;
+    } else if event.target == xdnd.targets {
+      self
+        .connection
+        .change_property32(
+          PropMode::REPLACE,
+          event.requestor,
+          property,
+          AtomEnum::ATOM,
+          &[xdnd.targets, xdnd.utf8, xdnd.text],
+        )
+        .map_err(error)?;
+    } else if event.target == xdnd.utf8 || event.target == xdnd.text {
+      self
+        .connection
+        .change_property8(
+          PropMode::REPLACE,
+          event.requestor,
+          property,
+          event.target,
+          text.as_bytes(),
+        )
+        .map_err(error)?;
+      report(
+        "drag_send",
+        &[("target", quote(&self.atom_name(event.target)))],
+      );
+    } else {
+      property = NONE;
+    }
+    let notify = SelectionNotifyEvent {
+      response_type: SELECTION_NOTIFY_EVENT,
+      sequence: 0,
+      time: event.time,
+      requestor: event.requestor,
+      selection: event.selection,
+      target: event.target,
+      property,
+    };
+    self
+      .connection
+      .send_event(false, event.requestor, EventMask::NO_EVENT, notify)
+      .map_err(error)?;
+    self.connection.flush().map_err(|error| error.to_string())
+  }
+
+  /// The conversion of a drop on the probe as a target arrived: reports
+  /// the text and finishes the drag.
+  fn selection_notify(
+    &self,
+    event: &SelectionNotifyEvent,
+  ) -> Result<(), String> {
+    let xdnd = &self.xdnd;
+    if event.selection != xdnd.selection {
+      return Ok(());
+    }
+    let Some(source) = self.drag.borrow_mut().source.take() else {
+      return Ok(());
+    };
+    let text = if event.property == NONE {
+      None
+    } else {
+      let reply = self
+        .connection
+        .get_property(
+          true,
+          self.window,
+          xdnd.property,
+          AtomEnum::ANY,
+          0,
+          1 << 20,
+        )
+        .map_err(|error| error.to_string())?
+        .reply()
+        .map_err(|error| error.to_string())?;
+      Some(String::from_utf8_lossy(&reply.value).into_owned())
+    };
+    report(
+      "dropped",
+      &[("text", text.as_deref().map_or("null".into(), quote))],
+    );
+    let performed = text.is_some();
+    let action = if performed { xdnd.copy } else { NONE };
+    self.xdnd_send(
+      source,
+      xdnd.finished,
+      [self.window, u32::from(performed), action, 0, 0],
+    )?;
+    self.connection.flush().map_err(|error| error.to_string())
   }
 
   /// The names of the atoms in the window's property `property`.

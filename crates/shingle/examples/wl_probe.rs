@@ -15,8 +15,19 @@
 //! wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern] [--fifo]
 //!          [--damage] [--animate FRAMES] [--presentation]
 //!          [--report-outputs] [--layer OUTPUT] [--fullscreen]
-//!          [--decoration server|client]
+//!          [--decoration server|client] [--drag TEXT] [--drop]
 //! ```
+//!
+//! With `--drag TEXT`, a press of the first button on the probe starts a
+//! drag (`wl_data_device.start_drag`) of a source offering
+//! `text/plain;charset=utf-8` with the copy action, which answers each
+//! `send` with TEXT. It reports `drag_started`, the source's `drag_target`
+//! (mime, or null), `drag_action` (action bits), `drag_drop_performed`,
+//! `drag_finished`, `cancelled` and `send` (mime). With `--drop`, the
+//! probe accepts drags that offer `text/plain;charset=utf-8` with the
+//! copy action; it reports `drop_enter` (types), `drop_leave` and `drop`,
+//! reads the data and reports it as `dropped` (text) before it calls
+//! `finish`, as XW-6's checks use them (docs/design/xwayland.md).
 //!
 //! With `--decoration MODE`, the probe asks for server-side or
 //! client-side decorations through `zxdg_decoration_manager_v1` before
@@ -104,7 +115,8 @@ use wayland_client::{
   protocol::{
     wl_buffer, wl_callback, wl_compositor, wl_data_device,
     wl_data_device_manager, wl_data_offer, wl_data_source, wl_keyboard,
-    wl_output, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
+    wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool,
+    wl_surface,
   },
 };
 use wayland_protocols::{
@@ -179,6 +191,10 @@ struct Options {
   fullscreen: bool,
   /// The decoration mode to ask for: server-side when true.
   decoration: Option<bool>,
+  /// Text to drag on a press of the first button.
+  drag: Option<String>,
+  /// Accepts text drags and reports what is dropped.
+  drop: bool,
 }
 
 /// The XRGB8888 bytes (B, G, R, X) of pixel (`x`, `y`) of a `width` by
@@ -241,6 +257,11 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         });
       }
       "--damage" => options.damage = true,
+      "--drag" => {
+        options.drag =
+          Some(arguments.next().ok_or("--drag needs a text")?.clone());
+      }
+      "--drop" => options.drop = true,
       "--animate" => {
         let value = arguments.next().ok_or("--animate needs a number")?;
         options.animate = Some(
@@ -317,6 +338,20 @@ struct Probe {
   released: Vec<&'static str>,
   /// Whether the last frame callback is done.
   frame_done: bool,
+  /// The pointer, with `--drag` or `--drop`.
+  pointer: Option<wl_pointer::WlPointer>,
+  /// The data device, with `--drag` or `--drop`.
+  device: Option<wl_data_device::WlDataDevice>,
+  /// The text `--drag` drags.
+  drag_text: Option<String>,
+  /// The source of the drag started, if any.
+  drag_source: Option<wl_data_source::WlDataSource>,
+  /// Whether `--drop` accepts drags.
+  drop_target: bool,
+  /// The types each data offer announced.
+  offer_types: Vec<(wl_data_offer::WlDataOffer, Vec<String>)>,
+  /// The offer of the drag over the probe.
+  drag_offer: Option<wl_data_offer::WlDataOffer>,
 }
 
 impl Probe {
@@ -575,13 +610,22 @@ impl Dispatch<wl_seat::WlSeat, ()> for Probe {
     _: &Connection,
     handle: &QueueHandle<Self>,
   ) {
-    if let wl_seat::Event::Capabilities {
+    let wl_seat::Event::Capabilities {
       capabilities: WEnum::Value(capabilities),
     } = event
-      && capabilities.contains(wl_seat::Capability::Keyboard)
+    else {
+      return;
+    };
+    if capabilities.contains(wl_seat::Capability::Keyboard)
       && probe.keyboard.is_none()
     {
       probe.keyboard = Some(seat.get_keyboard(handle, ()));
+    }
+    if capabilities.contains(wl_seat::Capability::Pointer)
+      && probe.pointer.is_none()
+      && (probe.drag_text.is_some() || probe.drop_target)
+    {
+      probe.pointer = Some(seat.get_pointer(handle, ()));
     }
   }
 }
@@ -614,19 +658,61 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Probe {
   }
 }
 
+impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
+  fn event(
+    probe: &mut Self,
+    _: &wl_pointer::WlPointer,
+    event: wl_pointer::Event,
+    _: &(),
+    _: &Connection,
+    handle: &QueueHandle<Self>,
+  ) {
+    let wl_pointer::Event::Button {
+      serial,
+      button: 0x110,
+      state: WEnum::Value(wl_pointer::ButtonState::Pressed),
+      ..
+    } = event
+    else {
+      return;
+    };
+    let (Some(text), None) = (&probe.drag_text, &probe.drag_source) else {
+      return;
+    };
+    let (Some(manager), Some(device), Some(surface)) =
+      (&probe.data_device_manager, &probe.device, &probe.surface)
+    else {
+      return;
+    };
+    let source = manager.create_data_source(handle, ());
+    source.offer(COPY_TYPE.into());
+    source.set_actions(wl_data_device_manager::DndAction::Copy);
+    device.start_drag(Some(&source), surface, None, serial);
+    report("drag_started", &[("text", format!("{text:?}"))]);
+    probe.drag_source = Some(source);
+  }
+}
+
 impl Dispatch<wl_data_source::WlDataSource, ()> for Probe {
   fn event(
     probe: &mut Self,
-    _: &wl_data_source::WlDataSource,
+    source: &wl_data_source::WlDataSource,
     event: wl_data_source::Event,
     _: &(),
     _: &Connection,
     _: &QueueHandle<Self>,
   ) {
+    let dragged = probe.drag_source.as_ref() == Some(source);
     match event {
       wl_data_source::Event::Send { mime_type, fd } => {
         report("send", &[("mime", format!("{mime_type:?}"))]);
-        let Some((text, delay_ms)) = probe.copy.clone() else {
+        let copy = probe.copy.clone();
+        let text = if dragged {
+          probe.drag_text.clone().map(|text| (text, 0))
+        } else {
+          copy
+        };
+        let Some((text, delay_ms)) = text else {
           return;
         };
         // The slow writer: only this thread waits.
@@ -638,7 +724,31 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for Probe {
           report("sent", &[]);
         });
       }
-      wl_data_source::Event::Cancelled => report("cancelled", &[]),
+      wl_data_source::Event::Cancelled => {
+        report("cancelled", &[]);
+        if dragged {
+          source.destroy();
+          probe.drag_source = None;
+        }
+      }
+      wl_data_source::Event::Target { mime_type } => report(
+        "drag_target",
+        &[(
+          "mime",
+          mime_type.map_or("null".into(), |mime| format!("{mime:?}")),
+        )],
+      ),
+      wl_data_source::Event::Action {
+        dnd_action: WEnum::Value(action),
+      } => report("drag_action", &[("action", action.bits().to_string())]),
+      wl_data_source::Event::DndDropPerformed => {
+        report("drag_drop_performed", &[]);
+      }
+      wl_data_source::Event::DndFinished => {
+        report("drag_finished", &[]);
+        source.destroy();
+        probe.drag_source = None;
+      }
       _ => {}
     }
   }
@@ -646,13 +756,79 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for Probe {
 
 impl Dispatch<wl_data_device::WlDataDevice, ()> for Probe {
   fn event(
-    _: &mut Self,
+    probe: &mut Self,
     _: &wl_data_device::WlDataDevice,
-    _: wl_data_device::Event,
+    event: wl_data_device::Event,
     _: &(),
-    _: &Connection,
+    connection: &Connection,
     _: &QueueHandle<Self>,
   ) {
+    if !probe.drop_target {
+      return;
+    }
+    match event {
+      wl_data_device::Event::Enter { serial, id, .. } => {
+        let Some(offer) = id else {
+          return;
+        };
+        let types = probe
+          .offer_types
+          .iter()
+          .find(|(known, _)| *known == offer)
+          .map(|(_, types)| types.clone())
+          .unwrap_or_default();
+        report("drop_enter", &[("types", format!("{types:?}"))]);
+        if types.iter().any(|mime| mime == COPY_TYPE) {
+          offer.accept(serial, Some(COPY_TYPE.into()));
+          offer.set_actions(
+            wl_data_device_manager::DndAction::Copy,
+            wl_data_device_manager::DndAction::Copy,
+          );
+        } else {
+          offer.accept(serial, None);
+        }
+        probe.drag_offer = Some(offer);
+      }
+      wl_data_device::Event::Leave => {
+        report("drop_leave", &[]);
+        if let Some(offer) = probe.drag_offer.take() {
+          probe.offer_types.retain(|(known, _)| *known != offer);
+          offer.destroy();
+        }
+      }
+      wl_data_device::Event::Drop => {
+        report("drop", &[]);
+        let Some(offer) = probe.drag_offer.take() else {
+          return;
+        };
+        let Ok((read, write)) = rustix::pipe::pipe() else {
+          report("error", &[("text", "\"pipe\"".into())]);
+          return;
+        };
+        offer.receive(COPY_TYPE.into(), write.as_fd());
+        drop(write);
+        let _ = connection.flush();
+        // The data comes from the compositor, which does not wait for
+        // this probe, so reading it here cannot deadlock.
+        let mut text = String::new();
+        let mut file = std::fs::File::from(read);
+        let read = std::io::Read::read_to_string(&mut file, &mut text);
+        report(
+          "dropped",
+          &[(
+            "text",
+            match read {
+              Ok(_) => format!("{text:?}"),
+              Err(_) => "null".into(),
+            },
+          )],
+        );
+        offer.finish();
+        offer.destroy();
+        probe.offer_types.retain(|(known, _)| *known != offer);
+      }
+      _ => {}
+    }
   }
 
   wayland_client::event_created_child!(Probe, wl_data_device::WlDataDevice, [
@@ -1082,12 +1258,33 @@ ignore_events!(
   wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
   zwlr_layer_shell_v1::ZwlrLayerShellV1,
   wl_data_device_manager::WlDataDeviceManager,
-  wl_data_offer::WlDataOffer,
   wp_fifo_manager_v1::WpFifoManagerV1,
   wp_fifo_v1::WpFifoV1,
   wp_presentation::WpPresentation,
   zxdg_decoration_manager_v1::ZxdgDecorationManagerV1
 );
+
+impl Dispatch<wl_data_offer::WlDataOffer, ()> for Probe {
+  fn event(
+    probe: &mut Self,
+    offer: &wl_data_offer::WlDataOffer,
+    event: wl_data_offer::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wl_data_offer::Event::Offer { mime_type } = event {
+      match probe
+        .offer_types
+        .iter_mut()
+        .find(|(known, _)| known == offer)
+      {
+        Some((_, types)) => types.push(mime_type),
+        None => probe.offer_types.push((offer.clone(), vec![mime_type])),
+      }
+    }
+  }
+}
 
 /// Maps the toplevel, sets the selection with `--copy`, and serves events
 /// until it is closed.
@@ -1103,6 +1300,8 @@ fn run(options: &Options) -> Result<(), String> {
     pattern: options.pattern,
     report_outputs: options.report_outputs || options.layer.is_some(),
     wants_presentation: options.presentation,
+    drag_text: options.drag.clone(),
+    drop_target: options.drop,
     ..Probe::default()
   };
   queue
@@ -1180,6 +1379,13 @@ fn run(options: &Options) -> Result<(), String> {
   if let Some(frames) = options.animate {
     wait_mapped(&mut queue, &mut probe)?;
     animate(&mut queue, &mut probe, frames)?;
+  }
+  if options.drag.is_some() || options.drop {
+    let (Some(manager), Some(seat)) = (&probe.data_device_manager, &probe.seat)
+    else {
+      return Err("wl_data_device_manager or wl_seat is missing".into());
+    };
+    probe.device = Some(manager.get_data_device(seat, &handle, ()));
   }
   // Kept alive for as long as the probe runs.
   let mut _selection = None;
@@ -1259,8 +1465,14 @@ mod tests {
         layer: None,
         fullscreen: false,
         decoration: None,
+        drag: None,
+        drop: false,
       }
     );
+    let options = parse(&arguments(&["--drag", "text", "--drop"])).unwrap();
+    assert_eq!(options.drag.as_deref(), Some("text"));
+    assert!(options.drop);
+    assert!(parse(&arguments(&["--drag"])).is_err());
     assert!(parse(&arguments(&["--fullscreen"])).unwrap().fullscreen);
     assert_eq!(
       parse(&arguments(&["--decoration", "server"]))
