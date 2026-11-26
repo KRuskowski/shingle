@@ -371,14 +371,19 @@ class Headless:
     self.ipc.close()
     if not signal_checked(self.process.pid, signal.SIGTERM, 'shingle'):
       return 'not signalled'
+    # Shingle syncs its session to disk on exit, which can take tens of
+    # seconds on a busy /home, as in the XWayland harness.
     try:
-      return self.process.wait(10)
+      return self.process.wait(EXIT_TIMEOUT)
     except subprocess.TimeoutExpired:
       signal_checked(self.process.pid, signal.SIGKILL, 'shingle')
       self.process.wait()
       return 'timeout'
     finally:
       self.log.close()
+
+# Seconds Shingle gets to exit after SIGTERM.
+EXIT_TIMEOUT = 60
 
 PAM_PERMIT = ('auth sufficient pam_permit.so\n'
               'account sufficient pam_permit.so\n')
