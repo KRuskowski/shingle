@@ -247,4 +247,16 @@ impl Dispatch<ZxdgToplevelDecorationV1, ()> for CompositorState {
     state.decorations.insert(resource.id(), decoration);
     reconfigure(state);
   }
+
+  /// Forgets a decoration object its client never destroyed, when the
+  /// client disconnects; without this every such client left an entry
+  /// behind for as long as Shingle ran (found by the soak test).
+  fn destroyed(
+    state: &mut Self,
+    _client: wayland_server::backend::ClientId,
+    resource: &ZxdgToplevelDecorationV1,
+    _data: &(),
+  ) {
+    state.decorations.remove(&resource.id());
+  }
 }

@@ -595,3 +595,24 @@ fn a_placed_window_and_its_size_limits_include_the_frame() {
     Some(((108, 88), (0, 0)))
   );
 }
+
+#[test]
+fn a_decoration_its_client_never_destroyed_goes_with_the_client() {
+  let (mut compositor, path) = test_compositor_with(Config::default());
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let toplevel = client.toplevel(&mut compositor, "leaving");
+  let manager = client.bind::<ZxdgDecorationManagerV1>(1);
+  let decoration =
+    manager.get_toplevel_decoration(&toplevel.toplevel, &client.handle, ());
+  decoration.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSide);
+  client.roundtrip(&mut compositor);
+  assert_eq!(compositor.state.decorations.len(), 1);
+  // The client exits without destroying anything, as a killed one does.
+  drop((toplevel, decoration, manager, client));
+  for _ in 0..10 {
+    compositor
+      .dispatch_pending()
+      .expect("the compositor dispatches");
+  }
+  assert!(compositor.state.decorations.is_empty());
+}
