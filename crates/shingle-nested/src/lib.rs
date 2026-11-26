@@ -38,7 +38,8 @@ use shingle_render::{
   TextureTransform, WindowTarget, capture_frame,
 };
 use windows::{
-  Focus, Windows, initial_window_size, start_output_name, window_title,
+  Focus, Windows, initial_window_size, output_scale, start_output_name,
+  window_title,
 };
 use winit::{
   application::ApplicationHandler,
@@ -394,7 +395,8 @@ impl App {
       .with_inner_size(PhysicalSize::new(size.0, size.1));
     let window = Arc::new(event_loop.create_window(attributes)?);
     let size = window.inner_size();
-    let scale = window.scale_factor();
+    let scale =
+      output_scale(&self.config, output.name(), window.scale_factor());
     let target = match &self.gpu {
       Some(gpu) => {
         let surface =
@@ -419,9 +421,8 @@ impl App {
         target
       }
     };
-    // The output takes the window's scale factor, so that its logical
-    // pixels are the host's and the cursor Shingle draws sits under the
-    // host's.
+    // The output takes the window's scale factor unless configured
+    // otherwise, so that its logical pixels are the host's.
     let compositor = self.frontend.compositor_mut();
     compositor.set_output_scale_on(output, scale)?;
     compositor.set_output_size(output, (size.width, size.height))?;
@@ -540,12 +541,14 @@ impl App {
   }
 
   /// Gives the output of window `id` the window's scale factor, after the
-  /// window moved to a monitor of another scale. The physical size
+  /// window moved to a monitor of another scale, unless the config sets
+  /// the output's scale ([`output_scale`]). The physical size
   /// follows with the `Resized` event winit sends next.
   fn rescale_output(&mut self, id: WindowId, scale: f64) {
     let Some(output) = self.windows.output_of(id).cloned() else {
       return;
     };
+    let scale = output_scale(&self.config, output.name(), scale);
     if let Err(error) = self.frontend.output_rescaled_on(&output, scale) {
       eprintln!("shingle: rescaling {}: {error}", output.name());
     }
@@ -642,7 +645,9 @@ impl App {
       .iter()
       .map(|(_, output, window)| {
         let window = &window.window;
-        (output.clone(), window.scale_factor(), window.inner_size())
+        let scale =
+          output_scale(&self.config, output.name(), window.scale_factor());
+        (output.clone(), scale, window.inner_size())
       })
       .collect::<Vec<_>>();
     for (output, scale, size) in sizes {

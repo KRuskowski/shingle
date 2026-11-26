@@ -41,6 +41,23 @@ pub(crate) fn initial_window_size(
     .unwrap_or((1280, 720))
 }
 
+/// The scale of output `name` shown in a host window of `host_scale`:
+/// the output's configured scale if it sets one other than 1, else the
+/// window's scale factor, so that by default the output's logical pixels
+/// are the host's and its UI the host's size.
+pub(crate) fn output_scale(
+  config: &ShingleConfig,
+  name: &str,
+  host_scale: f64,
+) -> f64 {
+  let configured = config.output_config(name).scale;
+  if configured != 1.0 {
+    configured
+  } else {
+    host_scale
+  }
+}
+
 /// One window and the output it shows.
 struct Entry<K, W> {
   id: K,
@@ -243,6 +260,16 @@ mod tests {
     );
     assert_eq!(windows.output_of(3), None);
     assert_eq!(windows.output_of(4), Some(&handle("HEADLESS-2")));
+  }
+
+  #[test]
+  fn outputs_take_the_host_scale_unless_the_config_sets_one() {
+    let mut config = ShingleConfig::default();
+    for host in [1.0, 1.5, 2.0] {
+      assert_eq!(output_scale(&config, "HEADLESS-1", host), host);
+    }
+    config.output.scale = 2.0;
+    assert_eq!(output_scale(&config, "HEADLESS-1", 1.5), 2.0);
   }
 
   #[test]
