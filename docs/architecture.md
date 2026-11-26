@@ -33,8 +33,9 @@
 | Shared state and workspace transitions | `crates/shingle/src/state.rs` |
 | Client buffers: content (`BufferContent`), shm pools, CPU copies | `crates/shingle/src/buffer.rs` |
 | Buffer locks and `wl_buffer.release` (`BufferLock`, `ReleaseQueue`) | `crates/shingle/src/buffer_lock.rs` |
-| Per-surface commit queue and its blocker interface | `crates/shingle/src/commit_queue.rs` |
+| Per-surface commit queue, its blocker interface and the fd wait of the implicit and syncobj blockers (`FdWait`) | `crates/shingle/src/commit_queue.rs` |
 | `zwp_linux_dmabuf_v1`: global, feedback and format table, params checks, `DmabufBuffer`, the `DmabufImporter` trait, the implicit-sync fence wait | `crates/shingle/src/linux_dmabuf.rs`; tests in `linux_dmabuf/tests.rs` |
+| `wp_linux_drm_syncobj_manager_v1`: timelines, surface objects, commit rules, the acquire wait; release points | `crates/shingle/src/linux_drm_syncobj.rs`; the render node and timeline seams in `linux_drm_syncobj/timeline.rs`; release points in `buffer_lock.rs`; tests in `linux_drm_syncobj/tests.rs` |
 | `SHINGLE_TRACE_BUFFERS` buffer-path log | `crates/shingle/src/trace.rs` |
 | Keymap sent to clients, focus, input routing | `crates/shingle/src/input.rs` |
 | Seat device registry, per-device holds and gating, `input/*` IPC | `crates/shingle/src/input_device.rs` |
@@ -56,7 +57,7 @@
 | `Frontend` struct, public API, input dispatch | `crates/shingle-frontend/src/frontend.rs` |
 | Frontend areas: bindings, Scale, Expo, switcher, drags, effects, animations, scene build, session | `crates/shingle-frontend/src/frontend/*.rs` |
 | What the scene is drawn into (`RenderTarget`) | `crates/shingle-frontend/src/render_target.rs` |
-| The frontend's DMA-BUF importer, texture cache by buffer serial, locks of frames in flight, the linux-dmabuf decision | `crates/shingle-frontend/src/dmabuf.rs`; `Frontend::enable_dmabuf` and `start_clients` in `frontend.rs` |
+| The frontend's DMA-BUF importer, texture cache by buffer serial, locks of frames in flight, the linux-dmabuf and syncobj decisions | `crates/shingle-frontend/src/dmabuf.rs`; `Frontend::enable_dmabuf` and `start_clients` in `frontend.rs` |
 | Frontend input-script tests (`FakeHost`) | `crates/shingle-frontend/src/frontend/tests.rs` |
 | Command line, `--help` text | `crates/shingle-bin/src/cli.rs` |
 | Backend selection from arguments and environment | `crates/shingle-bin/src/backend.rs` |
@@ -65,7 +66,7 @@
 | Offscreen backend: the frontend on the GPU without a display, frame pacing, presentation | `crates/shingle-bin/src/offscreen.rs` |
 | Screencopy: CPU composite, or frame capture answered by the frontend (`set_frame_capture`, `finish_capture`) | `crates/shingle/src/screencopy.rs`; the frontend's capture draw in `crates/shingle-frontend/src/frontend/scene.rs` (`answer_captures`), `shingle_render::capture_frame` in `crates/shingle-render/src/target.rs` |
 | GPU namespace and DB-2's and DB-3's real-client checks (offscreen, nested, baseline, buffers) | `tools/gpu_test/run.py`, `tools/gpu_test/checks.py` |
-| DB-4's real-client checks (dmabuf, browsers, xwayland, nested-gpu, nodmabuf, weston) | `tools/gpu_test/dmabuf_checks.py` |
+| DB-4's and DB-5's real-client checks (dmabuf, browsers, xwayland, nested-gpu, nodmabuf, weston, syncobj, nosyncobj) | `tools/gpu_test/dmabuf_checks.py`; the stall probe `crates/shingle/examples/syncobj_probe.rs` |
 | winit host: window, input translation, button emulation | `crates/shingle-nested/src/lib.rs` |
 | Native seat: `Session`, libseat, startup checks (SSH, enable timeout, backend) | `crates/shingle-native/src/session.rs` |
 | libinput events, translation to `InputEvent`, device options | `crates/shingle-native/src/input.rs`, `input/libinput.rs` |

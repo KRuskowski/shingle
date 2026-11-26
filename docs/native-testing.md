@@ -445,6 +445,18 @@ These steps check `zwp_linux_dmabuf_v1` ([design/dmabuf.md](design/dmabuf.md#db-
 4. With the clients running, trigger a GPU loss as in step 15's row 5 where the driver allows it. Expected: `recreating the GPU context`, then `dmabuf import` lines again for the buffers on screen (imported again from their kept fds), and the clients keep drawing. Record if the driver has no trigger.
 5. Repeat 2 with `SHINGLE_DMABUF=0`: the log says `SHINGLE_DMABUF=0 forces wl_shm`, `wayland-info` has no `zwp_linux_dmabuf_v1` and the clients fall back to `wl_shm` (`shm upload` lines) or fail as DB-2's baseline recorded.
 
+## Explicit sync on the native output (DB-5)
+
+These steps check `wp_linux_drm_syncobj_manager_v1` ([design/dmabuf.md](design/dmabuf.md#db-5-as-built)) where the GPU namespace cannot: with NVIDIA's EGL clients, which need the card node, and on the native backend. Install the packages of step 23 and `weston` and `firefox-esr`.
+
+### Step 24: GPU clients commit with syncobj points
+
+1. Start Shingle on tty1 as in step 23, with `SHINGLE_TRACE_BUFFERS=1`. The log has `linux-drm-syncobj version 1 on render node M:m` after the linux-dmabuf line, and `wayland-info` lists `wp_linux_drm_syncobj_manager_v1` version 1.
+2. Start `vkcube --wsi wayland`, `es2gears_wayland -info`, `eglgears_wayland`, `kitty` and `firefox-esr` with a throwaway `--profile`, one at a time, each with `ipc stipc/run`. Expected for each: it draws, and its trace has `syncobj acquire ready` or `blocked syncobj N µs` lines and `syncobj release` lines, no `blocked implicit`. Record how many commits waited (`blocked syncobj`) and their times, and which EGL vendor `es2gears_wayland -info` reports (NVIDIA expected).
+3. While `vkcube` runs, switch VT away and back (`sudo chvt 2; sleep 5; sudo chvt 1`). Expected: the cube keeps turning, and no client exits or stops with a commit stuck in `blocked syncobj`.
+4. Repeat 2 with `SHINGLE_SYNCOBJ=0`: the log says `SHINGLE_SYNCOBJ=0 forces implicit sync`, `wayland-info` has no syncobj global, the clients draw, and the trace has no `syncobj` lines. Record whether the NVIDIA EGL clients' frame rate differs from 2, since without the protocol they wait for their own GPU before every commit.
+5. With `weston-simple-dmabuf-feedback` (which needs the card node the namespace hides), record the tranche it prints.
+
 ## Results
 
 Record results in [status.md](status.md#with-real-clients). None of the steps above has been run yet: the test machine does not exist so far.
