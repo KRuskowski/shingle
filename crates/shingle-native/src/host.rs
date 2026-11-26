@@ -49,7 +49,8 @@ use std::{
 };
 
 use shingle::{
-  DpmsState, InputDeviceId, InputDeviceKind, OutputHandle, OutputRequest,
+  DpmsState, HeadRequest, HeadState, InputDeviceId, InputDeviceKind,
+  OutputHandle, OutputRequest,
 };
 use shingle_config::InputConfig;
 use shingle_frontend::{
@@ -513,20 +514,31 @@ impl<S: Session, I: InputSource> Backend<S, I> {
   fn handle_output_requests(&mut self) {
     let requests = self.frontend.compositor_mut().take_output_requests();
     self.output_requests.extend(requests);
-    while let Some(request) = self.output_requests.first().copied() {
+    while let Some(request) = self.output_requests.first().cloned() {
       if !request.test_only && self.display.flip_pending() {
         return;
       }
       self.output_requests.remove(0);
-      let result = if request.test_only {
-        self.display.test_mode(request.mode)
-      } else {
-        self.display.set_mode(request.mode).map(|_| {
-          self.describe_output();
-        })
+      let mode = match request.heads.as_slice() {
+        [
+          HeadRequest {
+            state: HeadState::On(Some(mode)),
+            ..
+          },
+        ] => Ok(*mode),
+        _ => Err("only one output is lit".to_owned()),
       };
+      let result = mode.and_then(|mode| {
+        if request.test_only {
+          self.display.test_mode(mode)
+        } else {
+          self.display.set_mode(mode).map(|_| {
+            self.describe_output();
+          })
+        }
+      });
       if let Err(error) = &result {
-        diagnostics::log(&format!("output mode {:?}: {error}", request.mode));
+        diagnostics::log(&format!("output mode {:?}: {error}", request.heads));
       }
       self
         .frontend

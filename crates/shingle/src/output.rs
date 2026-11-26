@@ -11,11 +11,12 @@
 //! output-management heads, workspace groups) is finished.
 //!
 //! A backend that lists modes in [`OutputInfo::modes`] chooses modes
-//! itself: wlr-output-management requests that change the mode become
-//! [`OutputRequest`]s, which the backend tests (for example with a KMS
-//! `TEST_ONLY` commit) and answers with
-//! [`crate::Compositor::finish_output_request`]. Without a mode list, as in
-//! nested and headless, the compositor applies custom modes itself.
+//! itself: wlr-output-management configurations that change modes or turn
+//! such outputs on or off become [`OutputRequest`]s, which the backend
+//! tests (for example with one KMS `TEST_ONLY` commit for every head) and
+//! answers with [`crate::Compositor::finish_output_request`]. Without a
+//! mode list, as in nested and headless, the compositor applies custom
+//! modes and turns outputs on and off itself.
 
 mod bindings;
 mod focus;
@@ -41,7 +42,9 @@ pub(crate) use host::{
   configured_physical_size, create as create_host_output,
   destroy as destroy_host_output,
 };
-pub(crate) use hotplug::{add, park_restored, remove, restore};
+pub(crate) use hotplug::{
+  add, add_disabled, disable, park_restored, remove, restore,
+};
 pub use moving::MoveGeometry;
 pub(crate) use moving::{move_window_to_output, moved_events, topmost_parent};
 pub use registry::OutputKind;
@@ -227,16 +230,40 @@ pub enum RequestedMode {
   },
 }
 
-/// A mode change a wlr-output-management client asked for, which the
-/// backend tests and, unless `test_only`, applies. The rest of the
-/// configuration (position, scale, transform) is the compositor's and is
-/// applied when the backend finishes the request successfully.
+/// What a configuration asks of one output whose backend lists modes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HeadState {
+  /// Turn the output off. It stays listed as a disabled head.
+  Off,
+  /// Light the output, or keep it lit, with this mode. `None` keeps the
+  /// current mode of a lit output and lets the backend choose for one
+  /// that is off.
+  On(Option<RequestedMode>),
+}
+
+/// The state a configuration asks for one output, named by its handle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeadRequest {
+  /// The output, lit or turned off.
+  pub output: OutputHandle,
+  /// What it should be.
+  pub state: HeadState,
+}
+
+/// A wlr-output-management configuration that the backend carries out:
+/// the outputs it turns on or off and the mode changes, which the backend
+/// tests together (for native, in one KMS `TEST_ONLY` commit) and, unless
+/// `test_only`, applies together. Only outputs whose backend lists modes
+/// are named, and only those whose state changes. The rest of the
+/// configuration (position, scale, transform, and outputs without a mode
+/// list) is the compositor's and is applied when the backend finishes the
+/// request successfully.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutputRequest {
   /// The request, for [`crate::Compositor::finish_output_request`].
   pub id: OutputRequestId,
-  /// The mode to test or set.
-  pub mode: RequestedMode,
+  /// What each changed output should be, in the order of the outputs.
+  pub heads: Vec<HeadRequest>,
   /// Whether the client only tests the configuration.
   pub test_only: bool,
 }
@@ -625,6 +652,8 @@ pub(crate) fn claim_parked(
   }
 }
 
+#[cfg(test)]
+mod backend_tests;
 #[cfg(test)]
 mod focus_tests;
 #[cfg(test)]

@@ -122,12 +122,15 @@ struct ConfigurationHead {
   adaptive_sync: Option<bool>,
 }
 
-/// A configuration whose mode change the backend carries out.
+/// A configuration whose backend part (modes, outputs turned on or off)
+/// the backend carries out.
 struct Pending {
   resource: ZwlrOutputConfigurationV1,
-  /// The placement of each configured output, applied once the backend
-  /// made the mode change.
-  placements: Vec<(OutputId, OutputPlacement)>,
+  /// What it asks of each output that stays or comes on, applied once
+  /// the backend has done its part.
+  changes: Vec<Change>,
+  /// Outputs without a mode list that it turns off or on.
+  toggles: Toggles,
   test: bool,
 }
 
@@ -687,6 +690,7 @@ fn finish(
   let mut changes = Vec::new();
   let mut turn_off = Vec::new();
   let mut turn_on = Vec::new();
+  let mut heads = Vec::new();
   for head in &configured {
     let Some(name) = state
       .output_management
@@ -716,26 +720,24 @@ fn finish(
       resource.failed();
       return;
     }
-    // A backend with a mode list turns its connectors on and off itself,
-    // which comes with MO-7.
+    // A backend with a mode list turns its outputs on and off itself.
     let listed = |info: &crate::OutputInfo| !info.modes.is_empty();
     if disabled.contains(head) {
       if let Some(output) = state.outputs.get(&name) {
         if listed(&output.info) {
-          resource.failed();
-          return;
+          heads.push(crate::HeadRequest {
+            output: crate::OutputHandle::from(&name),
+            state: crate::HeadState::Off,
+          });
+        } else {
+          turn_off.push(name);
         }
-        turn_off.push(name);
       }
       continue;
     }
     let (current, kind) = if let Some(output) = state.outputs.get(&name) {
       ((output.position, output.scale, output.transform), None)
     } else if let Some(off) = state.outputs.disabled(&name) {
-      if listed(&off.info) {
-        resource.failed();
-        return;
-      }
       ((off.position, off.scale, off.transform), Some(off.clone()))
     } else {
       continue;
@@ -765,78 +767,107 @@ fn finish(
       }
     }
     match kind {
+      Some(off) if listed(&off.info) => {
+        heads.push(crate::HeadRequest {
+          output: crate::OutputHandle::from(&change.output),
+          state: crate::HeadState::On(requested_mode(&off.info, change.mode)),
+        });
+        // The backend lights it; its placement follows once it has.
+        change.mode = None;
+        changes.push(change);
+      }
       Some(off) => turn_on.push((change, off)),
-      None => changes.push(change),
+      None => {
+        let info = state.outputs.get(&change.output).map(|o| &o.info);
+        if let Some(info) = info.filter(|info| listed(info)) {
+          if let Some(mode) = requested_mode(info, change.mode) {
+            heads.push(crate::HeadRequest {
+              output: crate::OutputHandle::from(&change.output),
+              state: crate::HeadState::On(Some(mode)),
+            });
+          }
+          change.mode = None;
+        }
+        changes.push(change);
+      }
     }
   }
   // Turning every output off fails, as turning the only one off did.
+  let backend_off = |id: &OutputId| {
+    heads.iter().any(|head| {
+      head.state == crate::HeadState::Off && head.output.name() == id.as_str()
+    })
+  };
   let staying = state
     .outputs
     .iter()
-    .filter(|output| !output.dark && !turn_off.contains(&output.id))
+    .filter(|output| {
+      !output.dark && !turn_off.contains(&output.id) && !backend_off(&output.id)
+    })
     .count();
-  if staying + turn_on.len() == 0 {
+  let backend_on = heads
+    .iter()
+    .filter(|head| {
+      head.state != crate::HeadState::Off
+        && state.outputs.get(&head.output.id()).is_none()
+    })
+    .count();
+  if staying + turn_on.len() + backend_on == 0 {
     resource.failed();
     return;
   }
-  let requests = changes
-    .iter()
-    .filter_map(|change| requested_mode(state, &change.output, change.mode))
-    .collect::<Vec<_>>();
   let toggles = Toggles { turn_off, turn_on };
-  match requests.as_slice() {
-    [] => apply_locally(state, resource, changes, toggles, test),
-    [mode] if toggles.is_empty() => {
-      let id = OutputRequestId(state.next_output_request);
-      state.next_output_request += 1;
-      state.output_requests.push(OutputRequest {
-        id,
-        mode: *mode,
-        test_only: test,
-      });
-      state.output_management.pending.insert(
-        id,
-        Pending {
-          resource: resource.clone(),
-          placements: changes
-            .into_iter()
-            .map(|change| (change.output, change.placement))
-            .collect(),
-          test,
-        },
-      );
-    }
-    // A backend changes the mode of one output per configuration, and
-    // never with outputs turned on or off, until requests name their
-    // output (MO-7).
-    _ => resource.failed(),
+  if heads.is_empty() {
+    apply_locally(state, resource, changes, toggles, test);
+    return;
+  }
+  heads.sort_by_key(|head| head_order(state, &head.output.id()));
+  let id = OutputRequestId(state.next_output_request);
+  state.next_output_request += 1;
+  state.output_requests.push(OutputRequest {
+    id,
+    heads,
+    test_only: test,
+  });
+  state.output_management.pending.insert(
+    id,
+    Pending {
+      resource: resource.clone(),
+      changes,
+      toggles,
+      test,
+    },
+  );
+}
+
+/// Where output `id` comes in the order of the outputs: live outputs in
+/// add order, then turned-off ones at the place they had.
+fn head_order(state: &CompositorState, id: &OutputId) -> (usize, usize) {
+  match state.outputs.index_of(id) {
+    Some(index) => (0, index),
+    None => (
+      1,
+      state
+        .outputs
+        .disabled(id)
+        .map_or(usize::MAX, |off| off.index),
+    ),
   }
 }
 
 /// The outputs a configuration turns off, and those it turns on with what
-/// it asks of them.
+/// it asks of them, where the compositor does it itself.
 struct Toggles {
   turn_off: Vec<OutputId>,
   turn_on: Vec<(Change, crate::output::DisabledOutput)>,
 }
 
-impl Toggles {
-  fn is_empty(&self) -> bool {
-    self.turn_off.is_empty() && self.turn_on.is_empty()
-  }
-}
-
-/// The mode change the backend has to make on output `id`, if the backend
-/// lists its modes and `mode` is not the current one.
+/// The mode change the backend has to make on an output described by
+/// `info`, whose backend lists modes, if `mode` is not its current one.
 fn requested_mode(
-  state: &CompositorState,
-  id: &OutputId,
+  info: &crate::OutputInfo,
   mode: Option<ModeChoice>,
 ) -> Option<RequestedMode> {
-  let info = &state.outputs.get(id)?.info;
-  if info.modes.is_empty() {
-    return None;
-  }
   match mode? {
     ModeChoice::Listed(None) => None,
     ModeChoice::Listed(Some(index)) => {
@@ -934,9 +965,10 @@ fn apply_locally(
 }
 
 /// Answers the configuration behind request `id` once the backend tested
-/// or made its mode change: `failed` if it could not, else `succeeded`,
-/// after applying position, scale and transform around the new mode's
-/// size unless the client only tested.
+/// or carried out its part: `failed` if it could not, else the rest of
+/// the configuration is applied as [`apply_locally`] applies it (outputs
+/// without a mode list turned off and on, position, scale and transform
+/// around the new modes' sizes), unless the client only tested.
 pub(crate) fn finish_request(
   state: &mut CompositorState,
   id: OutputRequestId,
@@ -952,23 +984,13 @@ pub(crate) fn finish_request(
     pending.resource.failed();
     return;
   }
-  if pending.test {
-    pending.resource.succeeded();
-    return;
-  }
-  let mut ok = true;
-  for (output, placement) in pending.placements {
-    let physical = crate::output::physical_size(state, &output);
-    ok &= crate::output::place(state, &output, placement, physical).is_ok();
-    if let Some(output) = state.outputs.get_mut(&output) {
-      output.managed = true;
-    }
-  }
-  if ok {
-    pending.resource.succeeded();
-  } else {
-    pending.resource.failed();
-  }
+  apply_locally(
+    state,
+    &pending.resource,
+    pending.changes,
+    pending.toggles,
+    pending.test,
+  );
 }
 
 fn destroy_configuration(state: &mut CompositorState, id: ObjectId) {

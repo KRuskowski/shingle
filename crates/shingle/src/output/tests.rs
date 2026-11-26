@@ -332,7 +332,10 @@ fn mode_changes_wait_for_the_backend() {
     requests,
     [OutputRequest {
       id: requests[0].id,
-      mode: RequestedMode::Listed(1),
+      heads: vec![HeadRequest {
+        output: OutputHandle::new("DP-1"),
+        state: HeadState::On(Some(RequestedMode::Listed(1))),
+      }],
       test_only: true,
     }]
   );
@@ -347,7 +350,10 @@ fn mode_changes_wait_for_the_backend() {
     head.set_position(10, 20);
   });
   let requests = compositor.take_output_requests();
-  assert_eq!(requests[0].mode, RequestedMode::Listed(1));
+  assert_eq!(
+    requests[0].heads[0].state,
+    HeadState::On(Some(RequestedMode::Listed(1)))
+  );
   assert!(!requests[0].test_only);
   light(
     &mut compositor,
@@ -370,12 +376,12 @@ fn mode_changes_wait_for_the_backend() {
   });
   let requests = compositor.take_output_requests();
   assert_eq!(
-    requests[0].mode,
-    RequestedMode::Custom {
+    requests[0].heads[0].state,
+    HeadState::On(Some(RequestedMode::Custom {
       width: 1280,
       height: 720,
       refresh_mhz: 0
-    }
+    }))
   );
   compositor.finish_output_request(requests[0].id, false);
   client.roundtrip(&mut compositor);

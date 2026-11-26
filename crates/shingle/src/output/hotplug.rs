@@ -26,11 +26,15 @@ pub(crate) fn add(
     return Err(Error::Core(ShingleError::InvalidOutputId));
   }
   let id = OutputId::new(info.name.clone());
-  if state.outputs.get(&id).is_some() {
+  if let Some(existing) = state.outputs.get(&id) {
+    if existing.dark {
+      return revive(state, &id, info, physical).map(|()| id);
+    }
     return Err(Error::OutputExists(info.name));
   }
-  // A backend that adds an output that was turned off replugged it.
-  state.outputs.take_disabled(&id);
+  // A backend that adds an output that was turned off replugged it, or
+  // turned it on: it takes its old place in the add order.
+  let disabled = state.outputs.take_disabled(&id);
   let placement = state.placements.get(&info.name);
   if !placement.scale.is_finite() || placement.scale <= 0.0 {
     return Err(Error::InvalidOutputScale);
@@ -64,6 +68,9 @@ pub(crate) fn add(
     placement.position,
     kind,
   );
+  if let Some(off) = disabled {
+    state.outputs.move_to(&id, off.index);
+  }
   create_global(state, &id);
   for other in relayout(state) {
     if other != id {
@@ -90,6 +97,91 @@ pub(crate) fn add(
   super::focus::output_returned(state, &id);
   crate::shell::reconfigure_all(state);
   Ok(id)
+}
+
+/// Lights the dark output `id` again: the backend added the output of
+/// that name back after it reported the last one gone, as when the only
+/// monitor is plugged in again. The output keeps its workspace set,
+/// global and IPC id, takes the new description and size, and gets frames
+/// again.
+fn revive(
+  state: &mut CompositorState,
+  id: &OutputId,
+  info: OutputInfo,
+  physical: (u32, u32),
+) -> Result<(), Error> {
+  let Some(output) = state.outputs.get_mut(id) else {
+    return Ok(());
+  };
+  output.dark = false;
+  let modes_changed = output.info.modes != info.modes;
+  let (scale, transform, rect) = (output.scale, output.transform, output.rect);
+  state.set_info_of(id, info);
+  if modes_changed {
+    crate::output_management::modes_changed(state, id);
+  }
+  let (width, height) = crate::output_transform::logical_size(
+    physical.0, physical.1, scale, transform,
+  );
+  state.set_rect_of(id, Rect::new(rect.x, rect.y, width, height), false)?;
+  crate::shell::reconfigure_all(state);
+  Ok(())
+}
+
+/// Lists an output of `physical` pixels described by `info` that the
+/// backend has but does not light, as a disabled output-management head
+/// at the end of the add order. Does nothing if an output of that name
+/// is there or listed already.
+pub(crate) fn add_disabled(
+  state: &mut CompositorState,
+  info: OutputInfo,
+  physical: (u32, u32),
+) -> Result<(), Error> {
+  if info.name.is_empty() {
+    return Err(Error::Core(ShingleError::InvalidOutputId));
+  }
+  let id = OutputId::new(info.name.clone());
+  if state.outputs.get(&id).is_some() || state.outputs.disabled(&id).is_some() {
+    return Ok(());
+  }
+  let placement = state.placements.get(&info.name);
+  let index = state.outputs.iter().count();
+  state.outputs.disabled.push(super::DisabledOutput {
+    info,
+    physical,
+    kind: OutputKind::Backend,
+    position: placement.position,
+    scale: placement.scale,
+    transform: placement.transform,
+    index,
+  });
+  crate::output_management::output_added(state, &id);
+  Ok(())
+}
+
+/// Turns output `id` off for the backend: it is removed under
+/// `output_layout.unplug` and stays listed as a disabled head. The last
+/// output that is not dark is only marked dark, as [`remove`] keeps it.
+pub(crate) fn disable(
+  state: &mut CompositorState,
+  id: &OutputId,
+) -> Result<(), Error> {
+  let (Some(output), Some(index)) =
+    (state.outputs.get(id), state.outputs.index_of(id))
+  else {
+    return Err(Error::Core(ShingleError::OutputNotFound(
+      id.as_str().into(),
+    )));
+  };
+  let last = !state
+    .outputs
+    .iter()
+    .any(|other| other.id != *id && !other.dark);
+  if !last {
+    let off = super::DisabledOutput::new(output, index);
+    state.outputs.disabled.push(off);
+  }
+  remove(state, id)
 }
 
 /// Removes output `id`. Its workspace set is handled by

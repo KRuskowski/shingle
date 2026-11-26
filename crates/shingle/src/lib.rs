@@ -124,8 +124,8 @@ use calloop::{
 pub use input::{Axis, AxisSource, Modifiers};
 pub use input_device::{InputDeviceId, InputDeviceInfo, InputDeviceKind};
 pub use output::{
-  MoveGeometry, OutputAction, OutputHandle, OutputInfo, OutputKind,
-  OutputModeInfo, OutputPlacement, OutputRequest, OutputRequestId,
+  HeadRequest, HeadState, MoveGeometry, OutputAction, OutputHandle, OutputInfo,
+  OutputKind, OutputModeInfo, OutputPlacement, OutputRequest, OutputRequestId,
   OutputSwitch, OutputView, RequestedMode,
 };
 pub use shingle_core::{Direction, StackingMode, WindowId};
@@ -3386,6 +3386,11 @@ impl Compositor {
   /// EDID identity or name, whose windows away elsewhere come back, or a
   /// new set with the lowest free index. Clients see a new `wl_output`
   /// global and output-management head, and IPC watchers `output-added`.
+  /// An output that was turned off and listed as a disabled head takes its
+  /// old place in the add order. Adding the output of the name of the dark
+  /// last output ([`Compositor::remove_output`]) lights that output again,
+  /// with its windows, global and IPC id, and the new description and
+  /// size.
   ///
   /// # Errors
   ///
@@ -3422,6 +3427,53 @@ impl Compositor {
   /// [`Error::Core`] for an unknown output.
   pub fn remove_output(&mut self, output: &OutputHandle) -> Result<(), Error> {
     output::remove(&mut self.state, &output.id())
+  }
+
+  /// Lists an output that the backend has but does not light, such as a
+  /// connected monitor for which no CRTC is free or one configured `off`,
+  /// as a disabled wlr-output-management head described by `info`, with
+  /// a size of `physical` pixels. A configuration can then turn it on,
+  /// which becomes an [`OutputRequest`] for the backend; the backend adds
+  /// it with [`Compositor::add_output`] once it is lit, and
+  /// [`Compositor::remove_output`] removes the head when the monitor goes.
+  /// Does nothing if an output of that name is there or listed.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::Core`] for an empty name.
+  pub fn add_disabled_output(
+    &mut self,
+    info: OutputInfo,
+    physical: (u32, u32),
+  ) -> Result<(), Error> {
+    output::add_disabled(&mut self.state, info, physical)
+  }
+
+  /// Turns `output` off for the backend, as when a configuration or a
+  /// config reload turned its monitor off: it is removed as
+  /// [`Compositor::remove_output`] removes it, under
+  /// `output_layout.unplug`, and stays listed as a disabled head with its
+  /// description, position, scale and transform. The last output that is
+  /// not dark is kept, marked dark, instead.
+  ///
+  /// # Errors
+  ///
+  /// [`Error::Core`] for an unknown output.
+  pub fn disable_output(&mut self, output: &OutputHandle) -> Result<(), Error> {
+    output::disable(&mut self.state, &output.id())
+  }
+
+  /// The outputs turned off and listed as disabled heads: by output
+  /// management, by [`Compositor::disable_output`] or
+  /// [`Compositor::add_disabled_output`].
+  pub fn disabled_outputs(&self) -> Vec<OutputHandle> {
+    self
+      .state
+      .outputs
+      .disabled
+      .iter()
+      .map(|off| OutputHandle::new(off.info.name.clone()))
+      .collect()
   }
 
   /// Gives an output a new size in physical pixels, before the transform,
@@ -3493,8 +3545,7 @@ impl Compositor {
 
   /// The first output added that is still there. [`Compositor::output`],
   /// [`Compositor::visible_surfaces`] and the other calls without an
-  /// output mean this one; the nested and native hosts draw only it until
-  /// they have one window or CRTC per output (MO-6, MO-7).
+  /// output mean this one.
   pub fn primary_output(&self) -> OutputHandle {
     OutputHandle::from(&self.state.primary().id)
   }
@@ -3549,19 +3600,25 @@ impl Compositor {
     output::restore(&mut self.state);
   }
 
-  /// Takes the mode changes wlr-output-management clients asked for since
-  /// the last call. Only a backend that lists modes in [`OutputInfo`] gets
-  /// any. It tests each one, for a native output with a KMS `TEST_ONLY`
-  /// commit, and unless [`OutputRequest::test_only`] makes it, describes the
-  /// new current mode with [`Compositor::set_output_info`] and resizes the
-  /// output, and then calls [`Compositor::finish_output_request`].
+  /// Takes the configurations wlr-output-management clients asked for
+  /// since the last call whose outputs a backend that lists modes in
+  /// [`OutputInfo`] has to change: modes, and outputs turned on or off.
+  /// The backend tests each one as a whole, for native with one KMS
+  /// `TEST_ONLY` commit, and unless [`OutputRequest::test_only`] makes it,
+  /// carries it out: describes new current modes with
+  /// [`Compositor::describe_output`] and resizes those outputs, adds the
+  /// outputs it turned on with [`Compositor::add_output`] and turns off
+  /// the others with [`Compositor::disable_output`]. Then it calls
+  /// [`Compositor::finish_output_request`].
   pub fn take_output_requests(&mut self) -> Vec<OutputRequest> {
     std::mem::take(&mut self.state.output_requests)
   }
 
   /// Answers the client behind `request`: `failed` unless `ok`, else
-  /// `succeeded`, after applying the position, scale and transform it asked
-  /// for around the current mode, unless it only tested.
+  /// `succeeded`, after applying the rest of its configuration (outputs
+  /// without a mode list turned on or off, and the position, scale and
+  /// transform it asked for around the current modes), unless it only
+  /// tested.
   pub fn finish_output_request(&mut self, request: OutputRequestId, ok: bool) {
     output_management::finish_request(&mut self.state, request, ok);
   }
