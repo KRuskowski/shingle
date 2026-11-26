@@ -751,7 +751,9 @@ fn wset_json(state: &CompositorState, wset: shingle_core::WsetId) -> Value {
   let output = info.output.as_ref().and_then(|id| state.outputs.get(id));
   json!({
       "index": wset.get(),
-      "name": format!("workspace set {}", wset.get()),
+      // Wayfire names a set by its object id; Shingle's sets have only
+      // their index.
+      "name": wset.get().to_string(),
       "output-id": output.map_or(-1, |output| i64::from(output.ipc_id)),
       "output-name": output.map_or("", |output| output.info.name.as_str()),
       "workspace": {
