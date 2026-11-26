@@ -118,6 +118,7 @@
 | Real-client output-management checks (headless and nested) | `tools/output_test/run.py` |
 | WG-4's real-client wayfire-shell checks and their raw Wayland client | `tools/output_test/wayfire_shell_checks.py`, `tools/output_test/wayland_wire.py` |
 | Real-client check of responsiveness during slow session writes (nested on a FUSE mount with slow fsync) | `tools/session_test/run.py`, `tools/session_test/slowfs.py` |
+| Soak tests of headless, offscreen and nested Shingle (and native, attached, on the test machine): workload, sampler, trend test, CSV and summary; the counts they read | `tools/soak_test/run.py`, `tools/soak_test/workload.py`, `tools/soak_test/soak.py`; `stipc/object_counts` in `crates/shingle/src/object_counts.rs` |
 | Real-client session round trips through SIGKILL, SIGTERM and a version 1 session from `master` | `tools/session_test/round_trip.py`, run by `tools/session_test/run.py --checks round-trip` |
 | Host keyboard focus changes | `crates/shingle-nested/src/host_keyboard.rs` |
 | xkb keyboard state, key names, keysyms, modifier masks | `crates/shingle-frontend/src/keyboard.rs` |
