@@ -72,7 +72,11 @@
 //! first lit output.
 
 use std::{
-  collections::BTreeMap, fmt, io, os::fd::AsRawFd, path::PathBuf, time::Instant,
+  collections::{BTreeMap, BTreeSet},
+  fmt, io,
+  os::fd::AsRawFd,
+  path::PathBuf,
+  time::Instant,
 };
 
 use shingle::{
@@ -88,7 +92,7 @@ use crate::{
   features::PlaneFeatures,
   kms::{
     AtomicRequest, BlobId, CommitFlags, Connection, ConnectorInfo, CrtcId,
-    FramebufferId, KmsDevice, Mode, PlaneId, Subpixel,
+    DumbFramebuffer, FramebufferId, KmsDevice, Mode, PlaneId, Subpixel,
     atomic::{self, CursorState, Flip, ModesetState, OutputProps, Teardown},
     edid::Edid,
     modes::{self, ModeChoice},
@@ -268,6 +272,9 @@ struct Lit {
   async_refused: Option<String>,
   /// What the flip in flight was.
   in_flight: InFlight,
+  /// Whether the buffer on screen may show a client: a frame presented
+  /// while the session lock did not hide them. Fresh buffers are black.
+  shows_clients: bool,
 }
 
 impl Lit {
@@ -295,6 +302,7 @@ impl Lit {
       tearing: false,
       async_refused: None,
       in_flight: InFlight::default(),
+      shows_clients: false,
     }
   }
 
@@ -310,11 +318,12 @@ impl Lit {
     self.output.props.plane.id
   }
 
-  /// What a full modeset sets it to.
-  fn state(&self) -> ModesetState {
+  /// What a full modeset sets it to: its current buffer, or `blank`
+  /// instead when one is given.
+  fn state(&self, blank: Option<FramebufferId>) -> ModesetState {
     ModesetState {
       mode: self.blob,
-      framebuffer: self.scanout.current(),
+      framebuffer: blank.unwrap_or_else(|| self.scanout.current()),
       size: self.mode.size(),
       active: self.wanted_dpms,
       vrr: self.vrr,
@@ -556,6 +565,12 @@ pub struct Display {
   fences_refused: Option<String>,
   /// Whether the log said that tearing is asked for but cannot be had.
   told_no_tearing: bool,
+  /// Whether the session lock hides every client
+  /// ([`Display::set_lock_hides_clients`]).
+  hiding: bool,
+  /// Black buffers by size, which modesets show instead of a buffer
+  /// that may show a client while the lock hides them.
+  blanks: BTreeMap<(u32, u32), DumbFramebuffer>,
 }
 
 impl Display {
@@ -613,6 +628,8 @@ impl Display {
       features: PlaneFeatures::default(),
       fences_refused: None,
       told_no_tearing: false,
+      hiding: false,
+      blanks: BTreeMap::new(),
     };
     let ranked = display.ranked();
     if ranked.is_empty() {
@@ -812,7 +829,7 @@ impl Display {
       .iter()
       .enumerate()
       .filter(|(index, _)| !except.contains(index))
-      .map(|(_, lit)| (&lit.output.props, lit.state()))
+      .map(|(_, lit)| (&lit.output.props, lit.state(self.blank_for(lit))))
       .collect();
     states.extend(extra.iter().map(|(props, state)| (*props, *state)));
     let used: Vec<&OutputProps> =
@@ -920,6 +937,69 @@ impl Display {
     output
   }
 
+  /// Follows the session lock: while it hides every client
+  /// ([`shingle::Compositor::lock_hides_clients`]), no modeset shows a
+  /// buffer drawn before, which may show one. Turning an output on again
+  /// (DPMS), resuming the seat after a VT switch and relighting outputs
+  /// after a hotplug show a black buffer instead until a frame drawn
+  /// under the lock is presented; Wayfire's inhibited outputs likewise
+  /// draw only black under the lock layer
+  /// (wayfire:plugins/protocols/session-lock.cpp, `lock_output`). The
+  /// black buffers go when the lock does.
+  pub fn set_lock_hides_clients(&mut self, hiding: bool) {
+    if self.hiding == hiding {
+      return;
+    }
+    self.hiding = hiding;
+    if hiding {
+      self.make_blanks();
+    } else {
+      for (_, blank) in std::mem::take(&mut self.blanks) {
+        if let Err(error) = self.device.destroy_dumb_framebuffer(&blank) {
+          diagnostics::log(&format!("freeing a black buffer failed: {error}"));
+        }
+      }
+    }
+  }
+
+  /// Makes the black buffers the lit outputs need while the lock hides
+  /// the clients. One that cannot be made is logged; its output then
+  /// keeps its own buffer for a modeset.
+  fn make_blanks(&mut self) {
+    if !self.hiding {
+      return;
+    }
+    let sizes = self
+      .lit
+      .iter()
+      .filter(|lit| lit.shows_clients)
+      .map(|lit| lit.mode.size())
+      .filter(|size| !self.blanks.contains_key(size))
+      .collect::<BTreeSet<_>>();
+    for (width, height) in sizes {
+      match self.device.create_dumb_framebuffer(width, height) {
+        Ok(blank) => {
+          self.blanks.insert((width, height), blank);
+        }
+        Err(error) => diagnostics::log(&format!(
+          "no {width}x{height} black buffer for the lock: {error}"
+        )),
+      }
+    }
+  }
+
+  /// The black buffer a modeset of `lit` shows instead of its own, if
+  /// the lock hides the clients and its own may show one.
+  fn blank_for(&self, lit: &Lit) -> Option<FramebufferId> {
+    if !self.hiding || !lit.shows_clients {
+      return None;
+    }
+    self
+      .blanks
+      .get(&lit.mode.size())
+      .map(|blank| blank.framebuffer)
+  }
+
   /// Makes the modeset that `prepare` tested, showing a black frame on
   /// every lit output.
   pub fn start(&mut self) -> io::Result<()> {
@@ -935,6 +1015,7 @@ impl Display {
   /// connector turned off. Drawing resumes on those that are on. With
   /// nothing lit and nothing to turn off, nothing is committed.
   fn modeset(&mut self) -> io::Result<()> {
+    self.make_blanks();
     let request = self.request(&[], &[]);
     if request.is_empty() {
       return Ok(());
@@ -972,11 +1053,15 @@ impl Display {
   /// recovery from a lost flip make it, leaving the other outputs and
   /// their pending flips alone.
   fn modeset_one(&mut self, index: usize) -> io::Result<()> {
+    self.make_blanks();
     let Some(lit) = self.lit.get(index) else {
       return Ok(());
     };
-    let request =
-      atomic::modeset(&lit.output.props, &lit.state(), &Teardown::default());
+    let request = atomic::modeset(
+      &lit.output.props,
+      &lit.state(self.blank_for(lit)),
+      &Teardown::default(),
+    );
     let result = self
       .device
       .commit(
@@ -1213,6 +1298,7 @@ impl Display {
       wait_for(fence);
     }
     let name = self.lit[index].name().to_owned();
+    let hiding = self.hiding;
     loop {
       let lit = &mut self.lit[index];
       let flip = Flip {
@@ -1250,6 +1336,9 @@ impl Display {
             cursor_only: framebuffer.is_none(),
             tearing,
           };
+          if framebuffer.is_some() {
+            lit.shows_clients = !hiding;
+          }
           if let Some(state) = cursor {
             lit.cursor.shown = state;
             lit.cursor.tested |= shows_cursor;
@@ -2425,6 +2514,8 @@ fn monotonic_now() -> std::time::Duration {
   std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
 }
 
+#[cfg(test)]
+mod lock_tests;
 #[cfg(test)]
 mod planes_tests;
 #[cfg(test)]

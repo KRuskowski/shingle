@@ -307,11 +307,13 @@ impl<S: Session, I: InputSource> Backend<S, I> {
   /// that a slow machine cannot make a pending flip time out between two
   /// of their steps.
   pub(crate) fn step_at(&mut self, now: Instant) -> bool {
+    self.follow_lock();
     self.dispatch_session();
     self.dispatch_input();
     self.dispatch_display(now);
     self.dispatch_monitor();
     self.frontend.process(&mut self.host);
+    self.follow_lock();
     self.apply_host_requests();
     self.apply_reloaded_config();
     self.apply_output_changes();
@@ -705,6 +707,14 @@ impl<S: Session, I: InputSource> Backend<S, I> {
     diagnostics::log(&format!("{fatal}; saving the session and exiting"));
     self.fatal = Some(fatal);
     self.host.exit = true;
+  }
+
+  /// Tells the display whether the session lock hides every client, so
+  /// that a modeset (DPMS on, the seat's resume, a hotplug) never shows a
+  /// frame drawn before the lock.
+  fn follow_lock(&mut self) {
+    let hiding = self.frontend.compositor().lock_hides_clients();
+    self.display.set_lock_hides_clients(hiding);
   }
 
   /// Turns each output off or on when the compositor's power state of it
