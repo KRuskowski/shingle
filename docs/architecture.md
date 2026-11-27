@@ -16,7 +16,7 @@
 | `shingle-session` | Atomic session persistence, the background session writer and relaunching saved applications. |
 | `shingle-idle` | Idle, DPMS, fullscreen suppression and the lock state machine, with `Starting` and `LockState::hides_clients`. |
 | `shingle-auth` | PAM authentication for the lock client. |
-| `shingle-lock` | The lock screen: an `ext-session-lock-v1` client with swaylock's options, screenshots through wlr-screencopy blurred and drifting on the GPU, the clock and the outlined password input. |
+| `shingle-lock` | The lock screen: an `ext-session-lock-v1` client with swaylock's options, screenshots through wlr-screencopy blurred and drifting on the GPU, the clock and the password input in the minimal or the swaylock style. |
 | `shingle-wcm` | Graphical configuration manager built on [Gloomy](https://github.com/KRuskowski/gloomy). |
 | `shingle-launcher` | Application launcher: a layer-shell client drawing Gloomy widgets on lavapipe into `wl_shm`, with discovery, fuzzy matching, frecency and the user's layout file in a library unit-tested without Wayland ([design/launcher.md](design/launcher.md)). |
 
@@ -32,7 +32,7 @@
 | Environment of every child process (`ClientEnvironment`, with Wayfire's variables from `with_desktop`), launching clients | `crates/shingle-session/src/environment.rs`, `crates/shingle-session/src/lib.rs` |
 | Public compositor API and renderer events | `crates/shingle/src/lib.rs` |
 | What a locked output shows: only the active lock's surface once it has a full opaque frame (`shown_lock_surface`), the lock scene over black, black native modesets under the lock, the frame recorder | `crates/shingle/src/shell.rs`, `state.rs` (`visible_surfaces_on`); `crates/shingle-frontend/src/frontend/lock.rs`, `recorder.rs`; `crates/shingle-native/src/display.rs` (`set_lock_hides_clients`) |
-| swaylock's options and the `lock` config section; the lock client's option order, screenshots, GPU passes, clock and input | `crates/shingle-config/src/lock.rs`; `crates/shingle-lock/src/options.rs`, `capture.rs`, `gpu.rs`, `lock.wgsl`, `ui.rs` |
+| swaylock's options and the `lock` config section; the lock client's option order, screenshots, GPU passes, clock and input | `crates/shingle-config/src/lock.rs`; `crates/shingle-lock/src/options.rs`, `capture.rs`, `gpu.rs`, `lock.wgsl`, `damage.rs`, `ui.rs` (swaylock style), `minimal.rs` and `motion.rs` (minimal style), `font.rs` |
 | Protocol timestamps (`CLOCK_MONOTONIC`) | `crates/shingle/src/clock.rs` |
 | In-process Wayland test client | `crates/shingle/src/test_client.rs` |
 | Shared state and workspace transitions | `crates/shingle/src/state.rs` |

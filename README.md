@@ -61,7 +61,7 @@ cargo run -p shingle-wcm -- \
 
 ### Locking
 
-`shingle-lock` locks the session; the lock binding (`super+f8`) and `idle.lock_seconds` run it. It reads your swaylock config (`~/.config/swaylock/config`, swaylock's and swaylock-effects' options) and the `lock` section of Shingle's config, which adds the background's drift. A Wayfire config that runs `swaylock` runs `shingle-lock` instead; write `/usr/bin/swaylock` to keep swaylock. With swayidle, use `swayidle -w ... before-sleep 'shingle-lock -f'` so that a suspend waits until the lock is up. PAM uses the `shingle` service (data/pam/shingle). Details are in [docs/design/lock-screen.md](docs/design/lock-screen.md#6-switching-from-swaylock).
+`shingle-lock` locks the session; the lock binding (`super+f8`) and `idle.lock_seconds` run it. It blurs a screenshot of every output and shows the time; typing brings a slim white password input. It reads your swaylock config (`~/.config/swaylock/config`, swaylock's and swaylock-effects' options) and the `lock` section of Shingle's config, which adds the background's drift and `style: swaylock` for swaylock's coloured indicator. A Wayfire config that runs `swaylock` runs `shingle-lock` instead; write `/usr/bin/swaylock` to keep swaylock. With swayidle, use `swayidle -w ... before-sleep 'shingle-lock -f'` so that a suspend waits until the lock is up. PAM uses the `shingle` service (data/pam/shingle). Details are in [docs/design/lock-screen.md](docs/design/lock-screen.md#6-switching-from-swaylock).
 
 ## Scripting
 
