@@ -121,6 +121,12 @@ class FrameTest(unittest.TestCase):
     self.assertGreater(steps, 15)
     self.assertLessEqual(clean, steps * lock_checks.CLEAN_SHARE)
 
+  def test_mean_difference_is_in_levels(self):
+    dark = lock_checks.parse_frame(frame(16, 8, lambda x, y: (10, 20, 30)))
+    light = lock_checks.parse_frame(frame(16, 8, lambda x, y: (16, 26, 36)))
+    self.assertEqual(lock_checks.mean_difference(dark, light), 6.0)
+    self.assertEqual(lock_checks.mean_difference(dark, dark), 0.0)
+
 class LookTest(unittest.TestCase):
   """The trace of the minimal style's frames."""
 

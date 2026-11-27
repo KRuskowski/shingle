@@ -153,6 +153,13 @@ BANDING_ROWS = (12, 24, 36)
 # share of clean steps that still reads as grain.
 STEP_SIDE = 4
 CLEAN_SHARE = 0.25
+# How much the background at drift.intensity 1 changes in a second, in
+# mean levels: visible (the operator found 1.2 invisible) and calm (the
+# probe's pattern on dark changes less than a desktop: 3.5 against 6.7);
+# and
+# how much it may change from one frame to the next.
+MOTION = (2.5, 20.0)
+FRAME_STEP = 2.0
 # Shingle's lock.unlock_fade default, in seconds.
 UNLOCK_FADE = 0.35
 # The frames a second a transition must keep up at least; offscreen
@@ -287,6 +294,13 @@ def bright(frame, rows):
       row = pixels[y * width * 3:(y + 1) * width * 3:3]
       total += row.translate(BRIGHT_TABLE).count(1)
   return total
+
+def mean_difference(first, second, step=4):
+  """The mean difference of the channels of every `step`th pixel of two
+  frames, in levels."""
+  a = pixels_of(first)[::step, ::step].astype(numpy.int16)
+  b = pixels_of(second)[::step, ::step].astype(numpy.int16)
+  return float(numpy.abs(a - b).mean())
 
 def banding(frame, rows=BANDING_ROWS, channel=1, side=STEP_SIDE):
   """How banded the gradient along `rows` of `frame` is: of the steps
@@ -835,8 +849,31 @@ def minimal_checks(results, shingle, reader, lock_binary, empty, clients):
                 'output\'s frame rate',
                 frame_rate(recent) >= TRANSITION_FPS and moved,
                 f'{describe_looks(recent)}, last frames differ {moved}')
-  if kept:
-    clean, steps = banding(kept[-1].frame)
+  # How much it moves: frames a second apart, and from one frame to the
+  # next, which must change little and evenly (no flicker, no jitter).
+  # The reader lets go of old frames' pixels; keep this one's.
+  first = (kept[-1].frame, kept[-1].arrived) if kept else None
+  time.sleep(1.0)
+  reader.drain()
+  later = [(frame.frame, frame.arrived)
+           for frame in locked_frames(reader, moment)[-4:]]
+  later = [(pixels, arrived) for pixels, arrived in later if pixels]
+  if first is not None and len(later) >= 4:
+    per_second = (mean_difference(first[0], later[-1][0])
+                  / max(later[-1][1] - first[1], 1e-3))
+    recent_frames = [pixels for pixels, _ in later]
+    steps = [mean_difference(a, b)
+             for a, b in zip(recent_frames, recent_frames[1:])]
+    results.check('lock: minimal: the background flows visibly but calmly',
+                  MOTION[0] <= per_second <= MOTION[1]
+                  and max(steps) <= FRAME_STEP,
+                  f'{per_second:.2f} levels a second apart, '
+                  f'{[round(step, 2) for step in steps]} from frame to frame')
+  else:
+    results.check('lock: minimal: the background flows visibly but calmly',
+                  False, f'{len(later)} frames kept')
+  if later:
+    clean, steps = banding(later[-1][0])
     results.check('lock: minimal: the vignetted blur is dithered, without '
                   'bands', steps >= 20 and clean <= steps * CLEAN_SHARE,
                   f'{clean} of {steps} one-level steps along rows '
