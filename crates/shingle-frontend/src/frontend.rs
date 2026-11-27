@@ -1302,6 +1302,7 @@ impl Frontend {
     let Some(uploader) = &self.uploader else {
       return false;
     };
+    let started = Instant::now();
     let result = crate::shm::upload(
       uploader,
       self.textures.get(&surface),
@@ -1312,10 +1313,12 @@ impl Frontend {
     );
     match result {
       Ok(uploaded) => {
+        // The time is what tools/shm_bench reads.
         shingle::trace::buffer(format_args!(
-          "shm upload {} bytes surface={}",
+          "shm upload {} bytes surface={} us={}",
           uploaded.bytes,
-          surface.get()
+          surface.get(),
+          started.elapsed().as_micros()
         ));
         #[cfg(test)]
         self.uploads.push((surface, uploaded.bytes));

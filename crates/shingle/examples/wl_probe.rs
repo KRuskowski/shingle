@@ -14,6 +14,7 @@
 //! ```text
 //! wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern] [--fifo]
 //!          [--damage] [--animate FRAMES] [--presentation]
+//!          [--size WIDTHxHEIGHT] [--damage-square SIDE]
 //!          [--report-outputs] [--layer OUTPUT] [--fullscreen]
 //!          [--decoration server|client] [--drag TEXT] [--drag-icon]
 //!          [--drop]
@@ -91,7 +92,11 @@
 //! latency_us, the microseconds from the frame's commit to that time) or
 //! `discarded` for each, so that the harness can count the frames each
 //! output presents and check that feedback names the output the window
-//! is on (docs/design/multi-output.md, MO-5).
+//! is on (docs/design/multi-output.md, MO-5). With `--size WxH` the
+//! frames are W by H pixels whatever the configured size, and with
+//! `--damage-square SIDE` each frame redraws and damages only a SIDE by
+//! SIDE square, which moves along the diagonal from frame to frame, so
+//! that tools/shm_bench can time shm commits by buffer and damage size.
 //!
 //! With `--copy`, the probe also makes a `wl_data_source` offering
 //! `text/plain;charset=utf-8` the clipboard, and answers each `send` with
@@ -189,6 +194,11 @@ struct Options {
   animate: Option<u32>,
   /// Asks for presentation feedback of each animated frame.
   presentation: bool,
+  /// The animated frames' size, instead of the size last drawn.
+  size: Option<(i32, i32)>,
+  /// The side of the square each animated frame redraws and damages,
+  /// instead of all of it.
+  damage_square: Option<i32>,
   /// Reports the outputs the surface enters and leaves and its scales.
   report_outputs: bool,
   /// Maps a layer-shell panel on the output of this name instead of a
@@ -275,6 +285,20 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
       }
       "--drag-icon" => options.drag_icon = true,
       "--drop" => options.drop = true,
+      "--size" => {
+        let value = arguments.next().ok_or("--size needs WIDTHxHEIGHT")?;
+        options.size = Some(parse_size(value)?);
+      }
+      "--damage-square" => {
+        let value = arguments.next().ok_or("--damage-square needs a number")?;
+        options.damage_square = Some(
+          value
+            .parse()
+            .ok()
+            .filter(|side| *side > 0)
+            .ok_or_else(|| format!("bad --damage-square {value:?}"))?,
+        );
+      }
       "--animate" => {
         let value = arguments.next().ok_or("--animate needs a number")?;
         options.animate = Some(
@@ -293,6 +317,20 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     }
   }
   Ok(options)
+}
+
+/// Parses `WIDTHxHEIGHT`, both above zero and small enough that the
+/// pool of two XRGB8888 frames fits a `wl_shm_pool` size.
+fn parse_size(value: &str) -> Result<(i32, i32), String> {
+  let bad = || format!("bad --size {value:?}");
+  let (width, height) = value.split_once('x').ok_or_else(bad)?;
+  let width = width.parse::<i32>().map_err(|_| bad())?;
+  let height = height.parse::<i32>().map_err(|_| bad())?;
+  let pool = i64::from(width) * i64::from(height) * 8;
+  if width <= 0 || height <= 0 || pool > i64::from(i32::MAX) {
+    return Err(bad());
+  }
+  Ok((width, height))
 }
 
 /// Prints one JSON line: `{"event": NAME, FIELDS}`. Values are already
@@ -1198,15 +1236,49 @@ fn damage_commits(
   Ok(())
 }
 
-/// `--animate FRAMES`: full-size frames, one per frame callback.
+/// The frames of `--animate`: `--size` and `--damage-square`.
+#[derive(Clone, Copy, Debug, Default)]
+struct AnimateShape {
+  size: Option<(i32, i32)>,
+  damage_square: Option<i32>,
+}
+
+/// The rectangle frame `frame` of a `width` by `height` animation
+/// redraws and damages, `(x, y, width, height)`: all of it, or a square
+/// of side `square` (clipped to the buffer) that moves 7 pixels along the
+/// diagonal each frame and starts again at the top left when it would
+/// leave the buffer.
+fn animate_damage(
+  frame: u32,
+  width: i32,
+  height: i32,
+  square: Option<i32>,
+) -> (i32, i32, i32, i32) {
+  let Some(side) = square else {
+    return (0, 0, width, height);
+  };
+  let side = side.min(width).min(height);
+  let room = (width - side).min(height - side);
+  let offset = if room == 0 {
+    0
+  } else {
+    (i64::from(frame) * 7 % i64::from(room + 1)) as i32
+  };
+  (offset, offset, side, side)
+}
+
+/// `--animate FRAMES`: frames one per frame callback, at `shape`'s size
+/// or the size last drawn, each damaged in full or in `shape`'s square.
 fn animate(
   queue: &mut wayland_client::EventQueue<Probe>,
   probe: &mut Probe,
   frames: u32,
+  shape: AnimateShape,
 ) -> Result<(), String> {
   let handle = queue.handle();
   let surface = probe.surface.clone().ok_or("no surface")?;
-  let (width, height) = probe.drawn.ok_or("nothing was drawn")?;
+  let drawn = probe.drawn.ok_or("nothing was drawn")?;
+  let (width, height) = shape.size.unwrap_or(drawn);
   let frame_size = width * height * 4;
   let (pool, file) = probe.sealed_pool(&handle, frame_size * 2)?;
   let buffers = ANIMATE_BUFFERS
@@ -1239,16 +1311,23 @@ fn animate(
     let index = ANIMATE_BUFFERS.iter().position(|name| *name == label);
     let index = index.ok_or("an unknown buffer was released")?;
     pixels.fill((frame % 200) as u8 + 30);
-    file
-      .write_all_at(&pixels, (frame_size * index as i32) as u64)
-      .map_err(|error| error.to_string())?;
+    let (x, y, damage_width, damage_height) =
+      animate_damage(frame, width, height, shape.damage_square);
+    let buffer_start = (frame_size * index as i32) as u64;
+    let row_bytes = (damage_width * 4) as usize;
+    for row in y..y + damage_height {
+      let at = buffer_start + (row * width * 4 + x * 4) as u64;
+      file
+        .write_all_at(&pixels[..row_bytes], at)
+        .map_err(|error| error.to_string())?;
+    }
     probe.frame_done = false;
     if let Some(presentation) = &probe.presentation {
       presentation.feedback(&surface, &handle, monotonic_micros());
     }
     surface.frame(&handle, ());
     surface.attach(Some(&buffers[index]), 0, 0);
-    surface.damage_buffer(0, 0, width, height);
+    surface.damage_buffer(x, y, damage_width, damage_height);
     surface.commit();
     queue.flush().map_err(|error| error.to_string())?;
   }
@@ -1494,7 +1573,11 @@ fn run(options: &Options) -> Result<(), String> {
   }
   if let Some(frames) = options.animate {
     wait_mapped(&mut queue, &mut probe)?;
-    animate(&mut queue, &mut probe, frames)?;
+    let shape = AnimateShape {
+      size: options.size,
+      damage_square: options.damage_square,
+    };
+    animate(&mut queue, &mut probe, frames, shape)?;
   }
   if options.drag.is_some() || options.drop {
     let (Some(manager), Some(seat)) = (&probe.data_device_manager, &probe.seat)
@@ -1577,6 +1660,8 @@ mod tests {
         damage: false,
         animate: None,
         presentation: false,
+        size: None,
+        damage_square: None,
         report_outputs: false,
         layer: None,
         fullscreen: false,
@@ -1629,6 +1714,20 @@ mod tests {
       Some(60)
     );
     assert!(parse(&arguments(&["--presentation"])).unwrap().presentation);
+    assert_eq!(
+      parse(&arguments(&["--size", "1920x1080"])).unwrap().size,
+      Some((1920, 1080))
+    );
+    for bad in ["1920", "0x10", "10x-1", "axb", "100000x100000"] {
+      assert!(parse(&arguments(&["--size", bad])).is_err(), "{bad}");
+    }
+    assert_eq!(
+      parse(&arguments(&["--damage-square", "64"]))
+        .unwrap()
+        .damage_square,
+      Some(64)
+    );
+    assert!(parse(&arguments(&["--damage-square", "0"])).is_err());
     assert!(parse(&arguments(&["--animate", "many"])).is_err());
     assert!(parse(&arguments(&["--animate"])).is_err());
     assert!(parse(&arguments(&["a", "b"])).is_err());
@@ -1647,6 +1746,19 @@ mod tests {
     assert_eq!(bytes[..4], red);
     assert_eq!(bytes[28..], [0xff; 4]);
     assert_eq!(buffer_bytes(2, 1, false), [0xff; 8]);
+  }
+
+  #[test]
+  fn animated_damage_is_everything_or_a_moving_square_inside() {
+    assert_eq!(animate_damage(5, 100, 50, None), (0, 0, 100, 50));
+    assert_eq!(animate_damage(0, 100, 50, Some(10)), (0, 0, 10, 10));
+    assert_eq!(animate_damage(1, 100, 50, Some(10)), (7, 7, 10, 10));
+    for frame in 0..200 {
+      let (x, y, width, height) = animate_damage(frame, 100, 50, Some(10));
+      assert!(x + width <= 100 && y + height <= 50, "frame {frame}");
+    }
+    // A square larger than the buffer is the buffer.
+    assert_eq!(animate_damage(3, 20, 30, Some(64)), (0, 0, 20, 20));
   }
 
   #[test]
