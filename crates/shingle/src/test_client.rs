@@ -20,6 +20,12 @@ use wayland_client::{
   },
 };
 use wayland_protocols::{
+  ext::data_control::v1::client::{
+    ext_data_control_device_v1::{self, ExtDataControlDeviceV1},
+    ext_data_control_manager_v1::ExtDataControlManagerV1,
+    ext_data_control_offer_v1::{self, ExtDataControlOfferV1},
+    ext_data_control_source_v1::{self, ExtDataControlSourceV1},
+  },
   ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
     ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
@@ -180,11 +186,17 @@ pub(crate) struct Events {
   pub(crate) control_selections: Vec<Option<ZwlrDataControlOfferV1>>,
   /// wlr-data-control `primary_selection` events, in order.
   pub(crate) control_primary: Vec<Option<ZwlrDataControlOfferV1>>,
-  /// The MIME types each wlr-data-control offer announced.
+  /// The MIME types each wlr-data-control or ext-data-control offer
+  /// announced.
   pub(crate) offer_types: std::collections::HashMap<ObjectId, Vec<String>>,
-  /// wlr-data-control sources' `send` events: MIME type and descriptor.
+  /// ext-data-control `selection` events, in order.
+  pub(crate) ext_control_selections: Vec<Option<ExtDataControlOfferV1>>,
+  /// ext-data-control `primary_selection` events, in order.
+  pub(crate) ext_control_primary: Vec<Option<ExtDataControlOfferV1>>,
+  /// wlr-data-control and ext-data-control sources' `send` events: MIME
+  /// type and descriptor.
   pub(crate) control_sends: Vec<(String, OwnedFd)>,
-  /// wlr-data-control sources that were cancelled.
+  /// wlr-data-control and ext-data-control sources that were cancelled.
   pub(crate) control_cancelled: Vec<ObjectId>,
   /// Every wlr-screencopy frame event, in order.
   pub(crate) screencopy: Vec<zwlr_screencopy_frame_v1::Event>,
@@ -1234,6 +1246,72 @@ impl Dispatch<ZwlrDataControlSourceV1, ()> for Events {
   }
 }
 
+impl Dispatch<ExtDataControlDeviceV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ExtDataControlDeviceV1,
+    event: ext_data_control_device_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      ext_data_control_device_v1::Event::Selection { id } => {
+        events.ext_control_selections.push(id);
+      }
+      ext_data_control_device_v1::Event::PrimarySelection { id } => {
+        events.ext_control_primary.push(id);
+      }
+      _ => {}
+    }
+  }
+
+  wayland_client::event_created_child!(Events, ExtDataControlDeviceV1, [
+    ext_data_control_device_v1::EVT_DATA_OFFER_OPCODE =>
+      (ExtDataControlOfferV1, ()),
+  ]);
+}
+
+impl Dispatch<ExtDataControlOfferV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    offer: &ExtDataControlOfferV1,
+    event: ext_data_control_offer_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let ext_data_control_offer_v1::Event::Offer { mime_type } = event {
+      events
+        .offer_types
+        .entry(offer.id())
+        .or_default()
+        .push(mime_type);
+    }
+  }
+}
+
+impl Dispatch<ExtDataControlSourceV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    source: &ExtDataControlSourceV1,
+    event: ext_data_control_source_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      ext_data_control_source_v1::Event::Send { mime_type, fd } => {
+        events.control_sends.push((mime_type, fd));
+      }
+      ext_data_control_source_v1::Event::Cancelled => {
+        events.control_cancelled.push(source.id());
+      }
+      _ => {}
+    }
+  }
+}
+
 impl Dispatch<ExtForeignToplevelListV1, ()> for Events {
   fn event(
     events: &mut Self,
@@ -1627,6 +1705,7 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for Events {
 }
 
 ignore_events!(
+  ExtDataControlManagerV1,
   ZxdgDecorationManagerV1,
   ZwfShellManagerV2,
   ZwfSurfaceV2,

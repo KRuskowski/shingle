@@ -14,12 +14,10 @@ use wayland_protocols::wp::primary_selection::zv1::server::{
   zwp_primary_selection_offer_v1::{self, ZwpPrimarySelectionOfferV1},
   zwp_primary_selection_source_v1::{self, ZwpPrimarySelectionSourceV1},
 };
-use wayland_protocols_wlr::data_control::v1::server as wlr_data_control;
 use wayland_server::{
   Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
   backend::{ClientId, ObjectId},
 };
-use wlr_data_control::zwlr_data_control_source_v1::ZwlrDataControlSourceV1;
 
 use crate::{data_device::SourceKey, state::CompositorState};
 
@@ -32,8 +30,8 @@ struct OfferData;
 enum SourceOrigin {
   /// A client's `zwp_primary_selection_source_v1`.
   Client(ZwpPrimarySelectionSourceV1),
-  /// A wlr-data-control client's source.
-  Control(ZwlrDataControlSourceV1),
+  /// A wlr-data-control or ext-data-control client's source.
+  Control(crate::data_control::ControlSource),
   /// An X client, through the window manager.
   X11,
   /// The host session, through the nested backend.
@@ -142,7 +140,7 @@ pub(crate) fn selection(
 pub(crate) fn set_control_selection(
   state: &mut CompositorState,
   client: &Client,
-  control_source: ZwlrDataControlSourceV1,
+  control_source: crate::data_control::ControlSource,
   mime_types: Vec<String>,
 ) {
   let key = SourceKey::Object(control_source.id());

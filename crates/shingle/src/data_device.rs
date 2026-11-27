@@ -25,7 +25,6 @@ use std::{
   time::{Duration, Instant},
 };
 
-use wayland_protocols_wlr::data_control::v1::server as wlr_data_control;
 use wayland_server::{
   Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
   WEnum,
@@ -38,7 +37,6 @@ use wayland_server::{
     wl_surface::WlSurface,
   },
 };
-use wlr_data_control::zwlr_data_control_source_v1::ZwlrDataControlSourceV1;
 
 use shingle_core::Rect;
 
@@ -90,8 +88,8 @@ impl SourceKey {
 enum SourceOrigin {
   /// A client's `wl_data_source`.
   Client(WlDataSource),
-  /// A wlr-data-control client's source.
-  Control(ZwlrDataControlSourceV1),
+  /// A wlr-data-control or ext-data-control client's source.
+  Control(crate::data_control::ControlSource),
   /// An X client's selection, through the window manager.
   X11,
   /// An X client's drag, through the window manager.
@@ -295,7 +293,7 @@ pub(crate) fn selection(
 pub(crate) fn set_control_selection(
   state: &mut CompositorState,
   client: &Client,
-  control_source: ZwlrDataControlSourceV1,
+  control_source: crate::data_control::ControlSource,
   mime_types: Vec<String>,
 ) {
   let key = SourceKey::Object(control_source.id());
