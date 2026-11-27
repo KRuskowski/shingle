@@ -111,6 +111,8 @@ All seven workspaces of the survey are done, and since WG-8 to WG-10 two items o
 
 Since `shingle-screen-sharing` the screen-sharing portal works: xdg-desktop-portal-wlr shares an output through PipeWire with shm or DMA-BUF buffers, paced by damage and with either cursor mode, and Shingle has Wayfire's ext-image-copy-capture with output sources, toplevel sources of its own and ext-data-control ([status.md](status.md#screen-sharing-and-capture), [design/screen-sharing.md](design/screen-sharing.md)).
 
+Since `shingle-app-sweep` the installed applications are checked through one command, `tools/gpu_test/run.py --checks apps`, and every one passes its scenario but VLC's dialog, whose transient parent is Qt's hidden client leader, as under Wayfire ([status.md](status.md#applications)). The sweep found and fixed five Shingle bugs (tiled xdg dialogs, ignored window geometry, lost input regions, tiled windows maximizing over their neighbours, and Firefox ended by a protocol error on copy) and added xdg-foreign v1 and KDE's server decorations. Open from it: IPC geometry of views on another workspace than the current one.
+
 Since `shingle-colour-and-focus-fixes` every configured colour shows the bytes Wayfire writes for it, and the gamma LUT no longer darkens dark tones; WG-7's belief that Wayfire records the view refocused after a minimize as recently focused turned out wrong, and Shingle already matched Wayfire there ([Colour and focus fixes as built](design/wayfire-gaps.md#colour-and-focus-fixes-as-built)).
 
 ## 7. Soak tests and measurements

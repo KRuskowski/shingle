@@ -32,7 +32,7 @@ namespaces:
                vswipe|decoration|switcher|colours|minimize-focus|
                drag-icon|resize|resize-nested|nested-scaled|
                nested-clipboard|screencast|image-copy-capture|
-               ext-data-control ...
+               ext-data-control|apps|app-NAME ...
 
 For example, DB-1's import test:
 
@@ -99,7 +99,10 @@ checks ext-image-copy-capture from a raw-protocol client (capture_wire.py):
 output, toplevel and cursor sessions, damage, paint_cursors and a capture
 into a GBM DMA-BUF shown in a window, and grim with and without `-c`;
 `--checks ext-data-control` copies and pastes through ext-data-control
-against wl-copy and wl-paste.
+against wl-copy and wl-paste. `--checks apps` (app_checks.py) is the
+application compatibility sweep: every installed application, one at a
+time, through a scripted scenario against offscreen Shingle, and
+`app-NAME` runs one of them.
 
 It exits with the command's status, or 1 when a check failed. With
 `--checks` it prints one PASS or FAIL line per check and INFO lines for
@@ -112,7 +115,8 @@ test_nested_output_checks.py, test_wayfire_checks.py,
 test_vswipe_checks.py, test_decoration_checks.py,
 test_switcher_checks.py, test_colour_checks.py, test_focus_checks.py,
 test_drag_icon_checks.py, test_resize_checks.py,
-test_nested_clipboard_checks.py, test_screencast_checks.py).
+test_nested_clipboard_checks.py, test_screencast_checks.py,
+test_app_checks.py).
 The work directory under `target/` is removed afterwards unless `--keep`
 is given.
 """

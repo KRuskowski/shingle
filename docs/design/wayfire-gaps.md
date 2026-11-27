@@ -69,7 +69,7 @@ Ranked by how much a daily Wayfire user with the tiling plugin would notice them
 | `ext_data_control_manager_v1`, `ext_image_copy_capture_manager_v1` and `ext_output_image_capture_source_manager_v1` (new since 0.9.0); clients fall back to the wlr protocols Shingle has | clipboard managers, xdg-desktop-portal-wlr, wf-shell's window-list previews | wayfire:src/core/core.cpp:149, :160, :161 |
 | Screencopy has no DMA-BUF frames or damage (`copy_with_damage` copies everything) | screen recording and casting cost | crates/shingle/src/screencopy.rs:580 |
 | `gtk_shell1` (`gtk-shell`, `global_menu_bar`) and `org_kde_kwin_appmenu_manager` (`kde-appmenu`) | GTK3 app menus, global menus | wayfire:plugins/protocols/gtk-shell.cpp:393, kde-appmenu.cpp:104 |
-| `org_kde_kwin_server_decoration_manager`, `zxdg_exporter_v1`/`zxdg_importer_v1` (GTK3's xdg-foreign), `wp_drm_lease_device_v1` (VR), `zwlr_export_dmabuf_manager_v1` (wlrobs), `wp_color_manager_v1` and `wp_color_representation_manager_v1` (HDR, new since 0.9.0) | the clients named | [Wayland protocols](#wayland-protocols) |
+| `wp_drm_lease_device_v1` (VR), `zwlr_export_dmabuf_manager_v1` (wlrobs), `wp_color_manager_v1` and `wp_color_representation_manager_v1` (HDR, new since 0.9.0) | the clients named | [Wayland protocols](#wayland-protocols) |
 | Output options `depth`, `hdr`, `icc_profile`, `vrr_idle_refresh_rate`, `min_render_budget`, and `mode = mirror ...` (Shingle turns the output off instead, wayfire.rs:750) | presenters (mirror), HDR and colour-managed setups | wayfire.rs:741-773 |
 | IPC methods `wayfire/configuration`, `reload-config-metadata`, `reload-plugins`, `render-metrics`, `grid/slot_*` and `grid/restore`, `cube/*`, `stipc/tablet/*`, `stipc/delay_next_tx` | scripts and Wayfire's own tests | [IPC methods and events](#ipc-methods-and-events) |
 | `[workarounds] use_external_output_configuration`, `app_id_mode`, `enable_input_method_v2` (Shingle always offers input-method v2 with text-input v3; Wayfire only with this option), `force_xwayland_scaling`, `use_native_buffer_size` (XW-7) | kanshi users, Steam and GTK app-id quirks, X11 HiDPI | no arm in wayfire.rs:481-527 |
@@ -402,8 +402,8 @@ What the pinned Wayfire advertises and Shingle does not. Globals that only wlroo
 | `ext_image_copy_capture_manager_v1`, `ext_output_image_capture_source_manager_v1` | wayfire:src/core/core.cpp:160-161 (new since 0.9.0) | missing; `zwlr_screencopy_manager_v1` v3, shm only (crates/shingle/src/screencopy.rs:250) | rare |
 | `zwlr_export_dmabuf_manager_v1` | wayfire:src/core/core.cpp:163 | missing | rare |
 | `wp_drm_lease_device_v1` | wayfire:src/core/core.cpp:166 | missing | rare |
-| `org_kde_kwin_server_decoration_manager` | wayfire:src/core/core.cpp:197 | missing; `zxdg_decoration_manager_v1` (crates/shingle/src/decoration.rs:49) | rare |
-| `zxdg_exporter_v1`, `zxdg_importer_v1` | wayfire:src/core/core.cpp:250 | missing; v2 only (crates/shingle/src/foreign.rs:35) | rare |
+| `org_kde_kwin_server_decoration_manager` | wayfire:src/core/core.cpp:197 | version 1 since the application sweep (crates/shingle/src/server_decoration.rs) | rare |
+| `zxdg_exporter_v1`, `zxdg_importer_v1` | wayfire:src/core/core.cpp:250 | version 1 since the application sweep, sharing handles with v2 (crates/shingle/src/foreign.rs) | rare |
 | `wp_color_representation_manager_v1` | wayfire:src/core/core.cpp:258 (new since 0.9.0) | missing | rare |
 | `wp_color_manager_v1` | wayfire:src/core/core.cpp:284, when the renderer can (new since 0.9.0) | missing | rare |
 | `gtk_shell1` | wayfire:plugins/protocols/gtk-shell.cpp:393 | missing | rare |
@@ -606,7 +606,7 @@ Where the code differs from the plan above or from Wayfire, and why:
 - Touch on a frame does nothing; Wayfire's `handle_touch_down` presses it. A touch there reaches no client either.
 - Which windows have a frame is decided whenever Shingle reconfigures its windows, which it does on map, focus, tiling, maximize and fullscreen changes and reloads, where Wayfire decides on map, on a decoration-mode change and on `view-tiled`. A matcher on the title or app id therefore takes effect at the next reconfigure in Shingle, and at the next of those events in Wayfire.
 - A window rotated by `wrot` is drawn without its frame, whose pieces would turn about their own centres; closing and minimizing animations show only the client.
-- `org_kde_kwin_server_decoration_manager`, which Wayfire also offers, is still missing.
+- `org_kde_kwin_server_decoration_manager`, which Wayfire also offers, came with the application sweep (crates/shingle/src/server_decoration.rs).
 - The pinned pixels in crates/shingle-render/tests/offscreen_pixels.rs (`a_decorated_window_matches_reference`, tests/golden/frame.rgba) are drawn from the frontend's `frame_pieces` and rasterizers, so shingle-render's integration tests have a dev-dependency on shingle-frontend; the scene's own drawing of a frame is checked by the frontend's GPU test.
 - The X check uses `xw_probe --no-decorations` for a window without decorations, since no X client on the test host sets those hints by itself.
 - Nested Shingle's winit window asks for server-side decorations, so a Shingle hosting it now frames it, as Wayfire does. The harnesses that run nested inside a headless or offscreen Shingle find nested's surface by the window's `base-geometry`, and the XWayland harness's host ignores the request, so that nested still covers its output there.

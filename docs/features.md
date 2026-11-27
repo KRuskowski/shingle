@@ -246,9 +246,11 @@ For clients with popup-focus bugs, `behavior.focus_main_surface_instead_of_popup
 
 ### Dialogs
 
+An xdg toplevel with a parent, or with a fixed size, floats instead of tiling, as Wayfire's `simple-tile` refuses such views: a dialog is centred on its parent and kept inside the workarea, at the size it picks, and until it first draws its configures leave the size to it. A client's `xdg_surface.set_window_geometry` places its surface: the window geometry is the view, and client-side shadows outside it are drawn around the view and take no space in the layout. `org_kde_kwin_server_decoration_manager` lets Qt and KDE clients ask for a server-side frame or draw their own, with Wayfire's default from `preferred_decoration_mode`.
+
 `xdg-dialog-v1` supports modal and nonmodal hints on parented XDG toplevels. Focusing an ancestor redirects to its topmost explicitly modal descendant even when `behavior.all_dialogs_modal` is disabled. Unsetting the hint or destroying the dialog object restores normal focus. The existing all-dialogs option remains available as a compatibility policy for every parented dialog.
 
-`xdg-foreign-unstable-v2` exports random toplevel handles and imports them in other clients. Imported parents use the same stacking and session relationships as ordinary XDG parents. Invalid handles emit `destroyed`; destroying an import, export, or exported toplevel revokes only the relationships that depend on it.
+`xdg-foreign-unstable-v1` and `-v2` export random toplevel handles and import them in other clients; a handle of either version imports with the other, as in wlroots, and GTK 3 and xdg-desktop-portal-gtk use version 1. Imported parents use the same stacking and session relationships as ordinary XDG parents. Invalid handles emit `destroyed`; destroying an import, export, or exported toplevel revokes only the relationships that depend on it.
 
 ### Workspace tools
 
