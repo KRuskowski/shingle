@@ -22,7 +22,8 @@
 //! and out of the foreign queue family around each frame.
 //!
 //! Client `wl_shm` buffers are uploaded from their pools in their own
-//! byte order, damaged rectangles only ([`upload`]).
+//! byte order, damaged rectangles only ([`upload`]), through staging
+//! buffers in system memory ([`staging`]).
 //!
 //! A frame's submission can end with a sync_file that signals when the GPU
 //! has finished it ([`fence`]), for a KMS plane to wait for.
@@ -35,6 +36,7 @@ mod draw;
 pub mod fence;
 mod gpu;
 mod renderer;
+pub mod staging;
 mod state;
 mod target;
 pub mod upload;

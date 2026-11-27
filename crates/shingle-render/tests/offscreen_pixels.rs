@@ -464,6 +464,65 @@ fn shm_uploads_match_rgba_uploads_in_every_format_and_stride() {
   }
 }
 
+/// shm uploads go through staging buffers in system memory, not the
+/// device-local, host-visible memory `Queue::write_texture` prefers
+/// (docs/status.md#shm-upload-speed), and many uploads reuse a few
+/// buffers instead of making one each.
+#[test]
+fn shm_uploads_stage_in_system_memory_and_reuse_their_buffers() {
+  let Some(gpu) = gpu() else {
+    return;
+  };
+  let uploader = gpu.texture_uploader();
+  let Some(before) = uploader.staging_stats() else {
+    panic!("a Vulkan device has staging buffers");
+  };
+  let fourcc = dmabuf::DRM_FORMAT_XRGB8888;
+  let checker = checker_rgba();
+  // A stride that is no multiple of the copy alignment.
+  let bytes = shm_bytes(&checker, 4, 20, fourcc, 0);
+  let image = ShmImage {
+    width: 4,
+    height: 4,
+    stride: 20,
+    fourcc,
+    bytes: &bytes,
+  };
+  let texture = uploader
+    .create(&image, TextureFilter::Nearest)
+    .expect("shm texture");
+  let reference = gpu
+    .create_texture(4, 4, &checker, TextureFilter::Nearest)
+    .expect("texture upload");
+  let expected = texels(&gpu, &reference);
+  for round in 0..40 {
+    // Two rectangles a commit, then the whole buffer now and then.
+    let rects: &[[u32; 4]] = if round % 10 == 0 {
+      &[[0, 0, 4, 4]]
+    } else {
+      &[[0, 0, 2, 1], [1, 2, 3, 2]]
+    };
+    uploader.write(&texture, &image, rects).expect("write");
+    if round % 4 == 0 {
+      assert_eq!(texels(&gpu, &texture), expected, "round {round}");
+    }
+  }
+  assert_eq!(texels(&gpu, &texture), expected);
+  let after = uploader.staging_stats().expect("staging");
+  assert!(
+    after.created - before.created <= 4,
+    "40 uploads made {} staging buffers",
+    after.created - before.created
+  );
+  assert!(after.kept <= 8, "{} buffers kept", after.kept);
+  if after.system_memory {
+    assert!(
+      !after.device_local_heap,
+      "staged in video memory: {after:?}"
+    );
+  }
+}
+
 #[test]
 fn a_damaged_rectangle_replaces_only_its_texels() {
   let Some(gpu) = gpu() else {

@@ -79,6 +79,9 @@ pub struct GpuContext {
   pub(crate) effects: Effects,
   dmabuf: Result<DmabufCaps, DmabufUnavailable>,
   foreign_barriers: bool,
+  // Staging buffers in system memory for shm uploads, shared by every
+  // uploader; None off Vulkan or with `SHINGLE_SHM_STAGING=0`.
+  staging: Option<crate::staging::SharedStaging>,
 }
 
 impl GpuContext {
@@ -128,7 +131,13 @@ impl GpuContext {
       1,
       &[255, 255, 255, 255],
     )?;
+    let staging = crate::staging::configured(|name| std::env::var_os(name))
+      .and_then(|memory| {
+        crate::staging::StagingPool::new(&adapter, &device, memory)
+      })
+      .map(|pool| std::sync::Arc::new(Mutex::new(pool)));
     Ok(Self {
+      staging,
       instance,
       adapter,
       device,
@@ -208,6 +217,7 @@ impl GpuContext {
       layout: self.texture_layout.clone(),
       linear_sampler: self.linear_sampler.clone(),
       nearest_sampler: self.nearest_sampler.clone(),
+      staging: self.staging.clone(),
     }
   }
 

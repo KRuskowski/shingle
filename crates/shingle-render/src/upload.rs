@@ -8,8 +8,11 @@
 //! flag instead of a CPU pass that sets alpha, and `Queue::write_texture`
 //! reads the rows with the client's stride, which wgpu allows without
 //! alignment. Only damaged rectangles are written into an existing
-//! texture. wgpu copies the bytes into its staging memory before
-//! `write_texture` returns, so the client may have its buffer back then.
+//! texture. The rows are copied into a staging buffer in system memory
+//! ([`crate::staging`]) and from there into the texture on the GPU, or,
+//! without one, by `Queue::write_texture`, whose own staging memory may
+//! be video memory the CPU writes slowly. Either way the bytes are copied
+//! before the write returns, so the client may have its buffer back then.
 
 use crate::{
   GpuTexture, TextureFilter,
@@ -97,6 +100,7 @@ pub struct TextureUploader {
   pub(crate) layout: wgpu::BindGroupLayout,
   pub(crate) linear_sampler: wgpu::Sampler,
   pub(crate) nearest_sampler: wgpu::Sampler,
+  pub(crate) staging: Option<crate::staging::SharedStaging>,
 }
 
 impl TextureUploader {
@@ -160,8 +164,12 @@ impl TextureUploader {
   }
 
   /// Writes `rects` of `image` into `texture`, which must fit it
-  /// ([`TextureUploader::fits`]), straight from `image.bytes` with its
-  /// stride. Returns the bytes copied, as [`upload_bytes`] counts them.
+  /// ([`TextureUploader::fits`]), from `image.bytes` with its stride:
+  /// through the context's staging buffers in system memory
+  /// ([`crate::staging`]), or with `Queue::write_texture` where there are
+  /// none or one could not be made. Either way the bytes have been copied
+  /// out of `image` when this returns. Returns the bytes copied, as
+  /// [`upload_bytes`] counts them.
   pub fn write(
     &self,
     texture: &GpuTexture,
@@ -172,6 +180,22 @@ impl TextureUploader {
       return Err(UploadError::Mismatch);
     }
     let total = upload_bytes(image, rects)?;
+    if let Some(staging) = &self.staging {
+      let mut pool = staging.lock().unwrap_or_else(|error| error.into_inner());
+      let written = pool.write(
+        &self.queue,
+        &texture.texture,
+        image.bytes,
+        image.stride,
+        rects,
+      );
+      match written {
+        Ok(()) => return Ok(total),
+        Err(error) => {
+          eprintln!("shingle: shm staging failed, writing directly: {error}")
+        }
+      }
+    }
     for &[x, y, width, height] in rects {
       if width == 0 || height == 0 {
         continue;
@@ -197,6 +221,14 @@ impl TextureUploader {
       );
     }
     Ok(total)
+  }
+
+  /// What the staging buffers uploads go through have done, or None
+  /// when uploads use `Queue::write_texture` ([`crate::staging`]).
+  pub fn staging_stats(&self) -> Option<crate::staging::StagingStats> {
+    let staging = self.staging.as_ref()?;
+    let pool = staging.lock().unwrap_or_else(|error| error.into_inner());
+    Some(pool.stats())
   }
 
   /// `texture` sampled with `filter` instead: the same texels, a new
