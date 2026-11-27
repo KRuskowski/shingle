@@ -105,6 +105,22 @@ class FrameTest(unittest.TestCase):
     self.assertEqual(verdicts.bright_band, 11 * 32)
     self.assertEqual(verdicts.bright_above, 0)
 
+  def test_banding_is_clean_steps(self):
+    # A dark ramp rounded to 8 bits: every step a clean edge; dithered,
+    # each step's neighbours mixed.
+    def rounded(x, y):
+      return (0, x // 16, 0)
+
+    def dithered(x, y):
+      return (0, (x + 8 * ((x * 7 + y * 13) % 5) // 4) // 16, 0)
+    banded = lock_checks.parse_frame(frame(96, 40, rounded))
+    clean, steps = lock_checks.banding(banded)
+    self.assertEqual((clean, steps), (15, 15))
+    grainy = lock_checks.parse_frame(frame(96, 40, dithered))
+    clean, steps = lock_checks.banding(grainy)
+    self.assertGreater(steps, 15)
+    self.assertLessEqual(clean, steps * lock_checks.CLEAN_SHARE)
+
 class LookTest(unittest.TestCase):
   """The trace of the minimal style's frames."""
 

@@ -43,6 +43,7 @@ ACCEPTED_PHRASE; no real password is used. Signals go through
 namespace.
 """
 
+import json
 import os
 import re
 import shutil
@@ -51,6 +52,8 @@ import subprocess
 import sys
 import threading
 import time
+
+import numpy
 
 import checks
 import nested_output_checks
@@ -142,6 +145,16 @@ BRIGHT_TABLE = bytes(1 if value >= BRIGHT else 0 for value in range(256))
 # 400 pixel output) and the rows above it, where only the time is.
 BAND = 18
 ABOVE = (75, 21)
+# Rows near the top of an output, where the vignette darkens the blurred
+# background smoothly from the middle to the corners, and the longest
+# run of one value along them that still reads as grain, not as a band.
+BANDING_ROWS = (12, 24, 36)
+# The pixels on each side of a step that make it a clean edge, and the
+# share of clean steps that still reads as grain.
+STEP_SIDE = 4
+CLEAN_SHARE = 0.25
+# Shingle's lock.unlock_fade default, in seconds.
+UNLOCK_FADE = 0.35
 # The frames a second a transition must keep up at least; offscreen
 # outputs refresh at 60.
 TRANSITION_FPS = 40
@@ -183,50 +196,70 @@ def classify(r, g, b):
     return MINT
   return None
 
-def row_classes(frame, y, step=2):
-  """classify of every `step`th pixel of row `y`."""
-  _, width, _, pixels = frame
-  start = y * width * 3
-  row = pixels[start:start + width * 3]
-  return [classify(row[x * 3], row[x * 3 + 1], row[x * 3 + 2])
-          for x in range(0, width, step)]
+# checks.classify's names, and VIOLET and MINT, as codes: bit 0 high
+# red, bit 1 high green, bit 2 high blue for the saturated and grey
+# colours; -1 for none.
+CODES = {'black': 0, 'red': 1, 'green': 2, 'yellow': 3, 'blue': 4,
+         'magenta': 5, 'cyan': 6, 'white': 7, VIOLET: 8, MINT: 9}
+
+def pixels_of(frame):
+  """`frame`'s pixels as a height x width x 3 array."""
+  _, width, height, pixels = frame
+  return numpy.frombuffer(pixels, numpy.uint8).reshape(height, width, 3)
+
+def class_codes(rgb):
+  """classify of every pixel of `rgb` (..., 3), as CODES."""
+  values = rgb.astype(numpy.int16)
+  high, low = values > 200, values < 60
+  codes = numpy.where(numpy.all(high | low, axis=-1),
+                      high[..., 0] * 1 + high[..., 1] * 2 + high[..., 2] * 4,
+                      -1)
+  r, g, b = values[..., 0], values[..., 1], values[..., 2]
+  codes = numpy.where((codes < 0) & (r > 90) & (r < 170) & (g < 60)
+                      & (b > 200), CODES[VIOLET], codes)
+  codes = numpy.where((codes < 0) & (r < 60) & (g > 200) & (b > 90)
+                      & (b < 170), CODES[MINT], codes)
+  return codes
 
 def sampled_rows(frame):
-  """[(y, row_classes)] of every ROW_STEPth row of `frame`."""
-  _, _, height, _ = frame
-  return [(y, row_classes(frame, y, COLUMN_STEP))
-          for y in range(0, height, ROW_STEP)]
+  """The class codes of every COLUMN_STEPth pixel of every ROW_STEPth
+  row of `frame`, and those pixels' purity (unblurred)."""
+  sampled = pixels_of(frame)[::ROW_STEP, ::COLUMN_STEP]
+  pure = numpy.all((sampled >= PURE_HIGH) | (sampled <= PURE_LOW), axis=-1)
+  return class_codes(sampled), pure
+
+def sharp_at(frame, rows=None):
+  """Where `frame` shows the probe's pattern unblurred: the first point
+  with two of its neighbouring colours, as pure as the pattern draws
+  them (PURE_HIGH, PURE_LOW), SHARP_DISTANCE pixels apart across or
+  down; None when there is none. The lock's blur under the minimal
+  style's dim (0.78) is never that pure, so its white outline and dots
+  over a blurred quadrant are not taken for the pattern."""
+  codes, pure = sampled_rows(frame) if rows is None else rows
+  across = SHARP_DISTANCE // COLUMN_STEP
+  down = SHARP_DISTANCE // ROW_STEP
+  found = numpy.zeros(codes.shape, bool)
+  left, right = codes[:, :-across], codes[:, across:]
+  both = pure[:, :-across] & pure[:, across:]
+  for first, second in HORIZONTAL_PAIRS:
+    found[:, :-across] |= ((left == CODES[first]) & (right == CODES[second])
+                           & both)
+  top, bottom = codes[:-down], codes[down:]
+  both = pure[:-down] & pure[down:]
+  for first, second in VERTICAL_PAIRS:
+    found[:-down] |= (top == CODES[first]) & (bottom == CODES[second]) & both
+  points = numpy.argwhere(found)
+  if len(points) == 0:
+    return None
+  row, column = points[0]
+  return (int(column) * COLUMN_STEP, int(row) * ROW_STEP)
 
 def unblurred(frame, *points):
   """Whether every pixel at `points` of `frame` is as pure as the
   probe's pattern draws it: each channel at least PURE_HIGH or at most
-  PURE_LOW. The lock's blur under the minimal style's dim (0.78) never
-  is, so its white outline and dots over a blurred quadrant are not
-  taken for the pattern."""
+  PURE_LOW."""
   return all(all(value >= PURE_HIGH or value <= PURE_LOW
                  for value in pixel(frame, x, y)) for x, y in points)
-
-def sharp_at(frame, rows=None):
-  """Where `frame` shows the probe's pattern unblurred: the first point
-  with two of its neighbouring colours, pure, SHARP_DISTANCE pixels
-  apart across or down; None when there is none."""
-  rows = sampled_rows(frame) if rows is None else rows
-  across = SHARP_DISTANCE // COLUMN_STEP
-  down = SHARP_DISTANCE // ROW_STEP
-  for index, (y, here) in enumerate(rows):
-    for column, (left, right) in enumerate(zip(here, here[across:])):
-      x = column * COLUMN_STEP
-      if ((left, right) in HORIZONTAL_PAIRS
-          and unblurred(frame, (x, y), (x + SHARP_DISTANCE, y))):
-        return (x, y)
-    if index + down < len(rows):
-      below = rows[index + down][1]
-      for column, (top, bottom) in enumerate(zip(here, below)):
-        x = column * COLUMN_STEP
-        if ((top, bottom) in VERTICAL_PAIRS
-            and unblurred(frame, (x, y), (x, y + SHARP_DISTANCE))):
-          return (x, y)
-  return None
 
 def sharp_pattern(frame):
   """Whether `frame` shows the pattern unblurred anywhere (sharp_at)."""
@@ -241,8 +274,8 @@ def all_black(frame, columns=20, rows=12):
 
 def colour_count(frame, name, rows=None):
   """How many sampled pixels of `frame` classify as `name`."""
-  rows = sampled_rows(frame) if rows is None else rows
-  return sum(classes.count(name) for _, classes in rows)
+  codes, _ = sampled_rows(frame) if rows is None else rows
+  return int(numpy.count_nonzero(codes == CODES[name]))
 
 def bright(frame, rows):
   """How many pixels of `rows` of `frame` have a red channel of at least
@@ -254,6 +287,27 @@ def bright(frame, rows):
       row = pixels[y * width * 3:(y + 1) * width * 3:3]
       total += row.translate(BRIGHT_TABLE).count(1)
   return total
+
+def banding(frame, rows=BANDING_ROWS, channel=1, side=STEP_SIDE):
+  """How banded the gradient along `rows` of `frame` is: of the steps
+  of one level between neighbouring pixels of `channel`, how many are
+  clean edges, `side` equal pixels before and `side` equal pixels after,
+  and how many steps there are. A gradient rounded to 8 bits steps in
+  clean edges, the bands; a dithered one mixes the two levels around
+  each step, so that hardly any is clean."""
+  _, width, _, _ = frame
+  clean = steps = 0
+  for y in rows:
+    values = [pixel(frame, x, y)[channel] for x in range(width)]
+    for x in range(side, width - side):
+      if abs(values[x] - values[x - 1]) != 1:
+        continue
+      steps += 1
+      before = values[x - side:x]
+      after = values[x:x + side]
+      if len(set(before)) == 1 and len(set(after)) == 1:
+        clean += 1
+  return clean, steps
 
 def reddish(rgb):
   """Whether `rgb` is clearly more red than anything else."""
@@ -404,10 +458,10 @@ def key_names(text):
 class Lock:
   """shingle-lock as a client of `shingle`, with its frames traced."""
 
-  def __init__(self, shingle, binary, arguments, name):
+  def __init__(self, shingle, binary, arguments, name, config=None):
     # The lock section of the config Shingle reads, as Shingle passes it
-    # to the lock client it starts itself.
-    config = os.path.join(shingle.directory, 'shingle.yaml')
+    # to the lock client it starts itself, unless `config` names another.
+    config = config or os.path.join(shingle.directory, 'shingle.yaml')
     self.client = checks.Client(
         shingle, [binary, '--shingle-config', config, *arguments], name,
         extra_environment={'SHINGLE_LOCK_TRACE': '1'},
@@ -504,6 +558,8 @@ def lock_checks(results, binary, wl_probe, captures):
                  clients)
     nested_lock_checks(results, binary, lock_binary, wl_probe,
                        os.path.join(base, 'empty-config'))
+    cost_checks(results, binary, lock_binary, wl_probe,
+                os.path.join(base, 'empty-config'))
   finally:
     for client in clients:
       client.stop()
@@ -611,6 +667,84 @@ def nested_lock_checks(results, binary, lock_binary, wl_probe, empty):
   results.check('lock: nested: and never reports an error more than once',
                 all(count <= 1 for count in errors), str(errors))
 
+# The output sizes the cost of the smooth background is measured at, and
+# how long.
+COST_SIZES = ((1920, 1080), (3840, 2160))
+COST_SECONDS = 5.0
+
+def cpu_seconds(pid):
+  """The CPU time process `pid` has used, user and system, in seconds."""
+  with open(f'/proc/{pid}/stat') as file:
+    fields = file.read().rsplit(')', 1)[1].split()
+  # utime and stime, the 14th and 15th fields, counting the pid as 1st.
+  return (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
+
+def cost_checks(results, binary, lock_binary, wl_probe, empty):
+  """What the smooth background costs at rest, at each of COST_SIZES,
+  with DMA-BUF frames and with SHINGLE_LOCK_SHM's read-back into
+  wl_shm: shingle-lock's and offscreen Shingle's CPU use over
+  COST_SECONDS, and the frame rate. Reported in the checks' details,
+  which docs/design/lock-screen.md records."""
+  for (width, height), shm in [(size, shm) for size in COST_SIZES
+                               for shm in (False, True)]:
+    path = 'wl_shm' if shm else 'DMA-BUF'
+    name = f'lock-cost-{width}x{height}-{"shm" if shm else "dmabuf"}'
+    config = dict(checks.BASE_CONFIG)
+    config.update({
+        'outputs': [{'name': 'HEADLESS-1', 'mode': f'{width}x{height}@60'}],
+        'animate': {'open_animation': 'none', 'close_animation': 'none'},
+    })
+    shingle = checks.Shingle(binary, name, config,
+                             backend=('--backend', 'offscreen', '--outputs',
+                                      '1'))
+    clients = []
+    try:
+      clients.append(checks.Client(shingle, [wl_probe, 'cost-probe',
+                                             '--pattern'], 'cost-probe',
+                                   program='wl_probe'))
+      xw.wait_for(lambda: shingle.view('cost-probe'), timeout=15)
+      environment = {'SHINGLE_LOCK_TRACE': '1'}
+      if shm:
+        environment['SHINGLE_LOCK_SHM'] = '1'
+      lock = checks.Client(
+          shingle, [lock_binary, '--shingle-config',
+                    os.path.join(shingle.directory, 'shingle.yaml'), '-C',
+                    empty], 'lock', extra_environment=environment,
+          program='shingle-lock')
+      clients.append(lock)
+
+      class Traced:
+        """What `looks` needs of a Lock."""
+        client = lock
+      ready = xw.wait_for(lambda: 'shingle-lock: ready' in lock.output(),
+                          timeout=30)
+      time.sleep(2.0)
+      before = len(looks(Traced))
+      pids = (lock.process.pid, shingle.process.pid)
+      start = [cpu_seconds(pid) for pid in pids]
+      began = time.monotonic()
+      time.sleep(COST_SECONDS)
+      used = [cpu_seconds(pid) - first for pid, first in zip(pids, start)]
+      elapsed = time.monotonic() - began
+      drawn = looks(Traced)[before:]
+      rate = frame_rate(drawn)
+      lock_cpu, shingle_cpu = (100 * value / elapsed for value in used)
+      chosen = ('as DMA-BUFs' in lock.output()) != shm
+      results.check(
+          f'lock: cost: at rest at {width}x{height} through {path} the '
+          'background moves at the frame rate',
+          ready and chosen and rate >= TRANSITION_FPS,
+          f'shingle-lock {lock_cpu:.1f} % of a CPU, offscreen Shingle '
+          f'{shingle_cpu:.1f} %, {rate:.1f} frames a second over '
+          f'{elapsed:.1f} s')
+      type_text(shingle, ACCEPTED_PHRASE)
+      tap(shingle, 'KEY_ENTER')
+      lock.exited(15)
+    finally:
+      for client in clients:
+        client.stop()
+      shingle.stop()
+
 def locked_frames(reader, moment, output='HEADLESS-1'):
   """Frames of `output` with a lock surface read after `moment`."""
   return [frame for frame in reader.since(moment, output)
@@ -663,8 +797,16 @@ def describe_looks(frames):
 def minimal_checks(results, shingle, reader, lock_binary, empty, clients):
   """The minimal style with shingle-lock's defaults; see the module
   docstring. Ends unlocked."""
+  # Shingle's config, but with the drift's default: every frame.
+  with open(os.path.join(shingle.directory, 'shingle.yaml')) as file:
+    config = json.load(file)
+  config['lock']['drift'].pop('fps', None)
+  smooth = os.path.join(shingle.directory, 'smooth.yaml')
+  with open(smooth, 'w') as file:
+    json.dump(config, file)
   moment = time.monotonic()
-  lock = Lock(shingle, lock_binary, ['-C', empty], 'lock-minimal')
+  lock = Lock(shingle, lock_binary, ['-C', empty], 'lock-minimal',
+              config=smooth)
   clients.append(lock.client)
   results.check('lock: minimal: shingle-lock locks with its defaults',
                 lock.ready(), checks.tail(lock.client.output()))
@@ -687,10 +829,27 @@ def minimal_checks(results, shingle, reader, lock_binary, empty, clients):
                 f'{[frame.bright_above for frame in rest[-3:]]}, '
                 f'{describe_looks(traced[-3:])}')
   recent = [look for look in traced if look.ms >= traced[-1].ms - 1500]
-  rate = frame_rate(recent)
-  results.check('lock: minimal: at rest frames come at the drift\'s rate',
-                DRIFT_FPS * 0.5 <= rate <= DRIFT_FPS * 1.5,
-                describe_looks(recent))
+  kept = [frame for frame in rest if frame.frame]
+  moved = len(kept) >= 2 and difference(kept[-2].frame, kept[-1].frame) > 0
+  results.check('lock: minimal: at rest the background moves at the '
+                'output\'s frame rate',
+                frame_rate(recent) >= TRANSITION_FPS and moved,
+                f'{describe_looks(recent)}, last frames differ {moved}')
+  if kept:
+    clean, steps = banding(kept[-1].frame)
+    results.check('lock: minimal: the vignetted blur is dithered, without '
+                  'bands', steps >= 20 and clean <= steps * CLEAN_SHARE,
+                  f'{clean} of {steps} one-level steps along rows '
+                  f'{BANDING_ROWS} are clean edges')
+  else:
+    results.check('lock: minimal: the vignetted blur is dithered, without '
+                  'bands', False, 'no frame kept')
+  results.check('lock: minimal: its frames go to the compositor as '
+                'DMA-BUFs, nothing read back',
+                'as DMA-BUFs' in output
+                and recent and all(look.read_back == 0 for look in recent),
+                f'{[look.read_back for look in recent[:5]]}, '
+                f'{checks.tail(output)}')
   # Typing: the time leaves and the input comes, at the frame rate.
   index = len(traced)
   moment = time.monotonic()
@@ -709,11 +868,6 @@ def minimal_checks(results, shingle, reader, lock_binary, empty, clients):
                         and a.rise >= b.rise
                         for a, b in zip(moving, moving[1:])),
                 describe_looks(moving))
-  partial = [look for look in moving if look.read_back < WIDTH * HEIGHT]
-  results.check('lock: minimal: frames between drift steps read back only '
-                'the moving part', moving and len(partial) * 2 >= len(moving),
-                f'{len(partial)} of {len(moving)} read back less than the '
-                f'output, {[look.read_back for look in moving[:8]]}')
   typed = reader.wait(lambda frame: frame.lock == 'locked'
                       and frame.output == 'HEADLESS-1'
                       and frame.bright_above == 0 and frame.bright_band > 100,
@@ -813,6 +967,8 @@ def minimal_checks(results, shingle, reader, lock_binary, empty, clients):
                 after and after[-1].input == 0.0 and after[-1].clock == 0.0
                 and frame_rate(fading) >= TRANSITION_FPS,
                 f'{describe_looks(fading)}; last {describe_looks(after[-1:])}')
+  reader.wait(lambda frame: frame.lock == 'unlocked' and frame.sharp,
+              moment=moment)
   reader.drain()
   session = sorted(reader.since(moment, 'HEADLESS-1'),
                    key=lambda frame: frame.arrived)
@@ -820,15 +976,27 @@ def minimal_checks(results, shingle, reader, lock_binary, empty, clients):
                    if frame.lock == 'unlocked'), None)
   last = [frame for frame in session[:unlocked] if frame.lock_surface]
   results.check('lock: minimal: the last frame of the lock shows only the '
-                'blur, the frame after it the clients',
+                'blur',
                 unlocked is not None and last
-                and last[-1].bright_band == 0 and last[-1].bright_above == 0
-                and session[unlocked].lock == 'unlocked',
+                and last[-1].bright_band == 0 and last[-1].bright_above == 0,
                 f'{describe(session)}, last locked bright '
                 f'{last[-1].bright_band if last else None} in the middle, '
                 f'{last[-1].bright_above if last else None} above it')
-  reader.wait(lambda frame: frame.lock == 'unlocked' and frame.sharp,
-              moment=moment)
+  # Then Shingle dissolves that frame into the desktop: the first frame
+  # after the unlock is still the blur, the pattern sharp only after
+  # lock.unlock_fade, with frames in between.
+  after = session[unlocked:] if unlocked is not None else []
+  sharp = next((index for index, frame in enumerate(after) if frame.sharp),
+               None)
+  took = (after[sharp].arrived - after[0].arrived) if sharp else None
+  results.check('lock: minimal: after the unlock the blurred frame '
+                'dissolves into the sharp desktop over about '
+                f'{UNLOCK_FADE} s',
+                after and not after[0].sharp and sharp is not None
+                and sharp >= 6 and 0.1 <= took <= 1.0,
+                f'{len(after)} frames after the unlock, the first sharp '
+                f'the {sharp}th, {took if took is None else round(took, 3)} s '
+                'later')
 
 def run_sessions(results, shingle, reader, lock_binary, swaylock, geometry,
                  clients):
@@ -998,11 +1166,18 @@ def run_sessions(results, shingle, reader, lock_binary, swaylock, geometry,
   tap(shingle, 'KEY_ENTER')
   shown = reader.wait(lambda frame: frame.lock == 'unlocked' and frame.sharp,
                       moment=moment, timeout=15)
-  between = [frame for frame in reader.since(moment)
-             if shown is None or frame.arrived < shown.arrived]
+  # Until the unlock every frame hides the clients; from it on the lock's
+  # last frame dissolves into them (lock.unlock_fade), never sharp at
+  # once.
+  frames = sorted(reader.since(moment), key=lambda frame: frame.arrived)
+  first = next((frame for frame in frames if frame.lock == 'unlocked'),
+               None)
+  between = [frame for frame in frames
+             if first is None or frame.arrived < first.arrived]
   results.check('lock: which unlocks, the outputs black or locked until '
-                'then', shown is not None and all(
-                    frame.lock in HIDING for frame in between),
+                'then, and dissolving into the clients after',
+                shown is not None and first is not None and not first.sharp
+                and all(frame.lock in HIDING for frame in between),
                 describe(between))
   second.client.exited(5)
   # Lock again for the grace period's client to take over.
