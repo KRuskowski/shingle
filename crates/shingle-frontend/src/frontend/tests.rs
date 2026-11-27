@@ -666,6 +666,50 @@ fn alt_pointer_bindings_move_and_resize_with_real_alt_keys() {
 }
 
 #[test]
+fn a_tiled_resize_grabbed_near_the_middle_moves_the_nearer_edges() {
+  let config =
+    yaml_config(concat!("pointer:\n", "  resize_button: alt+btn_right\n",));
+  let mut fixture = Fixture::new(config);
+  for app_id in ["alpha", "bravo", "charlie"] {
+    fixture.window(app_id);
+  }
+  let [_, bravo, _] = fixture.tiles()[..] else {
+    panic!("three tiles");
+  };
+  let width = |fixture: &Fixture| {
+    fixture
+      .frontend
+      .compositor()
+      .core()
+      .window_layout(bravo)
+      .expect("a tile")
+      .geometry
+      .width
+  };
+  // Inside the middle third, where the floating corner threshold of 0.33
+  // finds no edge; simple-tile takes the half the pointer is in.
+  for (offset, drag) in [(10.0, 120.0), (-10.0, -120.0)] {
+    let before = width(&fixture);
+    let (x, y) = fixture.center(bravo);
+    fixture.move_pointer(x + offset, y);
+    fixture.key(KEY_LEFTALT, true);
+    fixture.button(BTN_RIGHT, true);
+    assert!(matches!(
+      fixture.frontend.drag,
+      Some(DragState::Resize { window, horizontal: Some(_), .. })
+        if window == bravo
+    ));
+    fixture.move_pointer(x + offset + drag, y);
+    fixture.button(BTN_RIGHT, false);
+    fixture.key(KEY_LEFTALT, false);
+    assert!(
+      width(&fixture) > before,
+      "dragging {drag} from {offset} off the centre widens bravo"
+    );
+  }
+}
+
+#[test]
 fn a_move_the_client_asks_for_leaves_no_button_held() {
   let (mut fixture, [alpha, _, _]) = three_windows();
   let (x, y) = fixture.center(alpha);

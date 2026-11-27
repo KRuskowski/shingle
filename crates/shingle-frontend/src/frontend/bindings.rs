@@ -146,7 +146,21 @@ impl Frontend {
     } else if let Some(geometry) = self.window_geometry(window) {
       let local_x = self.pointer_x - geometry.x as f64;
       let local_y = self.pointer_y - geometry.y as f64;
-      let threshold = self.resize.corner_threshold;
+      let floating = self
+        .compositor
+        .core()
+        .window_info(window)
+        .is_ok_and(|info| info.state.floating.is_some());
+      // simple-tile takes a tiled window's drag and always moves one edge
+      // per axis, that of the half the pointer is in
+      // (wayfire:plugins/tile/tree-controller.cpp:161-184); the corner
+      // threshold is the resize plugin's, for floating windows
+      // (wayfire:plugins/single_plugins/resize.cpp:178-200).
+      let threshold = if floating {
+        self.resize.corner_threshold
+      } else {
+        0.5
+      };
       let horizontal = if local_x < geometry.width as f64 * threshold {
         Some(Direction::Left)
       } else if local_x >= geometry.width as f64 * (1.0 - threshold) {
@@ -161,11 +175,6 @@ impl Frontend {
       } else {
         None
       };
-      let floating = self
-        .compositor
-        .core()
-        .window_info(window)
-        .is_ok_and(|info| info.state.floating.is_some());
       self.drag = Some(DragState::Resize {
         window,
         horizontal,

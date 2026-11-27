@@ -369,7 +369,19 @@ impl Frontend {
     } else {
       let dx = (x - *last_x).round() as i32;
       let dy = (y - *last_y).round() as i32;
-      for (direction, delta) in [(*horizontal, dx), (*vertical, dy)] {
+      // A floating window's edge follows the pointer's motion, while a
+      // tile grows by a positive delta towards `direction`, so dragging a
+      // tile's left or top edge left or up grows it.
+      let tiled = self
+        .compositor
+        .core()
+        .window_info(*window)
+        .is_ok_and(|info| info.state.floating.is_none());
+      for (direction, motion) in [(*horizontal, dx), (*vertical, dy)] {
+        let delta = match direction {
+          Some(Direction::Left | Direction::Up) if tiled => -motion,
+          _ => motion,
+        };
         if let Some(direction) = direction
           && delta != 0
           && let Err(error) = self.compositor.resize_window(
