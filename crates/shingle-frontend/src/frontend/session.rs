@@ -118,19 +118,8 @@ impl Frontend {
         self.left_handed_mode = config.input.left_handed_mode;
         self.middle_emulation = config.input.middle_emulation;
         self.compositor.clamp_opacity(self.alpha.min_value);
+        // Running animations finish as they started, as in Wayfire.
         self.animate = config.animate.clone();
-        if self.animate.close_animation == "none" {
-          for surface in self.closing_animations.keys() {
-            self.textures.remove(surface);
-          }
-          self.closing_animations.clear();
-        }
-        if self.animate.minimize_animation == "none" {
-          self.minimize_animations.clear();
-        }
-        if self.animate.open_animation == "none" {
-          self.open_animations.clear();
-        }
         self.invert_preserve_hue = config.effects.invert_preserve_hue;
         self.background_color = config.background_color;
         self.animation_duration =

@@ -65,8 +65,10 @@ pub(super) struct OutputScene {
   pub(super) animations: HashMap<SurfaceId, GeometryAnimation>,
   /// The surfaces with a buffer drawn in the last frame.
   pub(super) drawn: HashSet<SurfaceId>,
-  /// The surfaces of the last frame that `animate.enabled_for` matches.
-  pub(super) animation_enabled: HashSet<SurfaceId>,
+  /// What the `[animate]` matchers said of the surfaces of the last
+  /// frame that any of them matches.
+  pub(super) animation_enabled:
+    HashMap<SurfaceId, super::animation::ViewMatches>,
   /// The toplevels of the last frame and their windows.
   pub(super) surface_windows: HashMap<SurfaceId, TileWindowId>,
   /// Surfaces committed since this output's last frame.
@@ -86,7 +88,7 @@ impl OutputScene {
       previous_surfaces: HashMap::new(),
       animations: HashMap::new(),
       drawn: HashSet::new(),
-      animation_enabled: HashSet::new(),
+      animation_enabled: HashMap::new(),
       surface_windows: HashMap::new(),
       dirty: HashSet::new(),
     }
@@ -390,14 +392,6 @@ impl Frontend {
           (*candidate == window).then_some(*surface)
         })
     })
-  }
-
-  /// Whether `animate.enabled_for` matched `surface` when it was drawn.
-  pub(super) fn animation_enabled_for(&self, surface: SurfaceId) -> bool {
-    self
-      .scenes
-      .values()
-      .any(|scene| scene.animation_enabled.contains(&surface))
   }
 
   /// Marks `surface` committed for every output's next frame.

@@ -89,7 +89,8 @@ pub struct Frontend {
   /// has saved the session for the last time.
   session: Option<SessionWriter>,
   textures: HashMap<SurfaceId, GpuTexture>,
-  open_animations: HashMap<SurfaceId, Instant>,
+  /// Animations of surfaces that are drawn: opening and restoring.
+  open_animations: HashMap<SurfaceId, crate::animate::Animation>,
   closing_animations: HashMap<SurfaceId, ClosingAnimation>,
   minimize_animations: HashMap<SurfaceId, ClosingAnimation>,
   animate: shingle_config::AnimateConfig,
@@ -766,15 +767,10 @@ impl Frontend {
         Event::SurfaceCommitted(snapshot) => {
           self.scale_surface_committed(&snapshot);
           if snapshot.buffer.is_some()
-            && self.animate.open_animation != "none"
-            && self.animation_matches(&snapshot)
             && !self.textures.contains_key(&snapshot.id)
             && self.previous_of(snapshot.id).is_none()
           {
-            self
-              .open_animations
-              .entry(snapshot.id)
-              .or_insert_with(Instant::now);
+            self.start_open_animation(&snapshot);
           }
           self.mark_dirty(snapshot.id);
           // A cursor on a cursor plane changes without a frame.
@@ -790,20 +786,21 @@ impl Frontend {
         Event::SurfaceDestroyed { surface } => {
           self.uploaded.remove(&surface);
           let previous = self.previous_of(surface);
-          if self.animate.close_animation != "none"
-            && self.animation_enabled_for(surface)
-            && self.textures.contains_key(&surface)
-            && let Some(window) = self.surface_window(surface)
-            && let Some((output, (geometry, buffer))) = previous
+          let window = self.surface_window(surface);
+          let closing =
+            previous.filter(|_| self.textures.contains_key(&surface));
+          if let Some((output, (geometry, buffer))) = closing
+            && let Some(animation) =
+              self.close_animation(surface, window, geometry)
           {
             self.closing_animations.insert(
               surface,
               ClosingAnimation {
                 window,
                 output,
-                started: Instant::now(),
                 geometry,
                 buffer,
+                animation,
               },
             );
           } else {

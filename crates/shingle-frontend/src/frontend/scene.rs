@@ -19,7 +19,9 @@ use shingle_render::{
 
 use super::{
   Frontend,
-  animation::{ClosingAnimation, GeometryAnimation, apply_opening_animation},
+  animation::{
+    ClosingAnimation, GeometryAnimation, apply_animation, has_effect, rect_of,
+  },
   drag::DragState,
   frames::map_rect,
   outputs::{
@@ -45,29 +47,28 @@ impl Frontend {
     textures: &'a HashMap<SurfaceId, GpuTexture>,
     output: &OutputHandle,
     now: Instant,
-    config: &shingle_config::AnimateConfig,
-    effect: &str,
     tiles: &mut Vec<RenderTile<'a>>,
   ) {
     let mut surfaces = animations.keys().copied().collect::<Vec<_>>();
     surfaces.sort_unstable();
     for surface in surfaces {
-      let animation = &animations[&surface];
-      if animation.output != *output {
+      let closing = &animations[&surface];
+      if closing.output != *output {
         continue;
       }
       let Some(texture) = textures.get(&surface) else {
         continue;
       };
-      let mut tile = RenderTile::textured(animation.geometry, texture);
-      apply_buffer(&mut tile, &animation.buffer);
-      let progress = animation_progress(
-        animation.started,
+      let mut tile = RenderTile::textured(closing.geometry, texture);
+      apply_buffer(&mut tile, &closing.buffer);
+      let above = apply_animation(
+        &mut tile,
+        &closing.animation,
         now,
-        Duration::from_millis(config.duration_ms),
+        rect_of(closing.geometry),
       );
-      apply_opening_animation(&mut tile, effect, 1.0 - progress);
       tiles.push(tile);
+      tiles.extend(above);
     }
   }
 
@@ -525,6 +526,14 @@ impl Frontend {
           extend(&mut snapshots, dragged);
         }
       }
+      // Fire moves its particles once per frame of its output.
+      if self.has_fire() {
+        let drawn = snapshots
+          .iter()
+          .map(|snapshot| (snapshot.id, snapshot.geometry))
+          .collect::<Vec<_>>();
+        self.step_animations(output, &drawn, now);
+      }
       for snapshot in &snapshots {
         let Some(buffer) = &snapshot.buffer else {
           continue;
@@ -646,8 +655,8 @@ impl Frontend {
       }
       scene.animation_enabled = snapshots
         .iter()
-        .filter(|snapshot| self.animation_matches(snapshot))
-        .map(|snapshot| snapshot.id)
+        .map(|snapshot| (snapshot.id, self.view_matches(snapshot)))
+        .filter(|(_, matches)| !matches.is_empty())
         .collect();
       scene.surface_windows = snapshots
         .iter()
@@ -746,17 +755,11 @@ impl Frontend {
               ) as f32;
               tile.color = [snapshot.opacity * progress; 4];
             }
-            if let Some(started) = self.open_animations.get(&snapshot.id) {
-              let progress = animation_progress(
-                *started,
-                now,
-                Duration::from_millis(self.animate.duration_ms),
-              );
-              apply_opening_animation(
-                &mut tile,
-                &self.animate.open_animation,
-                progress,
-              );
+            // Fire's particles, drawn above the surface and its frame.
+            let mut above = None;
+            if let Some(animation) = self.open_animations.get(&snapshot.id) {
+              above =
+                apply_animation(&mut tile, animation, now, snapshot.geometry);
             }
             tiles.push(tile);
             if scale_here
@@ -914,6 +917,7 @@ impl Frontend {
             if let Some(frame) = frames.get(&snapshot.id)
               && let Some(content) = tiles.last()
               && content.rotation == 0.0
+              && !has_effect(content)
             {
               let mut framed = self.frame_textures.tiles(
                 frame,
@@ -925,6 +929,7 @@ impl Frontend {
               framed.append(&mut tiles);
               tiles = framed;
             }
+            tiles.extend(above);
             Some(tiles)
           })
           .flatten()
@@ -1038,8 +1043,6 @@ impl Frontend {
         &self.textures,
         output,
         now,
-        &self.animate,
-        &self.animate.close_animation,
         &mut tiles,
       );
       Self::append_closing_surfaces(
@@ -1047,8 +1050,6 @@ impl Frontend {
         &self.textures,
         output,
         now,
-        &self.animate,
-        &self.animate.minimize_animation,
         &mut tiles,
       );
       Self::append_label(
@@ -1301,12 +1302,11 @@ impl Frontend {
     }) {
       scene.label = None;
     }
-    let open = Duration::from_millis(self.animate.duration_ms);
     let opening = scene.drawn.iter().any(|surface| {
       self
         .open_animations
         .get(surface)
-        .is_some_and(|started| animation_progress(*started, now, open) < 1.0)
+        .is_some_and(|animation| animation.running(now))
     });
     // vswipe draws every frame while its wall is up, as Wayfire's
     // `post_frame` does; the last one ends it.
@@ -1328,11 +1328,10 @@ impl Frontend {
   /// the outputs they are drawn on while they run and once more after
   /// they end, so that the final state is drawn.
   fn finish_frame(&mut self, now: Instant) {
-    let open = Duration::from_millis(self.animate.duration_ms);
     let ended = self
       .open_animations
       .iter()
-      .filter(|(_, started)| animation_progress(**started, now, open) >= 1.0)
+      .filter(|(_, animation)| !animation.running(now))
       .map(|(surface, _)| *surface)
       .collect::<Vec<_>>();
     for surface in ended {

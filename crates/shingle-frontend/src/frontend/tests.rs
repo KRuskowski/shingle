@@ -2193,6 +2193,121 @@ fn only_x_drag_icons_may_animate() {
 }
 
 #[test]
+fn animations_are_chosen_in_wayfires_order() {
+  use super::animation::{ViewMatches, Which};
+  use shingle_config::Easing;
+  let mut config = ShingleConfig::default();
+  config.animate.close_animation = "zap".into();
+  let fixture = Fixture::new(config);
+  let frontend = &fixture.frontend;
+  let choose = |which, matches: &ViewMatches| {
+    let (name, chosen) = frontend.choose_animation(which, matches);
+    (name, chosen.ms, chosen.easing)
+  };
+  // Nothing matched: no animation.
+  assert_eq!(
+    choose(Which::Open, &ViewMatches::default()).0,
+    "none".to_owned()
+  );
+  // enabled_for gives the option's own animation, fade and zoom on
+  // `duration`, the others on theirs.
+  let enabled = ViewMatches {
+    enabled: true,
+    ..ViewMatches::default()
+  };
+  assert_eq!(
+    choose(Which::Open, &enabled),
+    ("zoom".into(), 400, Easing::Circle)
+  );
+  assert_eq!(
+    choose(Which::Close, &enabled),
+    ("zap".into(), 250, Easing::Linear)
+  );
+  assert_eq!(
+    choose(Which::Minimize, &enabled),
+    ("squeezimize".into(), 150, Easing::Linear)
+  );
+  // fade, zoom and fire_enabled_for win in that order, with their own
+  // durations.
+  let fading = ViewMatches {
+    fade: true,
+    ..enabled.clone()
+  };
+  assert_eq!(
+    choose(Which::Close, &fading),
+    ("fade".into(), 400, Easing::Circle)
+  );
+  let burning = ViewMatches {
+    zoom: true,
+    fire: true,
+    ..fading.clone()
+  };
+  assert_eq!(
+    choose(Which::Open, &burning),
+    ("fire".into(), 300, Easing::Linear)
+  );
+  // View properties come last.
+  let mut typed = fading.clone();
+  typed.types[0] = Some("spin".into());
+  assert_eq!(
+    choose(Which::Open, &typed),
+    ("spin".into(), 400, Easing::Circle)
+  );
+  typed.durations[0] = Some("1s linear".into());
+  assert_eq!(
+    choose(Which::Open, &typed),
+    ("spin".into(), 1000, Easing::Linear)
+  );
+  typed.types[0] = Some("wobble".into());
+  assert_eq!(choose(Which::Open, &typed).0, "none".to_owned());
+}
+
+#[test]
+fn a_minimized_window_squeezes_and_comes_back_the_way_it_went() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut config = ShingleConfig::default();
+  config.animate.open_animation = "none".into();
+  config.animate.squeezimize_duration_ms = 10_000;
+  let mut fixture = Fixture::new(config);
+  fixture.window("alpha");
+  render_until_idle(&mut fixture, &mut target);
+  let window = fixture.tiles()[0];
+  fixture
+    .frontend
+    .compositor_mut()
+    .set_minimized(window, true)
+    .unwrap();
+  fixture.process();
+  let minimizing = fixture
+    .frontend
+    .minimize_animations
+    .values()
+    .next()
+    .expect("a minimize animation");
+  assert_eq!(
+    minimizing.animation.effect,
+    crate::animate::Effect::Squeezimize
+  );
+  assert_eq!(minimizing.animation.kind, crate::animate::Kind::Minimize);
+  fixture
+    .frontend
+    .compositor_mut()
+    .set_minimized(window, false)
+    .unwrap();
+  fixture.process();
+  assert!(fixture.frontend.minimize_animations.is_empty());
+  let restoring = fixture
+    .frontend
+    .open_animations
+    .values()
+    .next()
+    .expect("the animation turned around");
+  assert_eq!(restoring.kind, crate::animate::Kind::Restore);
+}
+
+#[test]
 fn layer_views_are_named_after_their_layer() {
   let mut config = ShingleConfig::default();
   config.animate.enabled_for =

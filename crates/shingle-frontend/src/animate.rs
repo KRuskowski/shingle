@@ -3,8 +3,13 @@
 //! of its animation, with no GPU or compositor state. [`Timing`] is the
 //! length and curve every animation of the frontend runs on.
 
+mod effects;
+mod fire;
+
 use std::time::{Duration, Instant};
 
+pub use effects::{Animation, Effect, Kind, ViewInfo, ViewTransform};
+pub use fire::FireOptions;
 use shingle_config::Easing;
 use shingle_render::animation_progress;
 
@@ -65,6 +70,85 @@ impl Timing {
   /// interpolating; exactly 1 once it ended.
   pub fn progress(&self, started: Instant, now: Instant) -> f32 {
     eased_progress(started, now, self.duration, self.easing)
+  }
+}
+
+/// Wayfire's `duration_t` (wf-config:src/duration.cpp:89-229): a clock
+/// that runs for its length and can be reversed half way, after which it
+/// runs back from where it was.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Clock {
+  started: Instant,
+  timing: Timing,
+  pub(crate) reversed: bool,
+}
+
+impl Clock {
+  /// A clock of `timing` started at `now`.
+  pub(crate) fn start(now: Instant, timing: Timing) -> Self {
+    Self {
+      started: now,
+      timing,
+      reversed: false,
+    }
+  }
+
+  /// Its length: at least a millisecond, as wf-config's `get_duration`.
+  fn length(&self) -> Duration {
+    self.timing.duration.max(Duration::from_millis(1))
+  }
+
+  /// Whether it has run its length at `now`.
+  pub(crate) fn ready(&self, now: Instant) -> bool {
+    now.saturating_duration_since(self.started) >= self.length()
+  }
+
+  /// The eased progress at `now`: `easing(t)`, or `easing(1 - t)` once
+  /// reversed, and 1 or 0 at the end.
+  pub(crate) fn progress(&self, now: Instant) -> f64 {
+    if self.ready(now) {
+      return if self.reversed { 0.0 } else { 1.0 };
+    }
+    let elapsed = now.saturating_duration_since(self.started).as_secs_f64();
+    let mut linear = elapsed / self.length().as_secs_f64();
+    if self.reversed {
+      linear = 1.0 - linear;
+    }
+    self.timing.easing.apply(linear.clamp(0.0, 1.0))
+  }
+
+  /// Turns the clock around at `now`, so that it takes as long to go back
+  /// as it has run.
+  pub(crate) fn reverse(&mut self, now: Instant) {
+    let length = self.length();
+    let elapsed = now.saturating_duration_since(self.started).min(length);
+    let remaining = length - elapsed;
+    self.started = now.checked_sub(remaining).unwrap_or(self.started);
+    self.reversed = !self.reversed;
+  }
+}
+
+/// Wayfire's `timed_transition_t`: a value from `start` to `end`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Transition {
+  pub(crate) start: f64,
+  pub(crate) end: f64,
+}
+
+impl Transition {
+  /// From `start` to `end`.
+  pub(crate) fn new(start: f64, end: f64) -> Self {
+    Self { start, end }
+  }
+
+  /// Swaps the ends.
+  pub(crate) fn flip(&mut self) {
+    std::mem::swap(&mut self.start, &mut self.end);
+  }
+
+  /// The value at eased `progress`.
+  pub(crate) fn at(&self, progress: f64) -> f64 {
+    (1.0 - progress) * self.start + progress * self.end
   }
 }
 

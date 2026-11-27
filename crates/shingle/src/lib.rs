@@ -2677,6 +2677,32 @@ impl Compositor {
     input::focused_window(&self.state)
   }
 
+  /// The string view property `name` of `window`, as a client set it with
+  /// `window-rules/set-view-property`; `None` when it has none of that name
+  /// or the property is not a string. Wayfire's animate reads
+  /// `open-animation-type` and its kin this way
+  /// (wayfire:plugins/animate/animate.cpp:347-367).
+  pub fn view_string_property(
+    &self,
+    window: WindowId,
+    name: &str,
+  ) -> Option<&str> {
+    match self.state.view_properties.get(&window)?.get(name)? {
+      crate::ipc::ViewProperty::String(value) => Some(value),
+      _ => None,
+    }
+  }
+
+  /// Whether `window` has any view property, so that a caller can skip
+  /// looking for each.
+  pub fn has_view_properties(&self, window: WindowId) -> bool {
+    self
+      .state
+      .view_properties
+      .get(&window)
+      .is_some_and(|properties| !properties.is_empty())
+  }
+
   /// Where `window` minimizes to, in layout coordinates, if a taskbar told
   /// with `zwlr_foreign_toplevel_handle_v1.set_rectangle`, as Wayfire's
   /// `get_minimize_hint`.
