@@ -2,7 +2,8 @@
 run inside run.py's namespace.
 
 Nested Shingle runs on lavapipe as a client of a headless Shingle, which
-plays the host and offers `zwlr_data_control_manager_v1`; neither is ever
+plays the host and offers `ext_data_control_manager_v1`, which nested
+prefers, and `zwlr_data_control_manager_v1`; neither is ever
 a client of the operator's desktop. The group `nested-clipboard` checks,
 with `wl-copy --foreground` and `wl-paste --no-newline`:
 
@@ -144,9 +145,9 @@ def sharing_checks(results, outer, nested):
   """Both selections, both ways, small and large."""
   line = xw.wait_for(lambda: shared_line(nested.log_text()), timeout=15)
   results.check('nested-clipboard: nested shares both selections through '
-                'the host\'s wlr-data-control',
+                'the host\'s ext-data-control',
                 line == (('clipboard', 'primary'),
-                         'zwlr_data_control_manager_v1'),
+                         'ext_data_control_manager_v1'),
                 str(line))
   seed = 0
   for selection in SELECTIONS:
