@@ -959,6 +959,10 @@ pub struct LockConfig {
   /// Seconds without a key before the password input fades out;
   /// default 5.
   pub input_timeout: f64,
+  /// Seconds the compositor crossfades a lock's last frame into the
+  /// desktop after a proper unlock; 0 turns it off. Default 0.35; a lock
+  /// client that crashed never fades.
+  pub unlock_fade: f64,
 }
 
 impl Default for LockConfig {
@@ -971,6 +975,7 @@ impl Default for LockConfig {
       options: BTreeMap::new(),
       drift: DriftConfig::default(),
       input_timeout: 5.0,
+      unlock_fade: 0.35,
     }
   }
 }
@@ -1037,6 +1042,13 @@ impl LockConfig {
     if !(self.input_timeout.is_finite() && self.input_timeout > 0.0) {
       return Err(ConfigError::Invalid(
         "lock.input_timeout must be above 0 seconds".into(),
+      ));
+    }
+    if !(self.unlock_fade.is_finite()
+      && (0.0..=5.0).contains(&self.unlock_fade))
+    {
+      return Err(ConfigError::Invalid(
+        "lock.unlock_fade must be from 0 to 5 seconds".into(),
       ));
     }
     Ok(())

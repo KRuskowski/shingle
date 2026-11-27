@@ -113,6 +113,9 @@ pub struct Frontend {
   virtual_frame: Option<Instant>,
   /// How long the "Workspace set N" label stays (`wsets.label_duration`).
   wsets_label_duration: Duration,
+  /// How long a lock's last frame fades into the desktop after a proper
+  /// unlock (`lock.unlock_fade`); zero for none.
+  unlock_fade: Duration,
   lock_client: Option<Child>,
   /// What locking runs (`lock.command`), unless `SHINGLE_LOCK` says.
   lock_command: String,
@@ -524,6 +527,7 @@ impl Frontend {
       overview_output: None,
       virtual_frame: None,
       wsets_label_duration: Duration::from_millis(config.wsets.label_duration),
+      unlock_fade: Duration::from_secs_f64(config.lock.unlock_fade),
       lock_client: None,
       lock_command: config.lock.command.clone(),
       recorder: crate::recorder::FrameRecorder::from_env(),

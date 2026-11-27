@@ -75,6 +75,36 @@ pub(super) struct OutputScene {
   pub(super) dirty: HashSet<SurfaceId>,
   /// Where the output is in `[animate]`'s fade-in from black.
   pub(super) startup: Startup,
+  /// The lock surface of the last lock frame and where it was, which an
+  /// unlock fades into the desktop.
+  pub(super) last_lock_frame: Option<(GpuTexture, RenderRect)>,
+  /// [`shingle::Compositor::unlock_count`] when this output last drew.
+  pub(super) unlocks_seen: u64,
+  /// The lock's last frame fading out over the desktop after a proper
+  /// unlock (docs/design/lock-screen.md).
+  pub(super) unlock_fade: Option<UnlockFade>,
+}
+
+/// A lock's last frame crossfading into the desktop.
+pub(super) struct UnlockFade {
+  /// The lock surface's texture.
+  pub(super) texture: GpuTexture,
+  /// Where it was drawn, relative to the output.
+  pub(super) rect: RenderRect,
+  /// When the unlock was first drawn.
+  pub(super) started: Instant,
+}
+
+/// The lock frame's opacity `elapsed` into an unlock fade of `length`:
+/// a quadratic ease-out from 1 to 0, so that the desktop comes into
+/// view at once and settles softly without most of it in the first
+/// frames.
+pub(super) fn unlock_fade_alpha(elapsed: Duration, length: Duration) -> f32 {
+  if length.is_zero() {
+    return 0.0;
+  }
+  let t = (elapsed.as_secs_f32() / length.as_secs_f32()).clamp(0.0, 1.0);
+  (1.0 - t).powi(2)
 }
 
 /// How long an output waits for a background before it fades in anyway
@@ -115,6 +145,9 @@ impl OutputScene {
       surface_windows: HashMap::new(),
       dirty: HashSet::new(),
       startup: Startup::Pending,
+      last_lock_frame: None,
+      unlocks_seen: 0,
+      unlock_fade: None,
     }
   }
 

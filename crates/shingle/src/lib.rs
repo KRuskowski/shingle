@@ -1868,6 +1868,14 @@ impl Compositor {
     self.state.idle.lock_state()
   }
 
+  /// How many times a held lock was released properly, by its client's
+  /// `unlock_and_destroy` or [`Compositor::unlock`]: a frontend fades the
+  /// lock's last frame into the desktop when it grows. A crashed lock
+  /// client does not count; its outputs stay black.
+  pub fn unlock_count(&self) -> u64 {
+    self.state.unlocks
+  }
+
   /// Whether no output may draw any client, only the lock's surfaces:
   /// [`LockState::hides_clients`]. A frontend draws nothing else then,
   /// over black, and a backend shows no frame drawn before

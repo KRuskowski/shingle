@@ -106,3 +106,68 @@ fn a_lock_request_hides_scale_until_the_lock_shows_a_full_frame() {
   let (tiles, _) = frame(&mut fixture, &mut target);
   assert!(tiles.is_empty());
 }
+
+#[test]
+fn a_proper_unlock_fades_the_lock_frame_into_the_desktop() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut config = ShingleConfig::default();
+  config.animate.open_animation = "none".into();
+  config.background_color = [0.5, 0.5, 0.5, 1.0];
+  config.lock.unlock_fade = 0.25;
+  let mut fixture = Fixture::new(config);
+  let base = fixture.base.clone();
+  let mut locker =
+    TestClient::connect(fixture.frontend.compositor_mut(), &base);
+  let lock = locker.lock_session(fixture.frontend.compositor_mut());
+  locker.attach_colour(
+    fixture.frontend.compositor_mut(),
+    &lock.surface,
+    lock.size,
+    [0, 0, 255, 255],
+  );
+  let (_, pixel) = frame(&mut fixture, &mut target);
+  assert_eq!(pixel, [255, 0, 0, 255]);
+  let (_, desktop) = {
+    // What the desktop looks like: the background colour.
+    let mut unlocked = Fixture::new(ShingleConfig {
+      background_color: [0.5, 0.5, 0.5, 1.0],
+      ..ShingleConfig::default()
+    });
+    frame(&mut unlocked, &mut target)
+  };
+  fixture.frontend.compositor_mut().unlock();
+  // The first frame after the unlock is still the lock's, over the
+  // desktop drawn under it; then it gives way.
+  let (tiles, first) = frame(&mut fixture, &mut target);
+  assert!(!tiles.is_empty());
+  assert!(first[0] > 200 && first[1] < 60, "{first:?}");
+  assert!(
+    fixture.host.redrawn.contains(&primary()),
+    "the fade asks for frames"
+  );
+  std::thread::sleep(Duration::from_millis(100));
+  let (_, middle) = frame(&mut fixture, &mut target);
+  assert!(
+    middle[0] < first[0] && middle[0] > desktop[0],
+    "{middle:?} between {first:?} and {desktop:?}"
+  );
+  std::thread::sleep(Duration::from_millis(200));
+  let (_, last) = frame(&mut fixture, &mut target);
+  assert_eq!(last, desktop, "the desktop once the fade is over");
+  let (_, after) = frame(&mut fixture, &mut target);
+  assert_eq!(after, desktop);
+  drop(lock);
+}
+
+#[test]
+fn the_unlock_fade_eases_out() {
+  use super::super::outputs::unlock_fade_alpha;
+  let length = Duration::from_millis(400);
+  assert_eq!(unlock_fade_alpha(Duration::ZERO, length), 1.0);
+  assert!(unlock_fade_alpha(Duration::from_millis(100), length) > 0.5);
+  assert!(unlock_fade_alpha(Duration::from_millis(200), length) < 0.3);
+  assert_eq!(unlock_fade_alpha(length, length), 0.0);
+  assert_eq!(unlock_fade_alpha(Duration::ZERO, Duration::ZERO), 0.0);
+}

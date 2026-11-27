@@ -401,6 +401,28 @@ impl Frontend {
     if self.compositor.lock_hides_clients() {
       return self.draw_lock_scene(view, scene, target, now, present);
     }
+    // A lock released properly since the last frame fades its last
+    // frame out over the desktop; one that crashed never got here, its
+    // outputs staying black, and leaves nothing to fade.
+    let unlocks = self.compositor.unlock_count();
+    if let Some((texture, rect)) = scene.last_lock_frame.take()
+      && unlocks > scene.unlocks_seen
+      && !self.unlock_fade.is_zero()
+    {
+      scene.unlock_fade = Some(super::outputs::UnlockFade {
+        texture,
+        rect,
+        started: now,
+      });
+    }
+    scene.unlocks_seen = unlocks;
+    let unlock_fade = scene.unlock_fade.as_ref().map(|fade| {
+      let alpha = super::outputs::unlock_fade_alpha(
+        now.saturating_duration_since(fade.started),
+        self.unlock_fade,
+      );
+      (fade.texture.clone(), fade.rect, alpha)
+    });
     let output = &view.handle;
     let rect = view.rect;
     let (scale_timing, expo_timing, vswitch_timing) = (
@@ -1122,6 +1144,13 @@ impl Frontend {
     } else {
       background
     };
+    if let Some((texture, rect, alpha)) = &unlock_fade
+      && *alpha > 0.0
+    {
+      let mut tile = RenderTile::textured(*rect, texture);
+      tile.color = [*alpha; 4];
+      tiles.push(tile);
+    }
     if present {
       renderer.set_tearing(self.compositor.allows_tearing_on(output));
       let presented = renderer.render(&tiles, background)?;
@@ -1326,6 +1355,11 @@ impl Frontend {
     scene.animations.retain(|_, animation| {
       animation_progress(animation.started, now, self.animation_duration) < 1.0
     });
+    if scene.unlock_fade.as_ref().is_some_and(|fade| {
+      now.saturating_duration_since(fade.started) >= self.unlock_fade
+    }) {
+      scene.unlock_fade = None;
+    }
     let vswitch = self.vswitch_timing();
     if scene
       .workspace_transition
@@ -1361,6 +1395,7 @@ impl Frontend {
       || scene.workspace_transition.is_some()
       || self.vswipe_on(output)
       || scene.zoom_animation.is_some()
+      || scene.unlock_fade.is_some()
       || opening
     {
       self.request_redraw_on(output);

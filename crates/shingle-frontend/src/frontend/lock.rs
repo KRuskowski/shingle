@@ -99,6 +99,29 @@ impl Frontend {
         Some(tile)
       })
       .collect::<Vec<_>>();
+    // The lock surface's frame, should the lock end with an unlock.
+    if let Some((texture, rect)) = snapshots
+      .iter()
+      .filter(|snapshot| {
+        snapshot.role == SurfaceRole::SessionLock && snapshot.buffer.is_some()
+      })
+      .find_map(|snapshot| {
+        let geometry = snapshot.geometry;
+        Some((
+          self.textures.get(&snapshot.id)?.clone(),
+          RenderRect {
+            x: geometry.x - rect.x,
+            y: geometry.y - rect.y,
+            width: geometry.width,
+            height: geometry.height,
+          },
+        ))
+      })
+    {
+      scene.last_lock_frame = Some((texture, rect));
+    }
+    scene.unlocks_seen = self.compositor.unlock_count();
+    scene.unlock_fade = None;
     let locks = snapshots
       .iter()
       .filter_map(|snapshot| snapshot.buffer.as_ref()?.dmabuf())

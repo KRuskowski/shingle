@@ -255,6 +255,9 @@ pub(crate) struct CompositorState {
   pub(crate) next_surface: u64,
   pub(crate) next_serial: u32,
   pub(crate) active_lock: Option<ExtSessionLockV1>,
+  /// How many times a lock client unlocked properly
+  /// (`unlock_and_destroy` or [`crate::Compositor::unlock`]).
+  pub(crate) unlocks: u64,
   pub(crate) activation: crate::activation::Activation,
   pub(crate) data_devices: crate::data_device::DataDevices,
   pub(crate) data_control: crate::data_control::DataControl,
@@ -472,6 +475,7 @@ impl CompositorState {
       next_surface: 1,
       next_serial: 1,
       active_lock: None,
+      unlocks: 0,
       activation: crate::activation::Activation::new(config.activation),
       data_devices: Default::default(),
       data_control: Default::default(),
@@ -1618,6 +1622,9 @@ impl CompositorState {
   }
 
   pub(crate) fn unlock_session(&mut self) {
+    if self.idle.lock_state() == LockState::Locked {
+      self.unlocks += 1;
+    }
     self.active_lock = None;
     let commands = self.idle.unlock(self.now());
     self.process_idle_commands(commands);

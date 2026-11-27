@@ -100,6 +100,7 @@ impl Frontend {
         self.wsets_label_duration =
           Duration::from_millis(config.wsets.label_duration);
         self.lock_command = config.lock.command.clone();
+        self.unlock_fade = Duration::from_secs_f64(config.lock.unlock_fade);
         self.scale_exit = None;
         self.scale_titles.clear();
         self.scale_icons.clear();
