@@ -763,14 +763,16 @@ def all_checks():
   (launcher_checks.py), the lock screen (lock_checks.py), the animate
   effects (animate_checks.py), the Wayfire comparisons of configured
   colours (colour_checks.py) and of focus after a minimize
-  (focus_checks.py), and the rehearsal of a real wayfire.ini
-  (rehearsal_checks.py)."""
+  (focus_checks.py), the rehearsal of a real wayfire.ini
+  (rehearsal_checks.py) and the time to first frame of new windows
+  (first_frame_checks.py)."""
   import animate_checks
   import app_checks
   import colour_checks
   import decoration_checks
   import drag_icon_checks
   import dmabuf_checks
+  import first_frame_checks
   import focus_checks
   import launcher_checks
   import lock_checks
@@ -791,7 +793,8 @@ def all_checks():
           **resize_checks.CHECKS, **nested_clipboard_checks.CHECKS,
           **screencast_checks.CHECKS, **launcher_checks.CHECKS,
           **lock_checks.CHECKS, **rehearsal_checks.CHECKS,
-          **animate_checks.CHECKS, **app_checks.CHECKS}
+          **animate_checks.CHECKS, **first_frame_checks.CHECKS,
+          **app_checks.CHECKS}
 
 def run_checks(groups, binary, wl_probe, captures_directory=None):
   """Runs the check `groups` in order; returns 0 when all passed."""

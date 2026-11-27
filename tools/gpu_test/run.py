@@ -32,7 +32,8 @@ namespaces:
                vswipe|decoration|switcher|colours|minimize-focus|
                drag-icon|resize|resize-nested|nested-scaled|
                nested-clipboard|screencast|image-copy-capture|
-               ext-data-control|launcher|animate|lock|rehearsal|apps|
+               ext-data-control|launcher|animate|lock|rehearsal|
+               first-frame|apps|
                app-NAME ... [--wayfire-ini PATH]
 
 For example, DB-1's import test:
@@ -116,7 +117,11 @@ the grace period. `--checks rehearsal --wayfire-ini PATH`
 under offscreen Shingle and headless Wayfire, every binding it
 configures pressed through STIPC in both and the effects compared; the
 detailed table is copied to $TMPDIR, and without `--wayfire-ini` the
-group is skipped. `--checks apps`
+group is skipped. `--checks first-frame` (first_frame_checks.py) starts
+kitty, foot (`SHINGLE_FOOT`) and Firefox beside a tiled probe several
+times and reports from their `WAYLAND_DEBUG` logs the time to their
+first configure, first buffer and first buffer at the tile's size.
+`--checks apps`
 (app_checks.py) is the
 application compatibility sweep: every installed application, one at a
 time, through a scripted scenario against offscreen Shingle, and
@@ -135,7 +140,7 @@ test_switcher_checks.py, test_colour_checks.py, test_focus_checks.py,
 test_drag_icon_checks.py, test_resize_checks.py,
 test_nested_clipboard_checks.py, test_screencast_checks.py,
 test_app_checks.py, test_animate_checks.py, test_lock_checks.py,
-test_rehearsal_checks.py).
+test_rehearsal_checks.py, test_first_frame_checks.py).
 The work directory under `target/` is removed afterwards unless `--keep`
 is given.
 """
@@ -180,9 +185,9 @@ APP_GROUPS = ('apps', 'app-kitty', 'app-konsole', 'app-kate', 'app-dolphin',
 # switcher_checks.GROUPS, colour_checks.GROUPS, focus_checks.GROUPS and
 # drag_icon_checks.GROUPS, resize_checks.GROUPS,
 # nested_clipboard_checks.GROUPS, screencast_checks.GROUPS,
-# launcher_checks.GROUPS, animate_checks.GROUPS, lock_checks.GROUPS and
-# rehearsal_checks.GROUPS, kept here so that `--help` works without
-# importing them.
+# launcher_checks.GROUPS, animate_checks.GROUPS, lock_checks.GROUPS,
+# rehearsal_checks.GROUPS and first_frame_checks.GROUPS, kept here so
+# that `--help` works without importing them.
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
                 'weston', 'syncobj', 'nosyncobj', 'outputs', 'nested-outputs',
@@ -191,7 +196,8 @@ CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'colours', 'minimize-focus', 'drag-icon', 'resize',
                 'resize-nested', 'nested-clipboard', 'screencast',
                 'image-copy-capture', 'ext-data-control',
-                'launcher', 'animate', 'lock', 'rehearsal') + APP_GROUPS
+                'launcher', 'animate', 'lock', 'rehearsal',
+                'first-frame') + APP_GROUPS
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset, and nested Shingle's on NVIDIA in `resize-nested`;
 # `syncobj` runs no Vulkan client.
