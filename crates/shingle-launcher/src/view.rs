@@ -69,6 +69,7 @@ struct Metrics {
   menu_width: f32,
   menu_item: f32,
   small: f32,
+  icon: f32,
 }
 
 impl Metrics {
@@ -85,6 +86,7 @@ impl Metrics {
       menu_width: (size * 14.0).round(),
       menu_item: (size * 1.9).round(),
       small: (size * 0.8).round(),
+      icon: icon_size(theme),
     }
   }
 
@@ -120,10 +122,30 @@ pub fn panel_origin(theme: &Theme, output: (f32, f32)) -> (f32, f32) {
   )
 }
 
+/// The side of an entry's icon in logical pixels, for the theme's font
+/// size.
+pub fn icon_size(theme: &Theme) -> f32 {
+  (theme.font_size * 1.75).round()
+}
+
+/// Where a row's icon goes, from the row's left edge.
+const ICON_LEFT: f32 = 16.0;
+
 /// How many entry rows fit in a panel of `size`.
 pub fn page_size(theme: &Theme, size: (f32, f32)) -> usize {
   let metrics = Metrics::new(theme, size.0);
   ((metrics.body(size).height / metrics.row).floor() as usize).max(1)
+}
+
+/// An icon to draw over the main tree, below its text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IconSlot {
+  /// Where, in panel coordinates.
+  pub rect: Rect,
+  /// The icon's name or path, as the entry gives it.
+  pub icon: String,
+  /// The row it belongs to, an index of [`Model::rows`].
+  pub row: usize,
 }
 
 /// One frame of the panel.
@@ -132,6 +154,9 @@ pub struct Frame {
   pub main: Widget,
   /// The context menu and the dragged entry.
   pub overlay: Widget,
+  /// The rows' icons, drawn after the main tree's boxes and before its
+  /// text; rows whose icon is not loaded get a letter instead.
+  pub icons: Vec<IconSlot>,
   /// Pointer targets in drawing order; the last that contains a point is
   /// what the point is over.
   pub regions: Vec<(Rect, Target)>,
@@ -154,12 +179,14 @@ impl Frame {
 }
 
 /// Builds the frame of `model` for a panel of `size`. `measure` gives the
-/// width of a text at a font size, for truncating names.
+/// width of a text at a font size, for truncating names, and `loaded`
+/// whether an icon is ready to draw.
 pub fn build(
   model: &Model,
   theme: &Theme,
   size: (f32, f32),
   measure: &dyn Fn(&str, f32) -> f32,
+  loaded: &dyn Fn(&str) -> bool,
 ) -> Frame {
   let metrics = Metrics::new(theme, size.0);
   let mut builder = Builder {
@@ -167,8 +194,10 @@ pub fn build(
     theme,
     metrics,
     measure,
+    loaded,
     main: Vec::new(),
     overlay: Vec::new(),
+    icons: Vec::new(),
     regions: vec![(Rect::new(0.0, 0.0, size.0, size.1), Target::Panel)],
   };
   builder.field(size);
@@ -189,6 +218,7 @@ pub fn build(
   Frame {
     main,
     overlay,
+    icons: builder.icons,
     regions: builder.regions,
   }
 }
@@ -198,8 +228,10 @@ struct Builder<'a> {
   theme: &'a Theme,
   metrics: Metrics,
   measure: &'a dyn Fn(&str, f32) -> f32,
+  loaded: &'a dyn Fn(&str) -> bool,
   main: Vec<Widget>,
   overlay: Vec<Widget>,
+  icons: Vec<IconSlot>,
   regions: Vec<(Rect, Target)>,
 }
 
@@ -220,6 +252,32 @@ impl Builder<'_> {
       }
     }
     String::new()
+  }
+
+  /// A rounded square at `rect` with the first letter of `name`, for an
+  /// entry whose icon is missing or not loaded yet.
+  fn letter_tile(&self, name: &str, rect: Rect) -> Widget {
+    let theme = self.theme;
+    let letter = name
+      .chars()
+      .find(|character| character.is_alphanumeric())
+      .map(|character| character.to_uppercase().collect::<String>())
+      .unwrap_or_default();
+    let mut tile = boxed(
+      rect,
+      BoxStyle::fill(theme.field).with_radius(rect.width / 4.0),
+    );
+    set_children(
+      &mut tile,
+      vec![label(
+        &letter,
+        Rect::new(0.0, 0.0, rect.width, rect.height),
+        theme.font_size,
+        theme.dim_text,
+        TextAlign::Center,
+      )],
+    );
+    tile
   }
 
   fn field(&mut self, size: (f32, f32)) {
@@ -386,43 +444,87 @@ impl Builder<'_> {
       };
       let mut row = boxed(rect, style.with_radius(5.0));
       let mut children = Vec::new();
-      match rows[index] {
+      let text_left = ICON_LEFT + metrics.icon + 10.0;
+      let catalog = &model.catalog;
+      let shown = match rows[index] {
         Row::Entry(position) => {
-          let entry = &model.catalog.entries[position];
-          if model.catalog.is_favourite(position) {
-            children.push(boxed(
-              Rect::new(9.0, rect.height / 2.0 - 3.0, 6.0, 6.0),
-              BoxStyle::fill(theme.accent_text()).with_radius(3.0),
-            ));
-          }
+          let entry = &catalog.entries[position];
           let detail = if model.searching() {
             match entry.kind {
               EntryKind::Command => "command".to_owned(),
-              _ => model
-                .catalog
-                .category_of(position)
-                .unwrap_or_default()
-                .to_owned(),
+              _ => catalog.category_of(position).unwrap_or_default().to_owned(),
             }
           } else {
             [&entry.generic_name, &entry.comment]
               .into_iter()
               .find(|text| {
-                !text.is_empty() && **text != model.catalog.names[position]
+                !text.is_empty() && **text != catalog.names[position]
               })
               .cloned()
               .unwrap_or_default()
           };
+          Some((
+            catalog.names[position].as_str(),
+            detail,
+            entry.icon.as_str(),
+            catalog.is_favourite(position),
+          ))
+        }
+        Row::Action(position, action) => {
+          let entry = &catalog.entries[position];
+          let action = &entry.actions[action];
+          let icon = if action.icon.is_empty() {
+            &entry.icon
+          } else {
+            &action.icon
+          };
+          Some((
+            action.name.as_str(),
+            catalog.names[position].clone(),
+            icon.as_str(),
+            false,
+          ))
+        }
+        Row::Run => None,
+      };
+      match shown {
+        Some((name, detail, icon, favourite)) => {
+          if favourite {
+            children.push(boxed(
+              Rect::new(5.0, rect.height / 2.0 - 3.0, 6.0, 6.0),
+              BoxStyle::fill(theme.accent_text()).with_radius(3.0),
+            ));
+          }
+          let icon_rect = Rect::new(
+            ICON_LEFT,
+            ((rect.height - metrics.icon) / 2.0).round(),
+            metrics.icon,
+            metrics.icon,
+          );
+          if !icon.is_empty() && (self.loaded)(icon) {
+            self.icons.push(IconSlot {
+              rect: Rect::new(
+                rect.x + icon_rect.x,
+                rect.y + icon_rect.y,
+                icon_rect.width,
+                icon_rect.height,
+              ),
+              icon: icon.to_owned(),
+              row: index,
+            });
+          } else {
+            children.push(self.letter_tile(name, icon_rect));
+          }
           let detail = self.fit(&detail, rect.width * 0.4, metrics.small);
           let detail_width = (self.measure)(&detail, metrics.small);
           let name = self.fit(
-            &model.catalog.names[position],
-            rect.width - detail_width - 48.0,
+            name,
+            rect.width - detail_width - text_left - 24.0,
             theme.font_size,
           );
           children.push(label(
             &name,
-            Rect::new(24.0, 0.0, rect.width, rect.height),
+            Rect::new(text_left, 0.0, rect.width, rect.height),
             theme.font_size,
             theme.text,
             TextAlign::Left,
@@ -435,11 +537,11 @@ impl Builder<'_> {
             TextAlign::Right,
           ));
         }
-        Row::Run => {
+        None => {
           let text = format!("Run: {}", model.query.trim());
           children.push(label(
-            &self.fit(&text, rect.width - 36.0, theme.font_size),
-            Rect::new(24.0, 0.0, rect.width, rect.height),
+            &self.fit(&text, rect.width - text_left - 12.0, theme.font_size),
+            Rect::new(text_left, 0.0, rect.width, rect.height),
             theme.font_size,
             theme.accent_text(),
             TextAlign::Left,
@@ -517,8 +619,20 @@ impl Builder<'_> {
     let theme = self.theme;
     let metrics = self.metrics;
     let height = menu.items.len() as f32 * metrics.menu_item + 8.0;
-    let x = menu.at.0.min(size.0 - metrics.menu_width - 4.0).max(4.0);
-    let y = menu.at.1.min(size.1 - height - 4.0).max(4.0);
+    // A menu opened by a key goes below the selected row's name.
+    let at = menu
+      .at
+      .or_else(|| {
+        self.regions.iter().find_map(|(rect, target)| {
+          (*target == Target::Row(self.model.selected)).then_some((
+            rect.x + ICON_LEFT + metrics.icon,
+            rect.y + rect.height,
+          ))
+        })
+      })
+      .unwrap_or((size.0 / 3.0, size.1 / 3.0));
+    let x = at.0.min(size.0 - metrics.menu_width - 4.0).max(4.0);
+    let y = at.1.min(size.1 - height - 4.0).max(4.0);
     let rect = Rect::new(x, y, metrics.menu_width, height);
     let mut panel = boxed(
       rect,
@@ -751,6 +865,8 @@ mod tests {
         command: format!("app{number}"),
         terminal: false,
         category: if number % 2 == 0 { "Games" } else { "Office" }.into(),
+        icon: String::new(),
+        actions: Vec::new(),
       })
       .collect();
     Model::new(
@@ -793,7 +909,7 @@ mod tests {
     let size = (760.0, 480.0);
     let mut model = model();
     model.page = page_size(&theme, size);
-    let frame = build(&model, &theme, size, &measure);
+    let frame = build(&model, &theme, size, &measure, &|_| false);
     assert_eq!(frame.hit((-1.0, 10.0), size), Target::Backdrop);
     assert_eq!(frame.hit((5.0, 5.0), size), Target::Panel);
     assert_eq!(frame.hit((100.0, 30.0), size), Target::Field);
@@ -819,8 +935,10 @@ mod tests {
       theme: &theme,
       metrics: Metrics::new(&theme, 760.0),
       measure: &measure,
+      loaded: &|_| false,
       main: Vec::new(),
       overlay: Vec::new(),
+      icons: Vec::new(),
       regions: Vec::new(),
     };
     assert_eq!(builder.fit("abcdef", 30.0, 10.0), "abcdef");
@@ -835,7 +953,7 @@ mod tests {
     let size = (760.0, 480.0);
     let mut model = model();
     model.pointer_button(Button::Right, true, (400.0, 90.0), Target::Row(0));
-    let frame = build(&model, &theme, size, &measure);
+    let frame = build(&model, &theme, size, &measure, &|_| false);
     assert_eq!(frame.hit((410.0, 100.0), size), Target::MenuItem(0));
     let mut text = Vec::new();
     labels(&frame.overlay, &mut text);
@@ -843,7 +961,7 @@ mod tests {
     model.key(Key::Escape, Modifiers::NONE);
     model.pointer_button(Button::Left, true, (400.0, 90.0), Target::Row(0));
     model.pointer_motion((300.0, 200.0), Target::Row(2));
-    let frame = build(&model, &theme, size, &measure);
+    let frame = build(&model, &theme, size, &measure, &|_| false);
     let mut text = Vec::new();
     labels(&frame.overlay, &mut text);
     assert_eq!(text, ["Application number 00"]);
@@ -854,10 +972,62 @@ mod tests {
     let theme = Theme::default();
     let mut model = model();
     model.key(Key::F2, Modifiers::NONE);
-    let frame = build(&model, &theme, (760.0, 480.0), &measure);
+    let frame = build(&model, &theme, (760.0, 480.0), &measure, &|_| false);
     let mut text = Vec::new();
     labels(&frame.main, &mut text);
     assert_eq!(text[0], "Rename to:");
     assert_eq!(text[1], "[Application number 00]");
+  }
+
+  #[test]
+  fn loaded_icons_are_slots_and_missing_ones_letters() {
+    let theme = Theme::default();
+    let size = (760.0, 480.0);
+    let mut index = model().index().clone();
+    index.entries[0].icon = "loaded-icon".into();
+    index.entries[2].icon = "pending-icon".into();
+    let mut model = model();
+    model.set_index(index);
+    model.page = page_size(&theme, size);
+    let frame = build(&model, &theme, size, &measure, &|icon| {
+      icon == "loaded-icon"
+    });
+    assert_eq!(
+      frame.icons,
+      [IconSlot {
+        rect: Rect::new(208.0 + ICON_LEFT, 78.0, 28.0, 28.0),
+        icon: "loaded-icon".into(),
+        row: 0,
+      }]
+    );
+    // Every other row shows its name's first letter in a tile.
+    let mut text = Vec::new();
+    labels(&frame.main, &mut text);
+    assert_eq!(text.iter().filter(|text| *text == "A").count(), 7);
+  }
+
+  #[test]
+  fn a_menu_opened_by_key_goes_below_the_selected_row() {
+    let theme = Theme::default();
+    let size = (760.0, 480.0);
+    let mut model = model();
+    model.page = page_size(&theme, size);
+    model.key(Key::Down, Modifiers::NONE);
+    model.key(Key::Menu, Modifiers::NONE);
+    let frame = build(&model, &theme, size, &measure, &|_| false);
+    let row = frame
+      .regions
+      .iter()
+      .find(|(_, target)| *target == Target::Row(1))
+      .unwrap()
+      .0;
+    let item = frame
+      .regions
+      .iter()
+      .find(|(_, target)| *target == Target::MenuItem(0))
+      .unwrap()
+      .0;
+    assert_eq!(item.x, row.x + ICON_LEFT + 28.0 + 4.0);
+    assert_eq!(item.y, row.y + row.height + 4.0);
   }
 }

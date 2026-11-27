@@ -264,7 +264,7 @@ fn screenshot(
   model.page = view::page_size(theme, size);
   let mut frame = {
     let measure = renderer.measurer();
-    view::build(model, theme, size, &measure)
+    view::build(model, theme, size, &measure, &|_| false)
   };
   let mut pixels = vec![0_u8; size.0 as usize * size.1 as usize * 4];
   let stride = size.0 as usize * 4;

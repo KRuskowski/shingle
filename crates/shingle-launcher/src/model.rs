@@ -4,9 +4,9 @@
 use std::path::PathBuf;
 
 use crate::{
-  catalog::{Catalog, CategoryKey},
+  catalog::{Catalog, CategoryKey, Found},
   history::History,
-  index::{Entry, EntryKind, Index},
+  index::{Entry, EntryKind, Index, action_id},
   layout::{Layout, LayoutStore},
 };
 
@@ -51,6 +51,10 @@ pub enum Key {
   Tab,
   /// F2.
   F2,
+  /// F10; Shift+F10 opens the context menu.
+  F10,
+  /// The Menu key, which opens the context menu.
+  Menu,
 }
 
 /// The modifiers held with a key.
@@ -166,6 +170,8 @@ pub enum MenuAction {
   CategoryUp,
   /// Moves the category down.
   CategoryDown,
+  /// Launches the entry's desktop action with this index.
+  Action(usize),
 }
 
 /// What a context menu is for.
@@ -184,8 +190,9 @@ pub struct Menu {
   pub target: MenuTarget,
   /// Its items, with their labels.
   pub items: Vec<(MenuAction, String)>,
-  /// Where it opened, in panel coordinates.
-  pub at: (f32, f32),
+  /// Where it opened, in panel coordinates; `None` when a key opened it,
+  /// so that it goes beside the selected row.
+  pub at: Option<(f32, f32)>,
   /// The highlighted item.
   pub selected: usize,
 }
@@ -195,6 +202,9 @@ pub struct Menu {
 pub enum Row {
   /// The entry at this position of [`Catalog::entries`].
   Entry(usize),
+  /// The desktop action with the second index of the entry at the first
+  /// position, as a search result.
+  Action(usize, usize),
   /// "Run" the typed text.
   Run,
 }
@@ -285,7 +295,7 @@ pub struct Model {
   pub hover: Target,
   /// A message for the status line, such as a failed write.
   pub status: String,
-  results: Vec<usize>,
+  results: Vec<Found>,
   press: Option<Press>,
 }
 
@@ -356,7 +366,10 @@ impl Model {
       let mut rows = self
         .results
         .iter()
-        .map(|position| Row::Entry(*position))
+        .map(|found| match found.action {
+          Some(action) => Row::Action(found.position, action),
+          None => Row::Entry(found.position),
+        })
         .collect::<Vec<_>>();
       rows.push(Row::Run);
       rows
@@ -416,7 +429,7 @@ impl Model {
     if let Some(id) = selected
       && let Some(row) = self.rows().iter().position(|row| match row {
         Row::Entry(position) => self.catalog.entries[*position].id == id,
-        Row::Run => false,
+        Row::Action(..) | Row::Run => false,
       })
     {
       self.selected = row;
@@ -523,9 +536,28 @@ impl Model {
         self.record(&entry.id.clone());
         Effect::Launch(launch)
       }
+      Some(Row::Action(position, action)) => {
+        self.launch_action(*position, *action)
+      }
       Some(Row::Run) => self.run_query(),
       None => Effect::None,
     }
+  }
+
+  /// Launches action `action` of the entry at `position`.
+  fn launch_action(&mut self, position: usize, action: usize) -> Effect {
+    let entry = &self.catalog.entries[position];
+    let Some(chosen) = entry.actions.get(action) else {
+      return Effect::None;
+    };
+    let id = action_id(&entry.id, &chosen.id);
+    let launch = Launch {
+      id: Some(id.clone()),
+      command: chosen.command.clone(),
+      terminal: entry.terminal,
+    };
+    self.record(&id);
+    Effect::Launch(launch)
   }
 
   fn run_query(&mut self) -> Effect {
@@ -613,6 +645,10 @@ impl Model {
       (Key::Char('m'), true) => self.open_move_prompt(),
       (Key::F2, _) if modifiers.shift => self.open_category_rename(),
       (Key::F2, _) => self.open_rename(),
+      (Key::Menu, _) => self.open_menu(Target::Row(self.selected), None),
+      (Key::F10, _) if modifiers.shift => {
+        self.open_menu(Target::Row(self.selected), None)
+      }
       (Key::Delete, _) => self.remove_shortcut(),
       _ => Effect::None,
     }
@@ -895,8 +931,9 @@ impl Model {
     Effect::Redraw
   }
 
-  /// Opens the context menu of `target` at `at`.
-  fn open_menu(&mut self, target: Target, at: (f32, f32)) -> Effect {
+  /// Opens the context menu of `target` at `at`, or beside the selected
+  /// row for `None`. An entry's menu starts with its desktop actions.
+  fn open_menu(&mut self, target: Target, at: Option<(f32, f32)>) -> Effect {
     let menu = match target {
       Target::Row(row) => {
         let Some(Row::Entry(position)) = self.rows().get(row).copied() else {
@@ -904,7 +941,15 @@ impl Model {
         };
         self.selected = row;
         let entry = &self.catalog.entries[position];
-        let mut items = vec![
+        let mut items = entry
+          .actions
+          .iter()
+          .enumerate()
+          .map(|(index, action)| {
+            (MenuAction::Action(index), action.name.clone())
+          })
+          .collect::<Vec<_>>();
+        let mut edits = vec![
           (
             MenuAction::ToggleFavourite,
             if self.catalog.is_favourite(position) {
@@ -925,12 +970,13 @@ impl Model {
           ),
         ];
         if entry.kind == EntryKind::Shortcut {
-          items.push((MenuAction::EditCommand, "Edit command…"));
-          items.push((MenuAction::Remove, "Remove shortcut"));
+          edits.push((MenuAction::EditCommand, "Edit command…"));
+          edits.push((MenuAction::Remove, "Remove shortcut"));
         }
+        items.extend(own(edits));
         Menu {
           target: MenuTarget::Entry(entry.id.clone()),
-          items: own(items),
+          items,
           at,
           selected: 0,
         }
@@ -974,12 +1020,19 @@ impl Model {
     if let MenuTarget::Entry(id) = &menu.target
       && let Some(row) = self.rows().iter().position(|row| match row {
         Row::Entry(position) => &self.catalog.entries[*position].id == id,
-        Row::Run => false,
+        Row::Action(..) | Row::Run => false,
       })
     {
       self.selected = row;
     }
     match action {
+      MenuAction::Action(index) => match &menu.target {
+        MenuTarget::Entry(id) => match self.catalog.position(id) {
+          Some(position) => self.launch_action(position, index),
+          None => Effect::Redraw,
+        },
+        MenuTarget::Category(_) => Effect::Redraw,
+      },
       MenuAction::ToggleFavourite => self.toggle_favourite(),
       MenuAction::Rename => self.open_rename(),
       MenuAction::MoveTo => self.open_move_prompt(),
@@ -1061,7 +1114,9 @@ impl Model {
           self.press = Some(Press { at, target });
           Effect::None
         }
-        Button::Right if self.prompt.is_none() => self.open_menu(target, at),
+        Button::Right if self.prompt.is_none() => {
+          self.open_menu(target, Some(at))
+        }
         _ => Effect::None,
       };
     }

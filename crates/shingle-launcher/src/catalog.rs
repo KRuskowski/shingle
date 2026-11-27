@@ -73,6 +73,8 @@ impl Catalog {
       command: shortcut.command.clone(),
       terminal: shortcut.terminal,
       category: SHORTCUTS.to_owned(),
+      icon: String::new(),
+      actions: Vec::new(),
     }));
     let positions = entries
       .iter()
@@ -268,24 +270,48 @@ impl Catalog {
       })
   }
 
-  /// The positions of the best matches of `query` among the shown
-  /// entries, best first.
-  pub fn search(&self, query: &str, history: &History, now: u64) -> Vec<usize> {
-    let shown = (0..self.entries.len())
-      .filter(|position| !self.hidden[*position])
-      .collect::<Vec<_>>();
-    let candidates = shown
-      .iter()
-      .map(|position| Candidate {
-        entry: &self.entries[*position],
-        name: &self.names[*position],
-      })
-      .collect::<Vec<_>>();
+  /// The best matches of `query` among the shown entries and their
+  /// actions, best first.
+  pub fn search(&self, query: &str, history: &History, now: u64) -> Vec<Found> {
+    let mut found = Vec::new();
+    let mut candidates = Vec::new();
+    for position in 0..self.entries.len() {
+      if self.hidden[position] {
+        continue;
+      }
+      let entry = &self.entries[position];
+      let name = &self.names[position];
+      found.push(Found {
+        position,
+        action: None,
+      });
+      candidates.push(Candidate::entry(entry, name));
+      for (index, action) in entry.actions.iter().enumerate() {
+        found.push(Found {
+          position,
+          action: Some(index),
+        });
+        candidates.push(Candidate {
+          entry,
+          name,
+          action: Some(action),
+        });
+      }
+    }
     rank(query, &candidates, history, now, RESULT_LIMIT)
       .into_iter()
-      .map(|hit| shown[hit.index])
+      .map(|hit| found[hit.index])
       .collect()
   }
+}
+
+/// A search result: an entry, or one of its desktop actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Found {
+  /// The entry's position in [`Catalog::entries`].
+  pub position: usize,
+  /// The index of the action in the entry's `actions`, for an action.
+  pub action: Option<usize>,
 }
 
 #[cfg(test)]
@@ -304,6 +330,8 @@ mod tests {
       command: name.to_lowercase(),
       terminal: false,
       category: category.to_owned(),
+      icon: String::new(),
+      actions: Vec::new(),
     }
   }
 
@@ -413,11 +441,35 @@ mod tests {
       catalog
         .search(query, &History::default(), 0)
         .into_iter()
-        .map(|position| catalog.names[position].clone())
+        .map(|found| catalog.names[found.position].clone())
         .collect::<Vec<_>>()
     };
     assert_eq!(names("htop"), ["htop"]);
     assert_eq!(names("sheet"), ["Spreadsheet"]);
     assert!(names("doom").is_empty());
+  }
+
+  #[test]
+  fn search_finds_actions_of_shown_entries() {
+    let mut index = index();
+    let action = crate::index::EntryAction {
+      id: "private".into(),
+      name: "Private Window".into(),
+      icon: String::new(),
+      command: "exec firefox --private".into(),
+    };
+    index.entries[0].actions = vec![action.clone()];
+    index.entries[3].actions = vec![action];
+    let mut layout = Layout::default();
+    layout.set_hidden("doom", true);
+    let catalog = Catalog::build(&index, &layout, &History::default());
+    let found = catalog.search("private", &History::default(), 0);
+    assert_eq!(
+      found,
+      [Found {
+        position: 0,
+        action: Some(0),
+      }]
+    );
   }
 }

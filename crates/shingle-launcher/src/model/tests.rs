@@ -13,6 +13,8 @@ fn entry(id: &str, kind: EntryKind, name: &str, category: &str) -> Entry {
     command: format!("exec {}", name.to_lowercase()),
     terminal: false,
     category: category.to_owned(),
+    icon: String::new(),
+    actions: Vec::new(),
   }
 }
 
@@ -79,6 +81,11 @@ fn row_names(model: &Model) -> Vec<String> {
     .iter()
     .map(|row| match row {
       Row::Entry(position) => model.catalog.names[*position].clone(),
+      Row::Action(position, action) => format!(
+        "{} > {}",
+        model.catalog.names[*position],
+        model.catalog.entries[*position].actions[*action].name
+      ),
       Row::Run => "<run>".to_owned(),
     })
     .collect()
@@ -418,7 +425,7 @@ fn the_context_menu_favourites_renames_and_closes() {
   let row = Target::Row(row_of(&model, "Calc"));
   model.pointer_button(Button::Right, true, (50.0, 60.0), row);
   let menu = model.menu.clone().unwrap();
-  assert_eq!(menu.at, (50.0, 60.0));
+  assert_eq!(menu.at, Some((50.0, 60.0)));
   assert_eq!(menu.items[0].1, "Add to Favourites");
   assert_eq!(menu.items.len(), 4);
   model.pointer_motion((55.0, 65.0), Target::MenuItem(0));
@@ -533,4 +540,81 @@ fn a_new_index_keeps_the_selection() {
 fn removing_the_last_word() {
   assert_eq!(without_last_word("one two  "), "one ");
   assert_eq!(without_last_word("one"), "");
+}
+
+/// The fixture with a "Private Window" action on Firefox.
+fn with_action() -> Fixture {
+  let mut fixture = fixture();
+  let mut index = fixture.model.index().clone();
+  index.entries[0].actions = vec![crate::index::EntryAction {
+    id: "private".into(),
+    name: "Private Window".into(),
+    icon: String::new(),
+    command: "exec firefox --private-window".into(),
+  }];
+  fixture.model.set_index(index);
+  fixture
+}
+
+#[test]
+fn desktop_actions_are_search_results_that_launch() {
+  let Fixture {
+    mut model, history, ..
+  } = with_action();
+  typed(&mut model, "fire");
+  assert_eq!(row_names(&model), ["Firefox", "<run>"]);
+  press(&mut model, Key::Escape);
+  typed(&mut model, "priv");
+  assert_eq!(row_names(&model), ["Firefox > Private Window", "<run>"]);
+  // Edits are for entries, not their actions.
+  assert_eq!(ctrl(&mut model, 'd'), Effect::None);
+  assert_eq!(
+    press(&mut model, Key::Enter),
+    Effect::Launch(Launch {
+      id: Some("ff#private".into()),
+      command: "exec firefox --private-window".into(),
+      terminal: false,
+    })
+  );
+  assert_eq!(History::load(&history).entries["ff#private"].count, 1);
+}
+
+#[test]
+fn the_menu_key_and_a_right_click_open_the_actions() {
+  let Fixture { mut model, .. } = with_action();
+  typed(&mut model, "firefox");
+  assert_eq!(press(&mut model, Key::Menu), Effect::Redraw);
+  let menu = model.menu.clone().unwrap();
+  assert_eq!(menu.at, None);
+  assert_eq!(
+    menu.items[0],
+    (MenuAction::Action(0), "Private Window".into())
+  );
+  assert_eq!(menu.items[1].1, "Add to Favourites");
+  let launched = press(&mut model, Key::Enter);
+  assert!(
+    matches!(&launched, Effect::Launch(launch)
+      if launch.id.as_deref() == Some("ff#private")),
+    "{launched:?}"
+  );
+  // Shift+F10 opens the same menu; a right click on the row too.
+  let Fixture { mut model, .. } = with_action();
+  typed(&mut model, "firefox");
+  let shift = Modifiers {
+    shift: true,
+    ..Modifiers::NONE
+  };
+  assert_eq!(model.key(Key::F10, Modifiers::NONE), Effect::None);
+  assert_eq!(model.key(Key::F10, shift), Effect::Redraw);
+  press(&mut model, Key::Escape);
+  assert!(model.menu.is_none());
+  model.pointer_button(Button::Right, true, (40.0, 50.0), Target::Row(0));
+  let menu = model.menu.clone().unwrap();
+  assert_eq!(menu.items[0].0, MenuAction::Action(0));
+  // Entries without actions start with the edits.
+  press(&mut model, Key::Escape);
+  press(&mut model, Key::Escape);
+  typed(&mut model, "calc");
+  press(&mut model, Key::Menu);
+  assert_eq!(model.menu.unwrap().items[0].1, "Add to Favourites");
 }

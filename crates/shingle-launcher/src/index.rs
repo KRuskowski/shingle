@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// The version of the cache format; a cache of another version is ignored.
-pub const CACHE_VERSION: u32 = 1;
+pub const CACHE_VERSION: u32 = 2;
 
 /// Where an entry came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +57,33 @@ pub struct Entry {
   pub terminal: bool,
   /// Its default category's shown name; empty for commands on `$PATH`.
   pub category: String,
+  /// `Icon`: a name for the icon theme or an absolute path; empty for
+  /// none.
+  #[serde(default)]
+  pub icon: String,
+  /// Its desktop actions, in the order of `Actions`.
+  #[serde(default)]
+  pub actions: Vec<EntryAction>,
+}
+
+/// A desktop action of an entry (`[Desktop Action ID]`), such as a
+/// browser's "New Private Window".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryAction {
+  /// The action's ID in its desktop file.
+  pub id: String,
+  /// The name shown.
+  pub name: String,
+  /// Its own `Icon`, or empty to show the entry's.
+  pub icon: String,
+  /// The `/bin/sh` command line that runs it.
+  pub command: String,
+}
+
+/// The ID under which launches of `action` of the entry `entry` are
+/// recorded in the history.
+pub fn action_id(entry: &str, action: &str) -> String {
+  format!("{entry}#{action}")
 }
 
 /// What a scan found.
@@ -244,22 +271,50 @@ pub fn application(
     return None;
   }
   let name = desktop.localized("Name", &paths.locales)?;
-  let icon = desktop.string("Icon");
+  let icon = desktop.string("Icon").unwrap_or_default();
   let path_text = path.to_string_lossy();
-  let arguments = parse_exec(
-    &desktop.string("Exec")?,
-    &ExecContext {
-      name: &name,
-      path: &path_text,
-      icon: icon.as_deref(),
-    },
-  )?;
-  let mut command = format!("exec {}", shell_join(&arguments));
-  if let Some(directory) =
-    desktop.string("Path").filter(|path| !path.is_empty())
-  {
-    command = format!("cd {} && {command}", shell_quote(&directory));
-  }
+  let directory = desktop.string("Path").filter(|path| !path.is_empty());
+  // The command line of an `Exec` value, run in `Path` when there is one.
+  let command_of = |exec: &str, name: &str, icon: &str| {
+    let arguments = parse_exec(
+      exec,
+      &ExecContext {
+        name,
+        path: &path_text,
+        icon: Some(icon),
+      },
+    )?;
+    let mut command = format!("exec {}", shell_join(&arguments));
+    if let Some(directory) = &directory {
+      command = format!("cd {} && {command}", shell_quote(directory));
+    }
+    Some((command, arguments))
+  };
+  let (command, arguments) =
+    command_of(&desktop.string("Exec")?, &name, &icon)?;
+  // An action without `Exec` is only for D-Bus activation, which the
+  // launcher does not do.
+  let actions = desktop
+    .list("Actions", &[])
+    .into_iter()
+    .filter_map(|id| {
+      let group = desktop.action(&id)?;
+      let action_name = group.localized("Name", &paths.locales)?;
+      let action_icon = group.string("Icon").unwrap_or_default();
+      let shown_icon = if action_icon.is_empty() {
+        &icon
+      } else {
+        &action_icon
+      };
+      let (command, _) = command_of(&group.string("Exec")?, &name, shown_icon)?;
+      Some(EntryAction {
+        id,
+        name: action_name,
+        icon: action_icon,
+        command,
+      })
+    })
+    .collect();
   Some(Entry {
     id: id.to_owned(),
     kind: EntryKind::Application,
@@ -275,6 +330,8 @@ pub fn application(
     terminal: desktop.boolean("Terminal"),
     category: main_category(&desktop.list("Categories", &[])).to_owned(),
     name,
+    icon,
+    actions,
   })
 }
 
@@ -352,6 +409,8 @@ fn scan_commands(path_dirs: &[PathBuf]) -> Vec<Entry> {
         keywords: Vec::new(),
         terminal: false,
         category: String::new(),
+        icon: String::new(),
+        actions: Vec::new(),
       });
     }
   }
@@ -609,6 +668,46 @@ mod tests {
       commands,
       [("path:other tool", "'other tool'"), ("path:tool", "tool")]
     );
+  }
+
+  #[test]
+  fn desktop_actions_become_sub_entries_in_order() {
+    let fixture = fixture();
+    write(
+      &fixture.system.join("browser.desktop"),
+      "[Desktop Entry]\nType=Application\nName=Browser\nIcon=web\n\
+       Exec=browser %u\nPath=/srv\nActions=private;gone;window;dbus;\n\
+       [Desktop Action window]\nName=New Window\nExec=browser --new %u\n\
+       [Desktop Action private]\nName=Private\nName[de]=Privat\n\
+       Icon=mask\nExec=browser --private %i\n\
+       [Desktop Action dbus]\nName=Only D-Bus\n\
+       [Desktop Action unlisted]\nName=Unlisted\nExec=x\n",
+    );
+    let paths = SearchPaths {
+      locales: vec!["de".into()],
+      ..fixture.paths.clone()
+    };
+    let index = scan(&paths);
+    let browser = &index.entries[0];
+    assert_eq!(browser.icon, "web");
+    assert_eq!(
+      browser.actions,
+      [
+        EntryAction {
+          id: "private".into(),
+          name: "Privat".into(),
+          icon: "mask".into(),
+          command: "cd /srv && exec browser --private --icon mask".into(),
+        },
+        EntryAction {
+          id: "window".into(),
+          name: "New Window".into(),
+          icon: String::new(),
+          command: "cd /srv && exec browser --new".into(),
+        },
+      ]
+    );
+    assert_eq!(action_id(&browser.id, "window"), "browser.desktop#window");
   }
 
   #[test]

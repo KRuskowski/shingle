@@ -310,7 +310,7 @@ impl State {
     self.model.page = view::page_size(&self.theme, panel);
     let mut frame = {
       let measure = self.renderer.measurer();
-      view::build(&self.model, &self.theme, panel, &measure)
+      view::build(&self.model, &self.theme, panel, &measure, &|_| false)
     };
     self.renderer.resize(
       panel.0 as u32 * scale,
@@ -406,6 +406,14 @@ impl State {
             "id": model.catalog.entries[position].id,
             "name": model.catalog.names[position],
             "favourite": model.catalog.is_favourite(position),
+            "selected": *row == model.selected,
+            "rect": shift(rect),
+          }),
+          Row::Action(position, action) => json!({
+            "id": model.catalog.entries[position].id,
+            "action": model.catalog.entries[position].actions[action].id,
+            "name": model.catalog.entries[position].actions[action].name,
+            "parent": model.catalog.names[position],
             "selected": *row == model.selected,
             "rect": shift(rect),
           }),
@@ -642,6 +650,8 @@ fn translate(
     keysyms::KEY_End | keysyms::KEY_KP_End => Key::End,
     keysyms::KEY_Tab | keysyms::KEY_ISO_Left_Tab => Key::Tab,
     keysyms::KEY_F2 => Key::F2,
+    keysyms::KEY_F10 => Key::F10,
+    keysyms::KEY_Menu => Key::Menu,
     _ => {
       if modifiers.ctrl || modifiers.alt {
         let character = xkb::keysym_to_utf32(keysym);

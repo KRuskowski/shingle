@@ -3,7 +3,7 @@
 
 use crate::{
   history::History,
-  index::{Entry, EntryKind},
+  index::{Entry, EntryAction, EntryKind, action_id},
   matching::score,
 };
 
@@ -13,14 +13,60 @@ const KEYWORD_WEIGHT: f64 = 0.7;
 const PROGRAM_WEIGHT: f64 = 0.9;
 /// Added for desktop entries and shortcuts over plain commands.
 const ENTRY_BONUS: f64 = 0.3;
+/// Taken from an action's score, so that an action ranks below an entry
+/// that matches as well.
+const ACTION_PENALTY: f64 = 0.4;
 
-/// An entry as the user sees it.
+/// An entry, or one of its desktop actions, as the user sees it.
 #[derive(Clone, Copy, Debug)]
 pub struct Candidate<'a> {
   /// The entry.
   pub entry: &'a Entry,
   /// Its shown name, after the user's renames.
   pub name: &'a str,
+  /// The action, when the candidate is one of the entry's actions.
+  pub action: Option<&'a EntryAction>,
+}
+
+impl<'a> Candidate<'a> {
+  /// The entry itself.
+  pub fn entry(entry: &'a Entry, name: &'a str) -> Self {
+    Self {
+      entry,
+      name,
+      action: None,
+    }
+  }
+
+  /// The name ties are sorted by: the action's, else the entry's.
+  fn sort_name(&self) -> String {
+    self
+      .action
+      .map_or(self.name, |action| action.name.as_str())
+      .to_lowercase()
+  }
+
+  /// The ID its frecency is recorded under.
+  fn history_id(&self) -> String {
+    match self.action {
+      Some(action) => action_id(&self.entry.id, &action.id),
+      None => self.entry.id.clone(),
+    }
+  }
+}
+
+/// The match of `query` against an action named `action` of an entry
+/// shown as `name`: against the action's name, or against both names
+/// together. A query the entry's name already matches must match the
+/// action's own name, so that typing an application's name lists it
+/// rather than all its actions.
+fn action_score(query: &str, name: &str, action: &str) -> Option<f64> {
+  let own = score(query, action);
+  if own.is_none() && score(query, name).is_some() {
+    return None;
+  }
+  let together = score(query, &format!("{name} {action}"));
+  [own, together].into_iter().flatten().reduce(f64::max)
 }
 
 /// A ranked match.
@@ -36,6 +82,10 @@ pub struct Hit {
 /// `None` when no field matches.
 pub fn match_score(query: &str, candidate: &Candidate<'_>) -> Option<f64> {
   let entry = candidate.entry;
+  if let Some(action) = candidate.action {
+    return action_score(query, candidate.name, &action.name)
+      .map(|value| value - ACTION_PENALTY);
+  }
   let weighted = |text: &str, weight: f64| {
     (!text.is_empty())
       .then(|| score(query, text))
@@ -80,13 +130,13 @@ pub fn rank(
       };
       Some(Hit {
         index,
-        score: matched + bonus + history.frecency(&candidate.entry.id, now),
+        score: matched + bonus + history.frecency(&candidate.history_id(), now),
       })
     })
     .collect::<Vec<_>>();
   hits.sort_by(|a, b| {
     b.score.total_cmp(&a.score).then_with(|| {
-      let name = |hit: &Hit| candidates[hit.index].name.to_lowercase();
+      let name = |hit: &Hit| candidates[hit.index].sort_name();
       name(a).cmp(&name(b))
     })
   });
@@ -110,16 +160,15 @@ mod tests {
       command: name.to_lowercase(),
       terminal: false,
       category: String::new(),
+      icon: String::new(),
+      actions: Vec::new(),
     }
   }
 
   fn names(entries: &[Entry], query: &str, history: &History) -> Vec<String> {
     let candidates = entries
       .iter()
-      .map(|entry| Candidate {
-        entry,
-        name: &entry.name,
-      })
+      .map(|entry| Candidate::entry(entry, &entry.name))
       .collect::<Vec<_>>();
     rank(query, &candidates, history, 1_000_000, 10)
       .into_iter()
@@ -167,29 +216,57 @@ mod tests {
       entry("a.desktop", EntryKind::Application, "Alpha"),
     ];
     let candidates = [
-      Candidate {
-        entry: &entries[0],
-        name: "Renamed",
-      },
-      Candidate {
-        entry: &entries[1],
-        name: "Alpha",
-      },
+      Candidate::entry(&entries[0], "Renamed"),
+      Candidate::entry(&entries[1], "Alpha"),
     ];
     let hits = rank("ren", &candidates, &History::default(), 0, 10);
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].index, 0);
     let both = [
-      Candidate {
-        entry: &entries[0],
-        name: "Same",
-      },
-      Candidate {
-        entry: &entries[1],
-        name: "same",
-      },
+      Candidate::entry(&entries[0], "Same"),
+      Candidate::entry(&entries[1], "same"),
     ];
     let hits = rank("sa", &both, &History::default(), 0, 1);
     assert_eq!(hits.len(), 1);
+  }
+
+  #[test]
+  fn actions_match_their_own_name_or_both_names() {
+    let mut browser = entry("ff.desktop", EntryKind::Application, "Firefox");
+    browser.actions = vec![EntryAction {
+      id: "private".into(),
+      name: "New Private Window".into(),
+      icon: String::new(),
+      command: "firefox --private-window".into(),
+    }];
+    let candidates = [
+      Candidate::entry(&browser, "Firefox"),
+      Candidate {
+        entry: &browser,
+        name: "Firefox",
+        action: Some(&browser.actions[0]),
+      },
+    ];
+    let indices = |query: &str, history: &History| {
+      rank(query, &candidates, history, 1_000_000, 10)
+        .into_iter()
+        .map(|hit| hit.index)
+        .collect::<Vec<_>>()
+    };
+    let history = History::default();
+    // The entry's name alone does not list its actions.
+    assert_eq!(indices("firefox", &history), [0]);
+    assert_eq!(indices("private", &history), [1]);
+    assert_eq!(indices("fire priv", &history), [1]);
+    assert_eq!(indices("w", &history), [1]);
+    // An action used often climbs by its own history.
+    let mut used = History::default();
+    for _ in 0..5 {
+      used.record("ff.desktop#private", 1_000_000);
+    }
+    assert!(
+      rank("private", &candidates, &used, 1_000_000, 10)[0].score
+        > rank("private", &candidates, &history, 1_000_000, 10)[0].score
+    );
   }
 }

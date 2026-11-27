@@ -5,38 +5,64 @@
 use std::collections::HashMap;
 
 /// The keys of a file's `[Desktop Entry]` group, as written, values with
-/// the specification's string escapes still in place.
+/// the specification's string escapes still in place, and its
+/// `[Desktop Action ID]` groups by ID.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DesktopEntry {
   keys: HashMap<String, String>,
+  actions: HashMap<String, DesktopEntry>,
+}
+
+/// Which group of a desktop file a line belongs to.
+enum Group {
+  Entry,
+  Action(String),
+  Other,
 }
 
 impl DesktopEntry {
-  /// Parses `text`, keeping only the `[Desktop Entry]` group. Comments,
-  /// blank lines, other groups (such as desktop actions) and malformed lines
-  /// are skipped; a key given twice keeps its first value.
+  /// Parses `text`, keeping the `[Desktop Entry]` group and the
+  /// `[Desktop Action ID]` groups. Comments, blank lines, other groups and
+  /// malformed lines are skipped; a key given twice keeps its first value.
   pub fn parse(text: &str) -> Self {
-    let mut keys = HashMap::new();
-    let mut in_entry = false;
+    let mut entry = Self::default();
+    let mut group = Group::Other;
     for line in text.lines() {
       let line = line.trim();
       if line.is_empty() || line.starts_with('#') {
         continue;
       }
       if line.starts_with('[') {
-        in_entry = line == "[Desktop Entry]";
+        let action = line
+          .strip_prefix("[Desktop Action ")
+          .and_then(|rest| rest.strip_suffix(']'))
+          .filter(|id| !id.is_empty());
+        group = match action {
+          _ if line == "[Desktop Entry]" => Group::Entry,
+          Some(id) => Group::Action(id.to_owned()),
+          None => Group::Other,
+        };
         continue;
       }
-      if !in_entry {
-        continue;
-      }
+      let keys = match &group {
+        Group::Entry => &mut entry.keys,
+        Group::Action(id) => {
+          &mut entry.actions.entry(id.clone()).or_default().keys
+        }
+        Group::Other => continue,
+      };
       if let Some((key, value)) = line.split_once('=') {
         keys
           .entry(key.trim().to_owned())
           .or_insert_with(|| value.trim().to_owned());
       }
     }
-    Self { keys }
+    entry
+  }
+
+  /// The `[Desktop Action ID]` group `id`, read with the same methods.
+  pub fn action(&self, id: &str) -> Option<&DesktopEntry> {
+    self.actions.get(id)
   }
 
   /// The raw value of `key`, without locale.
@@ -307,6 +333,18 @@ Exec=firefox --new-window %u
     assert_eq!(entry.raw("Exec"), Some("firefox %u"));
     assert!(!entry.boolean("Terminal"));
     assert_eq!(entry.list("Categories", &[]), ["Network", "WebBrowser"]);
+  }
+
+  #[test]
+  fn parses_desktop_action_groups() {
+    let entry = DesktopEntry::parse(FIREFOX);
+    let action = entry.action("new-window").expect("the action group");
+    assert_eq!(action.raw("Exec"), Some("firefox --new-window %u"));
+    assert_eq!(action.localized("Name", &[]).as_deref(), Some("New Window"));
+    assert_eq!(action.raw("Type"), None);
+    assert!(entry.action("missing").is_none());
+    let odd = DesktopEntry::parse("[Desktop Action ]\nName=X\n");
+    assert!(odd.action("").is_none());
   }
 
   #[test]
