@@ -23,6 +23,7 @@ use wayland_protocols::{
     presentation_time::client::{
       wp_presentation::WpPresentation, wp_presentation_feedback,
     },
+    viewporter::client::wp_viewporter::WpViewporter,
   },
 };
 use wayland_protocols_wlr::{
@@ -271,6 +272,43 @@ fn panel(
   surface.commit();
   client.roundtrip(compositor);
   (surface, layer)
+}
+
+#[test]
+fn a_layer_surface_covers_its_logical_size_at_any_scale() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = bind_outputs(&mut compositor, &mut client);
+  let geometry = |compositor: &Compositor| {
+    compositor
+      .visible_surfaces_on(&OutputHandle::new("HEADLESS-2"))
+      .into_iter()
+      .find(|snapshot| snapshot.role == crate::SurfaceRole::LayerShell)
+      .unwrap()
+      .geometry
+  };
+  let (surface, layer) =
+    panel(&mut compositor, &mut client, Some(&outputs["HEADLESS-2"]));
+  let &(_, serial, _, _) = client.events.layer_configures.last().unwrap();
+  layer.ack_configure(serial);
+  // A buffer at scale 2 covers half its pixels.
+  surface.set_buffer_scale(2);
+  client.attach_buffer(&mut compositor, &surface, 1600, 60);
+  assert_eq!(
+    geometry(&compositor),
+    shingle_core::Rect::new(1280, 0, 800, 30)
+  );
+  // A buffer of 1.5 times the size covers its viewport's destination.
+  let viewporter = client.bind::<WpViewporter>(1);
+  let viewport = viewporter.get_viewport(&surface, &client.handle, ());
+  surface.set_buffer_scale(1);
+  viewport.set_destination(800, 30);
+  client.attach_buffer(&mut compositor, &surface, 1200, 45);
+  assert_eq!(
+    geometry(&compositor),
+    shingle_core::Rect::new(1280, 0, 800, 30)
+  );
+  let _ = std::fs::remove_file(path);
 }
 
 #[test]

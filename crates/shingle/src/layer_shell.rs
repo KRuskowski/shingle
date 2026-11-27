@@ -138,14 +138,13 @@ pub(crate) fn geometry(
   } else {
     output
   };
-  let width = surface
-    .buffer
-    .as_ref()
-    .map_or(layer.configured.0, |buffer| buffer.width);
-  let height = surface
-    .buffer
-    .as_ref()
-    .map_or(layer.configured.1, |buffer| buffer.height);
+  // A buffer covers its viewport's destination, else its size divided by
+  // its buffer scale, as for every other role.
+  let (width, height) = match &surface.buffer {
+    Some(_) => crate::viewport::dimensions(state, object)
+      .unwrap_or_else(|| crate::shell::logical_buffer_dimensions(surface)),
+    None => layer.configured,
+  };
   let anchor = layer.current.anchor;
   let (margin_top, margin_right, margin_bottom, margin_left) =
     layer.current.margin;
