@@ -169,6 +169,20 @@ class ProcessTest(unittest.TestCase):
     parents = {10: 1, 11: 10, 12: 11, 13: 1, 14: 12}
     self.assertEqual(app_checks.descendants(10, parents), {10, 11, 12, 14})
 
+class UserTest(unittest.TestCase):
+  """Running applications as the caller."""
+
+  def test_as_user_maps_back_to_the_callers_uid(self):
+    self.assertEqual(app_checks.as_user(['vlc', '-q'], '1234'), [
+        'unshare', '--user', '--map-user=1234', '--map-group=1234', '--',
+        'vlc', '-q'])
+
+  def test_root_is_never_the_uid(self):
+    self.assertEqual(app_checks.unprivileged_uid(
+        {'SHINGLE_GPU_TEST_UID': '0'}), '1000')
+    self.assertEqual(app_checks.unprivileged_uid(
+        {'SHINGLE_GPU_TEST_UID': '1001'}), '1001')
+
 class TableTest(unittest.TestCase):
   """The per-app table."""
 

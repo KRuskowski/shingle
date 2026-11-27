@@ -327,6 +327,22 @@ SVG = ('<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300">'
        '<rect x="20" y="20" width="200" height="120" fill="#00a000"/>'
        '</svg>\n')
 
+def unprivileged_uid(environment=None):
+  """The caller's uid on the host, as run.py passes it, never 0."""
+  environment = os.environ if environment is None else environment
+  uid = environment.get('SHINGLE_GPU_TEST_UID', '1000')
+  return uid if uid.isdigit() and uid != '0' else '1000'
+
+def as_user(arguments, uid=None):
+  """`arguments` run in a nested user namespace that maps the namespace's
+  root back to the caller's uid, as wayfire_reference.py runs Wayfire:
+  applications run as the user they run as on the desktop, and some, such
+  as VLC, refuse to run as root. `unshare` execs the command, so the PID
+  is the application's."""
+  uid = uid or unprivileged_uid()
+  return ['unshare', '--user', f'--map-user={uid}', f'--map-group={uid}',
+          '--', *arguments]
+
 def new_pids(before, current, keep):
   """PIDs in `current` but not `before`, without `keep`, 1 or below."""
   return sorted(pid for pid in set(current) - set(before) - set(keep)
@@ -604,9 +620,10 @@ class Sweep:
     return environment
 
   def start(self, arguments, name, extra=None):
-    """A client of this sweep's Shingle."""
-    return checks.Client(self.shingle, arguments, name,
-                         self.environment(extra))
+    """A client of this sweep's Shingle, run as the unprivileged user."""
+    return checks.Client(self.shingle, as_user(arguments), name,
+                         self.environment(extra),
+                         program=os.path.basename(arguments[0]))
 
   def views(self):
     """The mapped views."""
