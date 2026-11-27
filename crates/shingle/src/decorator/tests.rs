@@ -394,6 +394,15 @@ fn dragging_the_title_moves_and_a_border_press_resizes() {
   let mut fixture = Fixture::new(Config::default());
   let (_, window) = fixture.ssd("drag");
   shell_float(&mut fixture, window);
+  // Untiled, it is back at its own 64x64; a title bar long enough to
+  // drag needs a wider window.
+  crate::shell::set_floating_geometry(
+    &mut fixture.compositor.state,
+    window,
+    Rect::new(0, 0, 400, 300),
+  )
+  .unwrap();
+  fixture.roundtrip();
   fixture.compositor.drain_events();
   fixture.point_at(window, 60.0, 20.0);
   fixture

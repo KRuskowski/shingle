@@ -3,6 +3,10 @@ use shingle_core::{Rect, WindowId};
 
 use crate::{shell, state::CompositorState};
 
+/// Places floating `window` at its client's size, as Wayfire's place
+/// plugin places a view that maps floating
+/// (wayfire:plugins/single_plugins/place.cpp), and a dialog centred on its
+/// parent.
 pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
   let Some((geometry, fullscreen)) = state
     .core
@@ -12,7 +16,7 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
   else {
     return;
   };
-  let Some(mut current) = geometry else {
+  let Some(current) = geometry else {
     return;
   };
   if fullscreen {
@@ -20,74 +24,12 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
   }
   // An X transient was centred on its parent at its requested size
   // (crates/shingle/src/xwayland/requests.rs, `float`).
-  let (parent, x11) = state
-    .surfaces
-    .values()
-    .find_map(|surface| {
-      surface
-        .role
-        .toplevel()
-        .filter(|toplevel| toplevel.window() == Some(window))
-        .map(|toplevel| {
-          (
-            toplevel.parent,
-            matches!(toplevel.handle, shell::ToplevelHandle::X11(_)),
-          )
-        })
-    })
-    .unwrap_or((None, false));
+  let (parent, x11) = toplevel_kind(state, window);
   if parent.is_some() && x11 {
     return;
   }
-  // The client's size, and its server-side frame's margins, which a
-  // Wayfire view's geometry includes.
-  let mut margins = crate::frame::Margins::ZERO;
-  let natural_size = state.surfaces.iter().find_map(|(object, surface)| {
-    if surface
-      .role
-      .toplevel()
-      .is_none_or(|toplevel| toplevel.window() != Some(window))
-    {
-      return None;
-    }
-    margins = crate::decorator::margins(state, object);
-    if let Some(dimensions) = crate::viewport::dimensions(state, object) {
-      return Some(dimensions);
-    }
-    let buffer = surface.buffer.as_ref()?;
-    let scale = buffer.scale.max(1) as u32;
-    let mut dimensions = (buffer.width / scale, buffer.height / scale);
-    if matches!(
-      buffer.transform,
-      wayland_server::protocol::wl_output::Transform::Flipped90
-        | wayland_server::protocol::wl_output::Transform::Flipped270
-        | wayland_server::protocol::wl_output::Transform::_90
-        | wayland_server::protocol::wl_output::Transform::_270
-    ) {
-      std::mem::swap(&mut dimensions.0, &mut dimensions.1);
-    }
-    Some(dimensions)
-  });
-  if let Some((width, height)) = natural_size
-    && width > 0
-    && height > 0
-  {
-    current.width = width.saturating_add(margins.left + margins.right);
-    current.height = height.saturating_add(margins.top + margins.bottom);
-  }
-  // The workarea of the window's own set, which a dialog shares with its
-  // parent on whichever output that is.
-  let workarea = state
-    .core
-    .window_info(window)
-    .ok()
-    .and_then(|info| {
-      state
-        .core
-        .wset_tree(info.wset, info.location.workspace)
-        .ok()
-    })
-    .map_or(state.active().rect, |tree| tree.workarea());
+  let current = with_natural_size(state, window, current);
+  let workarea = workarea_of(state, window);
   // A dialog is centred on its parent and kept inside the workarea,
   // whatever the placement mode, as Wayfire's
   // `reposition_relative_to_parent` places it (src/view/toplevel-view.cpp).
@@ -108,27 +50,174 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
     let _ = shell::set_maximized(state, window, true);
     return;
   }
-  let placed = match state.placement_mode.as_str() {
-    "cascade" => cascade(state, current, workarea),
-    "random" => random(current, workarea),
-    "pointer" => pointer(state, current, workarea),
-    // Wayfire without its place plugin clamps the view's own position,
-    // which starts at the origin, to the workarea.
-    "none" => Some(Rect {
-      x: workarea.x,
-      y: workarea.y,
-      ..current
-    }),
-    _ => center(current, workarea),
-  };
-  let Some(geometry) = placed.and_then(|geometry| geometry.validate().ok())
-  else {
+  let Some(geometry) = placed(state, window, current, workarea) else {
     return;
   };
   if state.core.set_floating(window, Some(geometry)).is_ok() {
     shell::sync_floating_geometry(state, window, geometry);
     shell::reconfigure_all(state);
   }
+}
+
+/// Where `window`, which maps into its tile, would float: its client's
+/// size, placed as [`place`] places a floating view. Wayfire places a view
+/// in its map transaction, before simple-tile tiles it on `view-mapped`,
+/// and tiling it records that geometry as the one untiling returns to
+/// (wayfire:plugins/tile/tree.cpp, `view_node_t::set_geometry`, which
+/// calls `update_last_windowed_geometry` while the view is not tiled yet).
+/// None for a dialog, under `place/mode = maximize` or without the
+/// client's size.
+pub(crate) fn windowed_on_map(
+  state: &mut CompositorState,
+  window: WindowId,
+) -> Option<Rect> {
+  let (parent, _) = toplevel_kind(state, window);
+  if parent.is_some() || state.placement_mode == "maximize" {
+    return None;
+  }
+  let size = natural_size(state, window)?;
+  let current = Rect::new(0, 0, size.width, size.height);
+  let workarea = workarea_of(state, window);
+  placed(state, window, current, workarea).and_then(|rect| rect.validate().ok())
+}
+
+/// `current`, the geometry of `window`, inside `workarea`, placed by
+/// `place/mode`. As Wayfire's `adjust_view_pending_geometry_on_start_map`,
+/// the view is first clamped to the workarea, size included.
+fn placed(
+  state: &mut CompositorState,
+  window: WindowId,
+  current: Rect,
+  workarea: Rect,
+) -> Option<Rect> {
+  let current = clamp_size(current, workarea);
+  match state.placement_mode.as_str() {
+    "cascade" => cascade(state, current, workarea),
+    "random" => random(current, workarea),
+    "pointer" => pointer(state, current, workarea),
+    // Wayfire without its place plugin keeps the view's own position,
+    // which a toplevel's state starts at 100, 100 in its output
+    // (wayfire:src/api/wayfire/toplevel.hpp, `toplevel_state_t`), clamped
+    // to the workarea.
+    "none" => {
+      let output = state.output_of_window(window).rect;
+      Some(clamp(
+        Rect {
+          x: output.x.saturating_add(UNPLACED_OFFSET),
+          y: output.y.saturating_add(UNPLACED_OFFSET),
+          ..current
+        },
+        workarea,
+      ))
+    }
+    _ => center(current, workarea),
+  }
+}
+
+/// Where an unplaced Wayfire view starts, from its output's corner.
+const UNPLACED_OFFSET: i32 = 100;
+
+/// `geometry` no larger than `workarea`.
+fn clamp_size(geometry: Rect, workarea: Rect) -> Rect {
+  Rect {
+    width: geometry.width.min(workarea.width),
+    height: geometry.height.min(workarea.height),
+    ..geometry
+  }
+}
+
+/// `window`'s toplevel's parent, and whether it is an X window.
+fn toplevel_kind(
+  state: &CompositorState,
+  window: WindowId,
+) -> (Option<WindowId>, bool) {
+  state
+    .surfaces
+    .values()
+    .find_map(|surface| {
+      surface
+        .role
+        .toplevel()
+        .filter(|toplevel| toplevel.window() == Some(window))
+        .map(|toplevel| {
+          (
+            toplevel.parent,
+            matches!(toplevel.handle, shell::ToplevelHandle::X11(_)),
+          )
+        })
+    })
+    .unwrap_or((None, false))
+}
+
+/// The size of `window`'s client in surface coordinates, from its
+/// viewport or buffer, with its server-side frame's margins, which a
+/// Wayfire view's geometry includes; None without a buffer.
+fn natural_size(state: &CompositorState, window: WindowId) -> Option<Rect> {
+  state.surfaces.iter().find_map(|(object, surface)| {
+    if surface
+      .role
+      .toplevel()
+      .is_none_or(|toplevel| toplevel.window() != Some(window))
+    {
+      return None;
+    }
+    let margins = crate::decorator::margins(state, object);
+    let (width, height) = match crate::viewport::dimensions(state, object) {
+      Some(dimensions) => dimensions,
+      None => {
+        let buffer = surface.buffer.as_ref()?;
+        let scale = buffer.scale.max(1) as u32;
+        let mut dimensions = (buffer.width / scale, buffer.height / scale);
+        if matches!(
+          buffer.transform,
+          wayland_server::protocol::wl_output::Transform::Flipped90
+            | wayland_server::protocol::wl_output::Transform::Flipped270
+            | wayland_server::protocol::wl_output::Transform::_90
+            | wayland_server::protocol::wl_output::Transform::_270
+        ) {
+          std::mem::swap(&mut dimensions.0, &mut dimensions.1);
+        }
+        dimensions
+      }
+    };
+    (width > 0 && height > 0).then(|| {
+      Rect::new(
+        0,
+        0,
+        width.saturating_add(margins.left + margins.right),
+        height.saturating_add(margins.top + margins.bottom),
+      )
+    })
+  })
+}
+
+/// `current` with the size of `window`'s client, if it has one.
+fn with_natural_size(
+  state: &CompositorState,
+  window: WindowId,
+  current: Rect,
+) -> Rect {
+  natural_size(state, window).map_or(current, |size| Rect {
+    width: size.width,
+    height: size.height,
+    ..current
+  })
+}
+
+/// The workarea of `window`'s own set, which a dialog shares with its
+/// parent on whichever output that is.
+fn workarea_of(state: &CompositorState, window: WindowId) -> Rect {
+  state
+    .core
+    .window_info(window)
+    .ok()
+    .and_then(|info| {
+      state
+        .core
+        .wset_tree(info.wset, info.location.workspace)
+        .ok()
+    })
+    .map_or(state.active().rect, |tree| tree.workarea())
 }
 
 /// The geometry of `parent`'s toplevel, frame included.

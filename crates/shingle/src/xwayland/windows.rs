@@ -781,6 +781,37 @@ mod tests {
   }
 
   #[test]
+  fn an_untiled_x_window_gets_back_the_size_it_mapped_with() {
+    let mut fixture = Fixture::new();
+    fixture.state().placement_mode = "none".into();
+    // The fixture's surface commits 64x48 before the window maps.
+    map(&mut fixture, XTERM, "XTerm", 5);
+    let window = fixture.windows("XTerm")[0];
+    let area = fixture.state().active().rect;
+    assert_eq!(
+      fixture.state().core.window_layout(window).unwrap().geometry,
+      area
+    );
+    fixture.requests();
+    crate::shell::toggle_tiling(fixture.state(), window).unwrap();
+    assert_eq!(
+      fixture
+        .state()
+        .core
+        .window_info(window)
+        .unwrap()
+        .state
+        .floating,
+      Some(Rect::new(area.x + 100, area.y + 100, 64, 48))
+    );
+    assert!(fixture.requests().iter().any(|request| matches!(
+      request,
+      XRequest::Configure { window: XTERM, geometry, .. }
+        if (geometry.width, geometry.height) == (64, 48)
+    )));
+  }
+
+  #[test]
   fn list_views_shows_class_title_and_pid() {
     let mut fixture = Fixture::new();
     map(&mut fixture, XTERM, "XTerm", 5);

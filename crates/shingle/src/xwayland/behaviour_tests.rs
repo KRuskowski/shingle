@@ -140,6 +140,8 @@ fn an_untyped_override_redirect_window_takes_the_keyboard_and_returns_it() {
   map(&mut fixture, XTERM, "XTerm", 5);
   let xterm = object_of(&mut fixture, XTERM);
   let pointer = fixture.state().input.pointer_focus.clone();
+  // Before it mapped and took the focus, it was configured unfocused.
+  fixture.requests();
   map_info(
     &mut fixture,
     MENU,

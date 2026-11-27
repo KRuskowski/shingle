@@ -439,6 +439,8 @@ fn layout_views_places_views_on_other_workspaces() {
   let (mut compositor, path) = test_compositor_with(Config::default());
   let mut client = TestClient::connect(&mut compositor, &path);
   let window = mapped(&mut compositor, &mut client, "laid");
+  // Mapping changed its geometry from the 0x0 it was configured with.
+  ipc_events(&mut compositor);
   let reply = ipc(
     &mut compositor,
     "stipc/layout_views",

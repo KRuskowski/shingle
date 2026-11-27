@@ -824,6 +824,13 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
         // Out of the tree at its buffer's size; placement places it.
         let size = buffer_rect(state, object);
         let _ = set_floating_geometry(state, window, size);
+      } else {
+        // Tiled, after it mapped at its own size: untiling gives back that
+        // size, placed as it would have floated.
+        if let Some(windowed) = crate::placement::windowed_on_map(state, window)
+        {
+          set_windowed_geometry(state, window, windowed);
+        }
       }
       crate::placement::place(state, window);
       crate::window_rules::apply_created(state, window, &identity);
@@ -1187,15 +1194,31 @@ pub(crate) fn set_toplevel_parent(
   }
 }
 
-/// Whether `object` is an xdg toplevel without a buffer yet that will
-/// float when it maps ([`can_tile_xdg`]): its configures leave the size to
-/// the client until then.
+/// Whether `object` is a toplevel without a buffer yet whose configures
+/// leave the size to the client: one that has not mapped yet, as a new
+/// window is held out of its tree until it maps, or one that will float
+/// when it maps ([`can_tile_xdg`]). Wayfire's initial configure is the
+/// state committed before the view mapped, 0x0 unless a request changed
+/// it, and simple-tile only tiles a view on `view-mapped`
+/// (wayfire:src/view/xdg-shell/xdg-toplevel.cpp, `handle_surface_commit`;
+/// plugins/tile/tile-plugin.cpp, `on_view_mapped`).
 fn chooses_own_size(state: &CompositorState, object: &ObjectId) -> bool {
-  state
-    .surfaces
-    .get(object)
-    .is_some_and(|surface| surface.buffer.is_none())
-    && !can_tile_xdg(state, object)
+  let Some(surface) = state.surfaces.get(object) else {
+    return false;
+  };
+  if surface.buffer.is_some() {
+    return false;
+  }
+  let unmapped = surface
+    .role
+    .toplevel()
+    .is_some_and(|toplevel| match toplevel.window() {
+      None => true,
+      Some(window) => state.core.window_info(window).is_ok_and(|info| {
+        info.state.held && info.presence != WindowPresence::Mapped
+      }),
+    });
+  unmapped || !can_tile_xdg(state, object)
 }
 
 /// Wayfire's `can_tile_view` for xdg toplevels: a dialog (a toplevel with
@@ -1624,9 +1647,12 @@ pub(crate) fn materialize_toplevel(
             snapped: None,
             restore_geometry: None,
             tiled_edges: 15,
-            // A view that a view-pre-map subscriber will block takes no
-            // tile before its first map; see request_map.
-            held: !state.pre_map_clients.is_empty(),
+            // A new view takes no tile before its first map, as
+            // simple-tile attaches a view only on `view-mapped`
+            // (wayfire:plugins/tile/tile-plugin.cpp, `on_view_mapped`);
+            // until then its configures leave its size to the client
+            // (`chooses_own_size`), and `finish_map` releases it.
+            held: true,
           },
           parent,
         )
@@ -2325,14 +2351,20 @@ pub(crate) fn toggle_tiling(
   }
   let geometry = if tiled {
     let info = state.core.window_info(window)?;
-    // A held view has no tile yet, so it floats at its configured size.
+    // A held view has no tile yet, so it floats at its configured size,
+    // or at its buffer's while its configures left the size to it.
     let tile = state
       .core
       .window_layout(window)
       .map(|layout| layout.geometry)
       .or_else(|error| {
         if info.state.held {
-          Ok(configured_geometry(state, &object))
+          let configured = configured_geometry(state, &object);
+          Ok(if configured.width == 0 || configured.height == 0 {
+            buffer_rect(state, &object)
+          } else {
+            configured
+          })
         } else {
           Err(error)
         }
@@ -3865,6 +3897,178 @@ mod tests {
     );
   }
 
+  /// The sizes `toplevel` was configured with, in order.
+  fn configured_sizes(
+    client: &TestClient,
+    xdg: &wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel,
+  ) -> Vec<(i32, i32)> {
+    let id = wayland_client::Proxy::id(xdg);
+    client
+      .events
+      .configures
+      .iter()
+      .filter(|(object, ..)| *object == id)
+      .map(|(_, width, height)| (*width, *height))
+      .collect()
+  }
+
+  #[test]
+  fn a_new_toplevel_chooses_its_size_and_tiles_when_it_maps() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let width = compositor.state.active().rect.width;
+    let first = client.toplevel(&mut compositor, "first");
+    client.attach_buffer(&mut compositor, &first.surface, 320, 240);
+    let first_id = windows_with(&compositor.state, "first")[0];
+    let second = client.toplevel(&mut compositor, "second");
+    // As in Wayfire, the initial configure is 0x0, and the window that
+    // has not mapped takes no tile from the one beside it yet.
+    assert_eq!(configured_sizes(&client, &second.toplevel), [(0, 0)]);
+    assert_eq!(
+      layout_tiles(&mut compositor.state),
+      vec![(first_id.0, u64::from(width))]
+    );
+    client.attach_buffer(&mut compositor, &second.surface, 320, 240);
+    let second_id = windows_with(&compositor.state, "second")[0];
+    assert_eq!(
+      layout_tiles(&mut compositor.state),
+      vec![
+        (first_id.0, u64::from(width / 2)),
+        (second_id.0, u64::from(width / 2))
+      ]
+    );
+    let height = compositor.state.active().rect.height as i32;
+    assert_eq!(
+      configured_sizes(&client, &second.toplevel),
+      [(0, 0), (width as i32 / 2, height)]
+    );
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn untiling_a_view_tiled_from_its_map_gives_back_its_own_size() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    compositor.state.placement_mode = "none".into();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let view = client.toplevel(&mut compositor, "own");
+    client.attach_buffer(&mut compositor, &view.surface, 320, 240);
+    let window = windows_with(&compositor.state, "own")[0];
+    // It mapped at 320x240 and then took the whole output as its tile.
+    let tile = compositor
+      .state
+      .core
+      .window_layout(window)
+      .unwrap()
+      .geometry;
+    assert_eq!(tile, compositor.state.active().rect);
+    client.attach_buffer(
+      &mut compositor,
+      &view.surface,
+      tile.width as i32,
+      tile.height as i32,
+    );
+    super::toggle_tiling(&mut compositor.state, window).unwrap();
+    client.roundtrip(&mut compositor);
+    // Untiled, it floats at the size it mapped with, where Wayfire
+    // without its place plugin puts a view: 100, 100 into its output.
+    assert_eq!(
+      compositor
+        .state
+        .core
+        .window_info(window)
+        .unwrap()
+        .state
+        .floating,
+      Some(Rect::new(100, 100, 320, 240))
+    );
+    assert_eq!(
+      client.events.last_configure(&view.toplevel),
+      Some((320, 240))
+    );
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn untiling_centres_the_own_size_under_the_place_plugins_default() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let view = client.toplevel(&mut compositor, "centred");
+    client.attach_buffer(&mut compositor, &view.surface, 320, 240);
+    let window = windows_with(&compositor.state, "centred")[0];
+    super::toggle_tiling(&mut compositor.state, window).unwrap();
+    let area = compositor.state.active().rect;
+    assert_eq!(
+      compositor
+        .state
+        .core
+        .window_info(window)
+        .unwrap()
+        .state
+        .floating,
+      Some(Rect::new(
+        area.x + (area.width as i32 - 320) / 2,
+        area.y + (area.height as i32 - 240) / 2,
+        320,
+        240
+      ))
+    );
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn a_view_outside_tile_by_default_floats_at_its_own_size() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    compositor.state.tile_by_default =
+      shingle_config::ViewMatcher::try_from("none".to_owned()).unwrap();
+    compositor.state.placement_mode = "none".into();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let view = client.toplevel(&mut compositor, "floats");
+    client.attach_buffer(&mut compositor, &view.surface, 320, 240);
+    let window = windows_with(&compositor.state, "floats")[0];
+    assert_eq!(
+      compositor
+        .state
+        .core
+        .window_info(window)
+        .unwrap()
+        .state
+        .floating,
+      Some(Rect::new(100, 100, 320, 240))
+    );
+    assert!(layout_tiles(&mut compositor.state).is_empty());
+    // Never configured to a tile's size.
+    assert!(
+      configured_sizes(&client, &view.toplevel)
+        .iter()
+        .all(|size| *size == (0, 0) || *size == (320, 240))
+    );
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn a_floating_view_larger_than_the_workarea_is_clamped_to_it() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    compositor.state.tile_by_default =
+      shingle_config::ViewMatcher::try_from("none".to_owned()).unwrap();
+    compositor.state.placement_mode = "none".into();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let area = compositor.state.active().rect;
+    let view = client.toplevel(&mut compositor, "large");
+    client.attach_buffer(&mut compositor, &view.surface, 4000, 200);
+    let window = windows_with(&compositor.state, "large")[0];
+    assert_eq!(
+      compositor
+        .state
+        .core
+        .window_info(window)
+        .unwrap()
+        .state
+        .floating,
+      Some(Rect::new(area.x, area.y + 100, area.width, 200))
+    );
+    let _ = std::fs::remove_file(path);
+  }
+
   #[test]
   fn blocked_view_outside_tile_by_default_floats() {
     let (mut compositor, path) = crate::tests::test_compositor();
@@ -4019,10 +4223,14 @@ mod tests {
     let (mut compositor, path) = crate::tests::test_compositor();
     let mut client = TestClient::connect(&mut compositor, &path);
     let view = client.toplevel(&mut compositor, "shadowed");
+    // The initial configure leaves the size to the client, and the tile's
+    // comes once it maps.
+    assert_eq!(client.events.last_configure(&view.toplevel), Some((0, 0)));
+    client.attach_buffer(&mut compositor, &view.surface, 64, 64);
     let (width, height) = client
       .events
       .last_configure(&view.toplevel)
-      .expect("an initial configure");
+      .expect("the tile's configure");
     // The client draws its configured size plus 20-pixel shadows, as GTK
     // does, and names the part inside them its window geometry.
     view._xdg_surface.set_window_geometry(20, 20, width, height);
@@ -4078,10 +4286,14 @@ mod tests {
     let (mut compositor, path) = crate::tests::test_compositor();
     let mut client = TestClient::connect(&mut compositor, &path);
     let view = client.toplevel(&mut compositor, "shadowed");
+    // The initial configure leaves the size to the client, and the tile's
+    // comes once it maps.
+    assert_eq!(client.events.last_configure(&view.toplevel), Some((0, 0)));
+    client.attach_buffer(&mut compositor, &view.surface, 64, 64);
     let (width, height) = client
       .events
       .last_configure(&view.toplevel)
-      .expect("an initial configure");
+      .expect("the tile's configure");
     view._xdg_surface.set_window_geometry(20, 20, width, height);
     client.attach_buffer(
       &mut compositor,
@@ -4198,10 +4410,11 @@ mod tests {
     assert!(layout_tiles(&mut compositor.state).is_empty());
     let info = compositor.state.core.window_info(window).unwrap();
     let workarea = compositor.state.active().rect;
-    // Without place, at the top left of the workarea.
+    // Without place, where a Wayfire view starts: 100, 100 into its
+    // output.
     assert_eq!(
       info.state.floating.map(|rect| (rect.x, rect.y, rect.width)),
-      Some((workarea.x, workarea.y, 200))
+      Some((workarea.x + 100, workarea.y + 100, 200))
     );
     assert!(matches!(
       super::toggle_tiling(&mut compositor.state, window),
