@@ -72,6 +72,7 @@
 | Host seam: `Host` trait, `InputEvent` | `crates/shingle-frontend/src/host.rs` |
 | `Frontend` struct, public API, input dispatch | `crates/shingle-frontend/src/frontend.rs` |
 | Frontend areas: bindings, Scale, Expo, switcher, drags, effects, animations, scene build, session | `crates/shingle-frontend/src/frontend/*.rs` |
+| Wayfire's animate effects and animation clock (`Timing`, `Animation`, fire's particle system), as functions of progress; easing curves and wf-config durations; the squeeze and particle tiles | `crates/shingle-frontend/src/animate.rs`, `animate/`; `crates/shingle-config/src/easing.rs`; `crates/shingle-render/src/tile_effects.rs` and `shader.wgsl` |
 | What the frontend keeps per output (zoom, workspace slides, the wsets label, surfaces drawn last), redraw requests per output, frames of IPC outputs | `crates/shingle-frontend/src/frontend/outputs.rs`; one output's scene in `crates/shingle-frontend/src/frontend/scene.rs` (`draw_scene`) |
 | What the scene is drawn into (`RenderTarget`) | `crates/shingle-frontend/src/render_target.rs` |
 | The frontend's DMA-BUF importer, texture cache by buffer serial, locks of frames in flight, the linux-dmabuf and syncobj decisions | `crates/shingle-frontend/src/dmabuf.rs`; `Frontend::attach_gpu`, `enable_dmabuf` and `start_clients` in `frontend.rs` |

@@ -115,6 +115,8 @@ Since `shingle-app-sweep` the installed applications are checked through one com
 
 Since `shingle-workspace-followups` the differences that change left are closed: unsticking a floating view leaves it on the current workspace, a move by a view's rectangle sends no `view-workspace-changed`, IPC rectangles and workareas are in each output's own plane, floating windows move with their output, and move's snap preview has `[move]`'s colours. A view straddling two workspaces is still drawn on one only, and the survey's remaining partial items for the operator's plugins are recorded with their reasons ([Workspace follow-ups as built](design/wayfire-gaps.md#workspace-follow-ups-as-built)).
 
+Since `shingle-animate` Wayfire's animate is complete: `fire`, `zap`, `spin` and `squeezimize` beside `fade` and `zoom`, the `*_enabled_for` matchers and durations, the animation view properties, `startup_duration`, the fire options and `spin_rotations`, the taskbar's minimize rectangle, and the easing curve of every wf-config duration in every animation Shingle has ([animate as built](design/wayfire-gaps.md#animate-as-built)).
+
 Since `shingle-colour-and-focus-fixes` every configured colour shows the bytes Wayfire writes for it, and the gamma LUT no longer darkens dark tones; WG-7's belief that Wayfire records the view refocused after a minimize as recently focused turned out wrong, and Shingle already matched Wayfire there ([Colour and focus fixes as built](design/wayfire-gaps.md#colour-and-focus-fixes-as-built)).
 
 ## 7. Soak tests and measurements
