@@ -36,11 +36,20 @@ const FORMAT_SRGB: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 const SCENE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// The blur's radius in texels at most; larger ones blur a smaller copy.
 const MAX_BLUR_TAPS: u32 = 16;
-/// How much the slowly drifting light brightens and darkens, as a
-/// fraction.
-const LIGHT: f32 = 0.03;
-/// How far the flow bends the image, in texture coordinates.
-const FLOW: f32 = 0.0022;
+/// How much the two drifting lights brighten and darken, as a fraction,
+/// at intensity 1.
+const LIGHT: f32 = 0.14;
+/// How far the flow bends the image at most, in texture coordinates, at
+/// intensity 1: about 100 pixels on a 1920 pixel wide output.
+const FLOW: f32 = 0.052;
+/// The angular speeds of the flow's and the lights' waves, in radians a
+/// second, at intensity 1: none a multiple of another, so that the
+/// pattern never repeats visibly. The first six turn the flow (its
+/// waves come round in 5 to 11 s, each bent by another), the next two
+/// move the lights (in 37 to 48 s).
+const SPEEDS: [f64; 8] = [0.87, 1.11, 0.69, 0.99, 1.23, 0.57, 0.17, 0.13];
+/// The breathing zoom's angular speed.
+const BREATHING: f64 = 0.11;
 
 /// Where the background is at one moment of its movement.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,9 +58,11 @@ pub struct Drift {
   pub offset: [f32; 2],
   /// The image's zoom, above 1 so its edges never show.
   pub zoom: f32,
-  /// The time the flow and the light are at, in seconds.
-  pub time: f32,
-  /// The drifting light's strength.
+  /// The phases of the flow's and the lights' waves ([`SPEEDS`]), each
+  /// computed from the time in double precision and wrapped to a turn,
+  /// so that the motion is continuous however long the lock lasts.
+  pub phases: [f32; 8],
+  /// The drifting lights' strength.
   pub light: f32,
   /// The flow's strength, in texture coordinates.
   pub flow: f32,
@@ -62,38 +73,52 @@ impl Drift {
   pub const STILL: Self = Self {
     offset: [0.0, 0.0],
     zoom: 1.0,
-    time: 0.0,
+    phases: [0.0; 8],
     light: 0.0,
     flow: 0.0,
   };
 
   /// The background `seconds` after locking on an output of `size`
-  /// logical pixels: a slow Lissajous path of `config.amplitude` pixels,
-  /// one cycle per `config.period`, a breathing zoom of half a percent,
-  /// a low, slow flow that bends the blurred image a few pixels, and a
-  /// broad light drifting across. Every part is smooth in time, so it
-  /// can be drawn at any frame rate.
+  /// logical pixels, like a slowly flowing liquid under frosted glass: a
+  /// flow of large, slow waves that bends the blurred image by up to
+  /// [`FLOW`] times `config.intensity` of its size and makes its colour
+  /// masses drift and morph, two broad lights wandering across, a slow
+  /// Lissajous path of `config.amplitude` pixels, one cycle per
+  /// `config.period`, and a breathing zoom of half a percent. Everything
+  /// is in texture coordinates, so it moves alike at any resolution and
+  /// scale, and smooth in time, so it can be drawn at any frame rate.
+  /// Intensity 0 holds it still.
   pub fn at(seconds: f64, config: &DriftConfig, size: (u32, u32)) -> Self {
-    if !config.enabled || config.amplitude <= 0.0 {
+    if !config.enabled || config.intensity <= 0.0 {
       return Self::STILL;
     }
     let (width, height) = (size.0.max(1) as f32, size.1.max(1) as f32);
-    let amplitude = config.amplitude as f32;
+    let amplitude = config.amplitude.max(0.0) as f32;
     let cycle = (seconds / config.period).fract() as f32 * TAU;
-    let breathing = 0.0025 * (1.0 + (cycle * 0.5).sin());
-    // Room for the flow too, so that no edge ever shows.
-    let zoom =
-      1.0 + 2.0 * amplitude / width.min(height) + 2.0 * FLOW + breathing;
+    let turn = |speed: f64| (seconds * speed).rem_euclid(TAU as f64) as f32;
+    let breathing = 0.0025 * (1.0 + turn(BREATHING).sin());
+    // Intensity scales both how far and how fast the flow moves, by its
+    // square root each, so that the motion grows with it and the margin
+    // the zoom must keep grows more slowly.
+    let root = config.intensity.sqrt();
+    let flow = FLOW * root as f32;
+    // Room for the path, the breathing and the flow, so that no edge of
+    // the image ever shows: half the view plus the flow stays inside.
+    let zoom = (1.0 + 2.0 * amplitude / width.min(height) + breathing) * 0.5
+      / (0.5 - flow);
+    let mut phases = [0.0; 8];
+    for (phase, speed) in phases.iter_mut().zip(SPEEDS) {
+      *phase = turn(speed * root);
+    }
     Self {
       offset: [
         amplitude * cycle.sin() / width / zoom,
         amplitude * (cycle * 2.0 + 1.1).sin() / height / zoom,
       ],
       zoom,
-      // Wrapped well before f32 loses the milliseconds.
-      time: (seconds % 100_000.0) as f32,
-      light: LIGHT,
-      flow: FLOW,
+      phases,
+      light: LIGHT * config.intensity as f32,
+      flow,
     }
   }
 }
@@ -138,6 +163,7 @@ struct BackgroundUniform {
   vignette: [f32; 4],
   color: [f32; 4],
   motion: [f32; 4],
+  phases: [[f32; 4]; 2],
 }
 
 #[repr(C)]
@@ -859,11 +885,20 @@ impl Target {
         linear(frame.color[2]),
         frame.dim,
       ],
-      motion: [
-        frame.drift.time,
-        self.cover[0],
-        self.cover[1],
-        frame.drift.flow,
+      motion: [0.0, self.cover[0], self.cover[1], frame.drift.flow],
+      phases: [
+        [
+          frame.drift.phases[0],
+          frame.drift.phases[1],
+          frame.drift.phases[2],
+          frame.drift.phases[3],
+        ],
+        [
+          frame.drift.phases[4],
+          frame.drift.phases[5],
+          frame.drift.phases[6],
+          frame.drift.phases[7],
+        ],
       ],
     };
     gpu.queue().write_buffer(
@@ -1111,10 +1146,13 @@ mod tests {
     for tenth in 0..300 {
       let drift = Drift::at(f64::from(tenth) / 10.0, &config, size);
       // The visible part, half of 1/zoom around the centre plus the
-      // offset, stays inside the image.
+      // offset and the flow, stays inside the image.
       let half = 0.5 / drift.zoom;
       for (axis, offset) in drift.offset.iter().enumerate() {
-        assert!(half + offset.abs() <= 0.5 + 1e-4, "{axis} at {tenth}");
+        assert!(
+          half + offset.abs() + drift.flow <= 0.5 + 1e-4,
+          "{axis} at {tenth}"
+        );
       }
     }
     let still = Drift::at(
@@ -1126,7 +1164,44 @@ mod tests {
       size,
     );
     assert_eq!(still, Drift::STILL);
-    assert_eq!(Drift::at(30.0, &config, size).offset, start.offset);
+    // The path comes round after a period, in pixels.
+    let (x30, y30) = offset(Drift::at(30.0, &config, size));
+    assert!((x30 - x0).abs() < 1e-3 && (y30 - y0).abs() < 1e-3);
+  }
+
+  #[test]
+  fn the_flow_follows_its_intensity_and_never_jumps() {
+    let config = DriftConfig::default();
+    let size = (3840, 2160);
+    let at = |seconds: f64, intensity: f64| {
+      Drift::at(
+        seconds,
+        &DriftConfig {
+          intensity,
+          ..config.clone()
+        },
+        size,
+      )
+    };
+    assert_eq!(at(10.0, 0.0), Drift::STILL, "intensity 0 holds it still");
+    assert_eq!(at(10.0, 1.0).flow, FLOW);
+    assert!((at(10.0, 4.0).flow - 2.0 * FLOW).abs() < 1e-6);
+    assert!(at(10.0, 3.0).zoom > at(10.0, 1.0).zoom);
+    // From one frame to the next at 60 Hz every phase moves a little,
+    // also a day and a year into the lock, where a time in f32 would
+    // have lost its milliseconds.
+    for start in [0.0, 86_400.0, 31_536_000.5] {
+      let (now, next) = (at(start, 1.0), at(start + 1.0 / 60.0, 1.0));
+      for (a, b) in now.phases.iter().zip(next.phases) {
+        let step = (b - a).rem_euclid(TAU);
+        let step = step.min(TAU - step);
+        assert!(step > 1e-3 && step < 0.03, "{step} at {start}");
+      }
+    }
+    // The same in texture coordinates whatever the output's size.
+    let small = Drift::at(10.0, &config, (1280, 720));
+    assert_eq!(small.phases, at(10.0, 1.0).phases);
+    assert_eq!(small.flow, at(10.0, 1.0).flow);
   }
 
   /// A 64x32 screenshot, red on the left half and green on the right.

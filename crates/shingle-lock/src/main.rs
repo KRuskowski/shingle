@@ -519,7 +519,7 @@ impl State {
   /// Whether the screenshot on output `global` drifts.
   fn drifts(&self, global: u32) -> bool {
     self.settings.drift.enabled
-      && self.settings.drift.amplitude > 0.0
+      && self.settings.drift.intensity > 0.0
       && self
         .outputs
         .get(&global)
@@ -1001,7 +1001,7 @@ impl State {
       }
     };
     let drifts = self.settings.drift.enabled
-      && self.settings.drift.amplitude > 0.0
+      && self.settings.drift.intensity > 0.0
       && output.capture.is_some();
     let frame = Frame {
       drift: if drifts {
@@ -2312,6 +2312,99 @@ mod tests {
       std::fs::write(&path, ppm).unwrap();
       eprintln!("wrote {}", path.display());
     }
+  }
+
+  /// The background's motion at rest over the PPM that
+  /// `SHINGLE_LOCK_PREVIEW_BACKGROUND` names, at `lock.drift.intensity`
+  /// `SHINGLE_LOCK_PREVIEW_INTENSITY` (default 1): 4 s at 15 frames a
+  /// second written into `SHINGLE_LOCK_PREVIEW_DIR` as `motion-NN.ppm`,
+  /// and the mean difference between frames a second apart printed, in
+  /// levels of 255.
+  #[test]
+  #[ignore = "writes images for a person to look at"]
+  fn preview_motion() {
+    let (Some(background), Some(directory)) = (
+      std::env::var_os("SHINGLE_LOCK_PREVIEW_BACKGROUND"),
+      std::env::var_os("SHINGLE_LOCK_PREVIEW_DIR"),
+    ) else {
+      eprintln!("no SHINGLE_LOCK_PREVIEW_BACKGROUND or _DIR; skipped");
+      return;
+    };
+    let Ok(gpu) = Gpu::new() else {
+      eprintln!("no GPU; skipped");
+      return;
+    };
+    let bytes = std::fs::read(background).unwrap();
+    let (width, height, rgb) = read_ppm(&bytes).unwrap();
+    let size = (width, height);
+    let shot = Screenshot {
+      name: None,
+      width,
+      height,
+      bgra: rgb
+        .chunks_exact(3)
+        .flat_map(|p| [p[2], p[1], p[0], 255])
+        .collect(),
+    };
+    let options = shingle_config::LockOptions::default();
+    let image = gpu.image(&shot, options.blur);
+    let config = shingle_config::DriftConfig {
+      intensity: std::env::var("SHINGLE_LOCK_PREVIEW_INTENSITY")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1.0),
+      ..shingle_config::DriftConfig::default()
+    };
+    let mut target = Target::new(&gpu, size, Some(&image), gpu::FORMAT);
+    let stride = width as usize * 4;
+    let mut frames = Vec::new();
+    for index in 0..60_u32 {
+      let frame = Frame {
+        drift: Drift::at(20.0 + f64::from(index) / 15.0, &config, size),
+        vignette: options.vignette,
+        color: options.color,
+        dim: MINIMAL_DIM,
+        seed: index,
+        clock: None,
+        input: None,
+      };
+      let mut out = vec![0; stride * height as usize];
+      target.draw(&gpu, &frame, &mut out, stride, None).unwrap();
+      let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+      for pixel in out.chunks_exact(4) {
+        ppm.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+      }
+      let name = format!("motion-{index:02}.ppm");
+      std::fs::write(std::path::Path::new(&directory).join(name), ppm).unwrap();
+      frames.push(out);
+    }
+    let difference = |a: &[u8], b: &[u8]| {
+      let total = a
+        .chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .map(|(a, b)| (0..3).map(|c| a[c].abs_diff(b[c]) as u64).sum::<u64>())
+        .sum::<u64>();
+      total as f64 / (a.len() / 4 * 3) as f64
+    };
+    let per_second = (0..45)
+      .map(|index| difference(&frames[index], &frames[index + 15]))
+      .collect::<Vec<_>>();
+    let per_frame = (0..59)
+      .map(|index| difference(&frames[index], &frames[index + 1]))
+      .collect::<Vec<_>>();
+    let mean =
+      |values: &[f64]| values.iter().sum::<f64>() / values.len() as f64;
+    let max = |values: &[f64]| values.iter().copied().fold(0.0, f64::max);
+    eprintln!(
+      "intensity {}: a second apart mean {:.2} levels (max {:.2}); a 15th \
+       apart mean {:.2} (max {:.2}); 4 s apart {:.2}",
+      config.intensity,
+      mean(&per_second),
+      max(&per_second),
+      mean(&per_frame),
+      max(&per_frame),
+      difference(&frames[0], &frames[59]),
+    );
   }
 
   #[test]

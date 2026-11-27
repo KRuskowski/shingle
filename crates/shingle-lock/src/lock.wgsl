@@ -72,31 +72,50 @@ struct Background {
   vignette: vec4<f32>,
   // The background colour, linear, and the brightness of the image.
   color: vec4<f32>,
-  // The time in seconds, the image's cover scale in yz, and the flow's
-  // strength in uv.
+  // Unused, the image's cover scale in yz, and the flow's strength in
+  // uv.
   motion: vec4<f32>,
+  // The phases of the flow's six waves and the lights' two, each wrapped
+  // to a turn on the CPU, so that they never jump.
+  flow_phases: vec4<f32>,
+  more_phases: vec4<f32>,
 };
 
 @group(0) @binding(0) var image: texture_2d<f32>;
 @group(0) @binding(1) var image_sampler: sampler;
 @group(0) @binding(2) var<uniform> background: Background;
 
-// A slow, smooth flow: two low-frequency waves, each turning at its own
-// pace, bend the image's coordinates a fraction of a percent.
-fn flow(uv: vec2<f32>, t: f32) -> vec2<f32> {
-  let a = sin(uv.y * 3.1 + t * 0.21 + sin(uv.x * 1.7 + t * 0.13) * 1.3);
-  let b = sin(uv.x * 2.7 - t * 0.17 + sin(uv.y * 2.3 - t * 0.11) * 1.1);
-  return vec2<f32>(a, b);
+// A slow liquid flow, from -1 to 1 on each axis: large waves across the
+// output, each bent by another, so that the image's colour masses drift
+// and change shape rather than slide; a smaller diagonal pair adds
+// detail. Each wave turns at its own speed.
+fn flow(uv: vec2<f32>, a: vec4<f32>, b: vec4<f32>) -> vec2<f32> {
+  let x = sin(uv.y * 2.3 + a.x + 0.9 * sin(uv.x * 1.6 + a.y));
+  let y = sin(uv.x * 2.1 + a.z + 0.9 * sin(uv.y * 1.8 + a.w));
+  let x2 = sin((uv.x + uv.y) * 3.1 + b.x);
+  let y2 = sin((uv.x - uv.y) * 2.9 + b.y);
+  return vec2<f32>(x + 0.5 * x2, y + 0.5 * y2) / 1.5;
+}
+
+// Two broad, soft lights wandering across, one brightening and one
+// darkening, from -1 to 1.
+fn lights(uv: vec2<f32>, b: vec4<f32>) -> f32 {
+  let bright = vec2<f32>(0.5 + 0.38 * sin(b.z), 0.5 + 0.32 * cos(b.w));
+  let dark = vec2<f32>(0.5 + 0.38 * sin(b.w + 2.0), 0.5 + 0.32 * cos(b.z + 1.0));
+  let to_bright = uv - bright;
+  let to_dark = uv - dark;
+  return exp(-dot(to_bright, to_bright) * 4.0)
+    - exp(-dot(to_dark, to_dark) * 4.0);
 }
 
 @fragment
 fn fs_background(in: VsOut) -> @location(0) vec4<f32> {
   var rgb = background.color.rgb;
-  let t = background.motion.x;
   if (background.transform.w > 0.5) {
     var uv = (in.uv - vec2<f32>(0.5)) * background.motion.yz
       / background.transform.z + vec2<f32>(0.5) + background.transform.xy;
-    uv = uv + flow(in.uv, t) * background.motion.w;
+    uv = uv + flow(in.uv, background.flow_phases, background.more_phases)
+      * background.motion.w;
     rgb = textureSampleLevel(image, image_sampler, uv, 0.0).rgb
       * background.color.w;
   }
@@ -110,11 +129,8 @@ fn fs_background(in: VsOut) -> @location(0) vec4<f32> {
       0.0, 1.0);
     rgb = rgb * pow(factor, 2.2);
   }
-  // A broad, soft light drifting slowly across.
-  let centre = vec2<f32>(0.5 + 0.35 * sin(t * 0.047),
-    0.5 + 0.3 * sin(t * 0.061 + 1.3));
-  let d = distance(in.uv, centre);
-  let light = 1.0 + background.vignette.w * (exp(-d * d * 3.0) * 2.0 - 1.0);
+  let light = 1.0 + background.vignette.w
+    * lights(in.uv, background.more_phases);
   return vec4<f32>(rgb * light, 1.0);
 }
 
