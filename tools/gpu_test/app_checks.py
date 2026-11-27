@@ -75,6 +75,8 @@ MAP_TIMEOUT = 90
 # The probe tiled beside the application for the resize steps.
 PROBE_APP_ID = 'sweep-probe'
 TOKEN_TYPED = 'shingle typed 42'
+# Seconds a browser gets after mapping before the location bar is used.
+BROWSER_SETTLE = 8
 TOKEN_PASTED = 'shingle pasted 7'
 STEPS = ('maps', 'tiles', 'draws', 'focus', 'typing', 'popup', 'dialog',
          'copy', 'paste', 'resize-tiler', 'resize-drag', 'fullscreen',
@@ -489,7 +491,8 @@ FIREFOX_PREFERENCES = (
 CHROMIUM_FLAGS = ('--user-data-dir={dir}/profile', '--no-first-run',
                   '--no-default-browser-check', '--no-sandbox',
                   '--password-store=basic', '--disable-sync',
-                  '--ozone-platform-hint=auto', 'about:blank')
+                  '--ozone-platform-hint=auto', '--disable-component-update',
+                  'about:blank')
 
 APPS = (
     App('kitty', ['kitty', '--config', 'NONE', '-o',
@@ -644,6 +647,11 @@ class Sweep:
     info = self.shingle.call('window-rules/get-focused-view').get('info')
     return info.get('id') if info else None
 
+  def layout(self):
+    """(app-id, geometry, tiled-edges) of every mapped view."""
+    return [(view['app-id'], view['geometry'], view['tiled-edges'])
+            for view in self.views()]
+
   def rects(self):
     """The geometry of every mapped view."""
     return [view['geometry'] for view in self.views()]
@@ -710,6 +718,25 @@ class Sweep:
     self.shingle.call('stipc/move_cursor', {'x': point[0], 'y': point[1]})
     self.shingle.call('stipc/feed_button', {'combo': button, 'mode': 'full'})
 
+  def x_properties(self, title):
+    """WM_TRANSIENT_FOR, WM_CLIENT_LEADER and _NET_WM_WINDOW_TYPE of the
+    X window named `title`, as xprop prints them, for the record."""
+    environment = self.environment({'WAYLAND_DEBUG': '0'})
+    try:
+      tree = subprocess.run(['xwininfo', '-root', '-tree'], env=environment,
+                            capture_output=True, text=True, timeout=10)
+      window = next((line.split()[0] for line in tree.stdout.splitlines()
+                     if f'"{title}"' in line), None)
+      if window is None:
+        return 'no window of that name'
+      done = subprocess.run(
+          ['xprop', '-id', window, 'WM_TRANSIENT_FOR', 'WM_CLIENT_LEADER',
+           '_NET_WM_WINDOW_TYPE'], env=environment, capture_output=True,
+          text=True, timeout=10)
+      return f'{window}: ' + ' | '.join(done.stdout.split('\n')).strip()
+    except subprocess.TimeoutExpired:
+      return 'timed out'
+
   def wl_copy(self, text):
     """Starts `wl-copy --foreground` with `text`; returns the client."""
     path = os.path.join(self.directory, 'copy.txt')
@@ -760,6 +787,7 @@ class Scenario:
     self.row = {}
     self.client = None
     self.main = None
+    self.x11 = False
 
   def record(self, step, passed, detail=''):
     """One step's PASS or FAIL."""
@@ -827,6 +855,7 @@ class Scenario:
     self.main = max(views, key=lambda view: view['geometry']['width']
                     * view['geometry']['height'])
     x11 = 'xdg_toplevel' not in self.log()
+    self.x11 = x11
     print(f'INFO {self.app.name}: maps as {"X11" if x11 else "Wayland"}, '
           f'app-id {self.main["app-id"]!r}, title {self.main["title"]!r}, '
           f'{len(views)} view(s)', flush=True)
@@ -923,12 +952,16 @@ class Scenario:
       time.sleep(0.5)
       self.sweep.chord('ctrl+a')
       self.sweep.chord('ctrl+c')
-      text = xw.wait_for(lambda: self.sweep.wl_paste() == TOKEN_TYPED and
-                         TOKEN_TYPED, timeout=10)
+      # LibreOffice's autocorrect capitalizes the sentence.
+      text = xw.wait_for(lambda: (self.sweep.wl_paste() or '').lower()
+                         == TOKEN_TYPED, timeout=10)
       self.record('typing', bool(text),
                   f'wl-paste read {self.sweep.wl_paste()!r}')
       self.record('copy', bool(text), 'the typed text, copied in the app')
     elif kind == 'browser':
+      # Chrome opens a tab of its own shortly after it starts, which
+      # takes the location bar.
+      time.sleep(BROWSER_SETTLE)
       ok = self.browse('red', 'typing', typed=True)
       self.record('typing', ok, 'a typed data: URL paints the page red')
     elif self.app.fullscreen_key:
@@ -968,32 +1001,48 @@ class Scenario:
     shot = self.sweep.settled(step, painted, timeout=20)
     return shot is not None and painted(shot)
 
+  def menus(self):
+    """How many menus the client opened and closed: xdg popups, and the
+    subsurfaces GTK 3 uses for popovers inside its window."""
+    log = self.log()
+    opened = (debug_requests(log, 'xdg_surface', 'get_popup')
+              + debug_requests(log, 'wl_subcompositor', 'get_subsurface'))
+    closed = (debug_requests(log, 'xdg_popup', 'destroy')
+              + debug_requests(log, 'wl_subsurface', 'destroy')
+              + debug_events(log, 'xdg_popup', 'popup_done'))
+    return opened, closed
+
   def step_popup(self):
-    """A right-click opens a popup menu, and Escape closes it."""
+    """A right-click opens a popup menu, and Escape closes it. A Wayland
+    client's menu is seen in its log; an X client's, an override-redirect
+    window, in captures."""
     if not self.app.popup:
       return self.skip('popup', 'no menu on a click')
-    before = debug_requests(self.log(), 'xdg_surface', 'get_popup')
     base = self.base()
     point = (base['x'] + base['width'] // 2, base['y'] + base['height'] // 2)
+    if self.x11:
+      before = self.sweep.settled('popup-before', lambda shot: True)
+      self.sweep.click(point, 'BTN_RIGHT')
+      shot = self.sweep.settled('popup', lambda shot: changed_share(
+          before, shot, base) > 0.01, timeout=10)
+      opened = changed_share(before, shot, base) > 0.01
+      self.sweep.chord('esc')
+      after = self.sweep.settled('popup-closed', lambda shot: changed_share(
+          before, shot, base) < 0.005, timeout=10)
+      closed = changed_share(before, after, base) < 0.005
+      return self.record('popup', opened and closed,
+                         f'X menu: {changed_share(before, shot, base):.3f} '
+                         f'of the window changed, closed {closed}')
+    opened_before, closed_before = self.menus()
     self.sweep.click(point, 'BTN_RIGHT')
-    print(f'INFO {self.app.name}: popup click at {point}, cursor '
-          f'{self.sweep.shingle.call("window-rules/get-cursor-position")}',
-          flush=True)
-    opened = xw.wait_for(
-        lambda: debug_requests(self.log(), 'xdg_surface', 'get_popup')
-        > before, timeout=10)
+    opened = xw.wait_for(lambda: self.menus()[0] > opened_before, timeout=10)
     shot = self.sweep.capture('popup')
-    detail = (f'{debug_requests(self.log(), "xdg_surface", "get_popup")} '
-              'get_popup requests')
+    detail = f'{self.menus()[0] - opened_before} menu surface(s)'
     if opened and shot is not None:
       wrong = misplaced(shot, self.sweep.output_rects(), self.sweep.rects())
       detail += f', gaps {"clean" if not wrong else wrong}'
-    destroyed = debug_requests(self.log(), 'xdg_popup', 'destroy')
     self.sweep.chord('esc')
-    closed = xw.wait_for(
-        lambda: debug_requests(self.log(), 'xdg_popup', 'destroy')
-        > destroyed or debug_events(self.log(), 'xdg_popup', 'popup_done'),
-        timeout=10)
+    closed = xw.wait_for(lambda: self.menus()[1] > closed_before, timeout=10)
     self.record('popup', opened and closed,
                 f'{detail}, closed {bool(closed)}')
 
@@ -1012,6 +1061,9 @@ class Scenario:
                          f'{self.app.dialog}')
     time.sleep(1)
     dialog = self.sweep.view(dialog['id']) or dialog
+    if self.x11:
+      print(f'INFO {self.app.name}: dialog X properties: '
+            f'{self.sweep.x_properties(dialog["title"])}', flush=True)
     problems = []
     if dialog['parent'] != self.main['id']:
       problems.append(f'parent {dialog["parent"]}, not {self.main["id"]}')
@@ -1118,6 +1170,7 @@ class Scenario:
       shown = self.probe_shown(shot)
       self.record('resize-tiler', halved and drawn[0] and shown,
                   f'geometry {self.main_view()["geometry"]}, {drawn[1]}, '
+                  f'views {self.sweep.layout()}, '
                   f'probe {"shown" if shown else "covered or missing"}')
       before = self.main_view()['geometry']
       # The boundary is between the two views: the left one's right edge.
