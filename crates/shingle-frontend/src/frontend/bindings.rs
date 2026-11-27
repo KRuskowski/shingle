@@ -882,6 +882,13 @@ impl Frontend {
           .iter()
           .any(|binding| binding.matches(modifiers, key))
       {
+        // Wayfire's `wayfire_close` activates its plugin for the press.
+        self
+          .compositor
+          .notify_plugin_activation("builtin-close-view", true);
+        self
+          .compositor
+          .notify_plugin_activation("builtin-close-view", false);
         self.compositor.close_focused();
         return;
       }

@@ -100,6 +100,12 @@ pub struct Frontend {
   animation_easing: shingle_config::Easing,
   /// What is drawn, zoomed and animated on each output.
   scenes: HashMap<OutputHandle, OutputScene>,
+  /// The outputs whose workspace slide IPC was told about, as Wayfire's
+  /// vswitch activates its plugin while it slides.
+  vswitch_active: HashSet<OutputHandle>,
+  /// The plugin IPC was told a pointer drag activated: `simple-tile` for
+  /// a tiled window, else `move` or `resize`, as in Wayfire.
+  drag_plugin: Option<&'static str>,
   /// The output Scale and Expo run on, from when they start until their
   /// exit animations end.
   overview_output: Option<OutputHandle>,
@@ -513,6 +519,8 @@ impl Frontend {
       ),
       animation_easing: config.tiling.animation_easing,
       scenes: HashMap::new(),
+      vswitch_active: HashSet::new(),
+      drag_plugin: None,
       overview_output: None,
       virtual_frame: None,
       wsets_label_duration: Duration::from_millis(config.wsets.label_duration),
@@ -1070,8 +1078,53 @@ impl Frontend {
     self.pace_virtual_outputs(now);
     self.expire_labels(now);
     self.expire_startup_inhibits(now);
+    self.publish_plugin_activations();
     self.flush(host);
     self.publish_counts();
+  }
+
+  /// Sends `plugin-activation-state-changed` for each output whose
+  /// workspace slide started or ended since the last turn (vswitch), and
+  /// for a pointer drag that started or ended.
+  fn publish_plugin_activations(&mut self) {
+    let active = self
+      .scenes
+      .iter()
+      .filter(|(_, scene)| scene.workspace_transition.is_some())
+      .map(|(output, _)| output.clone())
+      .collect::<HashSet<_>>();
+    let started = active.difference(&self.vswitch_active).count();
+    let ended = self.vswitch_active.difference(&active).count();
+    for _ in 0..started {
+      self.compositor.notify_plugin_activation("vswitch", true);
+    }
+    for _ in 0..ended {
+      self.compositor.notify_plugin_activation("vswitch", false);
+    }
+    self.vswitch_active = active;
+    let dragging = self.drag.as_ref().map(|drag| {
+      let (window, plugin) = match drag {
+        DragState::Move { source, .. } => (*source, "move"),
+        DragState::Resize { window, .. } => (*window, "resize"),
+      };
+      let tiled = self
+        .compositor
+        .core()
+        .window_info(window)
+        .is_ok_and(|info| info.state.floating.is_none());
+      if tiled { "simple-tile" } else { plugin }
+    });
+    match (self.drag_plugin, dragging) {
+      (None, Some(plugin)) => {
+        self.compositor.notify_plugin_activation(plugin, true);
+        self.drag_plugin = Some(plugin);
+      }
+      (Some(plugin), None) => {
+        self.compositor.notify_plugin_activation(plugin, false);
+        self.drag_plugin = None;
+      }
+      _ => {}
+    }
   }
 
   /// Hands the compositor the sizes of the frontend's caches, which

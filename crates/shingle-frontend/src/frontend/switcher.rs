@@ -90,6 +90,10 @@ impl Frontend {
         modifiers: binding_modifiers(&binding),
         original_opacity,
       });
+      // Wayfire's fast-switcher activates its plugin while it is held.
+      self
+        .compositor
+        .notify_plugin_activation("fast-switcher", true);
     }
     self.advance_switcher(reverse);
     if self
@@ -267,6 +271,11 @@ impl Frontend {
     };
     for (window, opacity) in state.original_opacity {
       self.compositor.set_window_opacity(window, opacity);
+    }
+    if state.kind != SwitcherKind::Regular {
+      self
+        .compositor
+        .notify_plugin_activation("fast-switcher", false);
     }
     let selected = if state.kind == SwitcherKind::Regular {
       // Wayfire's `handle_done`: the thumbnails move back, and the one in
