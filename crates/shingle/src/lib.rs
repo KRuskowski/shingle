@@ -78,6 +78,8 @@ mod launch;
 mod layer_shell;
 mod linux_dmabuf;
 mod linux_drm_syncobj;
+#[cfg(test)]
+mod lock_tests;
 mod modifier_binding;
 mod object_counts;
 mod output;
@@ -1861,9 +1863,25 @@ impl Compositor {
     self.state.idle.lock_state() != LockState::Unlocked
   }
 
+  /// The session-lock state.
+  pub fn lock_state(&self) -> LockState {
+    self.state.idle.lock_state()
+  }
+
+  /// Whether no output may draw any client, only the lock's surfaces:
+  /// [`LockState::hides_clients`]. A frontend draws nothing else then,
+  /// over black, and a backend shows no frame drawn before
+  /// (docs/design/lock-screen.md).
+  pub fn lock_hides_clients(&self) -> bool {
+    self.state.idle.lock_state().hides_clients()
+  }
+
   /// Starts locking, as an expired lock timeout would: emits
-  /// [`Event::StartLockClient`] unless a lock is already pending or held. The
-  /// lock is held once the lock client's surface is ready.
+  /// [`Event::StartLockClient`] unless a lock is already starting, pending
+  /// or held. The outputs show the clients until the lock client asks for
+  /// the lock, or [`shingle_idle::Config::lock_start_timeout`] passes
+  /// without it; the lock is held once the lock client's surfaces are
+  /// ready.
   pub fn request_lock(&mut self) {
     let commands = self.state.idle.request_lock(self.state.now());
     self.state.process_idle_commands(commands);

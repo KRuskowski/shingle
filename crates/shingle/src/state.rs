@@ -896,7 +896,10 @@ impl CompositorState {
   /// The surfaces to draw on output `id`, bottom to top: its layer
   /// surfaces, the windows of its workspace set, the unmanaged X windows
   /// whose top-left corner is on it, and the cursor while the pointer is
-  /// on it. While the session is locked, only its lock surface. A dark
+  /// on it. From the moment a lock client asks for the lock until it
+  /// unlocks, also after it crashed ([`LockState::hides_clients`]), only
+  /// the active lock's surface for it, once that has committed a full
+  /// opaque frame, and nothing before, so the output is black. A dark
   /// output shows nothing. Input-method panels are on the first output.
   pub(crate) fn visible_surfaces_on(
     &self,
@@ -912,17 +915,11 @@ impl CompositorState {
     {
       return Vec::new();
     }
-    if self.idle.lock_state() != LockState::Unlocked {
+    if self.idle.lock_state().hides_clients() {
       let mut surfaces = self
         .surfaces
         .values()
-        .filter(|surface| {
-          surface.buffer.is_some()
-            && matches!(
-              &surface.role,
-              Role::SessionLock { output, .. } if output == id
-            )
-        })
+        .filter(|surface| shell::shown_lock_surface(self, surface, id))
         .collect::<Vec<_>>();
       surfaces.sort_by_key(|surface| surface.id);
       return surfaces
@@ -1065,7 +1062,7 @@ impl CompositorState {
     if self.idle.dpms_state() == DpmsState::Off
       || output.dark
       || !output.powered
-      || self.idle.lock_state() != LockState::Unlocked
+      || self.idle.lock_state().hides_clients()
       || crate::surface_outputs::pointer_output(self) != *id
     {
       return None;
@@ -1209,7 +1206,7 @@ impl CompositorState {
     if self.idle.dpms_state() == DpmsState::Off
       || output.dark
       || !output.powered
-      || self.idle.lock_state() != LockState::Unlocked
+      || self.idle.lock_state().hides_clients()
     {
       return Vec::new();
     }

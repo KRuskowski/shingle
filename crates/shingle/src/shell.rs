@@ -64,6 +64,10 @@ pub(crate) enum Role {
     /// The configures not acknowledged yet, with the size each sent.
     serials: BTreeMap<u32, (u32, u32)>,
     acked: Option<(u32, u32, u32)>,
+    /// Whether it has committed a full frame: a buffer of its output's
+    /// size that hides everything under it. Until then its output stays
+    /// black (docs/design/lock-screen.md).
+    shown: bool,
   },
   /// A surface of Xwayland's, named by `xwayland_shell_v1`.
   Xwayland(Box<crate::xwayland::shell::XwaylandRole>),
@@ -839,15 +843,69 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
     }
   }
   crate::layer_shell::committed(state, object);
-  if state.idle.lock_state() != LockState::Pending
-    || !matches!(
-      state.surfaces.get(object).map(|surface| &surface.role),
-      Some(Role::SessionLock { .. })
-    )
-  {
+  if !matches!(
+    state.surfaces.get(object).map(|surface| &surface.role),
+    Some(Role::SessionLock { .. })
+  ) {
     return;
   }
-  finish_lock(state);
+  lock_surface_committed(state, object);
+  if state.idle.lock_state() == LockState::Pending {
+    finish_lock(state);
+  }
+}
+
+/// Marks lock surface `object` shown once it commits a full frame, a
+/// buffer of its output's size that covers it opaquely; its output draws
+/// it from then on, and black before.
+fn lock_surface_committed(state: &mut CompositorState, object: &ObjectId) {
+  let Some(surface) = state.surfaces.get(object) else {
+    return;
+  };
+  let Role::SessionLock {
+    output,
+    shown: false,
+    ..
+  } = &surface.role
+  else {
+    return;
+  };
+  let full = state.outputs.get(output).is_some_and(|output| {
+    surface.buffer.as_ref().is_some_and(|buffer| {
+      buffer.width == output.rect.width
+        && buffer.height == output.rect.height
+        && covers_opaquely(buffer)
+    })
+  });
+  if full
+    && let Some(Role::SessionLock { shown, .. }) = state
+      .surfaces
+      .get_mut(object)
+      .map(|surface| &mut surface.role)
+  {
+    *shown = true;
+  }
+}
+
+/// Whether surface `object` is a lock surface of the active lock that
+/// has shown a full frame on output `output`: the only surface an
+/// output draws while [`LockState::hides_clients`] holds.
+pub(crate) fn shown_lock_surface(
+  state: &CompositorState,
+  surface: &crate::state::Surface,
+  output: &OutputId,
+) -> bool {
+  let active_client = state
+    .active_lock
+    .as_ref()
+    .and_then(|lock| lock.client())
+    .map(|client| client.id());
+  active_client.is_some_and(|client| surface.client == client)
+    && surface.buffer.is_some()
+    && matches!(
+      &surface.role,
+      Role::SessionLock { output: on, shown: true, .. } if on == output
+    )
 }
 
 /// Sends `locked` once the pending lock's client covers every output that
@@ -3056,7 +3114,7 @@ impl Dispatch<ExtSessionLockManagerV1, ()> for CompositorState {
           return;
         }
         state.active_lock = Some(lock);
-        state.idle.request_lock(state.now());
+        state.idle.client_lock_requested(state.now());
         state.emit_idle_changes();
         crate::input::sync_focus(state);
       }
@@ -3148,6 +3206,7 @@ impl Dispatch<ExtSessionLockV1, SessionLockData> for CompositorState {
             output: on,
             serials: BTreeMap::new(),
             acked: None,
+            shown: false,
           };
         }
         configure_lock_surface(state, &object);

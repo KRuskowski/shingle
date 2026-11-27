@@ -17,7 +17,9 @@
 //!
 //! Locking fails closed: once a lock has been requested, normal clients get
 //! no input until a lock surface is shown and then unlocked (see
-//! [`IdleCoordinator::input_target`]).
+//! [`IdleCoordinator::input_target`]). Once a lock client has asked for the
+//! lock, no output shows a client until it is unlocked
+//! ([`LockState::hides_clients`]).
 
 #![warn(missing_docs)]
 
@@ -71,6 +73,10 @@ pub struct Config {
   /// Inactivity before [`Command::StartLockClient`]. Wayfire leaves this to
   /// external tools such as swayidle.
   pub lock_timeout: Option<Duration>,
+  /// How long a lock client the compositor started has to ask for the
+  /// lock ([`LockState::Starting`]) before the session is locked without
+  /// it ([`LockState::Pending`]). Default 5 s.
+  pub lock_start_timeout: Duration,
   /// Applied by [`IdleCoordinator::lock_client_failed`].
   pub lock_failure_policy: LockFailurePolicy,
   /// Suspend all timeouts while a fullscreen view is shown, Wayfire's
@@ -87,6 +93,7 @@ impl Default for Config {
       idle_timeout: None,
       dpms_timeout: None,
       lock_timeout: None,
+      lock_start_timeout: Duration::from_secs(5),
       lock_failure_policy: LockFailurePolicy::FailClosed,
       disable_on_fullscreen: true,
       disable_initially: false,
@@ -97,30 +104,50 @@ impl Default for Config {
 /// The session-lock state machine.
 ///
 /// ```text
-/// Unlocked --request_lock/lock timeout--> Pending
-/// Pending  --lock_surface_ready---------> Locked
-/// Locked   --unlock---------------------> Unlocked
-/// Pending, Locked --lock_client_failed--> Failed
-/// Failed   --request_lock---------------> Pending
+/// Unlocked --request_lock/lock timeout-------------> Starting
+/// Unlocked, Starting, Failed --client_lock_requested-> Pending
+/// Starting --lock_start_timeout---------------------> Pending
+/// Pending  --lock_surface_ready---------------------> Locked
+/// Locked   --unlock---------------------------------> Unlocked
+/// Pending, Locked --lock_client_failed--------------> Failed
 /// ```
 ///
-/// There is no way from `Pending` or `Failed` back to `Unlocked` except
-/// through `Locked`: only a lock client that showed a lock surface can
-/// unlock.
+/// There is no way from `Starting`, `Pending` or `Failed` back to
+/// `Unlocked` except through `Locked`: only a lock client that showed a
+/// lock surface can unlock. `request_lock` in `Failed` starts a new lock
+/// client and stays `Failed`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum LockState {
   /// Normal operation; clients get input.
   #[default]
   Unlocked,
-  /// A lock was requested, by the lock timeout, the compositor or an
-  /// `ext_session_lock_manager_v1.lock` request, and no lock surface has
-  /// been committed yet. No client gets input.
+  /// The lock timeout or the compositor started the lock client, which
+  /// has not asked for the lock yet. No client gets input, but the
+  /// outputs still show the clients, so that the lock client can capture
+  /// them for its background, as swaylock started by swayidle can. Ends
+  /// in [`LockState::Pending`] when the client asks or after
+  /// [`Config::lock_start_timeout`].
+  Starting,
+  /// A lock client asked for the lock with an
+  /// `ext_session_lock_manager_v1.lock` request, or the lock client
+  /// started by the compositor did not ask in time, and no lock surface
+  /// has been committed yet. No client gets input and none is shown.
   Pending,
   /// A lock surface is shown and receives all input.
   Locked,
   /// The lock client disconnected or destroyed its lock without unlocking.
-  /// No client gets input until a new lock client takes over.
+  /// No client gets input or is shown until a new lock client takes over.
   Failed,
+}
+
+impl LockState {
+  /// Whether no output may show any client: from the moment a lock
+  /// client asked for the lock until it unlocks, also after it crashed.
+  /// Only [`LockState::Unlocked`] and [`LockState::Starting`] show the
+  /// clients.
+  pub fn hides_clients(self) -> bool {
+    matches!(self, Self::Pending | Self::Locked | Self::Failed)
+  }
 }
 
 /// Which surfaces may receive seat input in the current [`LockState`].
@@ -130,7 +157,8 @@ pub enum InputTarget {
   NormalClients,
   /// Only the session-lock surface ([`LockState::Locked`]).
   LockSurface,
-  /// Nothing ([`LockState::Pending`] or [`LockState::Failed`]).
+  /// Nothing ([`LockState::Starting`], [`LockState::Pending`] or
+  /// [`LockState::Failed`]).
   None,
 }
 
@@ -139,8 +167,9 @@ pub enum InputTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
   /// Launch the configured lock client. Issued on entering
-  /// [`LockState::Pending`] from the lock timeout or
-  /// [`IdleCoordinator::request_lock`].
+  /// [`LockState::Starting`] from the lock timeout or
+  /// [`IdleCoordinator::request_lock`], and by `request_lock` in
+  /// [`LockState::Failed`].
   StartLockClient,
   /// Blank the outputs.
   RequestDpmsOff,
@@ -166,6 +195,8 @@ pub struct IdleCoordinator {
   idle_inhibited: bool,
   idle_notified: bool,
   lock_state: LockState,
+  /// When [`LockState::Starting`] was entered.
+  starting_since: Timestamp,
   dpms_state: DpmsState,
   enabled: bool,
   fullscreen: bool,
@@ -182,6 +213,7 @@ impl IdleCoordinator {
       idle_inhibited: false,
       idle_notified: false,
       lock_state: LockState::Unlocked,
+      starting_since: now,
       dpms_state: DpmsState::On,
       enabled: !config.disable_initially,
       fullscreen: false,
@@ -295,7 +327,9 @@ impl IdleCoordinator {
   pub fn input_target(&self) -> InputTarget {
     match self.lock_state {
       LockState::Unlocked => InputTarget::NormalClients,
-      LockState::Pending | LockState::Failed => InputTarget::None,
+      LockState::Starting | LockState::Pending | LockState::Failed => {
+        InputTarget::None
+      }
       LockState::Locked => InputTarget::LockSurface,
     }
   }
@@ -312,6 +346,10 @@ impl IdleCoordinator {
   /// lock timeout is reported although `tick` then skips DPMS), so a caller
   /// sleeping until it just ticks once more.
   pub fn next_deadline(&self) -> Option<Timestamp> {
+    // The start deadline runs whatever suppresses the idle timeouts.
+    if self.lock_state == LockState::Starting {
+      return Some(self.start_deadline().max(self.now));
+    }
     if self.idle_inhibited
       || !self.enabled
       || (self.fullscreen && self.config.disable_on_fullscreen)
@@ -332,9 +370,7 @@ impl IdleCoordinator {
         self.deadline(self.config.lock_timeout),
       );
     }
-    if self.dpms_state == DpmsState::On
-      && !matches!(self.lock_state, LockState::Pending | LockState::Failed)
-    {
+    if self.dpms_state == DpmsState::On && !self.lock_unsettled() {
       Self::consider_deadline(
         &mut next,
         self.deadline(self.config.dpms_timeout),
@@ -384,21 +420,38 @@ impl IdleCoordinator {
     }
   }
 
-  /// Asks for the session to be locked, from a lock binding, the
-  /// compositor API or a client's `ext_session_lock_manager_v1.lock`.
-  /// From [`LockState::Unlocked`] or [`LockState::Failed`] it enters
-  /// [`LockState::Pending`] and issues [`Command::StartLockClient`]; when a
-  /// lock is already pending or held it does nothing. A caller whose lock
-  /// client is already running, such as the `lock` request handler, may
-  /// drop the command.
+  /// Asks for the session to be locked by the compositor, from a lock
+  /// binding or the compositor API, which starts the lock client
+  /// ([`Command::StartLockClient`]). From [`LockState::Unlocked`] it
+  /// enters [`LockState::Starting`]; in [`LockState::Failed`] it stays
+  /// failed, so the outputs stay dark while the new client starts; when a
+  /// lock is already starting, pending or held it does nothing.
   pub fn request_lock(&mut self, now: Timestamp) -> Vec<Command> {
     self.advance_to(now);
     match self.lock_state {
-      LockState::Unlocked | LockState::Failed => {
-        self.lock_state = LockState::Pending;
+      LockState::Unlocked => {
+        self.enter_starting();
         vec![Command::StartLockClient]
       }
-      LockState::Pending | LockState::Locked => Vec::new(),
+      LockState::Failed => vec![Command::StartLockClient],
+      LockState::Starting | LockState::Pending | LockState::Locked => {
+        Vec::new()
+      }
+    }
+  }
+
+  /// A client asked for the lock (`ext_session_lock_manager_v1.lock`):
+  /// from [`LockState::Unlocked`], [`LockState::Starting`] or
+  /// [`LockState::Failed`] it enters [`LockState::Pending`], which hides
+  /// every client. Ignored while a lock is pending or held; the
+  /// compositor refuses a second lock before calling this.
+  pub fn client_lock_requested(&mut self, now: Timestamp) {
+    self.advance_to(now);
+    if matches!(
+      self.lock_state,
+      LockState::Unlocked | LockState::Starting | LockState::Failed
+    ) {
+      self.lock_state = LockState::Pending;
     }
   }
 
@@ -474,6 +527,11 @@ impl IdleCoordinator {
   /// blanked before the lock surface is up.
   pub fn tick(&mut self, now: Timestamp) -> Vec<Command> {
     self.advance_to(now);
+    if self.lock_state == LockState::Starting
+      && self.now >= self.start_deadline()
+    {
+      self.lock_state = LockState::Pending;
+    }
     if self.idle_inhibited
       || !self.enabled
       || (self.fullscreen && self.config.disable_on_fullscreen)
@@ -488,7 +546,7 @@ impl IdleCoordinator {
       && self.is_due(self.config.lock_timeout);
     let dpms_due = self.dpms_state == DpmsState::On
       && !lock_due
-      && !matches!(self.lock_state, LockState::Pending | LockState::Failed)
+      && !self.lock_unsettled()
       && self.is_due(self.config.dpms_timeout);
 
     let mut commands = Vec::new();
@@ -497,7 +555,7 @@ impl IdleCoordinator {
       commands.push(Command::NotifyIdle);
     }
     if lock_due {
-      self.lock_state = LockState::Pending;
+      self.enter_starting();
       commands.push(Command::StartLockClient);
     }
     if dpms_due {
@@ -528,6 +586,27 @@ impl IdleCoordinator {
 
   fn advance_to(&mut self, now: Timestamp) {
     self.now = self.now.max(now);
+  }
+
+  fn enter_starting(&mut self) {
+    self.lock_state = LockState::Starting;
+    self.starting_since = self.now;
+  }
+
+  /// When a [`LockState::Starting`] lock becomes [`LockState::Pending`].
+  fn start_deadline(&self) -> Timestamp {
+    self
+      .starting_since
+      .saturating_add(self.config.lock_start_timeout)
+  }
+
+  /// Whether a lock is on its way but not shown: no DPMS timeout then,
+  /// so a broken lock never blanks the screen over the session.
+  fn lock_unsettled(&self) -> bool {
+    matches!(
+      self.lock_state,
+      LockState::Starting | LockState::Pending | LockState::Failed
+    )
   }
 
   fn deadline(&self, timeout: Option<Duration>) -> Option<Timestamp> {
@@ -591,5 +670,81 @@ mod tests {
     assert_eq!(resumed, suppressed);
     assert_eq!(inhibited.set_idle_inhibited(true, seconds(31)), []);
     assert_eq!(inhibited.set_idle_inhibited(false, seconds(32)), []);
+  }
+  fn locking() -> IdleCoordinator {
+    IdleCoordinator::new(
+      Config {
+        lock_timeout: Some(seconds(10)),
+        dpms_timeout: Some(seconds(12)),
+        lock_start_timeout: seconds(5),
+        ..Config::default()
+      },
+      seconds(0),
+    )
+  }
+
+  #[test]
+  fn the_lock_timeout_starts_the_client_with_the_clients_still_shown() {
+    let mut idle = locking();
+    assert_eq!(idle.tick(seconds(10)), [Command::StartLockClient]);
+    assert_eq!(idle.lock_state(), LockState::Starting);
+    assert!(!idle.lock_state().hides_clients());
+    assert_eq!(idle.input_target(), InputTarget::None);
+    assert_eq!(idle.next_deadline(), Some(seconds(15)));
+    // No DPMS while the lock is on its way.
+    assert_eq!(idle.tick(seconds(13)), []);
+    assert_eq!(idle.dpms_state(), DpmsState::On);
+    idle.client_lock_requested(seconds(14));
+    assert_eq!(idle.lock_state(), LockState::Pending);
+    assert!(idle.lock_state().hides_clients());
+    idle.lock_surface_ready(seconds(14));
+    assert_eq!(idle.lock_state(), LockState::Locked);
+    assert!(idle.lock_state().hides_clients());
+  }
+
+  #[test]
+  fn a_lock_client_that_does_not_ask_in_time_leaves_the_session_pending() {
+    let mut idle = locking();
+    assert_eq!(idle.request_lock(seconds(1)), [Command::StartLockClient]);
+    assert_eq!(idle.request_lock(seconds(2)), []);
+    // Suppression does not hold the start deadline back.
+    idle.set_idle_inhibited(true, seconds(3));
+    assert_eq!(idle.next_deadline(), Some(seconds(6)));
+    idle.tick(seconds(5));
+    assert_eq!(idle.lock_state(), LockState::Starting);
+    idle.tick(seconds(6));
+    assert_eq!(idle.lock_state(), LockState::Pending);
+    assert_eq!(idle.unlock(seconds(7)), []);
+    assert_eq!(idle.lock_state(), LockState::Pending);
+  }
+
+  #[test]
+  fn a_failed_lock_stays_dark_while_a_new_client_starts() {
+    let mut idle = locking();
+    idle.client_lock_requested(seconds(1));
+    idle.lock_surface_ready(seconds(1));
+    idle.lock_client_failed(seconds(2));
+    assert_eq!(idle.lock_state(), LockState::Failed);
+    assert!(idle.lock_state().hides_clients());
+    assert_eq!(idle.request_lock(seconds(3)), [Command::StartLockClient]);
+    assert_eq!(idle.lock_state(), LockState::Failed);
+    idle.client_lock_requested(seconds(4));
+    assert_eq!(idle.lock_state(), LockState::Pending);
+    idle.lock_surface_ready(seconds(4));
+    idle.unlock(seconds(5));
+    assert_eq!(idle.lock_state(), LockState::Unlocked);
+  }
+
+  #[test]
+  fn only_unlocked_and_starting_show_the_clients() {
+    for (state, hides) in [
+      (LockState::Unlocked, false),
+      (LockState::Starting, false),
+      (LockState::Pending, true),
+      (LockState::Locked, true),
+      (LockState::Failed, true),
+    ] {
+      assert_eq!(state.hides_clients(), hides, "{state:?}");
+    }
   }
 }

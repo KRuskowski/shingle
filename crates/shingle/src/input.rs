@@ -497,7 +497,7 @@ impl Dispatch<WlTouch, TouchData> for CompositorState {
 
 pub(crate) fn sync_focus(state: &mut CompositorState) {
   match state.idle.lock_state() {
-    LockState::Pending | LockState::Failed => {
+    LockState::Starting | LockState::Pending | LockState::Failed => {
       set_keyboard_focus(state, None);
       set_pointer_focus(state, None);
     }
@@ -1703,7 +1703,7 @@ fn input_allowed(state: &CompositorState, object: &ObjectId) -> bool {
   match state.idle.lock_state() {
     LockState::Unlocked => role_accepts_keyboard(&surface.role),
     LockState::Locked => matches!(surface.role, Role::SessionLock { .. }),
-    LockState::Pending | LockState::Failed => false,
+    LockState::Starting | LockState::Pending | LockState::Failed => false,
   }
 }
 
