@@ -49,5 +49,48 @@ class LauncherChecksTest(unittest.TestCase):
     self.assertEqual(launcher_checks.summary([30.0, 10.0, 20.0]),
                      'median 20.0 ms, 10.0-30.0 ms')
 
+  def test_desktop_entries_carry_icons_and_actions(self):
+    text = launcher_checks.desktop_entry(
+        'A', 'a', 'Utility;', 'a-icon',
+        (('two', 'Second', 'a --two', 'two-icon'), ('three', 'Third', 'b',
+                                                    None)))
+    self.assertIn('Icon=a-icon\nActions=two;three;\n', text)
+    self.assertIn('\n[Desktop Action two]\nName=Second\nExec=a --two\n'
+                  'Icon=two-icon\n', text)
+    self.assertTrue(text.endswith('[Desktop Action three]\nName=Third\n'
+                                  'Exec=b\n'))
+
+  def test_png_and_svg_fixtures(self):
+    data = launcher_checks.png(3, 2, (1, 2, 3, 4))
+    self.assertTrue(data.startswith(b'\x89PNG\r\n\x1a\n'))
+    width, height = launcher_checks.struct.unpack('>II', data[16:24])
+    self.assertEqual((width, height), (3, 2))
+    self.assertIn('fill="#ffff00"', launcher_checks.svg((255, 255, 0, 255)))
+
+  def test_device_rectangles_round_their_edges(self):
+    rect = {'x': 260, 'y': 120, 'width': 760, 'height': 480}
+    self.assertEqual(launcher_checks.device_rect(rect, 1.5),
+                     (390, 180, 1140, 720))
+    odd = {'x': 0.5, 'y': 1, 'width': 1, 'height': 1}
+    self.assertEqual(launcher_checks.device_rect(odd, 1.0), (1, 1, 1, 1))
+    self.assertEqual(launcher_checks.round_half_up(2.5), 3)
+
+  def test_captures_are_compared_and_measured(self):
+    Capture = launcher_checks.xw.Capture
+    shot = Capture(3, 2, bytes([0, 0, 0, 255, 255, 0, 255, 255, 0,
+                                0, 0, 0, 255, 255, 0, 10, 10, 10]))
+    image = Capture(2, 1, bytes([255, 255, 0, 255, 255, 0]))
+    self.assertEqual(launcher_checks.mismatches(shot, image, (1, 0, 2, 1)), 0)
+    self.assertEqual(launcher_checks.mismatches(shot, image, (0, 0, 2, 1)), 1)
+    self.assertEqual(launcher_checks.mismatches(shot, image, (0, 0, 3, 1)), 3)
+    self.assertEqual(launcher_checks.colour_box(shot, (0, 0, 3, 2), 'yellow'),
+                     (2, 2))
+    self.assertIsNone(launcher_checks.colour_box(shot, (0, 0, 3, 2), 'red'))
+    frame = {'rows': [{'name': 'A', 'icon': {
+        'rect': {'x': 1, 'y': 0, 'width': 2, 'height': 1}}},
+                      {'name': 'B', 'icon': None}]}
+    self.assertEqual(launcher_checks.icon_colours(shot, frame, ['A', 'B']),
+                     {'A': 'yellow', 'B': None})
+
 if __name__ == '__main__':
   unittest.main()

@@ -39,7 +39,8 @@ again while it is open closes it.
                       shingle.yaml)
   --trace             Print one JSON line per frame and per launch
   --timing            Print how long the first frame took
-  --screenshot PATH   Draw the panel to a PNG without Wayland and exit
+  --screenshot PATH   Draw the panel to a PNG (a PPM for a .ppm path)
+                      without Wayland and exit
   --query TEXT        With --screenshot, type TEXT first
   --scale FACTOR      With --screenshot, draw at this scale (default 1)
   --help              Show this help
@@ -335,17 +336,41 @@ fn screenshot(
       target.copy_from_slice(&[source[2], source[1], source[0], 255]);
     }
   })?;
-  image::RgbaImage::from_raw(width, height, pixels)
-    .ok_or("bad image size")?
-    .save(path)
-    .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+  let saved = if path.extension().is_some_and(|extension| extension == "ppm") {
+    std::fs::write(path, ppm(width, height, &pixels))
+      .map_err(|error| error.to_string())
+  } else {
+    image::RgbaImage::from_raw(width, height, pixels)
+      .ok_or_else(|| "bad image size".to_owned())?
+      .save(path)
+      .map_err(|error| error.to_string())
+  };
+  saved.map_err(|error| format!("cannot write {}: {error}", path.display()))?;
   println!("Saved screenshot: {}", path.display());
   Ok(())
+}
+
+/// RGBA `pixels` as a binary PPM, which the harness compares with its
+/// captures.
+fn ppm(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
+  let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
+  for pixel in pixels.chunks_exact(4) {
+    bytes.extend_from_slice(&pixel[..3]);
+  }
+  bytes
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn screenshots_can_be_ppm() {
+    assert_eq!(
+      ppm(2, 1, &[1, 2, 3, 255, 4, 5, 6, 255]),
+      b"P6\n2 1\n255\n\x01\x02\x03\x04\x05\x06"
+    );
+  }
 
   fn arguments(items: &[&str]) -> Result<Action, String> {
     parse(items.iter().map(OsString::from))
