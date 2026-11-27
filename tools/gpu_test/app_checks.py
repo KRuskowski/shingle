@@ -451,6 +451,9 @@ def table(matrix, steps=STEPS):
     lines.append(f'| {app} | ' + ' | '.join(cells) + ' |')
   return '\n'.join(lines)
 
+# How often the editor paste is tried before it fails.
+PASTE_ATTEMPTS = 3
+
 class App:
   """What the sweep runs and how it drives one application."""
 
@@ -1198,14 +1201,26 @@ class Scenario:
                            timeout=10)
         self.record('paste', done, f'{path}: {_read(path)!r}')
       elif kind == 'editor':
-        self.sweep.chord('ctrl+a')
-        self.sweep.chord('ctrl+v')
-        time.sleep(1)
-        copier.stop()
-        self.sweep.chord('ctrl+a')
-        self.sweep.chord('ctrl+c')
-        text = xw.wait_for(lambda: self.sweep.wl_paste() == TOKEN_PASTED,
-                           timeout=10)
+        # An X application such as LibreOffice can take longer than a
+        # second to fetch the text through the selection bridge, so the
+        # paste is tried again with the source offered anew.
+        text = False
+        for attempt in range(PASTE_ATTEMPTS):
+          if attempt:
+            copier = self.sweep.wl_copy(TOKEN_PASTED)
+            time.sleep(1)
+          self.sweep.chord('ctrl+a')
+          self.sweep.chord('ctrl+v')
+          time.sleep(1 + attempt)
+          copier.stop()
+          self.sweep.chord('ctrl+a')
+          self.sweep.chord('ctrl+c')
+          text = xw.wait_for(lambda: self.sweep.wl_paste() == TOKEN_PASTED,
+                             timeout=10)
+          if text:
+            break
+          print(f'INFO {self.app.name}: paste attempt {attempt + 1} read '
+                f'{self.sweep.wl_paste()!r}', flush=True)
         self.record('paste', text, f'wl-paste read {self.sweep.wl_paste()!r}')
       elif kind == 'browser':
         ok = self.browse('blue', 'paste', typed=False)
