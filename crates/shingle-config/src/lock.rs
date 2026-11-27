@@ -921,6 +921,10 @@ pub struct DriftConfig {
   /// How strongly the blurred image flows and its lights wander: 0 holds
   /// it still, 1 is the default, up to 3.
   pub intensity: f64,
+  /// How fast it flows, separately from how strongly: 1, the default,
+  /// turns the flow's waves in 26 to 55 s and moves the lights in 200 to
+  /// 250 s; 2 twice as fast; above 0 and at most 4.
+  pub speed: f64,
 }
 
 impl Default for DriftConfig {
@@ -931,6 +935,7 @@ impl Default for DriftConfig {
       amplitude: 12.0,
       period: 30.0,
       intensity: 1.0,
+      speed: 1.0,
     }
   }
 }
@@ -1047,6 +1052,11 @@ impl LockConfig {
     {
       return Err(ConfigError::Invalid(
         "lock.drift.intensity must be from 0 to 3".into(),
+      ));
+    }
+    if !(drift.speed.is_finite() && drift.speed > 0.0 && drift.speed <= 4.0) {
+      return Err(ConfigError::Invalid(
+        "lock.drift.speed must be above 0 and at most 4".into(),
       ));
     }
     if !(self.input_timeout.is_finite() && self.input_timeout > 0.0) {
@@ -1548,6 +1558,8 @@ mod tests {
       "options:\n  effect-blur: big\n",
       "drift:\n  fps: -1\n",
       "drift:\n  intensity: 4\n",
+      "drift:\n  speed: 0\n",
+      "drift:\n  speed: 5\n",
       "command: ''\n",
     ] {
       let config: LockConfig = serde_yaml::from_str(bad).unwrap();

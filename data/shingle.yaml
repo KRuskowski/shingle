@@ -349,6 +349,7 @@ lock:
     amplitude: 12
     period: 30
     intensity: 1
+    speed: 1
   input_timeout: 5
 
 pointer:

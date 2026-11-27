@@ -43,11 +43,12 @@ const LIGHT: f32 = 0.14;
 /// intensity 1: about 100 pixels on a 1920 pixel wide output.
 const FLOW: f32 = 0.052;
 /// The angular speeds of the flow's and the lights' waves, in radians a
-/// second, at intensity 1: none a multiple of another, so that the
-/// pattern never repeats visibly. The first six turn the flow (its
-/// waves come round in 5 to 11 s, each bent by another), the next two
-/// move the lights (in 37 to 48 s).
-const SPEEDS: [f64; 8] = [0.87, 1.11, 0.69, 0.99, 1.23, 0.57, 0.17, 0.13];
+/// second, at intensity and speed 1: none a multiple of another, so that
+/// the pattern never repeats visibly. The first six turn the flow (its
+/// waves come round in 26 to 55 s, each bent by another), the next two
+/// move the lights (in 200 to 250 s).
+const SPEEDS: [f64; 8] =
+  [0.174, 0.222, 0.138, 0.198, 0.246, 0.114, 0.031, 0.025];
 /// The breathing zoom's angular speed.
 const BREATHING: f64 = 0.11;
 
@@ -87,7 +88,8 @@ impl Drift {
   /// `config.period`, and a breathing zoom of half a percent. Everything
   /// is in texture coordinates, so it moves alike at any resolution and
   /// scale, and smooth in time, so it can be drawn at any frame rate.
-  /// Intensity 0 holds it still.
+  /// Intensity 0 holds it still; `config.speed` scales how fast the
+  /// waves and lights move.
   pub fn at(seconds: f64, config: &DriftConfig, size: (u32, u32)) -> Self {
     if !config.enabled || config.intensity <= 0.0 {
       return Self::STILL;
@@ -108,7 +110,7 @@ impl Drift {
       / (0.5 - flow);
     let mut phases = [0.0; 8];
     for (phase, speed) in phases.iter_mut().zip(SPEEDS) {
-      *phase = turn(speed * root);
+      *phase = turn(speed * root * config.speed);
     }
     Self {
       offset: [
@@ -1195,13 +1197,28 @@ mod tests {
       for (a, b) in now.phases.iter().zip(next.phases) {
         let step = (b - a).rem_euclid(TAU);
         let step = step.min(TAU - step);
-        assert!(step > 1e-3 && step < 0.03, "{step} at {start}");
+        assert!(step > 1e-4 && step < 0.01, "{step} at {start}");
       }
     }
     // The same in texture coordinates whatever the output's size.
     let small = Drift::at(10.0, &config, (1280, 720));
     assert_eq!(small.phases, at(10.0, 1.0).phases);
     assert_eq!(small.flow, at(10.0, 1.0).flow);
+    // Speed moves it faster in time without changing how far.
+    let fast = Drift::at(
+      10.0,
+      &DriftConfig {
+        speed: 2.0,
+        ..config.clone()
+      },
+      size,
+    );
+    let twice = at(20.0, 1.0);
+    assert_eq!(fast.flow, twice.flow);
+    for (a, b) in fast.phases.iter().zip(twice.phases) {
+      let gap = (a - b).rem_euclid(TAU);
+      assert!(gap.min(TAU - gap) < 1e-4, "{a} {b}");
+    }
   }
 
   /// A 64x32 screenshot, red on the left half and green on the right.
