@@ -9,7 +9,10 @@ use std::{
   time::{Duration, Instant},
 };
 
-use shingle::{BufferSnapshot, OutputHandle, OutputKind, SurfaceId};
+use shingle::{
+  BufferSnapshot, CaptureRequest, CaptureSource, OutputHandle, OutputKind,
+  SurfaceId,
+};
 use shingle_core::{Rect, WindowId as TileWindowId};
 use shingle_render::{GpuTexture, RenderRect};
 
@@ -223,11 +226,27 @@ impl Frontend {
   /// Asks for a frame of every output the host draws.
   pub(super) fn request_redraw(&mut self) {
     self.redraw_all = true;
+    self.damaged.extend(
+      self
+        .compositor
+        .outputs()
+        .into_iter()
+        .map(|view| view.handle),
+    );
   }
 
-  /// Asks for a frame of `output`. A capture of an output created over
-  /// IPC is drawn with any output's frame, so it asks for all of them.
+  /// Asks for a frame of `output`, which changed. A capture of an output
+  /// created over IPC is drawn with any output's frame, so it asks for all
+  /// of them.
   pub(super) fn request_redraw_on(&mut self, output: &OutputHandle) {
+    self.damaged.insert(output.clone());
+    self.redraw_for_capture(output);
+  }
+
+  /// Asks for a frame of `output` for a capture alone: unlike
+  /// [`Frontend::request_redraw_on`], it does not damage the output, so
+  /// that captures waiting for damage keep waiting.
+  pub(super) fn redraw_for_capture(&mut self, output: &OutputHandle) {
     let virtual_output = self
       .compositor
       .output_view(output)
@@ -250,7 +269,26 @@ impl Frontend {
       .filter(|view| overlaps(view.rect, rect))
       .map(|view| view.handle)
       .collect::<Vec<_>>();
+    self.damaged.extend(outputs.iter().cloned());
     self.redraw_outputs.extend(outputs);
+  }
+
+  /// Takes a capture the compositor asked for: an output's is answered by
+  /// that output's next frame, a window's by the next frame of the output
+  /// it is on.
+  pub(super) fn add_capture(&mut self, request: CaptureRequest) {
+    match &request.source {
+      CaptureSource::Output { output, .. } => {
+        let output = output.clone();
+        self.redraw_for_capture(&output);
+        self.captures.push(request);
+      }
+      CaptureSource::Window { window, .. } => {
+        let output = self.compositor.output_of_window(*window);
+        self.redraw_for_capture(&output);
+        self.window_captures.push(request);
+      }
+    }
   }
 
   /// Passes pending redraw requests on to the host, one per output it may
@@ -435,19 +473,31 @@ impl Frontend {
   pub(super) fn fail_undrawable_captures(&mut self) {
     let captures = std::mem::take(&mut self.captures);
     for capture in captures {
+      let CaptureSource::Output { output, .. } = &capture.source else {
+        continue;
+      };
       let drawable = self
         .compositor
-        .output_view(&capture.1)
+        .output_view(output)
         .is_some_and(|view| !view.dark)
-        && self.compositor.output_powered(&capture.1);
+        && self.compositor.output_powered(output);
       if drawable {
         self.captures.push(capture);
       } else {
-        self.compositor.finish_capture(
-          capture.0,
-          Err(format!("{} is not drawn", capture.1.name())),
-        );
+        let error = format!("{} is not drawn", output.name());
+        self.compositor.finish_capture(capture.id, Err(error));
       }
+    }
+    // A window on an output that is not drawn is drawn with the next
+    // frame of any output.
+    if !self.window_captures.is_empty()
+      && let Some(view) = self.compositor.outputs().into_iter().find(|view| {
+        view.kind != OutputKind::Virtual
+          && !view.dark
+          && self.compositor.output_powered(&view.handle)
+      })
+    {
+      self.redraw_for_capture(&view.handle);
     }
   }
 }

@@ -24,6 +24,10 @@ use wayland_protocols::{
     ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
     ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
   },
+  ext::image_copy_capture::v1::client::{
+    ext_image_copy_capture_cursor_session_v1, ext_image_copy_capture_frame_v1,
+    ext_image_copy_capture_session_v1,
+  },
   ext::session_lock::v1::client::{
     ext_session_lock_manager_v1::ExtSessionLockManagerV1,
     ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
@@ -184,6 +188,15 @@ pub(crate) struct Events {
   pub(crate) control_cancelled: Vec<ObjectId>,
   /// Every wlr-screencopy frame event, in order.
   pub(crate) screencopy: Vec<zwlr_screencopy_frame_v1::Event>,
+  /// Every ext-image-copy-capture session event, with its session.
+  pub(crate) capture_sessions:
+    Vec<(ObjectId, ext_image_copy_capture_session_v1::Event)>,
+  /// Every ext-image-copy-capture frame event, with its frame.
+  pub(crate) capture_frames:
+    Vec<(ObjectId, ext_image_copy_capture_frame_v1::Event)>,
+  /// Every ext-image-copy-capture cursor session event, in order.
+  pub(crate) cursor_sessions:
+    Vec<ext_image_copy_capture_cursor_session_v1::Event>,
   /// ext-foreign-toplevel-list handles with the app IDs they announced.
   pub(crate) ext_toplevels: Vec<(ExtForeignToplevelHandleV1, Option<String>)>,
   /// The `wl_buffer`s that received `release`, in order.

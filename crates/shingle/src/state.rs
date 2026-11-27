@@ -250,6 +250,9 @@ pub(crate) struct CompositorState {
   /// Reads of the host session's selections, for a nested backend.
   pub(crate) host_selection: crate::host_selection::HostSelections,
   pub(crate) screencopy: crate::screencopy::Screencopy,
+  /// Captures of both screencopy protocols.
+  pub(crate) captures: crate::capture::Captures,
+  pub(crate) image_copy_capture: crate::image_copy_capture::ImageCopyCapture,
   pub(crate) security_context: crate::security_context::SecurityContexts,
   pub(crate) alpha_modifiers: crate::alpha_modifier::AlphaModifiers,
   pub(crate) tearing_controls: crate::tearing::TearingControls,
@@ -449,6 +452,8 @@ impl CompositorState {
       primary_selection: Default::default(),
       host_selection: Default::default(),
       screencopy: Default::default(),
+      captures: Default::default(),
+      image_copy_capture: Default::default(),
       security_context: crate::security_context::SecurityContexts::new(
         config.security_privileged_protocols,
       ),
@@ -768,6 +773,7 @@ impl CompositorState {
       crate::primary_selection::create_global(handle);
     }
     crate::screencopy::create_global(handle);
+    crate::image_copy_capture::create_globals(handle, plugins.ext_toplevel);
     if plugins.shortcuts_inhibit {
       crate::shortcuts::create_global(handle);
     }
@@ -1585,6 +1591,7 @@ impl CompositorState {
       .launch_templates
       .retain(|client, _| !clients.contains(client));
     crate::data_control::cleanup_clients(self, &clients);
+    crate::capture::cleanup_clients(self, &clients);
     self.data_devices.cleanup_clients(&clients);
     self.primary_selection.cleanup_clients(&clients);
     for client in &clients {

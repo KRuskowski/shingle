@@ -248,6 +248,7 @@ pub enum TextureTransform {
 /// The fragment colour is the texture sample (opaque white without a
 /// texture) multiplied by `color`, then passed through the gamma ramp and the
 /// inversion effect, and blended as premultiplied alpha.
+#[derive(Clone)]
 pub struct RenderTile<'a> {
   /// Where the quad is drawn, before rotation, zoom and output transform.
   pub geometry: RenderRect,

@@ -21,6 +21,9 @@ pub(crate) fn reply(state: &CompositorState) -> Value {
     state.data_control.totals();
   let (primary_sources, primary_devices, primary_offers) =
     state.primary_selection.totals();
+  let (captures_waiting, captures_drawn) = state.captures.totals();
+  let (capture_sessions, capture_frames, cursor_sessions) =
+    state.image_copy_capture.totals();
   let bound_outputs = state
     .outputs
     .iter()
@@ -31,7 +34,7 @@ pub(crate) fn reply(state: &CompositorState) -> Value {
     .iter()
     .map(|(name, count)| ((*name).to_owned(), json!(count)))
     .collect::<Map<_, _>>();
-  json!({
+  let mut reply = json!({
     "result": "ok",
     "clients": state.launch_templates.len(),
     "ipc_clients": state.ipc_clients,
@@ -69,7 +72,23 @@ pub(crate) fn reply(state: &CompositorState) -> Value {
     "focus_recency": state.focus_recency.len(),
     "view_properties": state.view_properties.len(),
     "frontend": frontend,
-  })
+  });
+  // A second object: one `json!` of every count passes its recursion
+  // limit.
+  let captures = json!({
+    "screencopy_frames": state.screencopy.frames(),
+    "captures_waiting": captures_waiting,
+    "captures_drawn": captures_drawn,
+    "capture_sessions": capture_sessions,
+    "capture_frames": capture_frames,
+    "capture_cursor_sessions": cursor_sessions,
+  });
+  if let (Some(reply), Value::Object(captures)) =
+    (reply.as_object_mut(), captures)
+  {
+    reply.extend(captures);
+  }
+  reply
 }
 
 #[cfg(test)]

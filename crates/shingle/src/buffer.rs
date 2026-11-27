@@ -28,6 +28,11 @@ use crate::{
   linux_dmabuf::DmabufBuffer,
 };
 
+/// The `wl_shm` formats captures write: BGRA bytes, with or without
+/// alpha, as wlroots' screencopy offers them.
+pub(crate) const CAPTURE_SHM_FORMATS: [Format; 2] =
+  [Format::Argb8888, Format::Xrgb8888];
+
 /// A `wl_shm_pool`: the client's fd and its declared size.
 ///
 /// A pool whose fd carries `F_SEAL_SHRINK` cannot be truncated under the
@@ -358,15 +363,25 @@ impl Attachment {
     })
   }
 
-  /// Writes tightly packed RGBA rows into a `wl_shm` buffer, as
-  /// screencopy does, and releases it.
-  pub(crate) fn write_rgba(&self, rgba: &[u8]) -> Result<(), String> {
+  /// Writes tightly packed RGBA rows into a capture's `wl_shm` buffer of
+  /// one of [`CAPTURE_SHM_FORMATS`]. Capture buffers are not released:
+  /// the protocols leave `wl_buffer.release` unused.
+  pub(crate) fn write_capture(&self, rgba: &[u8]) -> Result<(), String> {
     let BufferContent::Shm(view) = &self.content else {
       return Err("buffer has no shared memory pool".into());
     };
-    view.write_rgba(self.width, self.height, rgba)?;
-    self.resource.release();
-    Ok(())
+    if !CAPTURE_SHM_FORMATS.contains(&view.format) {
+      return Err(format!("cannot capture into {:?} buffers", view.format));
+    }
+    view.write_rgba(self.width, self.height, rgba)
+  }
+
+  /// The `wl_shm` format of a shared-memory buffer.
+  pub(crate) fn shm_format(&self) -> Option<Format> {
+    match &self.content {
+      BufferContent::Shm(view) => Some(view.format),
+      _ => None,
+    }
   }
 
   pub(crate) fn validate_format(

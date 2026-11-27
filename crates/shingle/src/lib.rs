@@ -47,6 +47,7 @@ mod activation;
 mod alpha_modifier;
 mod buffer;
 mod buffer_lock;
+mod capture;
 mod clock;
 mod commit_queue;
 mod commit_timing;
@@ -66,6 +67,7 @@ pub mod frame;
 mod gamma_control;
 mod host_selection;
 mod idle_notify;
+mod image_copy_capture;
 mod input;
 mod input_device;
 mod input_method;
@@ -150,6 +152,7 @@ use wayland_server::{
 
 pub use buffer::ShmContent;
 pub use buffer_lock::BufferLock;
+pub use capture::{CaptureId, CaptureRequest, CaptureSource};
 pub use host_selection::{
   HostSelectionRequest, SelectionKind, SelectionOwner, SelectionSourceId,
 };
@@ -157,7 +160,6 @@ pub use linux_dmabuf::{
   DmabufBuffer, DmabufFeedback, DmabufFormat, DmabufImporter, DmabufPlane,
   fourcc_name,
 };
-pub use screencopy::CaptureId;
 pub use state::SurfaceId;
 use state::{ClientDataImpl, CompositorState};
 pub use xwayland::XwaylandSettings;
@@ -1173,21 +1175,12 @@ pub enum Event {
     /// The index of the set it shows now.
     wset: u32,
   },
-  /// A wlr-screencopy client asked for `region` of `output`, and frame
+  /// A capture client asked for an output region or a window, and frame
   /// capture is on ([`Compositor::set_frame_capture`]). The frontend
-  /// draws that output's frame as it shows it and answers with
-  /// [`Compositor::finish_capture`].
-  CaptureRequested {
-    /// The capture to answer.
-    id: CaptureId,
-    /// The captured output.
-    output: OutputHandle,
-    /// The captured rectangle in the output's logical pixels, with
-    /// (0, 0) at its top-left corner; the frontend answers with this
-    /// many pixels, which the compositor scales into the client's buffer
-    /// of physical pixels.
-    region: Rect,
-  },
+  /// draws it as it shows it and answers with
+  /// [`Compositor::finish_capture`]. Captures that waited for damage come
+  /// from [`Compositor::output_damaged`] instead.
+  CaptureRequested(CaptureRequest),
 }
 
 /// Why a [`Compositor`] call failed.
@@ -1569,6 +1562,9 @@ impl Compositor {
   /// socket fails. A single misbehaving client is disconnected with a protocol
   /// error rather than failing the call.
   pub fn poll(&mut self, timeout: Option<Duration>) -> Result<usize, Error> {
+    // Events of this turn tell captures without a frontend that something
+    // changed.
+    let events_before = self.state.events.len();
     output::restore(&mut self.state);
     self.state.reap_ipc_children();
     self
@@ -1618,6 +1614,9 @@ impl Compositor {
     data_device::sync_drag(&mut self.state, &self.display.handle());
     data_device::sync_icon(&mut self.state);
     data_control::sync(&mut self.state, &self.display.handle());
+    image_copy_capture::sync(&mut self.state);
+    let changed = self.state.events.len() > events_before;
+    capture::sync(&mut self.state, changed);
     primary_selection::sync_selection(&mut self.state, &self.display.handle());
     wayfire_shell::sync(&mut self.state, std::time::Instant::now());
     if let Some(xwayland) = &mut self.xwayland {
@@ -2475,14 +2474,29 @@ impl Compositor {
     self.state.syncobj.is_some()
   }
 
-  /// Makes wlr-screencopy `copy` and `copy_with_damage` emit
+  /// Makes wlr-screencopy and ext-image-copy-capture copies emit
   /// [`Event::CaptureRequested`] instead of compositing the surfaces'
   /// CPU pixels, for a frontend that renders: what it draws, with
   /// inversion, Scale, Expo and animations, is what clients capture, as
   /// in Wayfire, whose wlroots copies the rendered output. Without it,
   /// as in the headless backend, the compositor composites on the CPU.
+  /// The frontend then also reports damage with
+  /// [`Compositor::output_damaged`].
   pub fn set_frame_capture(&mut self, enabled: bool) {
-    self.state.screencopy.frame_capture = enabled;
+    self.state.captures.frame_capture = enabled;
+  }
+
+  /// Tells captures that `output`, and the windows on it, changed: the
+  /// frontend is drawing a frame of it for anything but a capture. Returns
+  /// the captures that waited for that damage (`copy_with_damage`, and
+  /// ext-image-copy-capture frames after a session's first), which the
+  /// frontend answers from the frame it is drawing, as it answers
+  /// [`Event::CaptureRequested`].
+  pub fn output_damaged(
+    &mut self,
+    output: &OutputHandle,
+  ) -> Vec<CaptureRequest> {
+    capture::damage(&mut self.state, &[capture::Damaged::Output(output.id())])
   }
 
   /// Makes `wl_shm` commits keep the client's buffer instead of copying
@@ -2507,18 +2521,19 @@ impl Compositor {
     self.state.frontend_counts.extend_from_slice(counts);
   }
 
-  /// Answers [`Event::CaptureRequested`] `id` with `result`: the region
-  /// in logical pixels as tightly packed RGBA8 rows, top to bottom, which
-  /// are scaled and turned into the client's buffer, in the output's
-  /// physical pixels, before `ready` is sent; or why it could not be
-  /// drawn, which sends `failed`. Pixels of the wrong size also fail. An
-  /// unknown `id`, or one whose frame was destroyed, is ignored.
+  /// Answers [`Event::CaptureRequested`] `id` with `result`: the source
+  /// in logical pixels ([`CaptureRequest::size`]) as tightly packed RGBA8
+  /// rows, top to bottom, which are scaled and turned into the client's
+  /// buffer, in the source's physical pixels, before `ready` is sent; or
+  /// why it could not be drawn, which sends `failed`. Pixels of the wrong
+  /// size also fail. An unknown `id`, or one whose frame was destroyed, is
+  /// ignored.
   pub fn finish_capture(
     &mut self,
     id: CaptureId,
     result: Result<Vec<u8>, String>,
   ) {
-    screencopy::finish(&mut self.state, id, result);
+    capture::finish(&mut self.state, id, result);
   }
 
   /// Sets key repeat for clients via `wl_keyboard.repeat_info`: `rate` in keys
@@ -3879,6 +3894,12 @@ impl Compositor {
   /// a window it drags on every output the window crosses with them.
   pub fn window_surfaces(&self, window: WindowId) -> Vec<SurfaceSnapshot> {
     self.state.window_surfaces(window)
+  }
+
+  /// The output `window` is on, or the active output for a window that
+  /// is gone.
+  pub fn output_of_window(&self, window: WindowId) -> OutputHandle {
+    OutputHandle::from(&self.state.output_of_window(window).id)
   }
 
   /// Whether any surface visible on `output` has asked for asynchronous

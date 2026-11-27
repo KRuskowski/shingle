@@ -16,6 +16,21 @@ use wayland_client::{
   },
 };
 use wayland_protocols::{
+  ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
+    ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
+  },
+  ext::image_capture_source::v1::client::{
+    ext_foreign_toplevel_image_capture_source_manager_v1 as toplevel_sources,
+    ext_image_capture_source_v1::ExtImageCaptureSourceV1,
+  },
+  ext::image_copy_capture::v1::client::{
+    ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1},
+    ext_image_copy_capture_manager_v1::{
+      ExtImageCopyCaptureManagerV1, Options,
+    },
+    ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
+  },
   wp::linux_dmabuf::zv1::client::{
     zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1,
   },
@@ -35,6 +50,9 @@ use wayland_protocols_wlr::{
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
   },
 };
+
+type ToplevelSources =
+  toplevel_sources::ExtForeignToplevelImageCaptureSourceManagerV1;
 
 /// The client's side of wayfire-shell-unstable-v2, which no protocol
 /// crate has.
@@ -82,15 +100,20 @@ pub(crate) struct Events {
   swipes: Vec<String>,
   /// The width of the last layer surface configure.
   layer_width: Option<u32>,
+  /// ext-foreign-toplevel-list handles and the app IDs they announced.
+  toplevels: Vec<(ExtForeignToplevelHandleV1, Option<String>)>,
+  /// The buffer size each ext-image-copy-capture session announced last.
+  session_sizes: Vec<(wayland_client::backend::ObjectId, (u32, u32))>,
   synced: bool,
 }
 
 /// The user data of a frame callback: the number the test gave it.
 pub(crate) struct FrameCallback(u32);
 
-/// A screencopy copy in flight, with the memory its buffer lives in.
+/// A screencopy or ext-image-copy-capture copy in flight, with the
+/// memory its buffer lives in.
 pub(crate) struct Capture {
-  _frame: ZwlrScreencopyFrameV1,
+  _frame: Box<dyn std::any::Any>,
   _buffer: wl_buffer::WlBuffer,
   fd: OwnedFd,
   size: usize,
@@ -294,13 +317,35 @@ impl TestClient {
     self.capture_on(compositor, 0, region)
   }
 
+  /// [`TestClient::capture`] with the cursor if `cursor`, and with
+  /// `copy_with_damage` if `with_damage`.
+  pub(crate) fn capture_with(
+    &mut self,
+    compositor: &mut Compositor,
+    region: (i32, i32, i32, i32),
+    cursor: bool,
+    with_damage: bool,
+  ) -> Capture {
+    self.capture_output(compositor, 0, region, (cursor, with_damage))
+  }
+
   /// [`TestClient::capture`] of the `nth` `wl_output` global announced,
   /// counted from 0.
   pub(crate) fn capture_on(
     &mut self,
     compositor: &mut Compositor,
     nth: usize,
+    region: (i32, i32, i32, i32),
+  ) -> Capture {
+    self.capture_output(compositor, nth, region, (false, false))
+  }
+
+  fn capture_output(
+    &mut self,
+    compositor: &mut Compositor,
+    nth: usize,
     (x, y, width, height): (i32, i32, i32, i32),
+    (cursor, with_damage): (bool, bool),
   ) -> Capture {
     let manager = self.bind::<ZwlrScreencopyManagerV1>(3);
     let name = self
@@ -318,7 +363,7 @@ impl TestClient {
       (),
     );
     let frame = manager.capture_output_region(
-      0,
+      i32::from(cursor),
       &output,
       x,
       y,
@@ -327,6 +372,28 @@ impl TestClient {
       &self.handle,
       (),
     );
+    let (buffer, fd, size) = self.capture_buffer(width, height);
+    if with_damage {
+      frame.copy_with_damage(&buffer);
+    } else {
+      frame.copy(&buffer);
+    }
+    self.roundtrip(compositor);
+    Capture {
+      _frame: Box::new(frame),
+      _buffer: buffer,
+      fd,
+      size,
+    }
+  }
+
+  /// A `width` by `height` ARGB8888 buffer for a capture, its memory and
+  /// size.
+  fn capture_buffer(
+    &self,
+    width: i32,
+    height: i32,
+  ) -> (wl_buffer::WlBuffer, OwnedFd, usize) {
     let size = width * height * 4;
     let fd = rustix::fs::memfd_create(
       "shingle-frontend-test-capture",
@@ -346,14 +413,52 @@ impl TestClient {
       &self.handle,
       (),
     );
-    frame.copy(&buffer);
+    (buffer, fd, size as usize)
+  }
+
+  /// Captures the window with `app_id` alone through
+  /// ext-image-copy-capture; returns the copy and the buffer's size.
+  pub(crate) fn capture_window(
+    &mut self,
+    compositor: &mut Compositor,
+    app_id: &str,
+  ) -> (Capture, (u32, u32)) {
+    let _list = self.bind::<ExtForeignToplevelListV1>(1);
     self.roundtrip(compositor);
-    Capture {
-      _frame: frame,
+    let handle = self
+      .events
+      .toplevels
+      .iter()
+      .find(|(_, known)| known.as_deref() == Some(app_id))
+      .map(|(handle, _)| handle.clone())
+      .expect("the window is listed");
+    let sources = self.bind::<ToplevelSources>(1);
+    let source = sources.create_source(&handle, &self.handle, ());
+    let manager = self.bind::<ExtImageCopyCaptureManagerV1>(1);
+    let session =
+      manager.create_session(&source, Options::empty(), &self.handle, ());
+    self.roundtrip(compositor);
+    let (width, height) = self
+      .events
+      .session_sizes
+      .iter()
+      .rev()
+      .find(|(id, _)| *id == session.id())
+      .map(|(_, size)| *size)
+      .expect("the session announced its buffer");
+    let (buffer, fd, size) = self.capture_buffer(width as i32, height as i32);
+    let frame = session.create_frame(&self.handle, ());
+    frame.attach_buffer(&buffer);
+    frame.damage_buffer(0, 0, width as i32, height as i32);
+    frame.capture();
+    self.roundtrip(compositor);
+    let capture = Capture {
+      _frame: Box::new((frame, session, source)),
       _buffer: buffer,
       fd,
-      size: size as usize,
-    }
+      size,
+    };
+    (capture, (width, height))
   }
 
   /// A `width` by `height` XRGB8888 linear DMA-BUF made with
@@ -442,6 +547,44 @@ impl TestClient {
     height: i32,
   ) {
     let buffer = self.shm_buffer(width, height);
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage(0, 0, width, height);
+    surface.commit();
+    self.roundtrip(compositor);
+  }
+
+  /// Attaches and commits a `width` by `height` shm buffer of one colour,
+  /// `bgra` bytes, on `surface`.
+  pub(crate) fn attach_colour(
+    &mut self,
+    compositor: &mut Compositor,
+    surface: &wl_surface::WlSurface,
+    (width, height): (i32, i32),
+    bgra: [u8; 4],
+  ) {
+    let shm = self.bind::<wl_shm::WlShm>(1);
+    let fd = rustix::fs::memfd_create(
+      "shingle-frontend-test-buffer",
+      rustix::fs::MemfdFlags::CLOEXEC,
+    )
+    .expect("memfd_create succeeds");
+    let pixels = bgra.repeat((width * height) as usize);
+    rustix::io::pwrite(&fd, &pixels, 0).expect("pwrite succeeds");
+    let pool = shm.create_pool(
+      rustix::fd::AsFd::as_fd(&fd),
+      width * height * 4,
+      &self.handle,
+      (),
+    );
+    let buffer = pool.create_buffer(
+      0,
+      width,
+      height,
+      width * 4,
+      wl_shm::Format::Argb8888,
+      &self.handle,
+      (),
+    );
     surface.attach(Some(&buffer), 0, 0);
     surface.damage(0, 0, width, height);
     surface.commit();
@@ -679,7 +822,90 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for Events {
   }
 }
 
+impl Dispatch<ExtForeignToplevelListV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ExtForeignToplevelListV1,
+    event: ext_foreign_toplevel_list_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } = event {
+      events.toplevels.push((toplevel, None));
+    }
+  }
+
+  wayland_client::event_created_child!(Events, ExtForeignToplevelListV1, [
+    ext_foreign_toplevel_list_v1::EVT_TOPLEVEL_OPCODE =>
+      (ExtForeignToplevelHandleV1, ()),
+  ]);
+}
+
+impl Dispatch<ExtForeignToplevelHandleV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    handle: &ExtForeignToplevelHandleV1,
+    event: ext_foreign_toplevel_handle_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let ext_foreign_toplevel_handle_v1::Event::AppId { app_id } = event
+      && let Some((_, known)) = events
+        .toplevels
+        .iter_mut()
+        .find(|(known, _)| known == handle)
+    {
+      *known = Some(app_id);
+    }
+  }
+}
+
+impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    session: &ExtImageCopyCaptureSessionV1,
+    event: ext_image_copy_capture_session_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let ext_image_copy_capture_session_v1::Event::BufferSize {
+      width,
+      height,
+    } = event
+    {
+      events.session_sizes.push((session.id(), (width, height)));
+    }
+  }
+}
+
+impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ExtImageCopyCaptureFrameV1,
+    event: ext_image_copy_capture_frame_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    match event {
+      ext_image_copy_capture_frame_v1::Event::Ready => {
+        events.captures.push("ready");
+      }
+      ext_image_copy_capture_frame_v1::Event::Failed { .. } => {
+        events.captures.push("failed");
+      }
+      _ => {}
+    }
+  }
+}
+
 ignore_events!(
+  ToplevelSources,
+  ExtImageCaptureSourceV1,
+  ExtImageCopyCaptureManagerV1,
   ZwlrLayerShellV1,
   ZwfShellManagerV2,
   wl_seat::WlSeat,

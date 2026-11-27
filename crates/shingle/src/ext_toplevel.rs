@@ -29,6 +29,18 @@ pub(crate) struct ExtToplevels {
   known: HashMap<WindowId, (String, String)>,
 }
 
+/// The window `handle` names, while it is open.
+pub(crate) fn window_of(
+  state: &CompositorState,
+  handle: &ExtForeignToplevelHandleV1,
+) -> Option<WindowId> {
+  state
+    .ext_toplevels
+    .handles
+    .get(&Resource::id(handle))
+    .and_then(|known| known.window)
+}
+
 pub(crate) fn create_global(handle: &DisplayHandle) {
   handle.create_global::<CompositorState, ExtForeignToplevelListV1, ()>(1, ());
 }

@@ -8,7 +8,8 @@ use std::{
 };
 
 use shingle::{
-  BufferSnapshot, OutputHandle, OutputKind, SurfaceId, SurfaceRole,
+  BufferSnapshot, CaptureRequest, CaptureSource, OutputHandle, OutputKind,
+  SurfaceId, SurfaceRole,
 };
 use shingle_core::WindowId as TileWindowId;
 use shingle_render::{
@@ -325,7 +326,10 @@ impl Frontend {
     let virtual_outputs = self
       .captures
       .iter()
-      .map(|(_, captured, _)| captured.clone())
+      .filter_map(|request| match &request.source {
+        CaptureSource::Output { output, .. } => Some(output.clone()),
+        CaptureSource::Window { .. } => None,
+      })
       .collect::<BTreeSet<_>>()
       .into_iter()
       .filter_map(|captured| self.compositor.output_view(&captured))
@@ -334,6 +338,7 @@ impl Frontend {
     for view in &virtual_outputs {
       self.draw_output(view, target, now, false)?;
     }
+    self.answer_window_captures(target);
     self.finish_frame(now);
     Ok(())
   }
@@ -394,6 +399,7 @@ impl Frontend {
       .switcher_view
       .as_ref()
       .is_some_and(|shown| shown.output == *output);
+    let cursor_ids: Vec<SurfaceId>;
     let (mut tiles, mut locks) = {
       let renderer = &mut *target;
       renderer.set_scale_factor(view.scale);
@@ -919,6 +925,11 @@ impl Frontend {
         .filter_map(|snapshot| snapshot.buffer.as_ref()?.dmabuf())
         .map(|content| content.lock.clone())
         .collect::<Vec<_>>();
+      cursor_ids = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.role == SurfaceRole::Cursor)
+        .map(|snapshot| snapshot.id)
+        .collect::<Vec<_>>();
       (tiles, locks)
     };
     if expo_here
@@ -1072,16 +1083,125 @@ impl Frontend {
       // A capture reads its frame back before it returns.
       drop(locks);
     }
-    // The tiles borrow textures from `self`, so only these two fields.
+    // The tiles borrow textures from `self`, so only these fields.
+    let cursors = scene
+      .drawn
+      .iter()
+      .filter(|id| cursor_ids.contains(id))
+      .filter_map(|id| self.textures.get(id))
+      .map(|texture| texture as *const GpuTexture)
+      .collect::<Vec<_>>();
+    if self.damaged.remove(output) {
+      for request in self.compositor.output_damaged(output) {
+        match request.source {
+          CaptureSource::Output { .. } => self.captures.push(request),
+          CaptureSource::Window { .. } => self.window_captures.push(request),
+        }
+      }
+    }
     answer_captures(
       &mut self.compositor,
       &mut self.captures,
       output,
       (rect.width, rect.height),
       renderer,
-      &tiles,
+      (&tiles, &cursors),
       background,
     );
+    Ok(())
+  }
+
+  /// Answers the window captures with each window's surfaces drawn alone
+  /// over transparent black, at the toplevel's logical size, without zoom
+  /// and without the cursor or anything else of the outputs.
+  fn answer_window_captures(&mut self, target: &mut dyn RenderTarget) {
+    for request in std::mem::take(&mut self.window_captures) {
+      let CaptureSource::Window { window, rect } = request.source else {
+        continue;
+      };
+      let result = self
+        .draw_window(window, rect, target)
+        .map_err(|error| error.to_string());
+      self.compositor.finish_capture(request.id, result);
+    }
+  }
+
+  /// RGBA rows of window `window`'s surfaces, drawn with the toplevel
+  /// surface's rectangle `rect`, in layout pixels, at the origin.
+  fn draw_window(
+    &mut self,
+    window: TileWindowId,
+    rect: shingle_core::Rect,
+    target: &mut dyn RenderTarget,
+  ) -> Result<Vec<u8>, Box<dyn Error>> {
+    let snapshots = self.compositor.window_surfaces(window);
+    if snapshots.is_empty() {
+      return Err("the window has no surfaces".into());
+    }
+    for snapshot in &snapshots {
+      self.prepare_texture(snapshot, &*target)?;
+    }
+    let tiles = snapshots
+      .iter()
+      .filter_map(|snapshot| {
+        let texture = self.textures.get(&snapshot.id)?;
+        let geometry = snapshot.geometry;
+        let mut tile = RenderTile::textured(
+          RenderRect {
+            x: geometry.x - rect.x,
+            y: geometry.y - rect.y,
+            width: geometry.width,
+            height: geometry.height,
+          },
+          texture,
+        );
+        tile.color = [snapshot.opacity; 4];
+        if let Some(buffer) = &snapshot.buffer {
+          apply_buffer(&mut tile, buffer);
+        }
+        Some(tile)
+      })
+      .collect::<Vec<_>>();
+    target.set_zoom(1.0, 0.0, 0.0);
+    Ok(target.capture(&tiles, [0.0; 4], (rect.width, rect.height))?)
+  }
+
+  /// Makes sure `snapshot`'s buffer has a texture, as drawing an output
+  /// does, for a window that may be on no output's screen.
+  fn prepare_texture(
+    &mut self,
+    snapshot: &shingle::SurfaceSnapshot,
+    renderer: &dyn RenderTarget,
+  ) -> Result<(), Box<dyn Error>> {
+    let Some(buffer) = &snapshot.buffer else {
+      return Ok(());
+    };
+    if let Some(content) = buffer.dmabuf() {
+      let texture = self
+        .dmabuf
+        .as_ref()
+        .and_then(|cache| cache.borrow_mut().texture(&content.buffer));
+      if let Some(texture) = texture {
+        self.textures.insert(snapshot.id, texture);
+      }
+      return Ok(());
+    }
+    if let Some(content) = buffer.shm() {
+      if content.is_locked() {
+        self.upload_shm(snapshot.id, buffer, content, false);
+      }
+      return Ok(());
+    }
+    let missing = self.textures.get(&snapshot.id).is_none_or(|texture| {
+      texture.is_imported()
+        || texture.width() != buffer.width
+        || texture.height() != buffer.height
+    });
+    if missing && let Some(rgba) = buffer.rgba() {
+      let texture =
+        renderer.create_texture(buffer.width, buffer.height, &rgba)?;
+      self.textures.insert(snapshot.id, texture);
+    }
     Ok(())
   }
 
@@ -1240,35 +1360,52 @@ impl Frontend {
   }
 }
 
-/// Answers the screencopy `captures` of `output` requested since its last
+/// Answers the output `captures` of `output` requested since its last
 /// frame with the frame just built from `tiles`, which are relative to the
 /// output: drawn once more offscreen at the output's logical `size` and cut
 /// to each capture's region, which the compositor scales into the client's
-/// buffer. Captures of other outputs wait for their own frames.
+/// buffer. Captures without the cursor are drawn without the tiles of the
+/// `cursors` textures. Captures of other outputs wait for their own
+/// frames.
 fn answer_captures(
   compositor: &mut shingle::Compositor,
-  captures: &mut Vec<(
-    shingle::CaptureId,
-    shingle::OutputHandle,
-    shingle_core::Rect,
-  )>,
+  captures: &mut Vec<CaptureRequest>,
   output: &OutputHandle,
   size: (u32, u32),
   target: &mut dyn RenderTarget,
-  tiles: &[RenderTile<'_>],
+  (tiles, cursors): (&[RenderTile<'_>], &[*const GpuTexture]),
   background: [f64; 4],
 ) {
-  if !captures.iter().any(|(_, captured, _)| captured == output) {
-    return;
-  }
-  let frame = target
-    .capture(tiles, background, size)
-    .map_err(|error| error.to_string());
   let (mine, others) = std::mem::take(captures)
     .into_iter()
-    .partition::<Vec<_>, _>(|(_, captured, _)| captured == output);
+    .partition::<Vec<_>, _>(|request| {
+      matches!(&request.source,
+        CaptureSource::Output { output: captured, .. } if captured == output)
+    });
   *captures = others;
-  for (id, _, region) in mine {
+  if mine.is_empty() {
+    return;
+  }
+  let mut with = None;
+  let mut without = None;
+  for request in mine {
+    let CaptureSource::Output { region, .. } = request.source else {
+      continue;
+    };
+    let frame = if request.cursor || cursors.is_empty() {
+      with.get_or_insert_with(|| {
+        target
+          .capture(tiles, background, size)
+          .map_err(|error| error.to_string())
+      })
+    } else {
+      without.get_or_insert_with(|| {
+        let tiles = without_cursor(tiles, cursors);
+        target
+          .capture(&tiles, background, size)
+          .map_err(|error| error.to_string())
+      })
+    };
     let result = frame.as_ref().map_err(Clone::clone).map(|rgba| {
       crop_rgba(
         rgba,
@@ -1278,8 +1415,24 @@ fn answer_captures(
         (region.width, region.height),
       )
     });
-    compositor.finish_capture(id, result);
+    compositor.finish_capture(request.id, result);
   }
+}
+
+/// `tiles` without those that draw one of the `cursors` textures.
+fn without_cursor<'a>(
+  tiles: &[RenderTile<'a>],
+  cursors: &[*const GpuTexture],
+) -> Vec<RenderTile<'a>> {
+  tiles
+    .iter()
+    .filter(|tile| {
+      tile.texture.is_none_or(|texture| {
+        !cursors.contains(&(texture as *const GpuTexture))
+      })
+    })
+    .cloned()
+    .collect()
 }
 
 /// The `width` by `height` rectangle at (`x`, `y`) of `rgba`, a frame of

@@ -35,7 +35,7 @@ use std::{
 };
 
 use shingle::{
-  CaptureId, Compositor, Config, Direction, Event, InputDeviceId,
+  CaptureRequest, Compositor, Config, Direction, Event, InputDeviceId,
   InputDeviceKind, OutputHandle, SurfaceId, SurfaceRole,
 };
 use shingle_config::{
@@ -204,9 +204,14 @@ pub struct Frontend {
   /// Where the cursor was when it was last looked at, to redraw where it
   /// moved.
   drawn_cursor: Option<cursor::DrawnCursor>,
-  /// Screencopy captures the next frame of their output answers, with
-  /// their outputs and regions.
-  captures: Vec<(CaptureId, OutputHandle, shingle_core::Rect)>,
+  /// Output captures the next frame of their output answers.
+  captures: Vec<CaptureRequest>,
+  /// Window captures, which the next frame of any output answers.
+  window_captures: Vec<CaptureRequest>,
+  /// The outputs that changed since their last frame: their next frame,
+  /// unless drawn only for a capture, is damage to captures
+  /// ([`shingle::Compositor::output_damaged`]).
+  damaged: HashSet<OutputHandle>,
   /// Imported DMA-BUF textures and the locks of frames in flight, once
   /// linux-dmabuf is offered.
   dmabuf: Option<Rc<RefCell<crate::dmabuf::DmabufTextures>>>,
@@ -574,6 +579,8 @@ impl Frontend {
       hardware_cursors: HashSet::new(),
       drawn_cursor: None,
       captures: Vec::new(),
+      window_captures: Vec::new(),
+      damaged: HashSet::new(),
       dmabuf: None,
       uploader: None,
       uploaded: HashSet::new(),
@@ -850,10 +857,7 @@ impl Frontend {
         | Event::FocusChanged { .. }
         | Event::GeometryChanged { .. }
         | Event::LockStateChanged(_) => {}
-        Event::CaptureRequested { id, output, region } => {
-          self.request_redraw_on(&output);
-          self.captures.push((id, output, region));
-        }
+        Event::CaptureRequested(request) => self.add_capture(request),
       }
     }
     self.fail_undrawable_captures();
