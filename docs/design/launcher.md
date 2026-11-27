@@ -24,7 +24,11 @@ Sources: Shingle on branch `shingle-launcher`, cut from `master` at `a546046`; G
 | 12 | Theming | A `launcher:` section in Shingle's YAML config: panel size, font size, colours (backdrop, panel, field, text, dim text, accent, selection), terminal and renderer. Colours are the bytes shown, as every colour of Shingle's config. Defaults are a dark slate panel with a blue accent. A Wayfire or i3 configuration gets the defaults. |
 | 13 | Launching | Commands run through crates/shingle-session's `launch_command` (`/bin/sh -c`) with a `ClientEnvironment` built from the launcher's own environment, which Shingle (or Wayfire) gave it: its `WAYLAND_DISPLAY`, `DISPLAY` and `WAYFIRE_SOCKET` pass on and `WAYLAND_SOCKET` never does. Shingle learns each window's launch identity from `/proc` as for any client, so session restore relaunches it. |
 | 14 | Binding | `data/shingle.yaml` binds `super+space` to `shingle-launcher`. The Wayfire import is unchanged: a `[command]` binding that runs rofi stays as it is, and no launcher binding is added. |
-| 15 | Startup target | First frame under 100 ms after `exec` in a release build on this host, measured by the launcher itself and by the GPU harness. Met: 44 to 53 ms median of warm starts ([As built](#as-built)). |
+| 15 | Startup target | First frame under 100 ms after `exec` in a release build on this host, measured by the launcher itself and by the GPU harness. Met: 44 to 53 ms median of warm starts ([As built](#as-built)), and still met with icons ([Icons as built](#icons-actions-scale-and-wcm-as-built)). |
+| 16 | Icons | Each entry's `Icon` is looked up as the Icon Theme Specification says (the theme of `launcher.icon_theme`, else KDE's or GTK's setting, its parents, `hicolor`, the pixmaps directories), PNG and SVG are decoded at the drawn size in device pixels, and the result is cached in one file per theme and size. The first frame draws what the cache holds; the rest is decoded in a thread and drawn as it arrives ([section 12](#12-icons)). |
+| 17 | Desktop actions | `[Desktop Action …]` groups are sub-entries: search lists an action when the query matches its name, and the entry's context menu, opened by a right click, the Menu key or Shift+F10, starts with its actions ([section 13](#13-desktop-actions)). |
+| 18 | Fractional scale | With `wp_fractional_scale_v1` and `wp_viewporter` the buffer has the output's device pixels at the preferred scale and the viewport gives its logical size; Gloomy draws text at that scale and icons are decoded at it ([section 2](#2-surface)). |
+| 19 | WCM | A Launcher page in shingle-wcm edits the `launcher:` section like the other pages ([section 8](#8-theming)). |
 
 ## What exists today
 
@@ -51,7 +55,7 @@ The launcher creates one `zwlr_layer_surface_v1` on the overlay layer with names
 
 The buffer covers the output. Outside the panel it is a translucent black backdrop (`launcher.colors.backdrop`, premultiplied `ARGB8888`), which is written once per buffer; each frame then draws only the panel and copies its rectangle into the free buffer, damaging that rectangle alone. A click on the backdrop closes the launcher, as clicking outside rofi does.
 
-The panel is `launcher.width` × `launcher.height` logical pixels, centred, and shrinks to fit a smaller output. The buffer scale follows `wl_surface.preferred_buffer_scale` (version 6) when the compositor sends it, else 1; Gloomy draws at that scale factor.
+The panel is `launcher.width` × `launcher.height` logical pixels, centred, and shrinks to fit a smaller output. When the compositor offers both `wp_fractional_scale_v1` and `wp_viewporter`, the launcher asks for the surface's preferred fractional scale, makes its buffer the output's logical size times that scale in device pixels, sets the buffer scale to 1 and the viewport's destination to the logical size, and Gloomy draws at that scale factor, so that text is rasterised at its device size; the panel's device rectangle comes from its rounded edges, so it meets the backdrop without a gap. Without them the buffer scale follows `wl_surface.preferred_buffer_scale` (version 6) when the compositor sends it, else 1.
 
 ### Rejected alternatives
 
@@ -107,7 +111,7 @@ The launcher prints `shingle-launcher: first frame after N ms` with `--timing`, 
 
 ### Decision
 
-**Desktop entries.** The launcher reads `applications/` under `$XDG_DATA_HOME` (default `~/.local/share`) and then each directory of `$XDG_DATA_DIRS` (default `/usr/local/share:/usr/share`), recursively. An entry's desktop file ID is its path below `applications/` with `/` replaced by `-`; the first directory that has an ID wins, so a user's copy overrides the system's, and a user's `Hidden=true` copy removes it. It keeps `Type=Application` entries and drops `NoDisplay=true`, `Hidden=true`, entries whose `OnlyShowIn` does not name, or `NotShowIn` names, a desktop of `$XDG_CURRENT_DESKTOP`, and entries whose `TryExec` is not an executable. It reads `Name`, `GenericName`, `Comment`, `Keywords`, `Categories`, `Exec`, `Path`, `Terminal` and `Icon`, with the best locale variant for `LC_MESSAGES`/`LANG` (`lang_COUNTRY`, then `lang`, then none). Actions (`[Desktop Action …]`) are not shown in the first version.
+**Desktop entries.** The launcher reads `applications/` under `$XDG_DATA_HOME` (default `~/.local/share`) and then each directory of `$XDG_DATA_DIRS` (default `/usr/local/share:/usr/share`), recursively. An entry's desktop file ID is its path below `applications/` with `/` replaced by `-`; the first directory that has an ID wins, so a user's copy overrides the system's, and a user's `Hidden=true` copy removes it. It keeps `Type=Application` entries and drops `NoDisplay=true`, `Hidden=true`, entries whose `OnlyShowIn` does not name, or `NotShowIn` names, a desktop of `$XDG_CURRENT_DESKTOP`, and entries whose `TryExec` is not an executable. It reads `Name`, `GenericName`, `Comment`, `Keywords`, `Categories`, `Exec`, `Path`, `Terminal`, `Icon` and `Actions`, with the best locale variant for `LC_MESSAGES`/`LANG` (`lang_COUNTRY`, then `lang`, then none), and each action listed in `Actions` from its `[Desktop Action ID]` group ([section 13](#13-desktop-actions)).
 
 **Commands on `$PATH`.** Every regular executable file in each `$PATH` directory, by name, deduplicated with the first directory winning, as rofi's run mode lists them. They have no category and show only in search results (a `/usr/bin` of thousands would bury All), and a desktop entry whose `Exec` program has the same name hides the plain command, so `firefox` appears once.
 
@@ -115,7 +119,7 @@ The launcher prints `shingle-launcher: first frame after N ms` with `--timing`, 
 
 **Categories.** An entry's default category is the first freedesktop main category it lists, shown by a readable name: AudioVideo, Audio and Video as Multimedia, Development, Education, Game as Games, Graphics, Network as Internet, Office, Science, Settings, System, Utility as Accessories; an entry with none goes to Other.
 
-**Cache.** The scanned index is JSON in `$XDG_CACHE_HOME/shingle/launcher-index.json`, versioned so that an incompatible cache is ignored. The start uses the cache; after the first frame a thread always rescans everything and, when the result differs, writes the cache and sends it to the main loop, which shows it keeping the selection. With no cache the first start scans before drawing.
+**Cache.** The scanned index is JSON in `$XDG_CACHE_HOME/shingle/launcher-index.json`, versioned so that an incompatible cache is ignored (version 2 added icons and actions). The start uses the cache; after the first frame a thread always rescans everything and, when the result differs, writes the cache and sends it to the main loop, which shows it keeping the selection. With no cache the first start scans before drawing.
 
 ### Rejected alternatives
 
@@ -182,6 +186,7 @@ launcher:
   font_size: 16
   renderer: auto          # auto, software or hardware
   terminal: ""            # "" picks $TERMINAL, foot, kitty, alacritty, xterm
+  icon_theme: ""          # "" follows KDE's or GTK's setting, then hicolor
   colors:
     backdrop: [0.0, 0.0, 0.0, 0.45]
     panel: [0.11, 0.12, 0.15, 1.0]
@@ -193,6 +198,8 @@ launcher:
 ```
 
 Colours are `[r, g, b, a]` in 0 to 1, like the rest of Shingle's config, and show as those values times 255. The accent is lightened for text on the panel (the caret, special category titles, the Run row, favourite marks).
+
+shingle-wcm has a Launcher page (`shingle-wcm --page launcher`) for the section: width, height, font size, icon theme, renderer and terminal as text fields, and each colour as `R G B A` (or `#RRGGBB`), checked by the config's own validation when the page is left or saved, as on every other page. The launcher reads the config at each start, so nothing has to be reloaded.
 
 ## 9. Launching
 
@@ -234,6 +241,7 @@ Keys, always available unless a prompt is open:
 | Ctrl+H | Hides the selected entry, or shows it again in Hidden. |
 | Ctrl+Up, Ctrl+Down | Moves the selected entry up or down in its category or in Favourites. |
 | Delete | Removes the selected shortcut. |
+| Menu, Shift+F10 | Opens the selected entry's context menu beside it, its desktop actions first; Up, Down and Enter choose. |
 
 A prompt replaces the search field with a labelled field (`Rename to:`, `Shortcut name:`, `Command:`, `Move to category:`); Enter accepts and Escape cancels. Ctrl+Backspace deletes a word, Ctrl+U the line.
 
@@ -245,6 +253,41 @@ Mouse:
 - The wheel scrolls the list.
 
 The keyboard path does not wait for the mouse path: the categories and favourites are shown from the first frame, and typing switches to results without any mode change.
+
+## 12. Icons
+
+### Decision
+
+Every row has an icon column of `round(1.75 × font_size)` logical pixels (28 at the default 16). The icon is the entry's `Icon`, or for an action its own `Icon` and else the entry's.
+
+**Theme.** `launcher.icon_theme`, else the desktop's setting: under KDE (`KDE` in `$XDG_CURRENT_DESKTOP`) `[Icons] Theme` of `$XDG_CONFIG_HOME/kdeglobals` before GTK's, elsewhere GTK's `gtk-icon-theme-name` of `gtk-4.0/settings.ini`, then `gtk-3.0/settings.ini`, before KDE's; else `hicolor`. GNOME's dconf setting is not read.
+
+**Lookup.** As the Icon Theme Specification 0.13 says: base directories `$HOME/.icons`, `$XDG_DATA_HOME/icons` and each `$XDG_DATA_DIRS/icons`; in the theme's `index.theme` directories (and `ScaledDirectories`), one whose `Size`, `Scale`, `Type`, `MinSize`, `MaxSize` and `Threshold` match the icon size at the integer scale above the fractional one wins, else the closest by `DirectorySizeDistance`; then the theme's `Inherits`, depth first, then `hicolor`, then the unthemed pixmaps directories (each `$XDG_DATA_DIRS/pixmaps`, then `/usr/share/pixmaps`). An absolute `Icon` is used as it is, and a name with a `.png` or `.svg` extension is looked up without it. Each directory is listed once and its file names kept, so a lookup costs no `stat` per candidate. Only PNG and SVG are searched: XPM is not decoded.
+
+**Decoding.** An SVG is drawn by resvg (Gloomy's version, 0.36) into a square of the icon's device pixels, centred with its aspect ratio; text in it is not drawn, since no fonts are loaded. A PNG is scaled into that square with its alpha premultiplied, so transparent pixels do not darken the edges. Icons are straight RGBA, uploaded once per decoded icon as a non-sRGB texture, so an icon shows as its file's bytes as the panel's colours do, and drawn one texel per device pixel.
+
+**Cache and start.** Decoded icons are kept in `$XDG_CACHE_HOME/shingle/launcher-icons/THEME-SIZE-PIXELS.bin`: for each name the file found (or none), its modification time and its pixels. The first draw reads the file of the size it draws at, so a warm start's first frame has every icon it had before. After the first frame a thread looks up what the file lacks, decodes what is new or whose file's time changed, hands each icon to the main loop as it is ready, where the next frame draws it, and writes the file at the end. Icons the file already knows are only checked by their file's time, unless the file is older than a day, when every name is looked up again, which finds icons installed into a theme since. A row whose icon is missing, or not loaded yet, shows its name's first letter in a tile.
+
+### Rejected alternatives
+
+- **A generic theme icon (`application-x-executable`) for entries without one.** It needs a lookup of its own, differs between themes, and a letter tells entries apart.
+- **Decoding before the first frame.** A cold start of a few hundred SVGs takes far longer than the whole budget; the cache makes the warm start as fast as without icons, and a cold one shows letters for a moment.
+- **Gloomy's `Image` and `Icon` widgets.** At the pinned commit they place images in logical pixels on a target of device pixels, so at any scale but 1 they land in the wrong place, they sample an sRGB texture into the panel's linear target, which darkens them, and its image shader flips textures vertically. The launcher draws through Gloomy's `ImageRenderer` itself, in device pixels, with the rows uploaded bottom first; a fix belongs in Gloomy's own repository.
+
+## 13. Desktop actions
+
+### Decision
+
+The actions an entry lists in `Actions`, in that order, are kept with it: their `Name` (localised), `Icon` and `Exec`, made into a command line as the entry's, with the entry's `Path` and `Terminal`. An action without `Exec`, which only D-Bus activation could run, is left out.
+
+**Search.** An action is a result when the query matches its own name, or matches the entry's name and the action's together while the entry's name alone does not: `firefox` lists Firefox only, `private` and `fire priv` list "New Private Window" under it. Its score is the better of the two matches less 0.4, so an action ranks below an entry that matches as well, plus its own frecency, recorded under `ENTRY#ACTION`. The row shows the action's name with its entry's name on the right, and Enter launches it. Edits (Ctrl+D, F2 and the rest) apply to entries, not to an action's row.
+
+**Menu.** An entry's context menu starts with its actions, then the edits. A right click opens it at the pointer, and the Menu key or Shift+F10 opens it below the selected row, so the actions are two keys away: Menu, Enter starts the first.
+
+### Rejected alternatives
+
+- **Actions expanded as rows under the entry by Right.** Left and Right already change category when nothing is typed, and an expanding list moves every row below it, which the pointer then misses.
+- **Listing every action of every match.** Typing a browser's name would bury the next result under its actions.
 
 ## 11. Testing
 
@@ -268,17 +311,24 @@ The operator was not available; each open question got the default the lead prop
 10. **Theme in Shingle's config, `launcher:`.** One place for the look of the desktop; WCM's palette as defaults.
 11. **Launching with `launch_command` and the launcher's own client environment.** That environment is already the one Shingle or Wayfire gives its children; Shingle's launch identities need nothing more.
 12. **`super+space` as the default binding.** `super+d`, rofi's usual key, is Shingle's show-desktop, and `super` alone toggles shell menus.
-13. **No desktop actions, icons or file arguments in the first version.** Icons need an icon theme lookup and image decoding on the start path; they are listed under open items.
+13. **No file arguments.** The launcher opens no files, so `%f`, `%F`, `%u` and `%U` expand to nothing. (Desktop actions and icons, left out of the first version, were added; Decisions 17 to 24.)
 14. **Commands on `$PATH` only in search results.** They have no category, and thousands of them in All would bury the applications; typing finds them as rofi's run mode does.
 15. **The category column is the keyboard's second axis, not a focus.** Tab and Left/Right change category; Shift+F2 and Ctrl+Shift+arrows edit the category, so no key moves a focus between two columns and typing always goes to the search.
 16. **Colours are bytes, not sRGB-encoded.** The panel is drawn into a linear `Bgra8Unorm` texture, so a configured colour shows as its values times 255, as `background_color` does in Shingle.
+17. **Icons by the Icon Theme Specification, PNG and SVG only.** The theme is `launcher.icon_theme`, else KDE's under KDE and GTK's elsewhere, falling back to the other, then `hicolor`, then pixmaps; GNOME's dconf is not read and XPM is not decoded.
+18. **One cache file per theme, icon size and device size, read at the first draw.** Icons the cache lacks are decoded in a thread after the first frame and drawn as they arrive, so the warm start does not change and a cold one shows letter tiles first. Known icons are checked by their file's time on each start and looked up again once the cache is a day old; an application that the background rescan finds gets its icon at the next start.
+19. **A letter tile for a missing icon**, not a theme's generic icon.
+20. **Icons drawn beside Gloomy's widgets**, through its `ImageRenderer` in device pixels from a non-sRGB texture uploaded bottom row first, since its `Image` widget is misplaced at scales other than 1, darkened by its sRGB texture and flipped by its shader at the pinned commit (section 12). Gloomy is not changed from this workspace.
+21. **Actions are search results when their own name matches, and the first items of the entry's context menu**, which the Menu key and Shift+F10 open by keyboard; no key expands them in the list, so no key collides with Left and Right changing category. Their launches count for frecency under `ENTRY#ACTION`.
+22. **Fractional scale through `wp_fractional_scale_v1` with `wp_viewporter`**, the buffer at the output's device pixels; the integer buffer scale remains for compositors without them.
+23. **The WCM page uses text fields like the other pages**, the renderer typed as `auto`, `software` or `hardware`, checked by the config's validation.
+24. **STIPC knows `KEY_COMPOSE`** (the Menu key, as libevdev names it), so the harness can press it; Wayfire's stipc already takes every libevdev name.
 
 ## Open items
 
-- Icons from the icon theme, loaded after the first frame.
-- Desktop actions (`[Desktop Action …]`) as sub-entries.
-- Fractional scale (`wp_fractional_scale_v1`); integer buffer scale only for now.
-- An entry in WCM for the `launcher:` theme.
+- XPM icons, text in SVG icons and GNOME's dconf icon theme setting.
+- An icon for an application installed while the launcher is open appears at the next start.
+- Gloomy's `Image` widget at scales other than 1, its sRGB textures and its flipped image shader, to be fixed in Gloomy's repository; the launcher then need not draw icons itself.
 
 ## As built
 
@@ -289,3 +339,15 @@ Built on branch `shingle-launcher` in crates/shingle-launcher, with the `launche
 - **Startup**: 44 to 53 ms median from `main` to the first committed buffer over seven warm starts, in three runs (40.2 to 58.7 ms in all), 2 to 3 ms more from `exec` as the harness sees it, in the GPU harness's namespace on this host with the release build on lavapipe; the very first start, with no index cache and an empty Mesa shader cache, took 167 to 188 ms. The design's 100 ms target holds.
 - **Verification**: 68 unit tests in the crate and 4 for the config section; the GPU harness's group `launcher` (tools/gpu_test/launcher_checks.py), 18 checks with the run under headless Wayfire, all passing ([status.md](../status.md#application-launcher)).
 - **Wayfire**: run under the host's `wayfire` 0.9, headless inside the GPU harness's namespace, never under the operator's session. Wayfire configures the layer surface at 0x0 first and then at the output's size, which the launcher now waits through. It uses nothing Shingle-specific: wlr-layer-shell, `wl_shm`, `wl_seat` and, when offered, cursor-shape.
+
+### Icons, actions, scale and WCM as built
+
+Built on branch `shingle-launcher-icons` (2026-11-27), with sections 2, 5, 8 and 10 updated and sections 12 and 13 and Decisions 17 to 24 added.
+
+- **Icons**: crates/shingle-launcher/src/icons.rs (`IconPaths`, `IconLookup`, `theme_name`), crates/shingle-launcher/src/icon_cache.rs (`IconStore`, `decode_svg`, `decode_png`, `resolve`, the cache file), the icon slots and letter tiles in view.rs (`IconSlot`), their drawing in render.rs (`Renderer::draw`, `icon_texture`), and the cache read at the first draw and the thread after it in client.rs (`load_icons`, `start_icons`). `launcher.icon_theme` is in crates/shingle-config/src/launcher.rs.
+- **Actions**: `[Desktop Action]` groups in desktop.rs (`DesktopEntry::action`), `EntryAction` and `action_id` in index.rs (cache version 2), action candidates in search.rs (`action_score`) and catalog.rs (`Found`), `Row::Action`, `MenuAction::Action`, `Key::Menu` and `Key::F10` in model.rs.
+- **Scale**: client.rs binds `wp_fractional_scale_v1` and `wp_viewporter` and draws at `State::scale`; `--screenshot` takes `--scale` and writes a PPM for a `.ppm` path, which the harness compares with its captures.
+- **WCM**: the Launcher page in crates/shingle-wcm/src/ui.rs (`launcher_page`) and its fields in crates/shingle-wcm/src/app.rs (`sync_page`), with `LauncherRenderer::as_str` and `FromStr`.
+- **Shingle** changed in three places the real runs found. A layer surface's geometry took its buffer's pixels as logical pixels, so a buffer at scale 2, or one of device pixels behind a viewport, covered twice or 1.5 times its size (crates/shingle/src/layer_shell.rs, `geometry`). An shm screencopy of a scaled output was drawn in logical pixels and repeated into the client's buffer, so `grim` at 1.25, 1.5 or 2 showed blocks rather than what the output shows; an untransformed scaled output is now drawn again in its device pixels and the buffer cut from that (crates/shingle-render/src/target.rs, `capture_frame_scaled`; crates/shingle-frontend/src/frontend/scene.rs, `answer_captures`; crates/shingle/src/capture.rs, `crop_device`). STIPC takes `KEY_COMPOSE` (crates/shingle/src/ipc.rs, `evdev_code`).
+- **Startup**: 44.2 to 45.6 ms median from `main` to the first committed buffer over seven warm starts with icons, in four runs (40.5 to 58.5 ms in all), 2 to 3 ms more from `exec`, as before icons; the first start with neither cache took 169 to 193 ms and draws letter tiles, whose icons appear in the following frames. Warm starts draw every icon in their first frame from the cache.
+- **Verification**: 20 new unit tests in the crate, 1 for the config section, 2 in WCM and 4 for the Shingle changes; the GPU harness's group `launcher`, 32 checks, all passing ([status.md](../status.md#application-launcher)).

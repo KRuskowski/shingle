@@ -147,6 +147,8 @@
 | The launcher's `launcher:` config section (`LauncherConfig`) | `crates/shingle-config/src/launcher.rs` |
 | Launcher discovery, index cache, matching, frecency, layout file, categories, keys and edits | `crates/shingle-launcher/src/index.rs`, `matching.rs`, `search.rs`, `history.rs`, `layout.rs`, `catalog.rs`, `model.rs` (tests in `model/tests.rs`) |
 | Launcher panel as Gloomy widgets, drawing on lavapipe and readback, layer surface and input | `crates/shingle-launcher/src/view.rs`, `render.rs`, `shm.rs`, `client.rs`; real-run checks `tools/gpu_test/launcher_checks.py` |
+| Launcher icons: icon theme lookup, decoding and the icon cache | `crates/shingle-launcher/src/icons.rs`, `icon_cache.rs` |
+| WCM's pages, the Launcher page among them | `crates/shingle-wcm/src/ui.rs`, `app.rs` |
 
 ## Design rules
 
