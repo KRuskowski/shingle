@@ -3257,6 +3257,7 @@ dependencies = [
  "pollster 0.3.0",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "wgpu 0.20.1",
 ]

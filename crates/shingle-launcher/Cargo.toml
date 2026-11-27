@@ -11,6 +11,7 @@ gloomy-core.workspace = true
 pollster = "0.3"
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 wgpu = "0.20"
 
 [dev-dependencies]
