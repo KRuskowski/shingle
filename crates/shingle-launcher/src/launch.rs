@@ -16,7 +16,8 @@ use crate::{desktop::shell_quote, index::find_executable, model::Launch};
 const TERMINALS: [&str; 4] = ["foot", "kitty", "alacritty", "xterm"];
 
 /// The terminal for entries with `Terminal=true`: `configured` when set,
-/// else `$TERMINAL`, else the first of [`TERMINALS`] on `path_dirs`.
+/// else `$TERMINAL`, else the first of foot, kitty, alacritty and xterm
+/// on `path_dirs`.
 pub fn pick_terminal(
   configured: &str,
   environment_terminal: Option<OsString>,
