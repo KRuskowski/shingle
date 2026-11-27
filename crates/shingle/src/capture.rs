@@ -108,7 +108,10 @@ pub(crate) enum Damaged {
 /// output, as wlroots tracks it, or one ext-image-copy-capture session.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum DamageKey {
-  Screencopy(ClientId, OutputId),
+  /// A client's captures of an output, with or without the cursor: a
+  /// portal's streams of one output with either cursor mode come from one
+  /// client, and each needs its own first frame.
+  Screencopy(ClientId, OutputId, bool),
   Session(ObjectId),
 }
 
@@ -677,7 +680,7 @@ pub(crate) fn cleanup_clients(
   clients: &[ClientId],
 ) {
   state.captures.clean.retain(|key, _| match key {
-    DamageKey::Screencopy(client, _) => !clients.contains(client),
+    DamageKey::Screencopy(client, ..) => !clients.contains(client),
     DamageKey::Session(_) => true,
   });
 }

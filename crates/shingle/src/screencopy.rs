@@ -157,8 +157,8 @@ fn copy_frame(
     resource.failed();
     return;
   }
-  let key =
-    with_damage.then(|| DamageKey::Screencopy(client.id(), output.clone()));
+  let key = with_damage
+    .then(|| DamageKey::Screencopy(client.id(), output.clone(), cursor));
   capture::start(
     state,
     Copy {
