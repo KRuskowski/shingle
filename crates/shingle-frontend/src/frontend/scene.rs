@@ -77,11 +77,29 @@ impl Frontend {
     let Some(rect) = self.drop_preview else {
       return;
     };
+    // Move's snap preview has `[move]`'s colours, simple-tile's drop
+    // preview `[simple-tile]`'s, as each Wayfire plugin passes its own
+    // prefix to `preview_indication_t`
+    // (wayfire:plugins/single_plugins/move.cpp:494-495,
+    // wayfire:plugins/tile/tile-dragging.hpp:122-123).
+    let (base, border, width) = if self.drop_preview_snaps {
+      (
+        self.snap_preview_base_color,
+        self.snap_preview_border_color,
+        self.snap_preview_border_width,
+      )
+    } else {
+      (
+        self.preview_base_color,
+        self.preview_border_color,
+        self.preview_border_width,
+      )
+    };
     tiles.extend(preview_tiles(
       rect,
-      srgb_fill(self.preview_base_color),
-      srgb_fill(self.preview_border_color),
-      self.preview_border_width,
+      srgb_fill(base),
+      srgb_fill(border),
+      width,
     ));
   }
 

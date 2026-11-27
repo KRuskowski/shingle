@@ -85,3 +85,34 @@ fn the_drop_preview_is_drawn_in_its_premultiplied_bytes() {
   // The border, opaque, shows its bytes.
   assert_eq!(fixture.pixel(&mut target, 101, 150), BYTES);
 }
+
+#[test]
+fn the_snap_preview_has_moves_colours() {
+  let mut config = config();
+  config.grid.preview_base_color = [1.0, 0.0, 0.0, 0.5];
+  config.grid.preview_border_color = [0.0, 1.0, 0.0, 1.0];
+  config.grid.preview_border_width = 5;
+  let mut fixture = Fixture::new(config);
+  fixture.frontend.drop_preview = Some(RenderRect {
+    x: 100,
+    y: 100,
+    width: 200,
+    height: 100,
+  });
+  fixture.frontend.drop_preview_snaps = true;
+  let mut tiles = Vec::new();
+  fixture.frontend.append_drop_preview(&mut tiles);
+  assert_eq!(tiles[0].color, srgb_fill([1.0, 0.0, 0.0, 0.5]));
+  assert!(
+    tiles[1..]
+      .iter()
+      .all(|tile| tile.color == srgb_fill([0.0, 1.0, 0.0, 1.0]))
+  );
+  // The top border is the configured width.
+  assert_eq!(tiles[1].geometry.height, 5);
+  // simple-tile's drop preview keeps its own colours.
+  fixture.frontend.drop_preview_snaps = false;
+  let mut tiles = Vec::new();
+  fixture.frontend.append_drop_preview(&mut tiles);
+  assert_eq!(tiles[0].color, srgb_fill([0.5, 0.5, 1.0, 0.5]));
+}

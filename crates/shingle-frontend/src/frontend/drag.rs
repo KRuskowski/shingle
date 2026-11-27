@@ -241,6 +241,7 @@ impl Frontend {
     {
       self.drop_slot = Some(slot);
       if let Some(geometry) = self.compositor.snap_geometry(slot) {
+        self.drop_preview_snaps = true;
         self.drop_preview = Some(RenderRect {
           x: geometry.x,
           y: geometry.y,
@@ -272,6 +273,7 @@ impl Frontend {
       Direction::Down => PreviewDirection::Down,
     };
     if let Some(geometry) = self.window_geometry(target) {
+      self.drop_preview_snaps = false;
       self.drop_preview = Some(split_preview(
         RenderRect {
           x: geometry.x,

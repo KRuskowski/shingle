@@ -138,6 +138,9 @@ impl Frontend {
         self.preview_base_color = config.tiling.preview_base_color;
         self.preview_border_color = config.tiling.preview_border_color;
         self.preview_border_width = config.tiling.preview_border_width;
+        self.snap_preview_base_color = config.grid.preview_base_color;
+        self.snap_preview_border_color = config.grid.preview_border_color;
+        self.snap_preview_border_width = config.grid.preview_border_width;
         self.grid_snap = config.grid.enable_snap;
         self.snap_threshold = config.grid.snap_threshold;
         self.quarter_snap_threshold = config.grid.quarter_snap_threshold;

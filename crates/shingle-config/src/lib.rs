@@ -747,6 +747,8 @@ impl ShingleConfig {
     for color in [
       self.tiling.preview_base_color,
       self.tiling.preview_border_color,
+      self.grid.preview_base_color,
+      self.grid.preview_border_color,
     ] {
       if color.iter().any(|component| {
         !component.is_finite() || !(0.0..=1.0).contains(component)
@@ -903,6 +905,15 @@ pub struct GridConfig {
   /// Whether dialogs move together with their parent instead of independently.
   /// `[move] join_views`; default false.
   pub join_views: bool,
+  /// Fill colour of the snap preview drawn while a window is dragged to an
+  /// edge or corner. `[move] preview_base_color`; default `0.5 0.5 1 0.5`.
+  pub preview_base_color: [f64; 4],
+  /// Border colour of the snap preview. `[move] preview_base_border`;
+  /// default `0.25 0.25 0.5 0.8`.
+  pub preview_border_color: [f64; 4],
+  /// Border width of the snap preview, in logical pixels. `[move]
+  /// preview_border_width`; default 3.
+  pub preview_border_width: u32,
 }
 
 impl Default for GridConfig {
@@ -915,6 +926,9 @@ impl Default for GridConfig {
       snap_off_threshold: 10,
       workspace_switch_after: -1,
       join_views: false,
+      preview_base_color: [0.5, 0.5, 1.0, 0.5],
+      preview_border_color: [0.25, 0.25, 0.5, 0.8],
+      preview_border_width: 3,
     }
   }
 }

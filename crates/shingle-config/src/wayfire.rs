@@ -872,6 +872,15 @@ fn apply(
     ("move", "join_views") => {
       config.grid.join_views = boolean(value)?;
     }
+    ("move", "preview_base_color") => {
+      config.grid.preview_base_color = crate::parse_color(value)?;
+    }
+    ("move", "preview_base_border") => {
+      config.grid.preview_border_color = crate::parse_color(value)?;
+    }
+    ("move", "preview_border_width") => {
+      config.grid.preview_border_width = number(value)?;
+    }
     ("workarounds", "all_dialogs_modal") => {
       config.behavior.all_dialogs_modal = boolean(value)?;
     }
@@ -1759,6 +1768,25 @@ mod tests {
         "animation yet; using \"zoom\""
       )]
     );
+  }
+
+  #[test]
+  fn moves_snap_preview_has_its_own_colours() {
+    let (config, warnings) = import(concat!(
+      "[core]\n",
+      "plugins = move grid simple-tile\n",
+      "[move]\n",
+      "preview_base_color = \\#FF000080\n",
+      "preview_base_border = 0 1 0 1\n",
+      "preview_border_width = 7\n",
+    ));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(config.grid.preview_base_color[0], 1.0);
+    assert_eq!(config.grid.preview_border_color, [0.0, 1.0, 0.0, 1.0]);
+    assert_eq!(config.grid.preview_border_width, 7);
+    // simple-tile's drop preview keeps its own.
+    assert_eq!(config.tiling.preview_border_width, 3);
+    assert_eq!(config.tiling.preview_base_color, [0.5, 0.5, 1.0, 0.5]);
   }
 
   #[test]

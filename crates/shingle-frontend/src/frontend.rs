@@ -174,7 +174,15 @@ pub struct Frontend {
   preview_base_color: [f64; 4],
   preview_border_color: [f64; 4],
   preview_border_width: u32,
+  /// `[move]`'s colours for the snap preview, which Wayfire's move draws
+  /// with its own options (wayfire:plugins/single_plugins/move.cpp:494).
+  snap_preview_base_color: [f64; 4],
+  snap_preview_border_color: [f64; 4],
+  snap_preview_border_width: u32,
   drop_preview: Option<RenderRect>,
+  /// Whether `drop_preview` is move's snap preview rather than
+  /// simple-tile's drop preview.
+  drop_preview_snaps: bool,
   drop_slot: Option<&'static str>,
   grid_snap: bool,
   snap_threshold: u32,
@@ -558,7 +566,11 @@ impl Frontend {
       preview_base_color: config.tiling.preview_base_color,
       preview_border_color: config.tiling.preview_border_color,
       preview_border_width: config.tiling.preview_border_width,
+      snap_preview_base_color: config.grid.preview_base_color,
+      snap_preview_border_color: config.grid.preview_border_color,
+      snap_preview_border_width: config.grid.preview_border_width,
       drop_preview: None,
+      drop_preview_snaps: false,
       drop_slot: None,
       grid_snap: config.grid.enable_snap,
       snap_threshold: config.grid.snap_threshold,

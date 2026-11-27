@@ -155,6 +155,9 @@ grid:
   snap_off_threshold: 10
   workspace_switch_after: -1
   join_views: false
+  preview_base_color: [0.5, 0.5, 1.0, 0.5]
+  preview_border_color: [0.25, 0.25, 0.5, 0.8]
+  preview_border_width: 3
 
 extra_gestures:
   move_fingers: 3
