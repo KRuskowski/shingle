@@ -23,6 +23,7 @@
 
 mod activator;
 mod config_watcher;
+mod easing;
 mod i3;
 mod import;
 mod ini;
@@ -38,6 +39,7 @@ mod wayfire_options;
 mod window_rule;
 
 pub use config_watcher::ConfigWatcher;
+pub use easing::{AnimationDuration, Easing};
 pub use input_devices::{
   DEVICE_OPTIONS, InputDeviceConfig, UDEV_PROPERTIES, matching_device,
   parse_calibration,
@@ -715,28 +717,35 @@ impl ShingleConfig {
         ));
       }
     }
-    if !matches!(
-      self.animate.open_animation.as_str(),
-      "none" | "fade" | "zoom"
-    ) {
+    for (name, value) in [
+      ("open_animation", &self.animate.open_animation),
+      ("close_animation", &self.animate.close_animation),
+      ("minimize_animation", &self.animate.minimize_animation),
+    ] {
+      if !ANIMATIONS.contains(&value.as_str()) {
+        return Err(ConfigError::Invalid(format!(
+          "animate.{name} must be one of {}",
+          ANIMATIONS.join(", ")
+        )));
+      }
+    }
+    if self.animate.fire_particles > 100_000 {
       return Err(ConfigError::Invalid(
-        "animate.open_animation must be none, fade, or zoom".into(),
+        "animate.fire_particles must be at most 100000".into(),
       ));
     }
-    if !matches!(
-      self.animate.close_animation.as_str(),
-      "none" | "fade" | "zoom"
-    ) {
+    if !self.animate.fire_particle_size.is_finite()
+      || self.animate.fire_particle_size < 0.0
+    {
       return Err(ConfigError::Invalid(
-        "animate.close_animation must be none, fade, or zoom".into(),
+        "animate.fire_particle_size must be finite and non-negative".into(),
       ));
     }
-    if !matches!(
-      self.animate.minimize_animation.as_str(),
-      "none" | "fade" | "zoom"
-    ) {
+    if self.animate.fire_color.iter().any(|component| {
+      !component.is_finite() || !(0.0..=1.0).contains(component)
+    }) {
       return Err(ConfigError::Invalid(
-        "animate.minimize_animation must be none, fade, or zoom".into(),
+        "animate.fire_color components must be between 0 and 1".into(),
       ));
     }
     if !matches!(self.zoom.interpolation.as_str(), "linear" | "nearest") {
@@ -1273,6 +1282,9 @@ pub struct ZoomConfig {
   /// Duration of the eased approach to the target zoom level; 0 jumps
   /// immediately. `[zoom] smoothing_duration`; default 300.
   pub smoothing_ms: u64,
+  /// Curve of the approach. The curve of `[zoom] smoothing_duration`;
+  /// default `linear`.
+  pub smoothing_easing: Easing,
   /// Texture filter while zoomed: `linear` or `nearest`. Imported from
   /// Wayfire's numeric `[zoom] interpolation_method`, where 0 is linear and 1
   /// nearest. Default `linear`.
@@ -1285,6 +1297,7 @@ impl Default for ZoomConfig {
       modifier: "super".into(),
       speed: 0.01,
       smoothing_ms: 300,
+      smoothing_easing: Easing::Linear,
       interpolation: "linear".into(),
     }
   }
@@ -1339,9 +1352,12 @@ impl Default for FastSwitcherConfig {
 #[derive(Clone, Debug, Deserialize, PartialEq, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SwitcherConfig {
-  /// Milliseconds the thumbnails take to move. `[switcher] speed`, whose
-  /// easing curve is ignored; default 500.
+  /// Milliseconds the thumbnails take to move. `[switcher] speed`;
+  /// default 500.
   pub duration_ms: u64,
+  /// Curve of the thumbnails' movement and of the background's dimming.
+  /// The curve of `[switcher] speed`; default `circle`.
+  pub easing: Easing,
   /// Size of the thumbnails, a factor of the size that fits them into
   /// 45 % of the output. `[switcher] view_thumbnail_scale`; finite;
   /// default 1.0.
@@ -1355,6 +1371,7 @@ impl Default for SwitcherConfig {
   fn default() -> Self {
     Self {
       duration_ms: 500,
+      easing: Easing::Circle,
       view_thumbnail_scale: 1.0,
       view_thumbnail_rotation: 30,
     }
@@ -1367,6 +1384,9 @@ impl Default for SwitcherConfig {
 pub struct ScaleConfig {
   /// Duration of thumbnail entry and layout transitions, in milliseconds.
   pub duration_ms: u64,
+  /// Curve of those transitions. The curve of `[scale] duration`; default
+  /// `circle`.
+  pub easing: Easing,
   /// Horizontal and vertical space between overview cells, in logical pixels.
   pub spacing: u32,
   /// Space reserved between the output edges and the overview grid.
@@ -1399,6 +1419,7 @@ impl Default for ScaleConfig {
   fn default() -> Self {
     Self {
       duration_ms: 750,
+      easing: Easing::Circle,
       spacing: 50,
       outer_margin: 0,
       inactive_alpha: 0.75,
@@ -1424,6 +1445,8 @@ pub struct ExpoConfig {
   pub background: [f64; 4],
   /// Duration of workspace-wall entry and exit zooms, in milliseconds.
   pub duration_ms: u64,
+  /// Curve of the zooms. The curve of `[expo] duration`; default `circle`.
+  pub easing: Easing,
   /// Gap around and between workspace cells, in logical pixels.
   pub offset: u32,
   /// Whether unmodified arrow and keypad keys move the selection.
@@ -1453,6 +1476,7 @@ impl Default for ExpoConfig {
     Self {
       background: [0.1, 0.1, 0.1, 1.0],
       duration_ms: 300,
+      easing: Easing::Circle,
       offset: 10,
       keyboard_interaction: true,
       inactive_brightness: 0.7,
@@ -1497,39 +1521,148 @@ impl Default for ScaleTitleFilterConfig {
   }
 }
 
-/// Window open, close and minimize animations (metadata/animate.xml). Only
-/// `fade` and `zoom` are implemented; Wayfire's `fire`, `squeezimize`, `zap`
-/// and `spin` are not.
+/// The names of the view animations, as Wayfire's `animate` registers its
+/// effects (wayfire:plugins/animate/animate.cpp:227-235).
+pub const ANIMATIONS: [&str; 7] =
+  ["none", "fade", "zoom", "fire", "zap", "spin", "squeezimize"];
+
+/// Window open, close and minimize animations (metadata/animate.xml), and
+/// the fade-in of every output when it starts.
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AnimateConfig {
-  /// Views that are animated. `[animate] enabled_for`; default `type equals
-  /// "toplevel"`. Shingle has no X11 views, so Wayfire's `x-or` clause is not
-  /// needed.
+  /// Views that get `open_animation`, `close_animation` and
+  /// `minimize_animation`. `[animate] enabled_for`; default `type equals
+  /// "toplevel"` (Wayfire's default also names focusable `x-or` views).
   pub enabled_for: ViewMatcher,
-  /// `none`, `fade` or `zoom`. `[animate] open_animation`; default `zoom`.
+  /// One of [`ANIMATIONS`]. `[animate] open_animation`; default `zoom`.
   pub open_animation: String,
-  /// `none`, `fade` or `zoom`. `[animate] close_animation`; default `zoom`.
+  /// One of [`ANIMATIONS`]. `[animate] close_animation`; default `zoom`.
   pub close_animation: String,
-  /// `none`, `fade` or `zoom`. `[animate] minimize_animation`; default `zoom`
-  /// (Wayfire's default, `squeezimize`, is not implemented).
+  /// One of [`ANIMATIONS`]. `[animate] minimize_animation`; default
+  /// `squeezimize`.
   pub minimize_animation: String,
-  /// Length of every animation. `[animate] duration` (an easing suffix such as
-  /// `400ms linear` is ignored, and `0.4s` is accepted); default 400.
+  /// Length of `fade`, `zoom` and `fire` when no `*_enabled_for` chose
+  /// them. `[animate] duration`; default 400.
   pub duration_ms: u64,
+  /// The curve of `[animate] duration`; default `circle`.
+  pub easing: Easing,
+  /// Length of the fade-in from black of an output that starts drawing;
+  /// 0 turns it off. `[animate] startup_duration`; default 250.
+  pub startup_duration_ms: u64,
+  /// The curve of `[animate] startup_duration`; default `linear`.
+  pub startup_easing: Easing,
+  /// Views that fade, whatever the three animations say.
+  /// `[animate] fade_enabled_for`; default `type equals "overlay"`.
+  pub fade_enabled_for: ViewMatcher,
+  /// Length of the fade of `fade_enabled_for` views. `[animate]
+  /// fade_duration`; default 400.
+  pub fade_duration_ms: u64,
+  /// The curve of `[animate] fade_duration`; default `circle`.
+  pub fade_easing: Easing,
+  /// Views that zoom, over `fade_enabled_for`. `[animate]
+  /// zoom_enabled_for`; default `none`.
+  pub zoom_enabled_for: ViewMatcher,
+  /// Length of the zoom of `zoom_enabled_for` views. `[animate]
+  /// zoom_duration`; default 500.
+  pub zoom_duration_ms: u64,
+  /// The curve of `[animate] zoom_duration`; default `circle`.
+  pub zoom_easing: Easing,
+  /// Views that burn, over `zoom_enabled_for`. `[animate]
+  /// fire_enabled_for`; default `none`.
+  pub fire_enabled_for: ViewMatcher,
+  /// Length of the fire of `fire_enabled_for` views, before it is scaled
+  /// by the view's height. `[animate] fire_duration`; default 300.
+  pub fire_duration_ms: u64,
+  /// The curve of `[animate] fire_duration`; default `linear`.
+  pub fire_easing: Easing,
+  /// Particles of a 400 pixel wide view; the count follows the width, up
+  /// to 3.5 times this. `[animate] fire_particles`; at most 100000;
+  /// default 2000.
+  pub fire_particles: u32,
+  /// Particle radius in logical pixels, varied by 20 % either way.
+  /// `[animate] fire_particle_size`; finite and non-negative; default 16.
+  pub fire_particle_size: f64,
+  /// Give every particle a random colour instead of a shade of
+  /// `fire_color`. `[animate] random_fire_color`; default false.
+  pub random_fire_color: bool,
+  /// The colour of the particles; alpha is ignored. `[animate]
+  /// fire_color`; default `#B22303FF`.
+  pub fire_color: [f64; 4],
+  /// Length of `squeezimize`. `[animate] squeezimize_duration`; default
+  /// 150.
+  pub squeezimize_duration_ms: u64,
+  /// The curve of `[animate] squeezimize_duration`; default `linear`.
+  pub squeezimize_easing: Easing,
+  /// Length of `zap`. `[animate] zap_duration`; default 250.
+  pub zap_duration_ms: u64,
+  /// The curve of `[animate] zap_duration`; default `linear`.
+  pub zap_easing: Easing,
+  /// Length of `spin`. `[animate] spin_duration`; default 250.
+  pub spin_duration_ms: u64,
+  /// The curve of `[animate] spin_duration`; default `linear`.
+  pub spin_easing: Easing,
+  /// Turns of `spin`; negative turns the other way. `[animate]
+  /// spin_rotations`; default 1.
+  pub spin_rotations: i32,
+}
+
+impl AnimateConfig {
+  /// The length and curve `animation` takes when nothing else chose one,
+  /// as Wayfire registers each effect with its option
+  /// (wayfire:plugins/animate/animate.cpp:227-235): `fade`, `zoom` and
+  /// `fire` take `duration`, the others their own.
+  pub fn default_duration(&self, animation: &str) -> AnimationDuration {
+    let (ms, easing) = match animation {
+      "zap" => (self.zap_duration_ms, self.zap_easing),
+      "spin" => (self.spin_duration_ms, self.spin_easing),
+      "squeezimize" => (self.squeezimize_duration_ms, self.squeezimize_easing),
+      _ => (self.duration_ms, self.easing),
+    };
+    AnimationDuration { ms, easing }
+  }
 }
 
 impl Default for AnimateConfig {
   fn default() -> Self {
+    let matcher = |text: &str| {
+      ViewMatcher::try_from(text.to_owned())
+        .expect("the default animation matchers are valid")
+    };
     Self {
-      enabled_for: "type equals \"toplevel\""
-        .to_owned()
-        .try_into()
-        .expect("the default animation matcher is valid"),
+      enabled_for: matcher("type equals \"toplevel\""),
       open_animation: "zoom".into(),
       close_animation: "zoom".into(),
-      minimize_animation: "zoom".into(),
+      minimize_animation: "squeezimize".into(),
       duration_ms: 400,
+      easing: Easing::Circle,
+      startup_duration_ms: 250,
+      startup_easing: Easing::Linear,
+      fade_enabled_for: matcher("type equals \"overlay\""),
+      fade_duration_ms: 400,
+      fade_easing: Easing::Circle,
+      zoom_enabled_for: matcher("none"),
+      zoom_duration_ms: 500,
+      zoom_easing: Easing::Circle,
+      fire_enabled_for: matcher("none"),
+      fire_duration_ms: 300,
+      fire_easing: Easing::Linear,
+      fire_particles: 2000,
+      fire_particle_size: 16.0,
+      random_fire_color: false,
+      fire_color: [
+        f64::from(0xB2u8) / 255.0,
+        f64::from(0x23u8) / 255.0,
+        f64::from(0x03u8) / 255.0,
+        1.0,
+      ],
+      squeezimize_duration_ms: 150,
+      squeezimize_easing: Easing::Linear,
+      zap_duration_ms: 250,
+      zap_easing: Easing::Linear,
+      spin_duration_ms: 250,
+      spin_easing: Easing::Linear,
+      spin_rotations: 1,
     }
   }
 }
@@ -1590,6 +1723,9 @@ impl Default for WorkspaceConfig {
 pub struct VswitchConfig {
   /// Duration of the workspace-wall movement, in milliseconds.
   pub duration_ms: u64,
+  /// Curve of the movement. The curve of `[vswitch] duration`; default
+  /// `circle`.
+  pub easing: Easing,
   /// Visual gap between workspaces during the transition.
   pub gap: u32,
   /// Color visible in the inter-workspace gap.
@@ -1620,6 +1756,7 @@ impl Default for VswitchConfig {
   fn default() -> Self {
     Self {
       duration_ms: 300,
+      easing: Easing::Circle,
       gap: 20,
       background: [0.1, 0.1, 0.1, 1.0],
       workspace_bindings: Vec::new(),
@@ -1648,6 +1785,9 @@ pub struct VswipeConfig {
   /// target workspace after the fingers lift. `[vswipe] duration`;
   /// default 180.
   pub duration_ms: u64,
+  /// Curve of the smooth transition and the slide. The curve of
+  /// `[vswipe] duration`; default `circle`.
+  pub easing: Easing,
   /// Colour between and around the workspaces of the wall. `[vswipe]
   /// background`; components 0–1; default `[0.1, 0.1, 0.1, 1.0]`.
   pub background: [f64; 4],
@@ -1681,6 +1821,7 @@ impl Default for VswipeConfig {
       enable_free_movement: false,
       enable_smooth_transition: false,
       duration_ms: 180,
+      easing: Easing::Circle,
       background: [0.1, 0.1, 0.1, 1.0],
       fingers: 4,
       gap: 32.0,
@@ -1842,6 +1983,9 @@ pub struct TilingConfig {
   /// Duration of the crossfade when a tile's geometry changes; 0 disables it.
   /// `[simple-tile] animation_duration`; default 0.
   pub animation_duration: u64,
+  /// Curve of the crossfade. The curve of `[simple-tile]
+  /// animation_duration`; default `circle`.
+  pub animation_easing: Easing,
   /// Fill colour of the drop preview drawn while dragging a tile.
   /// `[simple-tile] preview_base_color`.
   pub preview_base_color: [f64; 4],
@@ -1860,6 +2004,7 @@ impl Default for TilingConfig {
       keep_fullscreen_on_adjacent: true,
       tile_by_default: ViewMatcher::default(),
       animation_duration: 0,
+      animation_easing: Easing::Circle,
       preview_base_color: [0.5, 0.5, 1.0, 0.5],
       preview_border_color: [0.25, 0.25, 0.5, 0.8],
       preview_border_width: 3,
@@ -2951,8 +3096,8 @@ mod tests {
     assert!(matcher.animate.enabled_for.as_str().contains("x-or"));
     assert!(warnings.is_empty(), "{warnings:?}");
     let (animation, warnings) =
-      parse("[animate]\nminimize_animation = squeezimize\n");
-    assert_eq!(animation.animate.minimize_animation, "zoom");
+      parse("[animate]\nminimize_animation = wobble\n");
+    assert_eq!(animation.animate.minimize_animation, "squeezimize");
     assert_eq!(warnings.len(), 1);
     let (modifier, warnings) =
       parse("[core]\nplugins = scale\n[scale]\ntoggle = <super>\n");
@@ -3970,6 +4115,7 @@ mod tests {
         enable_free_movement: true,
         enable_smooth_transition: true,
         duration_ms: 250,
+        easing: Easing::Circle,
         background: [1.0, 0.0, 0.0, 128.0 / 255.0],
         fingers: 3,
         gap: 12.5,
@@ -4033,6 +4179,7 @@ mod tests {
       config.switcher,
       SwitcherConfig {
         duration_ms: 300,
+        easing: Easing::Circle,
         view_thumbnail_scale: 0.5,
         view_thumbnail_rotation: -45,
       }

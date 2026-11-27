@@ -1142,6 +1142,7 @@ mod tests {
       duration_ms: 0,
       view_thumbnail_scale: 0.5,
       view_thumbnail_rotation: 60,
+      ..Default::default()
     });
     let now = Instant::now();
     switcher.switch(Direction::Next, &views, now);

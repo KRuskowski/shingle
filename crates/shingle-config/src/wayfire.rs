@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-  Binding, ConfigError, ConfigWarning, ShingleConfig,
+  AnimationDuration, Binding, ConfigError, ConfigWarning, ShingleConfig,
   import::{self, Import},
   ini::{self, Entry},
 };
@@ -219,8 +219,8 @@ fn apply_default(
 /// Wayfire's defaults for a file whose plugin list is `plugins`: Shingle's
 /// own defaults without its extra bindings, then the default of every
 /// option of the table whose section applies, in table order. Defaults
-/// whose values Shingle lacks (`squeezimize`) fall back silently; the
-/// file's own values warn.
+/// whose values Shingle lacks would be dropped silently; the file's own
+/// values warn.
 fn wayfire_defaults(plugins: &[String]) -> ShingleConfig {
   let mut config = without_shingle_bindings();
   let options = crate::wayfire_options().iter().filter(|option| {
@@ -425,7 +425,9 @@ fn apply(
       config.tiling.preview_border_width = number(value)?;
     }
     ("simple-tile", "animation_duration") => {
-      config.tiling.animation_duration = duration_ms(value)?;
+      let duration = AnimationDuration::parse(value)?;
+      config.tiling.animation_duration = duration.ms;
+      config.tiling.animation_easing = duration.easing;
     }
     ("simple-tile", "inner_gap_size") => {
       config.tiling.gaps.inner = number(value)?;
@@ -464,7 +466,11 @@ fn apply(
     ("switcher", "prev_view") => {
       config.keybindings.focus_previous = import::binding(value, notes)?;
     }
-    ("switcher", "speed") => config.switcher.duration_ms = duration_ms(value)?,
+    ("switcher", "speed") => {
+      let duration = AnimationDuration::parse(value)?;
+      config.switcher.duration_ms = duration.ms;
+      config.switcher.easing = duration.easing;
+    }
     ("switcher", "view_thumbnail_scale") => {
       config.switcher.view_thumbnail_scale = number(value)?
     }
@@ -705,7 +711,11 @@ fn apply(
     ("expo", "background") => {
       config.expo.background = crate::parse_color(value)?
     }
-    ("expo", "duration") => config.expo.duration_ms = duration_ms(value)?,
+    ("expo", "duration") => {
+      let duration = AnimationDuration::parse(value)?;
+      config.expo.duration_ms = duration.ms;
+      config.expo.easing = duration.easing;
+    }
     ("expo", "transition_length") => {
       config.expo.transition_length_ms = number(value)?
     }
@@ -728,7 +738,11 @@ fn apply(
     ("scale", "toggle_all") => {
       config.keybindings.scale_toggle_all = import::binding(value, notes)?
     }
-    ("scale", "duration") => config.scale.duration_ms = duration_ms(value)?,
+    ("scale", "duration") => {
+      let duration = AnimationDuration::parse(value)?;
+      config.scale.duration_ms = duration.ms;
+      config.scale.easing = duration.easing;
+    }
     ("scale", "title_overlay") => {
       config.scale.title_overlay = value.to_lowercase()
     }
@@ -784,16 +798,77 @@ fn apply(
       config.animate.enabled_for = value.to_owned().try_into()?;
     }
     ("animate", "open_animation") => {
-      config.animate.open_animation = import::animation(value, notes);
+      config.animate.open_animation = import::animation(value);
     }
     ("animate", "close_animation") => {
-      config.animate.close_animation = import::animation(value, notes);
+      config.animate.close_animation = import::animation(value);
     }
     ("animate", "minimize_animation") => {
-      config.animate.minimize_animation = import::animation(value, notes);
+      config.animate.minimize_animation = import::animation(value);
     }
     ("animate", "duration") => {
-      config.animate.duration_ms = duration_ms(value)?;
+      let duration = AnimationDuration::parse(value)?;
+      config.animate.duration_ms = duration.ms;
+      config.animate.easing = duration.easing;
+    }
+    ("animate", "startup_duration") => {
+      let duration = AnimationDuration::parse(value)?;
+      config.animate.startup_duration_ms = duration.ms;
+      config.animate.startup_easing = duration.easing;
+    }
+    ("animate", "fade_duration") => {
+      let duration = AnimationDuration::parse(value)?;
+      config.animate.fade_duration_ms = duration.ms;
+      config.animate.fade_easing = duration.easing;
+    }
+    ("animate", "zoom_duration") => {
+      let duration = AnimationDuration::parse(value)?;
+      config.animate.zoom_duration_ms = duration.ms;
+      config.animate.zoom_easing = duration.easing;
+    }
+    ("animate", "fire_duration") => {
+      let duration = AnimationDuration::parse(value)?;
+      config.animate.fire_duration_ms = duration.ms;
+      config.animate.fire_easing = duration.easing;
+    }
+    ("animate", "squeezimize_duration") => {
+      let duration = AnimationDuration::parse(value)?;
+      config.animate.squeezimize_duration_ms = duration.ms;
+      config.animate.squeezimize_easing = duration.easing;
+    }
+    ("animate", "zap_duration") => {
+      let duration = AnimationDuration::parse(value)?;
+      config.animate.zap_duration_ms = duration.ms;
+      config.animate.zap_easing = duration.easing;
+    }
+    ("animate", "spin_duration") => {
+      let duration = AnimationDuration::parse(value)?;
+      config.animate.spin_duration_ms = duration.ms;
+      config.animate.spin_easing = duration.easing;
+    }
+    ("animate", "fade_enabled_for") => {
+      config.animate.fade_enabled_for = value.to_owned().try_into()?;
+    }
+    ("animate", "zoom_enabled_for") => {
+      config.animate.zoom_enabled_for = value.to_owned().try_into()?;
+    }
+    ("animate", "fire_enabled_for") => {
+      config.animate.fire_enabled_for = value.to_owned().try_into()?;
+    }
+    ("animate", "fire_particles") => {
+      config.animate.fire_particles = number(value)?;
+    }
+    ("animate", "fire_particle_size") => {
+      config.animate.fire_particle_size = number(value)?;
+    }
+    ("animate", "random_fire_color") => {
+      config.animate.random_fire_color = boolean(value)?;
+    }
+    ("animate", "fire_color") => {
+      config.animate.fire_color = crate::parse_color(value)?;
+    }
+    ("animate", "spin_rotations") => {
+      config.animate.spin_rotations = number(value)?;
     }
     ("fast-switcher", "activate") => {
       config.keybindings.fast_switcher_next = import::binding(value, notes)?;
@@ -828,7 +903,9 @@ fn apply(
     ("zoom", "modifier") => config.zoom.modifier = value.to_lowercase(),
     ("zoom", "speed") => config.zoom.speed = number(value)?,
     ("zoom", "smoothing_duration") => {
-      config.zoom.smoothing_ms = duration_ms(value)?;
+      let duration = AnimationDuration::parse(value)?;
+      config.zoom.smoothing_ms = duration.ms;
+      config.zoom.smoothing_easing = duration.easing;
     }
     ("zoom", "interpolation_method") => {
       config.zoom.interpolation = match number::<u32>(value)? {
@@ -1002,7 +1079,11 @@ fn apply(
     ("vswipe", "enable_smooth_transition") => {
       config.vswipe.enable_smooth_transition = boolean(value)?
     }
-    ("vswipe", "duration") => config.vswipe.duration_ms = duration_ms(value)?,
+    ("vswipe", "duration") => {
+      let duration = AnimationDuration::parse(value)?;
+      config.vswipe.duration_ms = duration.ms;
+      config.vswipe.easing = duration.easing;
+    }
     ("vswipe", "background") => {
       config.vswipe.background = crate::parse_color(value)?
     }
@@ -1014,7 +1095,11 @@ fn apply(
     }
     ("vswipe", "speed_factor") => config.vswipe.speed_factor = number(value)?,
     ("vswipe", "speed_cap") => config.vswipe.speed_cap = number(value)?,
-    ("vswitch", "duration") => config.vswitch.duration_ms = duration_ms(value)?,
+    ("vswitch", "duration") => {
+      let duration = AnimationDuration::parse(value)?;
+      config.vswitch.duration_ms = duration.ms;
+      config.vswitch.easing = duration.easing;
+    }
     ("vswitch", "gap") => config.vswitch.gap = number(value)?,
     ("vswitch", "background") => {
       config.vswitch.background = crate::parse_color(value)?
@@ -1139,7 +1224,7 @@ fn apply(
       config.oswitch.below_output = import::binding(value, notes)?;
     }
     ("wsets", "label_duration") => {
-      config.wsets.label_duration = duration_ms(value)?;
+      config.wsets.label_duration = AnimationDuration::parse(value)?.ms;
     }
     ("wsets", key) if key.starts_with("send_to_wset_") => {
       config.wsets.send_window_bindings.push(crate::WsetBinding {
@@ -1249,27 +1334,6 @@ fn numbered(key: &str, prefix: &str) -> Option<usize> {
 fn optional_seconds(value: &str) -> Result<Option<u64>, ConfigError> {
   let seconds: i64 = number(value)?;
   Ok((seconds >= 0).then_some(seconds as u64))
-}
-
-/// A Wayfire animation duration in milliseconds: `400`, `400ms` or `0.4s`,
-/// optionally followed by an easing curve, which Shingle ignores.
-fn duration_ms(value: &str) -> Result<u64, ConfigError> {
-  let value = value.split_whitespace().next().unwrap_or(value);
-  if let Some(seconds) =
-    value.strip_suffix('s').filter(|_| !value.ends_with("ms"))
-  {
-    let seconds: f64 = number(seconds)?;
-    if !seconds.is_finite()
-      || seconds < 0.0
-      || seconds * 1000.0 > u64::MAX as f64
-    {
-      return Err(ConfigError::Invalid(format!(
-        "invalid animation duration {value:?}"
-      )));
-    }
-    return Ok((seconds * 1000.0).round() as u64);
-  }
-  number(value.strip_suffix("ms").unwrap_or(value))
 }
 
 /// Normalizes a Wayfire or i3 key name to Shingle's: without `KEY_`, lower
@@ -1423,14 +1487,6 @@ mod tests {
     let (config, warnings) = import(WCM);
     let expected = [
       (
-        14,
-        "[animate] close_animation: Shingle has no \"fire\" animation",
-      ),
-      (
-        24,
-        "[animate] minimize_animation: Shingle has no \"squeezimize\"",
-      ),
-      (
         40,
         "[blur] belongs to a plugin Shingle does not have; its 18",
       ),
@@ -1478,8 +1534,8 @@ mod tests {
       )
     );
     assert_eq!(config.animate.open_animation, "zoom");
-    assert_eq!(config.animate.close_animation, "fade");
-    assert_eq!(config.animate.minimize_animation, "zoom");
+    assert_eq!(config.animate.close_animation, "fire");
+    assert_eq!(config.animate.minimize_animation, "squeezimize");
     assert_eq!(config.placement.mode, "center");
     // The continued plugins line names preserve-output.
     assert_eq!(config.output_layout.unplug, UnplugPolicy::Park);
@@ -1731,8 +1787,8 @@ mod tests {
     assert_eq!(config.keybindings.scale_toggle, Binding::disabled());
     assert_eq!(config.keybindings.focus_left, Binding::disabled());
     assert_eq!(config.keybindings.toggle_maximized, Binding::disabled());
-    // Animate is in it; minimize falls back from squeezimize silently.
-    assert_eq!(config.animate.minimize_animation, "zoom");
+    // Animate is in it, with Wayfire's minimize animation.
+    assert_eq!(config.animate.minimize_animation, "squeezimize");
     assert_eq!(text(&config.keybindings.expo_toggle), "super+e");
     // autostart_wf_shell defaults to true.
     assert_eq!(config.autostart, ["wf-panel", "wf-background"]);
@@ -1761,13 +1817,7 @@ mod tests {
           .push(format!("[{}] {}: {error}", option.section, option.name)),
       }
     }
-    assert_eq!(
-      problems,
-      [concat!(
-        "[animate] minimize_animation: Shingle has no \"squeezimize\" ",
-        "animation yet; using \"zoom\""
-      )]
-    );
+    assert_eq!(problems, Vec::<String>::new());
   }
 
   #[test]

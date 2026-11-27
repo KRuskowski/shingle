@@ -94,8 +94,8 @@ pub(crate) fn parse(
     }
     let tokens = expand(tokens, &variables);
     let context = tokens.iter().take(2).cloned().collect::<Vec<_>>().join(" ");
-    importer.option(line_number, &context, |config, notes| {
-      line(config, &mut variables, &tokens, notes)
+    importer.option(line_number, &context, |config, _| {
+      line(config, &mut variables, &tokens)
     });
   }
   importer.finish()
@@ -106,7 +106,6 @@ fn line(
   config: &mut ShingleConfig,
   variables: &mut HashMap<String, String>,
   tokens: &[String],
-  notes: &mut Vec<String>,
 ) -> Result<(), ConfigError> {
   {
     match tokens[0].as_str() {
@@ -150,13 +149,13 @@ fn line(
             config.animate.enabled_for = value.try_into()?
           }
           "$open_animation" => {
-            config.animate.open_animation = import::animation(&value, notes)
+            config.animate.open_animation = import::animation(&value)
           }
           "$close_animation" => {
-            config.animate.close_animation = import::animation(&value, notes)
+            config.animate.close_animation = import::animation(&value)
           }
           "$minimize_animation" => {
-            config.animate.minimize_animation = import::animation(&value, notes)
+            config.animate.minimize_animation = import::animation(&value)
           }
           "$open_animation_duration" => {
             config.animate.duration_ms = number(&value)?
@@ -787,7 +786,7 @@ mod tests {
     let defaults = ShingleConfig::default();
     assert_eq!(config.scale.spacing, defaults.scale.spacing);
     assert_eq!(config.tiling.gaps.inner, 6);
-    assert_eq!(config.animate.open_animation, "fade");
+    assert_eq!(config.animate.open_animation, "spin");
     assert_eq!(config.commands.len(), 1);
     assert!(config.expo.workspace_bindings.is_empty());
     assert_eq!(
@@ -797,8 +796,6 @@ mod tests {
           "line 1: set $scale_spacing: invalid number \"many\"; keeping ",
           "the default"
         ),
-        "line 3: set $open_animation: Shingle has no \"spin\" animation \
-         yet; using \"fade\"",
         "line 4: unterminated quote or escape; line ignored",
         "line 6: Expo workspace 20 is outside the 10x1 workspace grid; the \
          binding is ignored",

@@ -197,21 +197,10 @@ fn describe(error: &ConfigError) -> String {
   }
 }
 
-/// Maps the animations Shingle lacks to the closest it has, as decided in
-/// docs/design/wayfire-gaps.md (Decisions, 5): `squeezimize` becomes
-/// `zoom`, `fire`, `zap` and `spin` become `fade`. Other names are only
-/// lower-cased; validation rejects the unknown ones.
-pub(crate) fn animation(value: &str, notes: &mut Vec<String>) -> String {
-  let name = value.trim().to_lowercase();
-  let replacement = match name.as_str() {
-    "squeezimize" => "zoom",
-    "fire" | "zap" | "spin" => "fade",
-    _ => return name,
-  };
-  notes.push(format!(
-    "Shingle has no {name:?} animation yet; using {replacement:?}"
-  ));
-  replacement.to_owned()
+/// An animation name as Wayfire writes it, lower-cased; validation
+/// rejects the names that are not one of [`crate::ANIMATIONS`].
+pub(crate) fn animation(value: &str) -> String {
+  value.trim().to_lowercase()
 }
 
 /// The keys and buttons of a Wayfire activator, for options that take a
@@ -372,15 +361,9 @@ mod tests {
   }
 
   #[test]
-  fn unsupported_animations_fall_back_with_a_note() {
-    let mut notes = Vec::new();
-    assert_eq!(animation("squeezimize", &mut notes), "zoom");
-    for name in ["fire", "zap", "Spin"] {
-      assert_eq!(animation(name, &mut notes), "fade");
-    }
-    assert_eq!(animation("Fade", &mut notes), "fade");
-    assert_eq!(animation("wobble", &mut notes), "wobble");
-    assert_eq!(notes.len(), 4);
+  fn animation_names_are_lower_cased() {
+    assert_eq!(animation(" Squeezimize "), "squeezimize");
+    assert_eq!(animation("wobble"), "wobble");
   }
 
   #[test]
