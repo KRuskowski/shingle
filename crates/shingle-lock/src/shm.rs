@@ -12,12 +12,14 @@ use wayland_client::{
   protocol::{wl_buffer, wl_shm, wl_shm_pool},
 };
 
+/// Which output's buffer a `wl_buffer` is, and which of its buffers.
 #[derive(Clone, Copy, Debug)]
 pub struct BufferData {
   pub output: u32,
   pub id: u64,
 }
 
+/// An XRGB8888 `wl_shm` buffer mapped into this process.
 pub struct ShmBuffer {
   pub id: u64,
   pub buffer: wl_buffer::WlBuffer,
@@ -26,9 +28,11 @@ pub struct ShmBuffer {
   _file: File,
   mapping: NonNull<std::ffi::c_void>,
   len: usize,
+  stride: usize,
 }
 
 impl ShmBuffer {
+  /// A `width` by `height` buffer of output `output`.
   pub fn new<State>(
     shm: &wl_shm::WlShm,
     qh: &QueueHandle<State>,
@@ -99,41 +103,30 @@ impl ShmBuffer {
       _file: file,
       mapping,
       len,
+      stride: stride as usize,
     })
   }
 
-  pub fn write_rgba(&mut self, rgba: &[u8]) -> io::Result<()> {
-    if rgba.len() != self.len || self.busy {
+  /// The buffer's bytes, rows `stride` apart, for a frame to be drawn
+  /// into while the compositor does not hold it.
+  pub fn bytes_mut(&mut self) -> io::Result<&mut [u8]> {
+    if self.busy {
       return Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "invalid or busy shared-memory buffer",
+        io::ErrorKind::WouldBlock,
+        "the compositor still holds the buffer",
       ));
     }
-    // SAFETY: The mapping is valid for len bytes and only this client writes it
-    // while the compositor has released the buffer. The source length exactly
-    // equals the mapping length.
-    let destination = unsafe {
+    // SAFETY: The mapping is valid for len bytes and only this client writes
+    // it while the compositor has released the buffer; the borrow of self
+    // keeps the mapping alive.
+    Ok(unsafe {
       slice::from_raw_parts_mut(self.mapping.as_ptr().cast::<u8>(), self.len)
-    };
-    #[cfg(target_endian = "little")]
-    for (source, destination) in rgba
-      .as_chunks::<4>()
-      .0
-      .iter()
-      .zip(destination.as_chunks_mut::<4>().0.iter_mut())
-    {
-      destination.copy_from_slice(&[source[2], source[1], source[0], 255]);
-    }
-    #[cfg(target_endian = "big")]
-    for (source, destination) in rgba
-      .as_chunks::<4>()
-      .0
-      .iter()
-      .zip(destination.as_chunks_mut::<4>().0.iter_mut())
-    {
-      destination.copy_from_slice(&[255, source[0], source[1], source[2]]);
-    }
-    Ok(())
+    })
+  }
+
+  /// Bytes from one row to the next.
+  pub fn stride(&self) -> usize {
+    self.stride
   }
 }
 

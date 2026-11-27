@@ -3279,17 +3279,22 @@ dependencies = [
 name = "shingle-lock"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
+ "bytemuck",
  "calloop 0.14.5",
  "calloop-wayland-source 0.4.1",
  "libc",
  "pollster 0.4.0",
  "rustix 1.1.6",
  "shingle-auth",
+ "shingle-config",
  "shingle-render",
  "tempfile",
  "thiserror 2.0.21",
  "wayland-client",
  "wayland-protocols 0.32.13",
+ "wayland-protocols-wlr 0.3.12",
+ "wgpu 30.0.2",
  "xkbcommon",
  "zeroize",
 ]

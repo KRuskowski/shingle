@@ -1,15 +1,33 @@
+//! `shingle-lock`: Shingle's lock screen, an ext-session-lock-v1 client
+//! that takes swaylock's and swaylock-effects' options and unlocks with
+//! PAM through `shingle-auth` (docs/design/lock-screen.md).
+//!
+//! With `screenshot` it captures every output before it asks for the
+//! lock, blurs the captures once on the GPU and shows them, slowly
+//! drifting, under a vignette and the clock; typing fades in an outlined
+//! password input. Frames follow the compositor's frame callbacks, so
+//! nothing is drawn while an output is off.
+
+mod capture;
+mod clock;
+mod daemon;
+mod font;
+mod gpu;
+mod options;
 mod shm;
+mod ui;
 mod username;
 
 use std::{
   collections::HashMap,
-  fs, io,
+  io,
   panic::{AssertUnwindSafe, catch_unwind},
-  path::{Path, PathBuf},
   process::ExitCode,
   thread,
+  time::{Duration, Instant, SystemTime},
 };
 
+use ab_glyph::FontArc;
 use calloop::{
   EventLoop,
   channel::{self, Event as ChannelEvent, Sender},
@@ -17,7 +35,6 @@ use calloop::{
 };
 use calloop_wayland_source::WaylandSource;
 use shingle_auth::{Authenticator, Password, ZeroOnFree};
-use shingle_render::{OffscreenRenderer, RenderRect, RenderTile};
 use shm::{BufferData, ShmBuffer};
 use thiserror::Error;
 use wayland_client::{
@@ -26,8 +43,8 @@ use wayland_client::{
     BindError, GlobalError, GlobalList, GlobalListContents, registry_queue_init,
   },
   protocol::{
-    wl_buffer, wl_compositor, wl_keyboard, wl_output, wl_region, wl_registry,
-    wl_seat, wl_shm, wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer,
+    wl_region, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface, wl_touch,
   },
 };
 use wayland_protocols::ext::session_lock::v1::client::{
@@ -38,6 +55,12 @@ use wayland_protocols::ext::session_lock::v1::client::{
 use xkbcommon::xkb;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::{
+  gpu::{Drift, Frame, Gpu, Image, Target},
+  options::{Action, Settings},
+  ui::{Content, Highlight, Indicator, Layout},
+};
+
 // Zeroes every freed heap block, including the password copy that nonstick
 // drops after handing it to PAM and old buffers of a growing password.
 #[global_allocator]
@@ -45,261 +68,11 @@ static ALLOCATOR: ZeroOnFree<std::alloc::System> =
   ZeroOnFree::new(std::alloc::System);
 
 const MAX_PASSWORD_BYTES: usize = 4096;
-
-struct Options {
-  background_color: [f64; 4],
-  show_indicator: bool,
-}
-
-enum CliAction {
-  Run(Options),
-  Help,
-  Version,
-}
-
-impl Default for Options {
-  fn default() -> Self {
-    Self {
-      background_color: [0.012, 0.016, 0.028, 1.0],
-      show_indicator: true,
-    }
-  }
-}
-
-impl Options {
-  fn parse() -> Result<CliAction, LockError> {
-    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let config = Self::config_path(&arguments)?.or_else(default_config);
-    Self::parse_arguments(arguments, config)
-  }
-
-  #[cfg(test)]
-  fn parse_from(
-    arguments: impl IntoIterator<Item = std::ffi::OsString>,
-  ) -> Result<CliAction, LockError> {
-    let arguments = arguments.into_iter().collect::<Vec<_>>();
-    let config = Self::config_path(&arguments)?;
-    Self::parse_arguments(arguments, config)
-  }
-
-  fn parse_arguments(
-    arguments: Vec<std::ffi::OsString>,
-    config: Option<PathBuf>,
-  ) -> Result<CliAction, LockError> {
-    for argument in &arguments {
-      match argument.to_str() {
-        Some("-h" | "--help") => return Ok(CliAction::Help),
-        Some("-v" | "--version") => return Ok(CliAction::Version),
-        _ => {}
-      }
-    }
-    let mut options = Self::default();
-    if let Some(path) = config {
-      options.apply_config(&path)?;
-    }
-    options.apply_arguments(arguments)?;
-    Ok(CliAction::Run(options))
-  }
-
-  fn config_path(
-    arguments: &[std::ffi::OsString],
-  ) -> Result<Option<PathBuf>, LockError> {
-    let mut path = None;
-    let mut arguments = arguments.iter();
-    while let Some(argument) = arguments.next() {
-      match argument.to_str() {
-        Some("-C" | "--config") => {
-          let value = arguments.next().ok_or_else(|| {
-            LockError::Message(format!(
-              "{} needs a config path",
-              argument.to_string_lossy()
-            ))
-          })?;
-          if value.is_empty() {
-            return Err(LockError::Message(
-              "config path cannot be empty".into(),
-            ));
-          }
-          path = Some(PathBuf::from(value));
-        }
-        Some(argument) => {
-          if let Some(value) = argument.strip_prefix("--config=") {
-            if value.is_empty() {
-              return Err(LockError::Message(
-                "config path cannot be empty".into(),
-              ));
-            }
-            path = Some(PathBuf::from(value));
-          }
-        }
-        None => {
-          return Err(LockError::Message(
-            "command-line arguments must be valid UTF-8".into(),
-          ));
-        }
-      }
-    }
-    Ok(path)
-  }
-
-  fn apply_config(&mut self, path: &Path) -> Result<(), LockError> {
-    let text = fs::read_to_string(path).map_err(|error| {
-      LockError::Message(format!(
-        "failed to read lock config {}: {error}",
-        path.display()
-      ))
-    })?;
-    for (index, original) in text.lines().enumerate() {
-      let line = original.trim();
-      if line.is_empty() || line.starts_with('#') {
-        continue;
-      }
-      let (name, value) = line
-        .split_once('=')
-        .map(|(name, value)| (name.trim(), Some(value.trim())))
-        .unwrap_or_else(|| {
-          let mut parts = line.splitn(2, char::is_whitespace);
-          (
-            parts.next().unwrap_or_default(),
-            parts.next().map(str::trim),
-          )
-        });
-      let name = name.trim().trim_start_matches("--");
-      match (name, value) {
-        ("color", Some(value)) => {
-          self.background_color = parse_color(value).map_err(|error| {
-            LockError::Message(format!(
-              "{}:{}: {error}",
-              path.display(),
-              index + 1
-            ))
-          })?
-        }
-        ("no-unlock-indicator", None | Some("")) => self.show_indicator = false,
-        _ => {
-          return Err(LockError::Message(format!(
-            "{}:{}: unknown or malformed option {name:?}",
-            path.display(),
-            index + 1
-          )));
-        }
-      }
-    }
-    Ok(())
-  }
-
-  fn apply_arguments(
-    &mut self,
-    arguments: Vec<std::ffi::OsString>,
-  ) -> Result<(), LockError> {
-    let mut arguments = arguments.into_iter();
-    while let Some(argument) = arguments.next() {
-      let argument = argument.into_string().map_err(|_| {
-        LockError::Message("command-line arguments must be valid UTF-8".into())
-      })?;
-      match argument.as_str() {
-        "-h" | "--help" | "-v" | "--version" => {}
-        "-u" | "--no-unlock-indicator" => self.show_indicator = false,
-        "-c" | "--color" => {
-          let value = arguments.next().ok_or_else(|| {
-            LockError::Message(format!("{argument} needs an RRGGBB color"))
-          })?;
-          let value = value.into_string().map_err(|_| {
-            LockError::Message("the lock color must be valid UTF-8".into())
-          })?;
-          self.background_color = parse_color(&value)?;
-        }
-        "-C" | "--config" => {
-          arguments.next();
-        }
-        _ => {
-          if let Some(value) = argument.strip_prefix("--color=") {
-            self.background_color = parse_color(value)?;
-          } else if !argument.starts_with("--config=") {
-            return Err(LockError::Message(format!(
-              "unknown argument {argument:?}; use --help for usage"
-            )));
-          }
-        }
-      }
-    }
-    Ok(())
-  }
-}
-
-fn default_config() -> Option<PathBuf> {
-  std::env::var_os("XDG_CONFIG_HOME")
-    .filter(|path| !path.is_empty())
-    .map(PathBuf::from)
-    .or_else(|| {
-      std::env::var_os("HOME")
-        .filter(|path| !path.is_empty())
-        .map(|home| PathBuf::from(home).join(".config"))
-    })
-    .map(|path| path.join("swaylock/config"))
-    .into_iter()
-    .chain([PathBuf::from("/etc/swaylock/config")])
-    .find(|path| path.is_file())
-}
-
-fn parse_color(text: &str) -> Result<[f64; 4], LockError> {
-  let text = text
-    .trim()
-    .strip_prefix('#')
-    .or_else(|| text.trim().strip_prefix("0x"))
-    .unwrap_or(text.trim());
-  if text.len() != 6 && text.len() != 8 {
-    return Err(LockError::Message(format!(
-      "invalid color {text:?}; expected RRGGBB or RRGGBBAA"
-    )));
-  }
-  let mut bytes = [0_u8; 4];
-  bytes[3] = 255;
-  for (index, byte) in bytes.iter_mut().enumerate().take(text.len() / 2) {
-    *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).map_err(
-      |_| {
-        LockError::Message(format!(
-          "invalid color {text:?}; expected RRGGBB or RRGGBBAA"
-        ))
-      },
-    )?;
-  }
-  Ok([
-    srgb_to_linear(bytes[0]),
-    srgb_to_linear(bytes[1]),
-    srgb_to_linear(bytes[2]),
-    f64::from(bytes[3]) / 255.0,
-  ])
-}
-
-fn srgb_to_linear(value: u8) -> f64 {
-  let value = f64::from(value) / 255.0;
-  if value <= 0.04045 {
-    value / 12.92
-  } else {
-    ((value + 0.055) / 1.055).powf(2.4)
-  }
-}
-
-fn print_help() {
-  println!(
-    "shingle-lock {}\n\
-         \n\
-         Usage: shingle-lock [OPTIONS]\n\
-         \n\
-         -c, --color <RRGGBB[AA]>  Set the lock-screen background color\n\
-         -u, --no-unlock-indicator Hide the password and \
-         authentication indicator\n\
-         -C, --config <PATH>       Read options from a \
-         swaylock-style config file\n\
-         -h, --help                Print this help\n\
-         -v, --version             Print the version\n\
-         \n\
-         Default config: $XDG_CONFIG_HOME/swaylock/config,\n\
-         $HOME/.config/swaylock/config, or /etc/swaylock/config",
-    env!("CARGO_PKG_VERSION")
-  );
-}
+/// How long the screenshots may take before the lock goes ahead without
+/// the missing ones.
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
+/// The frame interval asked for while the input fades.
+const FADE_FRAME: Duration = Duration::from_millis(16);
 
 #[derive(Debug, Error)]
 enum LockError {
@@ -323,6 +96,9 @@ enum AuthOutcome {
 
 struct Seat {
   proxy: wl_seat::WlSeat,
+  keyboard: Option<Keyboard>,
+  pointer: Option<wl_pointer::WlPointer>,
+  touch: Option<wl_touch::WlTouch>,
 }
 
 struct Keyboard {
@@ -330,16 +106,39 @@ struct Keyboard {
   xkb: Option<xkb::State>,
 }
 
+/// What an output's input image shows, to draw it again only on a
+/// change.
+#[derive(Clone, Debug, PartialEq)]
+struct InputLook {
+  state: shingle_config::InputState,
+  content: Content,
+  highlight: Option<Highlight>,
+}
+
 struct LockOutput {
+  global: u32,
   output: wl_output::WlOutput,
   surface: wl_surface::WlSurface,
   lock_surface: ExtSessionLockSurfaceV1,
-  renderer: Option<OffscreenRenderer>,
-  buffers: Vec<ShmBuffer>,
   size: Option<(u32, u32)>,
+  target: Option<Target>,
+  layout: Option<Layout>,
+  buffers: Vec<ShmBuffer>,
   next_buffer_id: u64,
-  dirty: bool,
+  /// A full frame was committed since the last configure.
   committed: bool,
+  /// A frame callback is outstanding: no frame until it is done, so an
+  /// output the compositor does not draw, such as one that is off, gets
+  /// none.
+  frame_pending: bool,
+  /// What it shows changed since its last frame.
+  dirty: bool,
+  last_frame: Option<Instant>,
+  clock: Option<(String, String)>,
+  /// The clock image's size.
+  clock_size: (u32, u32),
+  input: Option<InputLook>,
+  frames: u64,
 }
 
 impl LockOutput {
@@ -354,22 +153,28 @@ impl LockOutput {
 
 struct State {
   connection: Connection,
-  _globals: GlobalList,
+  qh: QueueHandle<State>,
+  globals: GlobalList,
   _manager: ExtSessionLockManagerV1,
   lock: ExtSessionLockV1,
   compositor: wl_compositor::WlCompositor,
   shm: wl_shm::WlShm,
   outputs: HashMap<u32, LockOutput>,
   seats: HashMap<u32, Seat>,
-  keyboards: HashMap<wayland_client::backend::ObjectId, Keyboard>,
   xkb_context: xkb::Context,
-  background_color: [f64; 4],
-  show_indicator: bool,
+  settings: Settings,
+  gpu: Gpu,
+  images: HashMap<u32, Image>,
+  font: FontArc,
+  indicator: Indicator,
+  started: Instant,
+  locked_at: Option<Instant>,
+  notifier: daemon::Notifier,
+  trace: bool,
   authenticator: Authenticator,
   username: String,
   auth_sender: Sender<AuthOutcome>,
   auth_running: bool,
-  auth_failed: bool,
   password: Zeroizing<String>,
   locked: bool,
   finished: bool,
@@ -390,25 +195,34 @@ impl State {
     self.failure.is_none() && !self.finished && !self.unlock_requested
   }
 
-  fn add_output(&mut self, name: u32, version: u32, qh: &QueueHandle<Self>) {
+  fn add_output(&mut self, name: u32, version: u32) {
     if !self.active() || self.outputs.contains_key(&name) {
       return;
     }
-    let output = self._globals.registry().bind(name, version.min(4), qh, ());
-    let surface = self.compositor.create_surface(qh, ());
-    let lock_surface = self.lock.get_lock_surface(&surface, &output, qh, name);
+    let qh = self.qh.clone();
+    let output = self.globals.registry().bind(name, version.min(4), &qh, ());
+    let surface = self.compositor.create_surface(&qh, ());
+    let lock_surface = self.lock.get_lock_surface(&surface, &output, &qh, name);
     self.outputs.insert(
       name,
       LockOutput {
+        global: name,
         output,
         surface,
         lock_surface,
-        renderer: None,
-        buffers: Vec::new(),
         size: None,
+        target: None,
+        layout: None,
+        buffers: Vec::new(),
         next_buffer_id: 0,
-        dirty: false,
         committed: false,
+        frame_pending: false,
+        dirty: true,
+        last_frame: None,
+        clock: None,
+        clock_size: (0, 0),
+        input: None,
+        frames: 0,
       },
     );
   }
@@ -416,73 +230,174 @@ impl State {
   fn remove_output(&mut self, name: u32) {
     if let Some(output) = self.outputs.remove(&name) {
       output.destroy();
+      self.images.remove(&name);
       self.ready_reported = self.ready_reported && !self.outputs.is_empty();
     }
   }
 
-  fn add_seat(&mut self, name: u32, version: u32, qh: &QueueHandle<Self>) {
+  fn add_seat(&mut self, name: u32, version: u32) {
     if !self.active() || self.seats.contains_key(&name) {
       return;
     }
+    let qh = self.qh.clone();
     let proxy = self
-      ._globals
+      .globals
       .registry()
-      .bind(name, version.min(7), qh, name);
-    self.seats.insert(name, Seat { proxy });
+      .bind(name, version.min(7), &qh, name);
+    self.seats.insert(
+      name,
+      Seat {
+        proxy,
+        keyboard: None,
+        pointer: None,
+        touch: None,
+      },
+    );
   }
 
   fn remove_seat(&mut self, name: u32) {
-    self.remove_keyboard(name);
-    if let Some(seat) = self.seats.remove(&name)
-      && seat.proxy.version() >= 5
-    {
-      seat.proxy.release();
-    }
-  }
-
-  fn remove_keyboard(&mut self, seat_name: u32) {
-    let ids = self
-      .keyboards
-      .iter()
-      .filter_map(|(id, keyboard)| {
-        (keyboard.proxy.data::<u32>() == Some(&seat_name)).then_some(id.clone())
-      })
-      .collect::<Vec<_>>();
-    for id in ids {
-      if let Some(keyboard) = self.keyboards.remove(&id)
-        && keyboard.proxy.version() >= 3
-      {
-        keyboard.proxy.release();
+    if let Some(mut seat) = self.seats.remove(&name) {
+      release_devices(&mut seat, wl_seat::Capability::empty());
+      if seat.proxy.version() >= 5 {
+        seat.proxy.release();
       }
     }
   }
 
-  fn set_keyboard(
-    &mut self,
-    seat_name: u32,
-    present: bool,
-    qh: &QueueHandle<Self>,
-  ) {
-    self.remove_keyboard(seat_name);
-    if !present || !self.active() {
-      return;
-    }
-    let Some(seat) = self.seats.get(&seat_name) else {
-      self.fail("keyboard capability arrived for an unknown seat");
+  fn set_capabilities(&mut self, name: u32, capabilities: wl_seat::Capability) {
+    let qh = self.qh.clone();
+    let active = self.active();
+    let Some(seat) = self.seats.get_mut(&name) else {
+      self.fail("capabilities arrived for an unknown seat");
       return;
     };
-    let proxy = seat.proxy.get_keyboard(qh, seat_name);
-    let id = proxy.id();
-    self.keyboards.insert(id, Keyboard { proxy, xkb: None });
+    release_devices(seat, capabilities);
+    if !active {
+      return;
+    }
+    if capabilities.contains(wl_seat::Capability::Keyboard)
+      && seat.keyboard.is_none()
+    {
+      seat.keyboard = Some(Keyboard {
+        proxy: seat.proxy.get_keyboard(&qh, name),
+        xkb: None,
+      });
+    }
+    if capabilities.contains(wl_seat::Capability::Pointer)
+      && seat.pointer.is_none()
+    {
+      seat.pointer = Some(seat.proxy.get_pointer(&qh, name));
+    }
+    if capabilities.contains(wl_seat::Capability::Touch) && seat.touch.is_none()
+    {
+      seat.touch = Some(seat.proxy.get_touch(&qh, name));
+    }
   }
 
-  fn render_dirty(&mut self, qh: &QueueHandle<Self>) {
+  fn keyboard_mut(&mut self, seat: u32) -> Option<&mut Keyboard> {
+    self.seats.get_mut(&seat)?.keyboard.as_mut()
+  }
+
+  /// Whether the screenshot of output `global` drifts.
+  fn drifts(&self, global: u32) -> bool {
+    self.settings.drift.enabled
+      && self.settings.drift.amplitude > 0.0
+      && self.images.contains_key(&global)
+  }
+
+  /// Whether output `name` wants a frame at `now`.
+  fn wants_frame(&self, name: u32, now: Instant) -> bool {
+    let Some(output) = self.outputs.get(&name) else {
+      return false;
+    };
+    if output.size.is_none() || output.frame_pending {
+      return false;
+    }
+    if output.dirty || self.indicator.animating(now) {
+      return true;
+    }
+    let interval = Duration::from_secs_f64(1.0 / self.settings.drift.fps);
+    self.drifts(name)
+      && output
+        .last_frame
+        .is_none_or(|last| now.saturating_duration_since(last) >= interval)
+  }
+
+  /// When something wants a frame next without input.
+  fn next_wake(&self, now: Instant) -> Option<Instant> {
+    let mut next: Option<Instant> = None;
+    let mut consider = |at: Instant| {
+      next = Some(next.map_or(at, |next| next.min(at)));
+    };
+    if self.indicator.animating(now) {
+      consider(now + FADE_FRAME);
+    }
+    if let Some(at) = self.indicator.next_change(now) {
+      consider(at);
+    }
+    let interval = Duration::from_secs_f64(1.0 / self.settings.drift.fps);
+    for (name, output) in &self.outputs {
+      if self.drifts(*name) && !output.frame_pending {
+        consider(output.last_frame.map_or(now, |last| last + interval));
+      }
+    }
+    if self.settings.options.clock {
+      // The clock is checked once a second.
+      let since = self.started.elapsed().as_millis() as u64 % 1000;
+      consider(now + Duration::from_millis(1000 - since));
+    }
+    if let Some(end) = self.grace_end()
+      && end > now
+    {
+      consider(end);
+    }
+    next
+  }
+
+  fn grace_end(&self) -> Option<Instant> {
+    let grace = self.settings.options.grace;
+    self
+      .locked_at
+      .filter(|_| !grace.is_zero())
+      .map(|locked| locked + grace)
+  }
+
+  fn in_grace(&self) -> bool {
+    self.grace_end().is_some_and(|end| Instant::now() < end)
+  }
+
+  fn mark_dirty(&mut self) {
+    for output in self.outputs.values_mut() {
+      output.dirty = true;
+    }
+  }
+
+  /// Draws every output that wants a frame now.
+  fn tick(&mut self) {
+    if !self.active() {
+      return;
+    }
+    let now = Instant::now();
+    if self.settings.options.clock {
+      let (time, date) = self.clock_text();
+      for output in self.outputs.values_mut() {
+        if output
+          .clock
+          .as_ref()
+          .is_none_or(|clock| *clock != (time.clone(), date.clone()))
+        {
+          output.dirty = true;
+        }
+      }
+    }
     let names = self.outputs.keys().copied().collect::<Vec<_>>();
     for name in names {
       if !self.active() {
         break;
       }
-      if let Err(error) = self.render_output(name, qh) {
+      if self.wants_frame(name, now)
+        && let Err(error) = self.render_output(name, now)
+      {
         self.fail(error);
         break;
       }
@@ -490,103 +405,154 @@ impl State {
     self.maybe_report_ready();
   }
 
-  fn render_output(
-    &mut self,
-    name: u32,
-    qh: &QueueHandle<Self>,
-  ) -> Result<(), String> {
-    let compositor = &self.compositor;
-    let shm = &self.shm;
-    let password_len = self.password.chars().count();
-    let authenticating = self.auth_running;
-    let auth_failed = self.auth_failed;
+  fn clock_text(&self) -> (String, String) {
+    let now = SystemTime::now();
+    let options = &self.settings.options;
+    (
+      clock::format(&options.timestr, now),
+      clock::format(&options.datestr, now),
+    )
+  }
+
+  fn render_output(&mut self, name: u32, now: Instant) -> Result<(), String> {
+    let clock = self.settings.options.clock.then(|| self.clock_text());
+    let look = InputLook {
+      state: self.indicator.state(),
+      content: self
+        .indicator
+        .content(self.settings.options.show_failed_attempts),
+      highlight: self.indicator.highlight(now),
+    };
+    let opacity = if self.settings.options.show_indicator {
+      self.indicator.opacity(now)
+    } else {
+      0.0
+    };
+    let drifts = self.drifts(name);
+    let qh = self.qh.clone();
     let Some(output) = self.outputs.get_mut(&name) else {
       return Ok(());
     };
-    if !output.dirty {
-      return Ok(());
-    }
     let Some((width, height)) = output.size else {
       return Ok(());
     };
-    if output.renderer.is_none() {
-      output.renderer = Some(
-        pollster::block_on(OffscreenRenderer::new(width, height)).map_err(
-          |error| {
-            format!("GPU initialization failed on output {name}: {error}")
-          },
-        )?,
-      );
+    let options = &self.settings.options;
+    if output
+      .target
+      .as_ref()
+      .is_none_or(|target| target.size() != (width, height))
+    {
+      output.target = Some(Target::new(
+        &self.gpu,
+        (width, height),
+        self.images.get(&name),
+      ));
+      output.layout = Some(Layout::new((width, height), options));
+      output.clock = None;
+      output.input = None;
     }
     if output.buffers.is_empty() {
-      let mut buffers = Vec::with_capacity(2);
       for _ in 0..2 {
         let id = output.next_buffer_id;
         output.next_buffer_id = output.next_buffer_id.wrapping_add(1);
-        buffers.push(
-          ShmBuffer::new(shm, qh, name, id, width, height).map_err(
+        output.buffers.push(
+          ShmBuffer::new(&self.shm, &qh, name, id, width, height).map_err(
             |error| format!("shared-memory allocation failed: {error}"),
           )?,
         );
       }
-      output.buffers = buffers;
     }
     let Some(index) = output.buffers.iter().position(|buffer| !buffer.busy)
     else {
       return Ok(());
     };
-    let tiles = if self.show_indicator {
-      feedback_tiles(width, height, password_len, authenticating, auth_failed)
-    } else {
-      Vec::new()
+    let layout = output.layout.expect("made with the target");
+    let target = output.target.as_mut().expect("made above");
+    if output.clock != clock {
+      let raster = clock.as_ref().and_then(|(time, date)| {
+        let color =
+          options.state_colors(shingle_config::InputState::Input).text;
+        ui::rasterize_clock(time, date, &layout, color, &self.font)
+      });
+      target.set_clock(&self.gpu, raster.as_ref());
+      output.clock_size = raster
+        .as_ref()
+        .map_or((0, 0), |raster| (raster.width, raster.height));
+      output.clock = clock;
+    }
+    if opacity > 0.0 && output.input.as_ref() != Some(&look) {
+      let raster = ui::rasterize_input(
+        &layout,
+        options,
+        options.state_colors(look.state),
+        &look.content,
+        look.highlight,
+        &self.font,
+      );
+      target.set_input(&self.gpu, Some(&raster));
+      output.input = Some(look);
+    }
+    // Centred; the image is as wide as its widest line.
+    let clock_at = output.clock.as_ref().map(|_| {
+      (
+        (layout.size.0 as i32 - output.clock_size.0 as i32) / 2,
+        layout.clock_top,
+      )
+    });
+    let elapsed = now.saturating_duration_since(self.started).as_secs_f64();
+    let frame = Frame {
+      drift: if drifts {
+        Drift::at(elapsed, &self.settings.drift, (width, height))
+      } else {
+        Drift::STILL
+      },
+      vignette: options.vignette,
+      color: options.color,
+      clock: clock_at.map(|at| (at, 1.0)),
+      input: (opacity > 0.0)
+        .then_some(((layout.input.0, layout.input.1), opacity)),
     };
-    let rgba = output
-      .renderer
-      .as_mut()
-      .expect("renderer initialized")
-      .render(&tiles, self.background_color)
+    let buffer = &mut output.buffers[index];
+    let stride = buffer.stride();
+    let bytes = buffer
+      .bytes_mut()
+      .map_err(|error| format!("the frame's buffer: {error}"))?;
+    target
+      .draw(&self.gpu, &frame, bytes, stride)
       .map_err(|error| {
         format!("GPU rendering failed on output {name}: {error}")
       })?;
-    output.buffers[index]
-      .write_rgba(&rgba)
-      .map_err(|error| format!("shared-memory write failed: {error}"))?;
-    let region = compositor.create_region(qh, ());
-    region.add(
-      0,
-      0,
-      i32::try_from(width)
-        .map_err(|_| "output width exceeds protocol limits".to_owned())?,
-      i32::try_from(height)
-        .map_err(|_| "output height exceeds protocol limits".to_owned())?,
+    let (w, h) = (
+      i32::try_from(width).map_err(|_| "the output is too wide".to_owned())?,
+      i32::try_from(height).map_err(|_| "the output is too tall".to_owned())?,
     );
-    output.surface.set_opaque_region(Some(&region));
-    region.destroy();
+    if !output.committed {
+      let region = self.compositor.create_region(&qh, ());
+      region.add(0, 0, w, h);
+      output.surface.set_opaque_region(Some(&region));
+      region.destroy();
+    }
     output.buffers[index].busy = true;
     output
       .surface
       .attach(Some(&output.buffers[index].buffer), 0, 0);
-    output.surface.damage_buffer(
-      0,
-      0,
-      i32::try_from(width)
-        .map_err(|_| "output width exceeds protocol limits".to_owned())?,
-      i32::try_from(height)
-        .map_err(|_| "output height exceeds protocol limits".to_owned())?,
-    );
+    output.surface.damage_buffer(0, 0, w, h);
+    output.surface.frame(&qh, name);
     output.surface.commit();
+    output.frame_pending = true;
     output.committed = true;
     output.dirty = false;
-    Ok(())
-  }
-
-  fn mark_dirty(&mut self, qh: &QueueHandle<Self>) {
-    for output in self.outputs.values_mut() {
-      if output.size.is_some() {
-        output.dirty = true;
-      }
+    output.last_frame = Some(now);
+    output.frames += 1;
+    if self.trace {
+      eprintln!(
+        "shingle-lock: frame {} of output {} at {} ms",
+        output.frames,
+        output.global,
+        elapsed_ms(self.started)
+      );
     }
-    self.render_dirty(qh);
+    Ok(())
   }
 
   fn maybe_report_ready(&mut self) {
@@ -602,27 +568,45 @@ impl State {
       self.outputs.len()
     );
     self.ready_reported = true;
+    self.notifier.locked();
   }
 
-  fn process_key(
-    &mut self,
-    keysym: xkb::Keysym,
-    text: String,
-    qh: &QueueHandle<Self>,
-  ) {
+  /// Unlocks without a password, as any input during the grace period
+  /// does.
+  fn grace_unlock(&mut self, what: &str) {
     if !self.active() || !self.locked || self.auth_running {
       return;
     }
-    let changed = match keysym.raw() {
+    eprintln!("shingle-lock: {what} during the grace period unlocks");
+    self.password.zeroize();
+    self.unlock_requested = true;
+    self.lock.unlock_and_destroy();
+  }
+
+  fn process_key(&mut self, keysym: xkb::Keysym, text: String) {
+    if !self.active() || !self.locked || self.auth_running {
+      return;
+    }
+    if self.in_grace() {
+      self.grace_unlock("a key");
+      return;
+    }
+    let now = Instant::now();
+    match keysym.raw() {
       xkb::keysyms::KEY_Return | xkb::keysyms::KEY_KP_Enter => {
-        self.start_authentication(qh);
+        self.start_authentication();
         return;
       }
-      xkb::keysyms::KEY_BackSpace => self.password.pop().is_some(),
+      xkb::keysyms::KEY_BackSpace => {
+        if self.password.pop().is_some() {
+          self.indicator.deleted(self.password.chars().count(), now);
+        } else {
+          self.indicator.cleared(now);
+        }
+      }
       xkb::keysyms::KEY_Escape | xkb::keysyms::KEY_Delete => {
-        let changed = !self.password.is_empty();
         self.password.zeroize();
-        changed
+        self.indicator.cleared(now);
       }
       _ => {
         let previous_len = self.password.len();
@@ -636,29 +620,29 @@ impl State {
           }
           self.password.push(character);
         }
-        self.password.len() != previous_len
+        if self.password.len() != previous_len {
+          self.indicator.typed(self.password.chars().count(), now);
+        } else {
+          self.indicator.poked(now);
+        }
       }
-    };
-    if changed {
-      self.auth_failed = false;
-      self.mark_dirty(qh);
     }
+    self.mark_dirty();
   }
 
-  fn start_authentication(&mut self, qh: &QueueHandle<Self>) {
-    if !self.active()
-      || !self.locked
-      || self.auth_running
-      || self.password.is_empty()
-    {
+  fn start_authentication(&mut self) {
+    if !self.active() || !self.locked || self.auth_running {
+      return;
+    }
+    let now = Instant::now();
+    if self.password.is_empty() && self.settings.options.ignore_empty_password {
+      self.indicator.poked(now);
+      self.mark_dirty();
       return;
     }
     self.auth_running = true;
-    self.auth_failed = false;
-    self.mark_dirty(qh);
-    if !self.active() {
-      return;
-    }
+    self.indicator.verifying(now);
+    self.mark_dirty();
     let mut password = std::mem::take(&mut self.password);
     let password = Password::new(std::mem::take(&mut *password));
     let authenticator = self.authenticator.clone();
@@ -689,7 +673,7 @@ impl State {
     eprintln!("shingle-lock: authentication started");
   }
 
-  fn handle_auth(&mut self, outcome: AuthOutcome, qh: &QueueHandle<Self>) {
+  fn handle_auth(&mut self, outcome: AuthOutcome) {
     if !self.auth_running || !self.active() {
       return;
     }
@@ -709,96 +693,44 @@ impl State {
       }
       AuthOutcome::Denied => {
         self.password.zeroize();
-        self.auth_failed = true;
+        self.indicator.denied(Instant::now());
+        let attempts = self.indicator.attempts();
+        let plural = if attempts == 1 { "" } else { "s" };
         eprintln!(
-          "shingle-lock: authentication failed; session remains locked"
+          "shingle-lock: authentication failed ({attempts} failed \
+           attempt{plural}); session remains locked"
         );
-        self.mark_dirty(qh);
+        self.mark_dirty();
       }
       AuthOutcome::WorkerFailed(error) => self.fail(error),
     }
   }
 }
 
-fn feedback_tiles(
-  width: u32,
-  height: u32,
-  password_len: usize,
-  authenticating: bool,
-  auth_failed: bool,
-) -> Vec<RenderTile<'static>> {
-  let panel_width = width.min(560);
-  let panel_height = height.min(260);
-  let panel_x = (width - panel_width) / 2;
-  let panel_y = (height - panel_height) / 2;
-  let margin = (panel_width / 20).min(panel_height / 8);
-  let field_width = panel_width.saturating_sub(margin * 2);
-  let field_height = (panel_height / 4).max(1);
-  let field_x = panel_x + margin;
-  let field_y = panel_y + (panel_height.saturating_sub(field_height)) / 2;
-  let mut tiles = vec![
-    RenderTile::solid(
-      RenderRect {
-        x: panel_x as i32,
-        y: panel_y as i32,
-        width: panel_width,
-        height: panel_height,
-      },
-      [0.055, 0.065, 0.095, 1.0],
-    ),
-    RenderTile::solid(
-      RenderRect {
-        x: field_x as i32,
-        y: field_y as i32,
-        width: field_width,
-        height: field_height,
-      },
-      [0.015, 0.02, 0.035, 1.0],
-    ),
-  ];
-  let count = password_len.min(32) as u32;
-  if count > 0 && field_width > count {
-    let spacing = field_width / (count + 1);
-    let diameter = spacing.min(field_height / 2).min(14);
-    if diameter > 0 {
-      let color = if authenticating {
-        [0.25, 0.55, 0.95, 1.0]
-      } else if auth_failed {
-        [0.95, 0.25, 0.25, 1.0]
-      } else {
-        [0.85, 0.88, 0.95, 1.0]
-      };
-      for index in 0..count {
-        tiles.push(RenderTile::solid(
-          RenderRect {
-            x: (field_x + spacing * (index + 1) + (spacing - diameter) / 2)
-              as i32,
-            y: (field_y + (field_height - diameter) / 2) as i32,
-            width: diameter,
-            height: diameter,
-          },
-          color,
-        ));
-      }
-    }
+/// Releases the devices of `seat` its capabilities no longer include.
+fn release_devices(seat: &mut Seat, capabilities: wl_seat::Capability) {
+  if !capabilities.contains(wl_seat::Capability::Keyboard)
+    && let Some(keyboard) = seat.keyboard.take()
+    && keyboard.proxy.version() >= 3
+  {
+    keyboard.proxy.release();
   }
-  if auth_failed || authenticating {
-    let color = if authenticating {
-      [0.25, 0.55, 0.95, 1.0]
-    } else {
-      [0.95, 0.25, 0.25, 1.0]
-    };
-    tiles.push(RenderTile::solid(
-      RenderRect {
-        x: field_x as i32,
-        y: (field_y + field_height + margin / 2) as i32,
-        width: field_width,
-        height: (panel_height / 64).max(1),
-      },
-      color,
-    ));
+  if !capabilities.contains(wl_seat::Capability::Pointer)
+    && let Some(pointer) = seat.pointer.take()
+    && pointer.version() >= 3
+  {
+    pointer.release();
   }
-  tiles
+  if !capabilities.contains(wl_seat::Capability::Touch)
+    && let Some(touch) = seat.touch.take()
+    && touch.version() >= 3
+  {
+    touch.release();
+  }
+}
+
+fn elapsed_ms(since: Instant) -> u128 {
+  since.elapsed().as_millis()
 }
 
 fn required_global<T>(
@@ -820,7 +752,10 @@ where
   })
 }
 
-fn run(options: Options) -> Result<(), LockError> {
+fn run(
+  settings: Settings,
+  notifier: daemon::Notifier,
+) -> Result<(), LockError> {
   let username = username::current()?;
   let connection = Connection::connect_to_env()?;
   let (globals, event_queue) = registry_queue_init::<State>(&connection)?;
@@ -829,17 +764,30 @@ fn run(options: Options) -> Result<(), LockError> {
   let shm = required_global(&globals, &qh, 1..=1, "wl_shm")?;
   let manager: ExtSessionLockManagerV1 =
     required_global(&globals, &qh, 1..=1, "ext_session_lock_manager_v1")?;
-  let lock = manager.lock(&qh, ());
   let initial_globals = globals.contents().clone_list();
   if !initial_globals
     .iter()
     .any(|global| global.interface == "wl_output")
   {
-    lock.destroy();
     return Err(LockError::Message(
       "no wl_output globals are available; lock request aborted".to_owned(),
     ));
   }
+  // Everything that can fail or take long happens before the lock is
+  // asked for: once it is, the compositor shows no client any more.
+  let gpu = Gpu::new()
+    .map_err(|error| LockError::Message(format!("no GPU: {error}")))?;
+  let font = font::load(&settings.options.font);
+  let mut images = HashMap::new();
+  if settings.options.screenshot {
+    let shots =
+      capture::capture_outputs(&connection, &globals, CAPTURE_TIMEOUT);
+    for (name, shot) in &shots {
+      images.insert(*name, gpu.image(shot, settings.options.blur));
+    }
+    eprintln!("shingle-lock: captured {} output(s)", shots.len());
+  }
+  let lock = manager.lock(&qh, ());
 
   let mut event_loop = EventLoop::<State>::try_new()?;
   let signals = Signals::new(&[
@@ -849,24 +797,36 @@ fn run(options: Options) -> Result<(), LockError> {
     Signal::SIGHUP,
   ])?;
   let (auth_sender, auth_receiver) = channel::channel();
+  let started = Instant::now();
+  let indicator = Indicator::new(
+    settings.input_timeout,
+    settings.options.indicator_always,
+    started,
+  );
   let mut state = State {
     connection: connection.clone(),
-    _globals: globals,
+    qh: qh.clone(),
+    globals,
     _manager: manager,
     lock,
     compositor,
     shm,
     outputs: HashMap::new(),
     seats: HashMap::new(),
-    keyboards: HashMap::new(),
     xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
-    background_color: options.background_color,
-    show_indicator: options.show_indicator,
+    settings,
+    gpu,
+    images,
+    font,
+    indicator,
+    started,
+    locked_at: None,
+    notifier,
+    trace: std::env::var_os("SHINGLE_LOCK_TRACE").is_some(),
     authenticator: Authenticator::from_env(),
     username,
     auth_sender,
     auth_running: false,
-    auth_failed: false,
     password: Zeroizing::new(String::new()),
     locked: false,
     finished: false,
@@ -874,17 +834,12 @@ fn run(options: Options) -> Result<(), LockError> {
     ready_reported: false,
     failure: None,
   };
-  for global in initial_globals
-    .iter()
-    .filter(|global| global.interface == "wl_output")
-  {
-    state.add_output(global.name, global.version, &qh);
-  }
-  for global in initial_globals
-    .iter()
-    .filter(|global| global.interface == "wl_seat")
-  {
-    state.add_seat(global.name, global.version, &qh);
+  for global in &initial_globals {
+    match global.interface.as_str() {
+      "wl_output" => state.add_output(global.name, global.version),
+      "wl_seat" => state.add_seat(global.name, global.version),
+      _ => {}
+    }
   }
 
   event_loop
@@ -898,7 +853,7 @@ fn run(options: Options) -> Result<(), LockError> {
   event_loop
     .handle()
     .insert_source(auth_receiver, |event, _, state| match event {
-      ChannelEvent::Msg(outcome) => state.handle_auth(outcome, &qh),
+      ChannelEvent::Msg(outcome) => state.handle_auth(outcome),
       ChannelEvent::Closed => {
         state.fail("authentication result channel closed unexpectedly")
       }
@@ -916,7 +871,13 @@ fn run(options: Options) -> Result<(), LockError> {
 
   eprintln!("shingle-lock: session lock requested");
   while state.failure.is_none() && !state.unlock_requested {
-    event_loop.dispatch(None, &mut state)?;
+    let now = Instant::now();
+    let timeout = state
+      .next_wake(now)
+      .map(|at| at.saturating_duration_since(now));
+    event_loop.dispatch(timeout, &mut state)?;
+    state.tick();
+    let _ = state.connection.flush();
   }
   if let Some(failure) = state.failure {
     return Err(LockError::Message(failure));
@@ -929,22 +890,43 @@ fn run(options: Options) -> Result<(), LockError> {
 }
 
 fn main() -> ExitCode {
-  let options = match Options::parse() {
-    Ok(CliAction::Run(options)) => options,
-    Ok(CliAction::Help) => {
-      print_help();
-      return ExitCode::SUCCESS;
+  let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+  let (settings, warnings) =
+    match options::resolve(&arguments, &options::Sources::system()) {
+      Ok(Action::Run(settings, warnings)) => (*settings, warnings),
+      Ok(Action::Help) => {
+        println!(
+          "shingle-lock {}\n\n{}",
+          env!("CARGO_PKG_VERSION"),
+          options::HELP
+        );
+        return ExitCode::SUCCESS;
+      }
+      Ok(Action::Version) => {
+        println!("shingle-lock {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+      }
+      Err(error) => {
+        eprintln!("shingle-lock: {error}");
+        return ExitCode::FAILURE;
+      }
+    };
+  for warning in warnings {
+    eprintln!("shingle-lock: {warning}");
+  }
+  let notifier = if settings.options.daemonize {
+    match daemon::daemonize() {
+      Ok(Ok(notifier)) => notifier,
+      Ok(Err(status)) => return ExitCode::from(status),
+      Err(error) => {
+        eprintln!("shingle-lock: cannot daemonize: {error}");
+        return ExitCode::FAILURE;
+      }
     }
-    Ok(CliAction::Version) => {
-      println!("shingle-lock {}", env!("CARGO_PKG_VERSION"));
-      return ExitCode::SUCCESS;
-    }
-    Err(error) => {
-      eprintln!("shingle-lock: {error}");
-      return ExitCode::FAILURE;
-    }
+  } else {
+    daemon::Notifier::none()
   };
-  match run(options) {
+  match run(settings, notifier) {
     Ok(()) => ExitCode::SUCCESS,
     Err(error) => {
       eprintln!("shingle-lock: {error}");
@@ -960,7 +942,7 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
     event: wl_registry::Event,
     _data: &GlobalListContents,
     _conn: &Connection,
-    qh: &QueueHandle<Self>,
+    _qh: &QueueHandle<Self>,
   ) {
     if !state.active() {
       return;
@@ -971,8 +953,8 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
         interface,
         version,
       } => match interface.as_str() {
-        "wl_output" => state.add_output(name, version, qh),
-        "wl_seat" => state.add_seat(name, version, qh),
+        "wl_output" => state.add_output(name, version),
+        "wl_seat" => state.add_seat(name, version),
         _ => {}
       },
       wl_registry::Event::GlobalRemove { name } => {
@@ -1002,6 +984,7 @@ impl Dispatch<ExtSessionLockV1, ()> for State {
     match event {
       ext_session_lock_v1::Event::Locked => {
         state.locked = true;
+        state.locked_at = Some(Instant::now());
         eprintln!("shingle-lock: compositor reported the session locked");
         state.maybe_report_ready();
       }
@@ -1032,7 +1015,7 @@ impl Dispatch<ExtSessionLockSurfaceV1, u32> for State {
     event: <ExtSessionLockSurfaceV1 as Proxy>::Event,
     output_name: &u32,
     _conn: &Connection,
-    qh: &QueueHandle<Self>,
+    _qh: &QueueHandle<Self>,
   ) {
     if !state.active() {
       return;
@@ -1049,23 +1032,41 @@ impl Dispatch<ExtSessionLockSurfaceV1, u32> for State {
       };
       if width == 0 || height == 0 {
         output.size = None;
-        output.renderer = None;
+        output.target = None;
         output.buffers.clear();
         output.committed = false;
         return;
       }
       if output.size != Some((width, height)) {
         output.size = Some((width, height));
-        output.renderer = None;
         output.buffers.clear();
       }
+      // A configure is answered at once, whatever frame is pending.
       output.committed = false;
       output.dirty = true;
-      if let Err(error) = state.render_output(*output_name, qh) {
+      output.frame_pending = false;
+      if let Err(error) = state.render_output(*output_name, Instant::now()) {
         state.fail(error);
         return;
       }
       state.maybe_report_ready();
+    }
+  }
+}
+
+impl Dispatch<wl_callback::WlCallback, u32> for State {
+  fn event(
+    state: &mut Self,
+    _proxy: &wl_callback::WlCallback,
+    event: wl_callback::Event,
+    output_name: &u32,
+    _conn: &Connection,
+    _qh: &QueueHandle<Self>,
+  ) {
+    if let wl_callback::Event::Done { .. } = event
+      && let Some(output) = state.outputs.get_mut(output_name)
+    {
+      output.frame_pending = false;
     }
   }
 }
@@ -1077,7 +1078,7 @@ impl Dispatch<wl_seat::WlSeat, u32> for State {
     event: wl_seat::Event,
     seat_name: &u32,
     _conn: &Connection,
-    qh: &QueueHandle<Self>,
+    _qh: &QueueHandle<Self>,
   ) {
     if !state.active() {
       return;
@@ -1085,11 +1086,7 @@ impl Dispatch<wl_seat::WlSeat, u32> for State {
     if let wl_seat::Event::Capabilities { capabilities } = event {
       match capabilities {
         WEnum::Value(capabilities) => {
-          state.set_keyboard(
-            *seat_name,
-            capabilities.contains(wl_seat::Capability::Keyboard),
-            qh,
-          );
+          state.set_capabilities(*seat_name, capabilities)
         }
         WEnum::Unknown(_) => {
           state.fail("compositor sent unknown seat capabilities")
@@ -1102,11 +1099,11 @@ impl Dispatch<wl_seat::WlSeat, u32> for State {
 impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
   fn event(
     state: &mut Self,
-    proxy: &wl_keyboard::WlKeyboard,
+    _proxy: &wl_keyboard::WlKeyboard,
     event: wl_keyboard::Event,
-    _seat_name: &u32,
+    seat_name: &u32,
     _conn: &Connection,
-    qh: &QueueHandle<Self>,
+    _qh: &QueueHandle<Self>,
   ) {
     if !state.active() {
       return;
@@ -1143,7 +1140,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
             return;
           }
         };
-        if let Some(keyboard) = state.keyboards.get_mut(&proxy.id()) {
+        if let Some(keyboard) = state.keyboard_mut(*seat_name) {
           keyboard.xkb = Some(xkb::State::new(&keymap));
         }
       }
@@ -1154,7 +1151,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
         group,
         ..
       } => {
-        if let Some(keyboard) = state.keyboards.get_mut(&proxy.id())
+        if let Some(keyboard) = state.keyboard_mut(*seat_name)
           && let Some(xkb) = &mut keyboard.xkb
         {
           xkb.update_mask(
@@ -1175,7 +1172,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
         if !matches!(key_state, WEnum::Value(wl_keyboard::KeyState::Pressed)) {
           return;
         }
-        let Some(keyboard) = state.keyboards.get(&proxy.id()) else {
+        let Some(keyboard) = state.keyboard_mut(*seat_name) else {
           state.fail("key event arrived for an unknown keyboard");
           return;
         };
@@ -1186,9 +1183,46 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
         let keycode = xkb::Keycode::new(key.saturating_add(8));
         let keysym = xkb.key_get_one_sym(keycode);
         let text = xkb.key_get_utf8(keycode);
-        state.process_key(keysym, text, qh);
+        state.process_key(keysym, text);
       }
       _ => {}
+    }
+  }
+}
+
+impl Dispatch<wl_pointer::WlPointer, u32> for State {
+  fn event(
+    state: &mut Self,
+    _proxy: &wl_pointer::WlPointer,
+    event: wl_pointer::Event,
+    _seat: &u32,
+    _conn: &Connection,
+    _qh: &QueueHandle<Self>,
+  ) {
+    let moved = matches!(
+      event,
+      wl_pointer::Event::Motion { .. } | wl_pointer::Event::Button { .. }
+    );
+    if moved && state.in_grace() && !state.settings.options.grace_no_mouse {
+      state.grace_unlock("the pointer");
+    }
+  }
+}
+
+impl Dispatch<wl_touch::WlTouch, u32> for State {
+  fn event(
+    state: &mut Self,
+    _proxy: &wl_touch::WlTouch,
+    event: wl_touch::Event,
+    _seat: &u32,
+    _conn: &Connection,
+    _qh: &QueueHandle<Self>,
+  ) {
+    if matches!(event, wl_touch::Event::Down { .. })
+      && state.in_grace()
+      && !state.settings.options.grace_no_touch
+    {
+      state.grace_unlock("a touch");
     }
   }
 }
@@ -1200,7 +1234,7 @@ impl Dispatch<wl_buffer::WlBuffer, BufferData> for State {
     event: wl_buffer::Event,
     data: &BufferData,
     _conn: &Connection,
-    qh: &QueueHandle<Self>,
+    _qh: &QueueHandle<Self>,
   ) {
     if !state.active() || !matches!(event, wl_buffer::Event::Release) {
       return;
@@ -1212,9 +1246,6 @@ impl Dispatch<wl_buffer::WlBuffer, BufferData> for State {
         .find(|buffer| buffer.id == data.id)
     {
       buffer.busy = false;
-    }
-    if let Err(error) = state.render_output(data.output, qh) {
-      state.fail(error);
     }
   }
 }
@@ -1246,113 +1277,3 @@ noop_dispatch!(
   wl_surface::WlSurface,
   ExtSessionLockManagerV1,
 );
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  fn parse(arguments: &[&str]) -> CliAction {
-    Options::parse_from(arguments.iter().map(std::ffi::OsString::from)).unwrap()
-  }
-
-  #[test]
-  fn parses_swaylock_color_and_indicator_options() {
-    let CliAction::Run(options) =
-      parse(&["--color=ff8000", "--no-unlock-indicator"])
-    else {
-      panic!("expected runnable options");
-    };
-    assert!(!options.show_indicator);
-    assert_eq!(options.background_color[0], 1.0);
-    assert_eq!(options.background_color[2], 0.0);
-    assert_eq!(options.background_color[3], 1.0);
-    assert!(
-      (options.background_color[1] - srgb_to_linear(128)).abs() < f64::EPSILON
-    );
-
-    let CliAction::Run(options) = parse(&["-c", "#11223380", "-u"]) else {
-      panic!("expected runnable options");
-    };
-    assert_eq!(options.background_color[0], srgb_to_linear(0x11));
-    assert_eq!(options.background_color[1], srgb_to_linear(0x22));
-    assert_eq!(options.background_color[2], srgb_to_linear(0x33));
-    assert_eq!(options.background_color[3], 128.0 / 255.0);
-  }
-
-  #[test]
-  fn reads_config_and_applies_cli_overrides() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config");
-    fs::write(&path, "# lock theme\ncolor=112233\nno-unlock-indicator\n")
-      .unwrap();
-    let path = path.to_string_lossy().into_owned();
-    let CliAction::Run(options) = parse(&["-C", &path, "--color=ff8000"])
-    else {
-      panic!("expected runnable options");
-    };
-    assert!(!options.show_indicator);
-    assert_eq!(options.background_color[0], 1.0);
-    assert_eq!(options.background_color[1], srgb_to_linear(128));
-    assert_eq!(options.background_color[2], 0.0);
-
-    let second = directory.path().join("second");
-    fs::write(&second, "color 334455\n").unwrap();
-    let second = format!("--config={}", second.to_string_lossy());
-    let CliAction::Run(options) = parse(&[&second]) else {
-      panic!("expected runnable options");
-    };
-    assert!(options.show_indicator);
-    assert_eq!(options.background_color[0], srgb_to_linear(0x33));
-    assert_eq!(options.background_color[1], srgb_to_linear(0x44));
-    assert_eq!(options.background_color[2], srgb_to_linear(0x55));
-  }
-
-  #[test]
-  fn rejects_bad_config_without_blocking_help() {
-    let directory = tempfile::tempdir().unwrap();
-    let missing = directory
-      .path()
-      .join("missing")
-      .to_string_lossy()
-      .into_owned();
-    assert!(matches!(
-      parse(&["--config", &missing, "--help"]),
-      CliAction::Help
-    ));
-    assert!(
-      Options::parse_from([
-        std::ffi::OsString::from("--config"),
-        std::ffi::OsString::from(&missing),
-      ])
-      .is_err()
-    );
-
-    let path = directory.path().join("bad");
-    fs::write(&path, "unknown-option=true\n").unwrap();
-    let path = path.to_string_lossy().into_owned();
-    assert!(
-      Options::parse_from([
-        std::ffi::OsString::from("--config"),
-        std::ffi::OsString::from(path),
-      ])
-      .is_err()
-    );
-  }
-
-  #[test]
-  fn handles_informational_and_invalid_options() {
-    assert!(matches!(parse(&["--help"]), CliAction::Help));
-    assert!(matches!(parse(&["--version"]), CliAction::Version));
-    for arguments in [
-      &["--unknown"][..],
-      &["--color"][..],
-      &["--color=12345"][..],
-      &["--color=gg0000"][..],
-    ] {
-      assert!(
-        Options::parse_from(arguments.iter().map(std::ffi::OsString::from))
-          .is_err()
-      );
-    }
-  }
-}

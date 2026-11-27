@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+ab_glyph = "0.2"
+bytemuck.workspace = true
 calloop = { workspace = true, features = ["signals"] }
 calloop-wayland-source = "0.4.1"
 libc = "0.2"
@@ -14,9 +16,12 @@ rustix.workspace = true
 tempfile = "3"
 thiserror.workspace = true
 shingle-auth = { path = "../shingle-auth" }
+shingle-config = { path = "../shingle-config" }
 shingle-render = { path = "../shingle-render" }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { workspace = true, features = ["client"] }
+wgpu.workspace = true
 xkbcommon = "0.9"
 zeroize.workspace = true
 
