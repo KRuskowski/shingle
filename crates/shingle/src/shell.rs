@@ -2782,7 +2782,20 @@ impl Dispatch<XdgToplevel, XdgToplevelData> for CompositorState {
         let Some(window) = materialize_toplevel(state, &object) else {
           return;
         };
-        let _ = set_maximized(state, window, maximized);
+        // simple-tile carries out a tiled view's maximize requests by
+        // ignoring them, since it manages the tiled state itself
+        // (wayfire:plugins/tile/tile-plugin.cpp, `on_tile_request`):
+        // inkscape asks to be maximized at start and would otherwise
+        // cover the tiles beside it. The client still gets a configure.
+        let tiled = state.tiling
+          && state
+            .surfaces
+            .get(&object)
+            .and_then(|surface| surface.role.toplevel())
+            .is_some_and(|toplevel| toplevel.tiled);
+        if !tiled {
+          let _ = set_maximized(state, window, maximized);
+        }
         request_configure(state, &object);
       }
       xdg_toplevel::Request::SetFullscreen { .. }
@@ -3893,6 +3906,35 @@ mod tests {
     view._xdg_surface.set_window_geometry(0, 0, 0, 10);
     let error = client.protocol_error(&mut compositor).expect("an error");
     assert_eq!(error.code, 5);
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn a_tiled_toplevels_maximize_request_keeps_its_tile() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let first = client.toplevel(&mut compositor, "first");
+    // As inkscape does before it first draws.
+    first.toplevel.set_maximized();
+    client.roundtrip(&mut compositor);
+    client.attach_buffer(&mut compositor, &first.surface, 640, 480);
+    let second = client.toplevel(&mut compositor, "second");
+    client.attach_buffer(&mut compositor, &second.surface, 640, 480);
+    first.toplevel.set_maximized();
+    client.roundtrip(&mut compositor);
+    let window = windows_with(&compositor.state, "first")[0];
+    let info = compositor.state.core.window_info(window).unwrap();
+    assert!(!info.state.maximized);
+    let tiles = layout_tiles(&mut compositor.state);
+    assert_eq!(tiles.len(), 2);
+    let width = compositor.state.active().rect.width;
+    assert!(tiles.iter().all(|(_, tile)| *tile < u64::from(width)));
+    // A floating window still maximizes.
+    super::toggle_tiling(&mut compositor.state, window).unwrap();
+    first.toplevel.set_maximized();
+    client.roundtrip(&mut compositor);
+    let info = compositor.state.core.window_info(window).unwrap();
+    assert!(info.state.maximized);
     let _ = std::fs::remove_file(path);
   }
 
