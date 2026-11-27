@@ -604,7 +604,9 @@ def config():
   result['workspaces'] = {'width': 2, 'height': 1}
   result['outputs'] = [dict(output) for output in OUTPUTS]
   result['background_color'] = BACKGROUND_COLOR
-  result['animate'] = {'open_animation': 'none'}
+  # The `before` captures are taken right after start, which would catch
+  # the output still black from animate's startup fade.
+  result['animate'] = {'open_animation': 'none', 'startup_duration_ms': 0}
   result['tiling'] = {'animation_duration': 0, 'gaps': dict(GAPS)}
   return result
 
