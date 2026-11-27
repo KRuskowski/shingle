@@ -216,8 +216,10 @@ struct LockOutput {
   name: Option<String>,
   /// The index in [`State::captures`] it shows, chosen with its target.
   capture: Option<usize>,
-  surface: wl_surface::WlSurface,
-  lock_surface: ExtSessionLockSurfaceV1,
+  /// Its surface and lock surface, made once its `wl_output`
+  /// described itself ([`State::give_lock_surface`]); `None` while it
+  /// waits, or while another global of the same output has them.
+  surfaces: Option<(wl_surface::WlSurface, ExtSessionLockSurfaceV1)>,
   size: Option<(u32, u32)>,
   target: Option<Target>,
   layout: Option<Layout>,
@@ -249,8 +251,10 @@ struct LockOutput {
 
 impl LockOutput {
   fn destroy(self) {
-    self.lock_surface.destroy();
-    self.surface.destroy();
+    if let Some((surface, lock_surface)) = self.surfaces {
+      lock_surface.destroy();
+      surface.destroy();
+    }
     if self.output.version() >= 3 {
       self.output.release();
     }
@@ -316,12 +320,13 @@ impl State {
       return;
     }
     let qh = self.qh.clone();
-    let output = self
-      .globals
-      .registry()
-      .bind(name, version.min(4), &qh, name);
-    let surface = self.compositor.create_surface(&qh, ());
-    let lock_surface = self.lock.get_lock_surface(&surface, &output, &qh, name);
+    let output: wl_output::WlOutput =
+      self
+        .globals
+        .registry()
+        .bind(name, version.min(4), &qh, name);
+    // wl_output before version 2 sends no done event to wait for.
+    let describes_itself = output.version() >= 2;
     self.outputs.insert(
       name,
       LockOutput {
@@ -329,8 +334,7 @@ impl State {
         output,
         name: None,
         capture: None,
-        surface,
-        lock_surface,
+        surfaces: None,
         size: None,
         target: None,
         layout: None,
@@ -349,13 +353,77 @@ impl State {
         frames: 0,
       },
     );
+    if !describes_itself {
+      self.give_lock_surface(name);
+    }
+  }
+
+  /// Gives output `global` its lock surface, unless another global of
+  /// the same output, by its `wl_output` name, has one: a compositor
+  /// that replaces an output's global announces the new one while the
+  /// client may still hold the old, and a second lock surface for one
+  /// output is a protocol error. The waiting one gets its surface when
+  /// the other goes ([`State::remove_output`]).
+  fn give_lock_surface(&mut self, global: u32) {
+    if !self.active() {
+      return;
+    }
+    let others = self
+      .outputs
+      .values()
+      .map(|output| {
+        (
+          output.global,
+          output.name.as_deref(),
+          output.surfaces.is_some(),
+        )
+      })
+      .collect::<Vec<_>>();
+    let Some(output) = self.outputs.get(&global) else {
+      return;
+    };
+    if output.surfaces.is_some() {
+      return;
+    }
+    if let Some(holder) =
+      lock_surface_holder(&others, global, output.name.as_deref())
+    {
+      eprintln!(
+        "shingle-lock: output {global} ({}) is the output of global {holder}, \
+         which has its lock surface; waiting for that one to go",
+        output.name.as_deref().unwrap_or("unnamed")
+      );
+      return;
+    }
+    let qh = self.qh.clone();
+    let surface = self.compositor.create_surface(&qh, ());
+    let lock_surface =
+      self
+        .lock
+        .get_lock_surface(&surface, &output.output, &qh, global);
+    if let Some(output) = self.outputs.get_mut(&global) {
+      output.surfaces = Some((surface, lock_surface));
+    }
   }
 
   fn remove_output(&mut self, name: u32) {
     // Its capture stays, for the output if it comes back.
     if let Some(output) = self.outputs.remove(&name) {
+      let alias = output.name.clone();
       output.destroy();
       self.ready_reported = self.ready_reported && !self.outputs.is_empty();
+      // Another global of the same output may have waited for this one.
+      let waiting = self
+        .outputs
+        .values()
+        .filter(|other| {
+          other.surfaces.is_none() && alias.is_some() && other.name == alias
+        })
+        .map(|other| other.global)
+        .collect::<Vec<_>>();
+      for global in waiting {
+        self.give_lock_surface(global);
+      }
     }
   }
 
@@ -688,6 +756,9 @@ impl State {
     let Some(output) = self.outputs.get_mut(&name) else {
       return Ok(());
     };
+    let Some((surface, _)) = output.surfaces.clone() else {
+      return Ok(());
+    };
     let options = &self.settings.options;
     if output
       .target
@@ -854,24 +925,22 @@ impl State {
     } else {
       let region = self.compositor.create_region(&qh, ());
       region.add(0, 0, w, h);
-      output.surface.set_opaque_region(Some(&region));
+      surface.set_opaque_region(Some(&region));
       region.destroy();
       Rect::full((width, height))
     };
     output.buffers[index].busy = true;
-    output
-      .surface
-      .attach(Some(&output.buffers[index].buffer), 0, 0);
+    surface.attach(Some(&output.buffers[index].buffer), 0, 0);
     if !damage.is_empty() {
-      output.surface.damage_buffer(
+      surface.damage_buffer(
         damage.x as i32,
         damage.y as i32,
         damage.width as i32,
         damage.height as i32,
       );
     }
-    output.surface.frame(&qh, name);
-    output.surface.commit();
+    surface.frame(&qh, name);
+    surface.commit();
     output.frame_pending = true;
     output.committed = true;
     output.dirty = false;
@@ -908,8 +977,15 @@ impl State {
   fn maybe_report_ready(&mut self) {
     if self.ready_reported
       || !self.locked
-      || self.outputs.is_empty()
-      || !self.outputs.values().all(|output| output.committed)
+      || !self
+        .outputs
+        .values()
+        .any(|output| output.surfaces.is_some())
+      || !self
+        .outputs
+        .values()
+        .filter(|output| output.surfaces.is_some())
+        .all(|output| output.committed)
     {
       return;
     }
@@ -1080,6 +1156,42 @@ impl State {
       AuthOutcome::WorkerFailed(error) => self.fail(error),
     }
   }
+}
+
+/// Why the loop must stop after a turn that `dispatched` ended: the
+/// compositor's protocol error, which ends the connection, or the
+/// loop's own error; `None` to go on.
+fn connection_failure(
+  connection: &Connection,
+  dispatched: Result<(), calloop::Error>,
+) -> Option<String> {
+  if let Some(error) = connection.protocol_error() {
+    return Some(format!(
+      "the compositor ended the connection with a protocol error: {error}"
+    ));
+  }
+  dispatched
+    .err()
+    .map(|error| format!("event loop failed: {error}"))
+}
+
+/// Which other global of `outputs`, as (global, `wl_output` name, has a
+/// lock surface), already holds the lock surface of the output that
+/// global `global` named `name` shows: one of the same name with a lock
+/// surface. `None` lets `global` have its own; so does an output without
+/// a name, which cannot be told apart.
+fn lock_surface_holder(
+  outputs: &[(u32, Option<&str>, bool)],
+  global: u32,
+  name: Option<&str>,
+) -> Option<u32> {
+  let name = name?;
+  outputs
+    .iter()
+    .find(|(other, other_name, has)| {
+      *other != global && *has && *other_name == Some(name)
+    })
+    .map(|(other, _, _)| *other)
 }
 
 /// Releases the devices of `seat` its capabilities no longer include.
@@ -1403,7 +1515,13 @@ fn run(
     let timeout = state
       .next_wake(now)
       .map(|at| at.saturating_duration_since(now));
-    event_loop.dispatch(timeout, &mut state)?;
+    let dispatched = event_loop.dispatch(timeout, &mut state);
+    // A protocol error ends the connection: nothing more will come, and
+    // the loop would only spin on it.
+    if let Some(failure) = connection_failure(&state.connection, dispatched) {
+      state.fail(failure);
+      break;
+    }
     state.tick();
     let _ = state.connection.flush();
   }
@@ -1808,10 +1926,15 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
     _conn: &Connection,
     _qh: &QueueHandle<Self>,
   ) {
-    if let wl_output::Event::Name { name } = event
-      && let Some(output) = state.outputs.get_mut(global)
-    {
-      output.name = Some(name);
+    match event {
+      wl_output::Event::Name { name } => {
+        if let Some(output) = state.outputs.get_mut(global) {
+          output.name = Some(name);
+        }
+      }
+      // Its name, if it has one, came before.
+      wl_output::Event::Done => state.give_lock_surface(*global),
+      _ => {}
     }
   }
 }
@@ -2008,6 +2131,99 @@ mod tests {
     assert_eq!(read_ppm(ppm), Some((2, 1, &ppm[11..])));
     assert_eq!(read_ppm(b"P5\n2 1\n255\n\x01\x02"), None);
     assert_eq!(read_ppm(b"P6\n2"), None);
+  }
+
+  /// A client of nothing but a registry, for the protocol error test.
+  struct Bare;
+
+  impl Dispatch<wl_registry::WlRegistry, ()> for Bare {
+    fn event(
+      _state: &mut Self,
+      _proxy: &wl_registry::WlRegistry,
+      _event: wl_registry::Event,
+      _data: &(),
+      _conn: &Connection,
+      _qh: &QueueHandle<Self>,
+    ) {
+    }
+  }
+
+  /// A `wl_display.error` event for `object` with `code` and `message`,
+  /// as a compositor writes it.
+  fn display_error(object: u32, code: u32, message: &str) -> Vec<u8> {
+    let mut text = message.as_bytes().to_vec();
+    text.push(0);
+    let length = text.len() as u32;
+    while !text.len().is_multiple_of(4) {
+      text.push(0);
+    }
+    let size = 8 + 4 + 4 + 4 + text.len() as u32;
+    let mut bytes = Vec::new();
+    for word in [1, size << 16, object, code, length] {
+      bytes.extend_from_slice(&u32::to_ne_bytes(word));
+    }
+    bytes.extend_from_slice(&text);
+    bytes
+  }
+
+  #[test]
+  fn a_protocol_error_stops_the_loop_at_once() {
+    use std::io::{Read, Write};
+    let (client, mut server) =
+      std::os::unix::net::UnixStream::pair().expect("a socket pair");
+    let connection = Connection::from_socket(client).expect("a connection");
+    let queue = connection.new_event_queue::<Bare>();
+    let _registry = connection.display().get_registry(&queue.handle(), ());
+    connection.flush().expect("the request is sent");
+    let mut request = [0_u8; 64];
+    let read = server.read(&mut request).expect("the request arrives");
+    assert!(read >= 12);
+    // The registry, object 2, is what the compositor refuses.
+    server
+      .write_all(&display_error(2, 3, "invented refusal"))
+      .expect("the error is sent");
+    let mut event_loop = EventLoop::<Bare>::try_new().expect("a loop");
+    WaylandSource::new(connection.clone(), queue)
+      .insert(event_loop.handle())
+      .expect("the source is inserted");
+    let mut turns = 0;
+    let failure = loop {
+      turns += 1;
+      assert!(turns <= 5, "the loop went on after the protocol error");
+      let dispatched =
+        event_loop.dispatch(Some(Duration::from_millis(100)), &mut Bare);
+      if let Some(failure) = connection_failure(&connection, dispatched) {
+        break failure;
+      }
+    };
+    assert!(failure.contains("protocol error"), "{failure}");
+    assert!(failure.contains("invented refusal"), "{failure}");
+    // Nothing wrong, nothing to stop for.
+    let (fine, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    let fine = Connection::from_socket(fine).unwrap();
+    assert_eq!(connection_failure(&fine, Ok(())), None);
+  }
+
+  #[test]
+  fn one_lock_surface_per_output_whatever_its_globals() {
+    let outputs = [
+      (12, Some("HEADLESS-1"), true),
+      (13, Some("HEADLESS-2"), true),
+      (60, Some("HEADLESS-1"), false),
+      (61, None, false),
+    ];
+    // A second global of HEADLESS-1 waits for the first to go.
+    assert_eq!(
+      lock_surface_holder(&outputs, 60, Some("HEADLESS-1")),
+      Some(12)
+    );
+    // The holder itself, another output and an unnamed one go ahead.
+    assert_eq!(lock_surface_holder(&outputs, 12, Some("HEADLESS-1")), None);
+    assert_eq!(lock_surface_holder(&outputs, 14, Some("DP-1")), None);
+    assert_eq!(lock_surface_holder(&outputs, 61, None), None);
+    // Once the first is gone, the second has no holder.
+    let gone = [(60, Some("HEADLESS-1"), false)];
+    assert_eq!(lock_surface_holder(&gone, 60, Some("HEADLESS-1")), None);
   }
 
   #[test]

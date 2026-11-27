@@ -473,6 +473,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "138efcf0940a02ebf0cc8d1eff41a1682a46b431630f4c52450d6265876021fa"
 dependencies = [
  "calloop 0.14.5",
+ "log",
  "rustix 1.1.6",
  "wayland-backend",
  "wayland-client",
