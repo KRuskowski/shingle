@@ -115,6 +115,8 @@ Since `shingle-colour-and-focus-fixes` every configured colour shows the bytes W
 
 Add long-running nested and native soak tests. Measure CPU, RSS, frame latency and GPU behaviour before making any resource or stability claims.
 
+Headless, offscreen and nested soaks are done: tools/soak_test/run.py, a two-hour offscreen run and 30-minute headless and nested runs, and fixes for the leaks they found ([status.md](status.md#soak-tests)). What remains: the native soak, step 53 of [native-testing.md](native-testing.md), on the test machine; and the cause of the slow second nested run recorded in [status.md](status.md#soak-tests).
+
 ## 8. Application launcher
 
 The operator's own wish (2026-11-26): a launcher that combines rofi's quick type-to-run with the KDE start menu's in-place customization. rofi is fast to use but hard to style and only configurable through files; KDE's menu can be rearranged to taste while it is open. The goal is one launcher that starts as fast as rofi from a keybinding, and lets entries be pinned, renamed, reordered, grouped and hidden directly in the open menu, with every change saved at once and no config file to edit by hand.
