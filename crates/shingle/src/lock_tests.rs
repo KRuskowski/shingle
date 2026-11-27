@@ -13,7 +13,7 @@ use wayland_protocols::ext::session_lock::v1::client::{
 };
 
 use crate::{
-  Compositor, Event, LockState, OutputHandle, SurfaceRole,
+  Compositor, Event, LockState, OutputHandle, OutputInfo, SurfaceRole,
   test_client::TestClient, tests::test_compositor,
 };
 
@@ -171,4 +171,49 @@ fn a_lock_the_compositor_starts_shows_the_clients_until_the_client_asks() {
   assert_eq!(compositor.lock_state(), LockState::Pending);
   assert_eq!(drawn(&compositor), []);
   let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_lock_surface_for_a_removed_output_is_inert_not_an_error() {
+  let (mut compositor, path) = test_compositor();
+  compositor
+    .add_output(
+      OutputInfo {
+        name: "HEADLESS-2".into(),
+        ..OutputInfo::default()
+      },
+      (800, 600),
+    )
+    .expect("a second output");
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let outputs = client
+    .events
+    .globals
+    .iter()
+    .filter(|(_, interface, _)| interface == "wl_output")
+    .map(|(name, ..)| *name)
+    .collect::<Vec<_>>();
+  assert_eq!(outputs.len(), 2);
+  let first = client.bind_name::<WlOutput>(outputs[0], 4);
+  let second = client.bind_name::<WlOutput>(outputs[1], 4);
+  client.roundtrip(&mut compositor);
+  // The second output goes before the client asks for its lock surface.
+  compositor
+    .remove_output(&OutputHandle::new("HEADLESS-2"))
+    .expect("the output is removed");
+  let wl_compositor = client.bind::<WlCompositor>(4);
+  let manager = client.bind::<ExtSessionLockManagerV1>(1);
+  let lock = manager.lock(&client.handle, ());
+  let surfaces = [&first, &second].map(|output| {
+    let surface = wl_compositor.create_surface(&client.handle, ());
+    let lock_surface =
+      lock.get_lock_surface(&surface, output, &client.handle, ());
+    (surface, lock_surface)
+  });
+  client.roundtrip(&mut compositor);
+  let error = client.connection.protocol_error();
+  assert!(error.is_none(), "{error:?}");
+  // Only the output that exists configures its lock surface.
+  assert_eq!(client.events.lock_configures.len(), 1);
+  drop(surfaces);
 }

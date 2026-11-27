@@ -358,7 +358,7 @@ pub(crate) struct Frame;
 
 /// A connected test client with its event queue.
 pub(crate) struct TestClient {
-  connection: Connection,
+  pub(crate) connection: Connection,
   queue: EventQueue<Events>,
   pub(crate) handle: QueueHandle<Events>,
   registry: wl_registry::WlRegistry,

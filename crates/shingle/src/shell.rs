@@ -3247,11 +3247,10 @@ impl Dispatch<ExtSessionLockV1, SessionLockData> for CompositorState {
           );
           return;
         }
+        // An output removed after the client bound it is a race the
+        // client cannot avoid: its lock surface stays inert, without a
+        // configure, until the client sees the global go and destroys it.
         let Some(on) = on else {
-          resource.post_error(
-            ext_session_lock_v1::Error::DuplicateOutput,
-            "unknown or removed output",
-          );
           return;
         };
         if let Some(surface) = state.surfaces.get_mut(&object) {
