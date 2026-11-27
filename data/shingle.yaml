@@ -327,6 +327,27 @@ launcher:
     accent: [0.33, 0.58, 0.93, 1.0]
     selection: [0.2, 0.31, 0.48, 1.0]
 
+# The lock screen. The lock binding and lock_seconds run command (with
+# SHINGLE_LOCK overriding it). shingle-lock reads the swaylock config
+# first, $XDG_CONFIG_HOME/swaylock/config unless swaylock_config names
+# another, then the swaylock options below by their long names, then its
+# command line. drift moves the blurred screenshot; input_timeout is how
+# long the password input stays without a key.
+lock:
+  command: shingle-lock
+  read_swaylock_config: true
+  options:
+    screenshot: true
+    effect-blur: 7x5
+    effect-vignette: 0.5:0.5
+    clock: true
+  drift:
+    enabled: true
+    fps: 8
+    amplitude: 12
+    period: 30
+  input_timeout: 5
+
 pointer:
   move_button: super+btn_left
   resize_button: super+btn_right

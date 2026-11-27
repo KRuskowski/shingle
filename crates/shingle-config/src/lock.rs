@@ -889,6 +889,20 @@ mod tests {
   use super::*;
 
   #[test]
+  fn the_sample_config_has_a_valid_lock_section() {
+    let sample = include_str!("../../../data/shingle.yaml");
+    let config =
+      crate::ShingleConfig::parse(sample, crate::ConfigFormat::Yaml).unwrap();
+    assert_eq!(config.lock.command, "shingle-lock");
+    let mut options = LockOptions::default();
+    config.lock.apply_to(&mut options).unwrap();
+    assert!(options.screenshot && options.clock);
+    assert_eq!(options.blur, Some((7, 5)));
+    assert_eq!(options.vignette, Some((0.5, 0.5)));
+    assert_eq!(config.lock.drift, DriftConfig::default());
+  }
+
+  #[test]
   fn bare_swaylock_commands_become_shingle_lock() {
     assert_eq!(
       swap_swaylock("swaylock -f -c 000000").as_deref(),
