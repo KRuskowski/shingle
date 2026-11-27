@@ -18,12 +18,25 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
   if fullscreen {
     return;
   }
-  let has_parent = state.surfaces.values().any(|surface| {
-    surface.role.toplevel().is_some_and(|toplevel| {
-      toplevel.window() == Some(window) && toplevel.parent.is_some()
+  // An X transient was centred on its parent at its requested size
+  // (crates/shingle/src/xwayland/requests.rs, `float`).
+  let (parent, x11) = state
+    .surfaces
+    .values()
+    .find_map(|surface| {
+      surface
+        .role
+        .toplevel()
+        .filter(|toplevel| toplevel.window() == Some(window))
+        .map(|toplevel| {
+          (
+            toplevel.parent,
+            matches!(toplevel.handle, shell::ToplevelHandle::X11(_)),
+          )
+        })
     })
-  });
-  if has_parent {
+    .unwrap_or((None, false));
+  if parent.is_some() && x11 {
     return;
   }
   // The client's size, and its server-side frame's margins, which a
@@ -75,6 +88,22 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
         .ok()
     })
     .map_or(state.active().rect, |tree| tree.workarea());
+  // A dialog is centred on its parent and kept inside the workarea,
+  // whatever the placement mode, as Wayfire's
+  // `reposition_relative_to_parent` places it (src/view/toplevel-view.cpp).
+  if let Some(parent) = parent {
+    let Some(parent_geometry) = parent_geometry(state, parent) else {
+      return;
+    };
+    let geometry = clamp(centre_on(current, parent_geometry), workarea);
+    if let Ok(geometry) = geometry.validate()
+      && state.core.set_floating(window, Some(geometry)).is_ok()
+    {
+      shell::sync_floating_geometry(state, window, geometry);
+      shell::reconfigure_all(state);
+    }
+    return;
+  }
   if state.placement_mode == "maximize" {
     let _ = shell::set_maximized(state, window, true);
     return;
@@ -99,6 +128,50 @@ pub(crate) fn place(state: &mut CompositorState, window: WindowId) {
   if state.core.set_floating(window, Some(geometry)).is_ok() {
     shell::sync_floating_geometry(state, window, geometry);
     shell::reconfigure_all(state);
+  }
+}
+
+/// The geometry of `parent`'s toplevel, frame included.
+fn parent_geometry(state: &CompositorState, parent: WindowId) -> Option<Rect> {
+  let object = state.surfaces.iter().find_map(|(object, surface)| {
+    surface
+      .role
+      .toplevel()
+      .is_some_and(|toplevel| toplevel.window() == Some(parent))
+      .then(|| object.clone())
+  })?;
+  shell::window_geometry(state, &object)
+}
+
+/// `geometry`'s size centred on `parent`.
+fn centre_on(geometry: Rect, parent: Rect) -> Rect {
+  let half = |outer: u32, inner: u32| (i64::from(outer) - i64::from(inner)) / 2;
+  let to_i32 = |value: i64| {
+    i32::try_from(value.clamp(i32::MIN.into(), i32::MAX.into()))
+      .unwrap_or_default()
+  };
+  Rect {
+    x: to_i32(i64::from(parent.x) + half(parent.width, geometry.width)),
+    y: to_i32(i64::from(parent.y) + half(parent.height, geometry.height)),
+    ..geometry
+  }
+}
+
+/// `geometry` shrunk to fit `workarea` and moved inside it, as
+/// `wf::clamp` does.
+fn clamp(geometry: Rect, workarea: Rect) -> Rect {
+  let width = geometry.width.min(workarea.width);
+  let height = geometry.height.min(workarea.height);
+  let fit = |position: i32, size: u32, start: i32, outer: u32| {
+    let end = i64::from(start) + i64::from(outer) - i64::from(size);
+    i32::try_from(i64::from(position).clamp(i64::from(start), end))
+      .unwrap_or(start)
+  };
+  Rect {
+    x: fit(geometry.x, width, workarea.x, workarea.width),
+    y: fit(geometry.y, height, workarea.y, workarea.height),
+    width,
+    height,
   }
 }
 

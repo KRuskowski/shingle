@@ -743,6 +743,10 @@ pub(crate) fn committed(state: &mut CompositorState, object: &ObjectId) {
         let _ = toggle_tiling(state, window);
       } else if !crate::xwayland::requests::can_tile(state, object) {
         crate::xwayland::requests::float(state, object, window);
+      } else if !can_tile_xdg(state, object) {
+        // Out of the tree at its buffer's size; placement places it.
+        let size = buffer_rect(state, object);
+        let _ = set_floating_geometry(state, window, size);
       }
       crate::placement::place(state, window);
       crate::window_rules::apply_created(state, window, &identity);
@@ -1005,6 +1009,11 @@ pub(crate) fn set_toplevel_parent(
   object: &ObjectId,
   parent: Option<WindowId>,
 ) {
+  let had_parent = state
+    .surfaces
+    .get(object)
+    .and_then(|surface| surface.role.toplevel())
+    .is_some_and(|toplevel| toplevel.parent.is_some());
   if let Some(surface) = state.surfaces.get_mut(object)
     && let Some(toplevel) = surface.role.toplevel_mut()
   {
@@ -1016,9 +1025,64 @@ pub(crate) fn set_toplevel_parent(
       .toplevel()
       .and_then(|toplevel| toplevel.window())
   });
-  if let Some(window) = window {
-    let _ = state.core.set_window_parent(window, parent);
+  let Some(window) = window else {
+    return;
+  };
+  let _ = state.core.set_window_parent(window, parent);
+  // A tiled xdg toplevel that becomes a dialog leaves its tile and is
+  // centred on its parent, as Wayfire takes a view with a parent out of
+  // its workspace set and so out of simple-tile.
+  let tiled = state
+    .surfaces
+    .get(object)
+    .and_then(|surface| surface.role.toplevel())
+    .is_some_and(|toplevel| {
+      toplevel.tiled && matches!(toplevel.handle, ToplevelHandle::Xdg(_))
+    });
+  let has_buffer = state
+    .surfaces
+    .get(object)
+    .is_some_and(|surface| surface.buffer.is_some());
+  if parent.is_some() && !had_parent && tiled && has_buffer {
+    let size = buffer_rect(state, object);
+    let _ = set_floating_geometry(state, window, size);
+    crate::placement::place(state, window);
+  } else if parent.is_some() && !has_buffer && tiled {
+    // Not drawn yet: out of the tree at once, so that its parent keeps its
+    // tile, and its next configure leaves it its own size.
+    let _ = set_floating_geometry(state, window, Rect::new(0, 0, 1, 1));
   }
+}
+
+/// Whether `object` is an xdg toplevel without a buffer yet that will
+/// float when it maps ([`can_tile_xdg`]): its configures leave the size to
+/// the client until then.
+fn chooses_own_size(state: &CompositorState, object: &ObjectId) -> bool {
+  state
+    .surfaces
+    .get(object)
+    .is_some_and(|surface| surface.buffer.is_none())
+    && !can_tile_xdg(state, object)
+}
+
+/// Wayfire's `can_tile_view` for xdg toplevels: a dialog (a toplevel with
+/// a parent) or a window of fixed size (equal positive minimum and
+/// maximum) floats (wayfire:plugins/tile/tile-plugin.cpp). X toplevels
+/// have their own rule, `xwayland::requests::can_tile`.
+pub(crate) fn can_tile_xdg(state: &CompositorState, object: &ObjectId) -> bool {
+  let Some(toplevel) = state
+    .surfaces
+    .get(object)
+    .and_then(|surface| surface.role.toplevel())
+  else {
+    return true;
+  };
+  if !matches!(toplevel.handle, ToplevelHandle::Xdg(_)) {
+    return true;
+  }
+  let (min, max) = (toplevel.min_size, toplevel.max_size);
+  let fixed = min == max && min.0 > 0 && min.1 > 0;
+  toplevel.parent.is_none() && !fixed
 }
 
 /// The window shown as active: the focused one, else the one keeping the
@@ -1095,6 +1159,10 @@ pub(crate) fn reconfigure_all(state: &mut CompositorState) {
       window.map_or(state.active().rect, |window| {
         state.output_of_window(window).rect
       })
+    } else if chooses_own_size(state, &object) {
+      // Wayfire's initial configure is 0x0 and only a tiled view is
+      // resized at map; a dialog keeps the size it picks.
+      Rect::new(0, 0, 0, 0)
     } else if tiled {
       layout.map_or(state.active().rect, |layout| layout.geometry)
     } else if maximized {
@@ -1107,6 +1175,7 @@ pub(crate) fn reconfigure_all(state: &mut CompositorState) {
     } else {
       floating_geometry
     };
+    let tiled = tiled && !chooses_own_size(state, &object);
     let states = ToplevelStates {
       tiled,
       activated: focused,
@@ -1159,8 +1228,13 @@ fn configure_toplevel(
   let previous = toplevel.configured_geometry.replace(geometry);
   let window = toplevel.window();
   let handle = toplevel.handle.clone();
-  // The client gets the window's geometry less its frame.
-  let content = crate::decorator::margins(state, object).shrink(geometry);
+  // The client gets the window's geometry less its frame; a size of 0
+  // leaves it to the client.
+  let content = if geometry.width == 0 || geometry.height == 0 {
+    geometry
+  } else {
+    crate::decorator::margins(state, object).shrink(geometry)
+  };
   match handle {
     ToplevelHandle::X11(x_window) => {
       // No acknowledgement: X11 has no configure serials.
@@ -1452,6 +1526,11 @@ pub(crate) fn materialize_toplevel(
         toplevel.floating_geometry = geometry;
       }
     }
+  }
+  // A dialog or a window of fixed size never takes a tile, not even
+  // before it is drawn (see `chooses_own_size`).
+  if created && !can_tile_xdg(state, object) {
+    let _ = set_floating_geometry(state, window, Rect::new(0, 0, 1, 1));
   }
   reconfigure_all(state);
   request_map(state, object);
@@ -2083,6 +2162,20 @@ pub(crate) fn toggle_tiling(
   reconfigure_all(state);
   crate::input::focus_window(state, window);
   Ok(!tiled)
+}
+
+/// A rectangle at the origin of the size of `object`'s buffer in surface
+/// coordinates, at least 1x1; placement then sizes and places it.
+fn buffer_rect(state: &CompositorState, object: &ObjectId) -> Rect {
+  let (width, height) = state
+    .surfaces
+    .get(object)
+    .and_then(|surface| surface.buffer.as_ref())
+    .map_or((1, 1), |buffer| {
+      let scale = buffer.scale.max(1) as u32;
+      (buffer.width / scale, buffer.height / scale)
+    });
+  Rect::new(0, 0, width.max(1), height.max(1))
 }
 
 fn configured_geometry(state: &CompositorState, object: &ObjectId) -> Rect {
@@ -3002,7 +3095,7 @@ mod tests {
     sync::{Arc, Mutex},
   };
 
-  use shingle_core::{LaunchIdentity, WindowId, WindowPresence};
+  use shingle_core::{LaunchIdentity, Rect, WindowId, WindowPresence};
   use wayland_server::Display;
 
   use super::unblock_map;
@@ -3460,6 +3553,115 @@ mod tests {
     assert!(layout_tiles(&mut compositor.state).is_empty());
     let info = compositor.state.core.window_info(window).unwrap();
     assert_eq!(info.state.floating, floating.state.floating);
+  }
+
+  /// The floating rectangle of the one window with `app_id`.
+  fn floating_of(state: &CompositorState, app_id: &str) -> Option<Rect> {
+    let window = windows_with(state, app_id)[0];
+    state.core.window_info(window).unwrap().state.floating
+  }
+
+  #[test]
+  fn an_xdg_dialog_floats_centred_on_its_parent() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let main = client.toplevel(&mut compositor, "main");
+    client.attach_buffer(&mut compositor, &main.surface, 640, 480);
+    let parent = windows_with(&compositor.state, "main")[0];
+    let dialog = client.toplevel(&mut compositor, "dialog");
+    dialog.toplevel.set_parent(Some(&main.toplevel));
+    client.roundtrip(&mut compositor);
+    client.attach_buffer(&mut compositor, &dialog.surface, 200, 100);
+    // Only the parent tiles, as Wayfire's can_tile_view refuses a view
+    // with a parent.
+    let tiles = layout_tiles(&mut compositor.state);
+    assert_eq!(tiles.len(), 1);
+    assert_eq!(tiles[0].0, parent.0);
+    let parent_geometry = compositor
+      .state
+      .core
+      .window_layout(parent)
+      .unwrap()
+      .geometry;
+    let floating = floating_of(&compositor.state, "dialog").unwrap();
+    assert_eq!((floating.width, floating.height), (200, 100));
+    assert_eq!(
+      (floating.x + 100, floating.y + 50,),
+      (
+        parent_geometry.x + parent_geometry.width as i32 / 2,
+        parent_geometry.y + parent_geometry.height as i32 / 2,
+      )
+    );
+    assert_eq!(
+      client.events.last_configure(&dialog.toplevel),
+      Some((200, 100))
+    );
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn a_dialog_parented_before_its_first_commit_chooses_its_size() {
+    use wayland_client::protocol::wl_compositor::WlCompositor;
+    use wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase;
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let main = client.toplevel(&mut compositor, "main");
+    client.attach_buffer(&mut compositor, &main.surface, 640, 480);
+    let wl_compositor = client.bind::<WlCompositor>(4);
+    let wm_base = client.bind::<XdgWmBase>(1);
+    let surface = wl_compositor.create_surface(&client.handle, ());
+    let xdg_surface = wm_base.get_xdg_surface(&surface, &client.handle, ());
+    let toplevel = xdg_surface.get_toplevel(&client.handle, ());
+    toplevel.set_app_id("dialog".into());
+    toplevel.set_parent(Some(&main.toplevel));
+    surface.commit();
+    client.roundtrip(&mut compositor);
+    // As in Wayfire, the initial configure of a view that will not tile
+    // leaves the size to the client.
+    assert_eq!(client.events.last_configure(&toplevel), Some((0, 0)));
+    client.attach_buffer(&mut compositor, &surface, 200, 100);
+    let floating = floating_of(&compositor.state, "dialog").unwrap();
+    assert_eq!((floating.width, floating.height), (200, 100));
+    assert_eq!(layout_tiles(&mut compositor.state).len(), 1);
+    assert!(matches!(
+      client.events.last_configure(&toplevel),
+      Some((0, 0) | (200, 100))
+    ));
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn a_tiled_xdg_toplevel_given_a_parent_leaves_its_tile() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let main = client.toplevel(&mut compositor, "main");
+    client.attach_buffer(&mut compositor, &main.surface, 640, 480);
+    let late = client.toplevel(&mut compositor, "late");
+    client.attach_buffer(&mut compositor, &late.surface, 300, 200);
+    assert_eq!(layout_tiles(&mut compositor.state).len(), 2);
+    late.toplevel.set_parent(Some(&main.toplevel));
+    client.roundtrip(&mut compositor);
+    assert_eq!(layout_tiles(&mut compositor.state).len(), 1);
+    let floating = floating_of(&compositor.state, "late").unwrap();
+    assert_eq!((floating.width, floating.height), (300, 200));
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn an_xdg_toplevel_of_fixed_size_floats() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let main = client.toplevel(&mut compositor, "main");
+    client.attach_buffer(&mut compositor, &main.surface, 640, 480);
+    let fixed = client.toplevel(&mut compositor, "fixed");
+    fixed.toplevel.set_min_size(320, 240);
+    fixed.toplevel.set_max_size(320, 240);
+    client.roundtrip(&mut compositor);
+    client.attach_buffer(&mut compositor, &fixed.surface, 320, 240);
+    assert_eq!(layout_tiles(&mut compositor.state).len(), 1);
+    let floating = floating_of(&compositor.state, "fixed").unwrap();
+    assert_eq!((floating.width, floating.height), (320, 240));
+    let _ = std::fs::remove_file(path);
   }
 
   #[test]
