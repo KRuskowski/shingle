@@ -99,6 +99,8 @@ SHARP_DISTANCE = 8
 ROW_STEP = 4
 COLUMN_STEP = 2
 HIDING = ('pending', 'locked', 'failed')
+# How long the lock binding may take until every output shows the lock.
+LOCK_UP_SECONDS = 1.0
 
 def parse_frame(data):
   """(info, width, height, RGB bytes) of a recorded frame, or None; info
@@ -648,6 +650,14 @@ def run_sessions(results, shingle, reader, lock_binary, swaylock, geometry,
     blurred = False
   results.check('lock: it captured the clients while the lock was starting',
                 blurred, f'{len(starting)} frames while starting')
+  up = xw.wait_for(lambda: lock_up_time(reader, moment), timeout=10)
+  timing = [line for line in shingle.log_text().splitlines()
+            if 'shingle-lock: timing:' in line]
+  results.check(f'lock: the binding\'s lock is up on every output within '
+                f'{LOCK_UP_SECONDS} s',
+                up is not None and up <= LOCK_UP_SECONDS,
+                f'{up:.3f} s; {timing[-1] if timing else "no timing"}'
+                if up is not None else 'never')
   type_text(shingle, ACCEPTED_PHRASE)
   moment = time.monotonic()
   tap(shingle, 'KEY_ENTER')
@@ -655,6 +665,17 @@ def run_sessions(results, shingle, reader, lock_binary, swaylock, geometry,
                       moment=moment, timeout=15)
   results.check('lock: and the test password unlocks it', shown is not None,
                 describe(reader.since(moment)))
+
+def lock_up_time(reader, moment):
+  """Seconds from `moment` until every output has presented a locked
+  frame with its lock surface; None if one has not."""
+  firsts = {}
+  for frame in reader.since(moment):
+    if frame.lock == 'locked' and frame.lock_surface:
+      firsts.setdefault(frame.output, frame.arrived)
+  if len(firsts) < len(OUTPUTS):
+    return None
+  return max(firsts.values()) - moment
 
 def lock_binding(shingle):
   """Presses Shingle's lock binding, super+F8, over STIPC."""

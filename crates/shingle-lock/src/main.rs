@@ -168,6 +168,8 @@ struct State {
   font: FontArc,
   indicator: Indicator,
   started: Instant,
+  /// When the process started, for the timings it reports.
+  launched: Instant,
   locked_at: Option<Instant>,
   notifier: daemon::Notifier,
   trace: bool,
@@ -563,8 +565,10 @@ impl State {
       return;
     }
     println!(
-      "shingle-lock: ready; opaque lock surfaces committed on {} output(s)",
-      self.outputs.len()
+      "shingle-lock: ready; opaque lock surfaces committed on {} output(s) \
+       {} ms after start",
+      self.outputs.len(),
+      elapsed_ms(self.launched)
     );
     self.ready_reported = true;
     self.notifier.locked();
@@ -740,6 +744,46 @@ fn elapsed_ms(since: Instant) -> u128 {
   since.elapsed().as_millis()
 }
 
+/// How long each step before the lock request took, for the report on
+/// standard error that the GPU harness reads.
+struct Timing {
+  launched: Instant,
+  last: Instant,
+  steps: Vec<(&'static str, Duration)>,
+}
+
+impl Timing {
+  fn new(launched: Instant) -> Self {
+    let now = Instant::now();
+    Self {
+      launched,
+      last: now,
+      steps: vec![("start", now - launched)],
+    }
+  }
+
+  /// Ends step `name` now.
+  fn mark(&mut self, name: &'static str) {
+    let now = Instant::now();
+    self.steps.push((name, now - self.last));
+    self.last = now;
+  }
+
+  /// `name N ms, ...` and the total since the process started.
+  fn report(&self) -> String {
+    let steps = self
+      .steps
+      .iter()
+      .map(|(name, took)| format!("{name} {} ms", took.as_millis()))
+      .collect::<Vec<_>>()
+      .join(", ");
+    format!(
+      "{steps}; lock requested {} ms after start",
+      self.launched.elapsed().as_millis()
+    )
+  }
+}
+
 fn required_global<T>(
   globals: &GlobalList,
   qh: &QueueHandle<State>,
@@ -762,6 +806,7 @@ where
 fn run(
   settings: Settings,
   notifier: daemon::Notifier,
+  launched: Instant,
 ) -> Result<(), LockError> {
   let username = username::current()?;
   let connection = Connection::connect_to_env()?;
@@ -782,19 +827,25 @@ fn run(
   }
   // Everything that can fail or take long happens before the lock is
   // asked for: once it is, the compositor shows no client any more.
+  let mut timing = Timing::new(launched);
   let gpu = Gpu::new()
     .map_err(|error| LockError::Message(format!("no GPU: {error}")))?;
+  timing.mark("gpu");
   let font = font::load(&settings.options.font);
+  timing.mark("font");
   let mut images = HashMap::new();
   if settings.options.screenshot {
     let shots =
       capture::capture_outputs(&connection, &globals, CAPTURE_TIMEOUT);
+    timing.mark("capture");
     for (name, shot) in &shots {
       images.insert(*name, gpu.image(shot, settings.options.blur));
     }
+    timing.mark("blur");
     eprintln!("shingle-lock: captured {} output(s)", shots.len());
   }
   let lock = manager.lock(&qh, ());
+  eprintln!("shingle-lock: timing: {}", timing.report());
 
   let mut event_loop = EventLoop::<State>::try_new()?;
   let signals = Signals::new(&[
@@ -827,6 +878,7 @@ fn run(
     font,
     indicator,
     started,
+    launched,
     locked_at: None,
     notifier,
     trace: std::env::var_os("SHINGLE_LOCK_TRACE").is_some(),
@@ -897,6 +949,7 @@ fn run(
 }
 
 fn main() -> ExitCode {
+  let launched = Instant::now();
   let arguments = std::env::args().skip(1).collect::<Vec<_>>();
   let (settings, warnings) =
     match options::resolve(&arguments, &options::Sources::system()) {
@@ -933,7 +986,7 @@ fn main() -> ExitCode {
   } else {
     daemon::Notifier::none()
   };
-  match run(settings, notifier) {
+  match run(settings, notifier, launched) {
     Ok(()) => ExitCode::SUCCESS,
     Err(error) => {
       eprintln!("shingle-lock: {error}");
