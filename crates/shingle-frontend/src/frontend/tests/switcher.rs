@@ -58,18 +58,19 @@ fn the_switcher_selects_in_focus_order_both_ways() {
     fixture.frontend.switcher_view.is_some(),
     "the thumbnails move back first"
   );
-  // Now bravo, charlie, alpha. Backwards from the least recent, while
-  // the thumbnails still move back.
+  // Now bravo, charlie, alpha. The first Shift press selects the next
+  // view, as Wayfire's does, while the thumbnails still move back; the
+  // next one goes backwards.
   fixture.key(KEY_LEFTALT, true);
   fixture.key(KEY_LEFTSHIFT, true);
   fixture.tap(KEY_TAB, &[]);
-  assert_eq!(fixture.selected(), Some(alpha));
-  fixture.tap(KEY_TAB, &[]);
   assert_eq!(fixture.selected(), Some(charlie));
+  fixture.tap(KEY_TAB, &[]);
+  assert_eq!(fixture.selected(), Some(bravo));
   // Forward again without Shift; the switcher still ends with it.
   fixture.key(KEY_LEFTSHIFT, false);
   assert!(fixture.frontend.switcher.is_none(), "Shift started it");
-  assert_eq!(fixture.focused(), Some(charlie));
+  assert_eq!(fixture.focused(), Some(bravo));
   fixture.key(KEY_LEFTALT, false);
 }
 

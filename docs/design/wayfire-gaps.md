@@ -637,7 +637,7 @@ Behaviour was checked against wayfire:plugins/single_plugins/switcher.cpp and wa
 
 Where the code differs from the plan and from Wayfire, and why:
 
-- Starting with `prev_view` puts the views left of the selection in reverse focus order. Wayfire's `arrange(1)` leaves them in focus order, so that from the fourth view on its `prev_view` takes the one after the selection rather than the one before it: with four views it selects the last, then the second, the third, the last again and only then the first. Shingle selects the last, the third, the second and the first, as every later step of Wayfire's own code does.
+- The first press of `prev_view` selects the next view, as the first `next_view` does: Wayfire's `arrange` takes no direction and ends with `handle_switch_request(-1)`, and Debian's Wayfire 0.9 does the same (checked by `run.py --checks rehearsal`, 2026-11-27). Only the later presses of `prev_view` go backwards. Shingle used to start `prev_view` from the least recent view, after a reading of the pinned commit that the reference compositor did not bear out; following the code, the design changed with it.
 - Wayfire's `move` sets every moved thumbnail's opacity to 0.7, also the one that comes to the middle, because it tests the slot the thumbnail leaves, which is never expired; Shingle keeps that, so after the first press the selection is drawn at 0.7 too, as in Wayfire.
 - `speed`'s easing curve is ignored, as for Shingle's other animations: the thumbnails move linearly over its duration.
 - Wayfire's input grab keeps the pointer from clients too while the switcher is held; Shingle's switcher takes the keyboard only, as before.

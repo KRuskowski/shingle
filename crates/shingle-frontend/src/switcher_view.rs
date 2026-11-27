@@ -291,8 +291,11 @@ impl SwitcherView {
     if self.active {
       self.next_view(direction.sign(), views, now)
     } else {
+      // Wayfire's `arrange` ignores the direction: the first press of
+      // `prev_view` selects the next view too, as `arrange` ends with
+      // `handle_switch_request(-1)` (Debian's Wayfire 0.9 does the same).
       self.active = true;
-      self.arrange(direction.sign(), views, now);
+      self.arrange(Direction::Next.sign(), views, now);
       None
     }
   }
@@ -534,10 +537,9 @@ impl SwitcherView {
   }
 
   /// `arrange`: every view of `views` gets a thumbnail, and the one in
-  /// the middle is the next in focus order for `focus_direction` -1, the
-  /// last for 1 and the focused one for 0. The others go to the right
-  /// in focus order, the one before the selection to the left; for 1 the
-  /// one after it goes right and the others left.
+  /// the middle is the next in focus order for `focus_direction` -1 and
+  /// the focused one for 0. The others go to the right in focus order,
+  /// the one before the selection to the left.
   fn arrange(&mut self, focus_direction: i32, views: &Views, now: Instant) {
     self.views.clear();
     self.output_width = views.output.0;
@@ -553,14 +555,9 @@ impl SwitcherView {
     if windows.is_empty() {
       return;
     }
-    if windows.len() >= 2 {
-      if focus_direction == -1 {
-        let first = self.views.remove(0);
-        self.views.push(Thumbnail::new(first.window));
-      } else if focus_direction == 1 {
-        let last = self.views.pop().expect("two views");
-        self.views.insert(0, Thumbnail::new(last.window));
-      }
+    if windows.len() >= 2 && focus_direction == -1 {
+      let first = self.views.remove(0);
+      self.views.push(Thumbnail::new(first.window));
     }
     self.arrange_view(0, CENTER, views, now);
     if windows.len() == 1 {
@@ -571,20 +568,9 @@ impl SwitcherView {
       self.views.push(Thumbnail::new(self.views[1].window));
     }
     let count = self.views.len();
-    if focus_direction == 1 {
-      self.arrange_view(1, RIGHT, views, now);
-      // Wayfire leaves the left slot in focus order, so that the next
-      // `prev_view` would select the view after the selection; the most
-      // recently focused of them goes on top, as `next_view` expects.
-      self.views[2..].reverse();
-      for index in 2..count {
-        self.arrange_view(index, LEFT, views, now);
-      }
-    } else {
-      self.arrange_view(count - 1, LEFT, views, now);
-      for index in 1..count - 1 {
-        self.arrange_view(index, RIGHT, views, now);
-      }
+    self.arrange_view(count - 1, LEFT, views, now);
+    for index in 1..count - 1 {
+      self.arrange_view(index, RIGHT, views, now);
     }
   }
 
@@ -904,10 +890,11 @@ mod tests {
   #[test]
   fn prev_view_selects_against_focus_order_and_wraps() {
     use Direction::Previous;
-    assert_eq!(selections(3, &[Previous; 4]), [2, 1, 0, 2]);
-    // Wayfire's own order would go 3, 1, 2, 3, 0 here.
-    assert_eq!(selections(4, &[Previous; 5]), [3, 2, 1, 0, 3]);
-    assert_eq!(selections(5, &[Previous; 6]), [4, 3, 2, 1, 0, 4]);
+    // The first press selects the next view, as Wayfire's `arrange` does
+    // whatever the direction; the later ones go backwards.
+    assert_eq!(selections(3, &[Previous; 4]), [1, 0, 2, 1]);
+    assert_eq!(selections(4, &[Previous; 5]), [1, 0, 3, 2, 1]);
+    assert_eq!(selections(5, &[Previous; 6]), [1, 0, 4, 3, 2, 1]);
     assert_eq!(selections(2, &[Previous; 3]), [1, 0, 1]);
   }
 
@@ -920,7 +907,7 @@ mod tests {
     );
     assert_eq!(
       selections(4, &[Previous, Next, Next, Previous]),
-      [3, 0, 1, 0]
+      [1, 2, 3, 2]
     );
   }
 
