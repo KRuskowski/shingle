@@ -75,7 +75,7 @@ Ranked by how much a daily Wayfire user with the tiling plugin would notice them
 | `[workarounds] use_external_output_configuration`, `app_id_mode`, `enable_input_method_v2` (Shingle always offers input-method v2 with text-input v3; Wayfire only with this option), `force_xwayland_scaling`, `use_native_buffer_size` (XW-7) | kanshi users, Steam and GTK app-id quirks, X11 HiDPI | no arm in wayfire.rs:481-527 |
 | `xdg_toplevel` `suspended` state and `wm_capabilities` (Wayfire's xdg-shell is version 6 with `suspended`, wayfire:src/view/xdg-shell.cpp:487) | clients throttling when hidden | crates/shingle/src/shell.rs:158 has no `Suspended` |
 | `scale-title-filter/share_filter` still has no effect, though several outputs exist now | multi-monitor Scale users | config/lib.rs:1238 |
-| Cosmetic options of implemented plugins: `move/preview_*`, `grid/duration` and `type` (`switcher/speed` since WG-7) | few | rows of [Plugins and options](#plugins-and-options) |
+| Cosmetic options of implemented plugins: `grid/duration` and `type` (`switcher/speed` since WG-7, `move/preview_*` since `shingle-workspace-followups`) | few | rows of [Plugins and options](#plugins-and-options) |
 | Override-redirect X windows are not in `list-views` (Wayfire lists them as `x-or`) | X11 scripting | docs/ipc.md, views and outputs |
 
 ## Plugins and options
@@ -238,7 +238,7 @@ Missing: no `org_kde_kwin_appmenu_manager` (wayfire:plugins/protocols/kde-appmen
 | Option | Status | Evidence |
 | --- | --- | --- |
 | `activate`, `enable_snap`, `snap_threshold`, `quarter_snap_threshold`, `enable_snap_off`, `snap_off_threshold`, `join_views`, `workspace_switch_after` | implemented | 146, 460-480; crates/shingle/src/shell.rs:3038, crates/shingle/src/lib.rs:2798, :2889 |
-| `preview_base_color`, `preview_base_border`, `preview_border_width` | missing: the snap preview uses `simple-tile`'s colours | no arm |
+| `preview_base_color`, `preview_base_border`, `preview_border_width` | implemented since `shingle-workspace-followups`: the snap preview has move's own colours, the drop preview simple-tile's (the snap preview used simple-tile's before) | `GridConfig`; crates/shingle-frontend/src/frontend/scene.rs (`append_drop_preview`) |
 
 ### oswitch
 
@@ -702,6 +702,26 @@ A `wl_data_device.start_drag` icon surface takes `Role::DragIcon` (crates/shingl
 - Touch drags, which Wayfire's icon also follows, still do not exist in Shingle, and neither do drags without a source.
 
 Tested by crates/shingle/src/data_device/icon_tests.rs (through the in-process test client: the icon drawn at the pointer by its offsets, below the cursor and above the window, redraw events for both places, offsets adding up, no input, gone with the drop, reused from the pointer, the role error) and crates/shingle-frontend (no animation for a Wayland icon). The real run is tools/gpu_test/run.py's group `drag-icon` (tools/gpu_test/drag_icon_checks.py) with `wl_probe --drag --drag-icon`, recorded in docs/status.md.
+
+### Workspace follow-ups as built
+
+The `shingle-workspace-followups` branch closed the differences the IPC workspace coordinates left open ([ipc.md](../ipc.md#views-on-other-workspaces)) and went through this survey for anything partial or different in the plugins the operator loads (`autostart command expo fast-switcher move oswitch shortcuts-inhibit switcher vswitch wayfire-shell window-rules simple-tile wsets wm-actions vswipe ipc ipc-rules`), against the pinned Wayfire.
+
+Fixed, each with unit tests:
+
+- Unsticking a floating or snapped view leaves it on the current workspace, with only `view-sticky` (wayfire:src/view/toplevel-view.cpp:258-276, wayfire:src/output/workspace-impl.cpp:612); a tiled one keeps its tile (wayfire:plugins/tile/tree.cpp:433-437). crates/shingle/src/shell.rs (`set_sticky`).
+- `configure-view` and `stipc/layout_views` that move a view to another workspace by its rectangle send no `view-workspace-changed` (wayfire:plugins/ipc-rules/ipc-rules.cpp:302-310); `Event::WindowMoved` says whether IPC reports a move.
+- IPC rectangles are in each output's own plane (wayfire:src/output/workspace-impl.cpp:198-202), as are outputs' workareas (wayfire:src/output/workarea.cpp:20), and floating and snapped windows move with an output that moves in the layout. crates/shingle/src/ipc/workspace_coords.rs, crates/shingle/src/output/moving.rs (`carry_windows`).
+- `[move] preview_base_color`, `preview_base_border` and `preview_border_width` colour move's snap preview (wayfire:plugins/single_plugins/move.cpp:494-495), apart from simple-tile's drop preview (wayfire:plugins/tile/tile-dragging.hpp:122-123).
+
+Left, and why:
+
+- A view straddling two workspaces is drawn on its own one only; Wayfire draws it on both ([ipc.md](../ipc.md#views-on-other-workspaces) gives the reason).
+- `list-views` still leaves out override-redirect X windows, which Wayfire lists as `x-or`: Shingle's unmanaged X windows have no core window and no view id, and every view method would need a second kind of id for them.
+- `set-config-options` still changes only the options Shingle keeps live: the others are read once by the part that uses them, and making each one live is work per option, not a fix in IPC.
+- The easing curves of animation durations (`vswitch/duration`, `vswipe/duration`, `switcher/speed`, `expo/duration`, `simple-tile/animation_duration`; wf-config:src/duration.cpp:28-35, :333-336) are still ignored and every animation is linear: following them needs the curve kept next to every duration in the YAML model and applied by every animation, a change of its own.
+- Touch-screen gestures and hotspots in `command` and other activators, `stipc/tablet/*` and `stipc/delay_next_tx`, and the `wayfire/configuration`, `reload-config-metadata`, `reload-plugins` and `render-metrics` methods of ipc-rules stay as the tables above rank them: there is no touch gesture recogniser or tablet support to bind them to, `delay_next_tx` delays Wayfire's transactions, which Shingle does not have, and the utility methods describe Wayfire's own build and plugin loader.
+- The differences recorded in the as-built sections above for vswipe (WG-5), wayfire-shell (WG-4) and the switcher (WG-7) are unchanged; each is there with its reason.
 
 ### Later
 
