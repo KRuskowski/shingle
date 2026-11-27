@@ -219,6 +219,8 @@ pub(crate) struct CompositorState {
   pub(crate) xdg_outputs: HashMap<ObjectId, ZxdgOutputV1>,
   pub(crate) events: Vec<Event>,
   pub(crate) ipc_events: Vec<serde_json::Value>,
+  /// The workspace offsets IPC last reported each window's geometry at.
+  pub(crate) ipc_offsets: crate::ipc::workspace_coords::OffsetTracker,
   pub(crate) pre_map_clients: HashSet<u64>,
   pub(crate) pending_maps: HashMap<WindowId, PendingMap>,
   pub(crate) delayed_maps: HashSet<WindowId>,
@@ -431,6 +433,7 @@ impl CompositorState {
       xdg_outputs: HashMap::new(),
       events: Vec::new(),
       ipc_events: Vec::new(),
+      ipc_offsets: Default::default(),
       pre_map_clients: HashSet::new(),
       pending_maps: HashMap::new(),
       delayed_maps: HashSet::new(),

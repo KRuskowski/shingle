@@ -1121,13 +1121,14 @@ fn without_output_limits_a_window_is_drawn_and_entered_where_it_overlaps() {
   let mut client = TestClient::connect(&mut compositor, &path);
   let outputs = bind_outputs(&mut compositor, &mut client);
   let (toplevel, window) = mapped(&mut compositor, &mut client, "wide");
+  // Its centre stays on HEADLESS-1's current workspace.
   let reply = crate::ipc::respond(
     &mut compositor.state,
     &serde_json::json!({
       "method": "window-rules/configure-view",
       "data": {
         "id": window.0,
-        "geometry": {"x": 1180, "y": 20, "width": 200, "height": 100},
+        "geometry": {"x": 1170, "y": 20, "width": 200, "height": 100},
       },
     }),
   );

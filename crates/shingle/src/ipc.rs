@@ -20,6 +20,8 @@ use crate::{
   state::CompositorState,
 };
 
+pub(crate) mod workspace_coords;
+
 const MAX_MESSAGE: usize = 1 << 20;
 
 pub(crate) struct IpcServer {
@@ -616,12 +618,36 @@ pub(crate) fn record_events(
 ) {
   use crate::Event;
   let mut layout_sent = false;
+  // Windows reconfigured in this batch report their workspace offset's
+  // change with their own `view-geometry-changed`.
+  let configured = events
+    .iter()
+    .filter_map(|event| match event {
+      Event::GeometryChanged { window, .. } => Some(*window),
+      _ => None,
+    })
+    .collect::<HashSet<_>>();
   for event in events {
+    // Wayfire moves the views before it reports a switch or a view sent
+    // to another workspace (wayfire:src/output/workspace-impl.cpp:603-643,
+    // wayfire:plugins/vswitch/vswitch.cpp:43-54).
+    if matches!(
+      event,
+      Event::WorkspaceChanged { .. }
+        | Event::WindowMoved { .. }
+        | Event::StickyChanged { .. }
+    ) {
+      let changes = workspace_coords::offset_changes(state, &configured);
+      state.ipc_events.extend(changes);
+    }
     let message = match event {
       Event::WindowCreated { window, .. } => {
+        let offset = workspace_coords::window_offset(state, *window);
+        state.ipc_offsets.record(*window, offset);
         view_event(state, "view-mapped", *window)
       }
       Event::WindowDestroyed { window, .. } => {
+        state.ipc_offsets.forget(*window);
         view_event(state, "view-unmapped", *window)
       }
       Event::FocusChanged { window } => {
@@ -641,11 +667,17 @@ pub(crate) fn record_events(
       Event::GeometryChanged {
         window,
         old_geometry,
-      } => json!({
-          "event": "view-geometry-changed",
-          "old-geometry": geometry(*old_geometry),
-          "view": event_view(state, *window),
-      }),
+      } => {
+        // The old rectangle at the offset it was last reported with.
+        let current = workspace_coords::window_offset(state, *window);
+        let reported = state.ipc_offsets.reported(*window).unwrap_or(current);
+        state.ipc_offsets.record(*window, current);
+        json!({
+            "event": "view-geometry-changed",
+            "old-geometry": geometry(reported.apply(*old_geometry)),
+            "view": event_view(state, *window),
+        })
+      }
       Event::WindowMoved {
         window,
         from,
@@ -740,6 +772,8 @@ pub(crate) fn record_events(
     };
     state.ipc_events.push(message);
   }
+  let changes = workspace_coords::offset_changes(state, &configured);
+  state.ipc_events.extend(changes);
 }
 
 fn json_ok() -> Value {
@@ -752,6 +786,16 @@ fn json_error(message: &str) -> Value {
 
 fn geometry(rect: Rect) -> Value {
   json!({"x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height})
+}
+
+/// The rectangle of a `geometry` value, if it has integer fields in range.
+fn rect_of(value: &Value) -> Option<Rect> {
+  Some(Rect::new(
+    i32::try_from(value.get("x")?.as_i64()?).ok()?,
+    i32::try_from(value.get("y")?.as_i64()?).ok()?,
+    u32::try_from(value.get("width")?.as_u64()?).ok()?,
+    u32::try_from(value.get("height")?.as_u64()?).ok()?,
+  ))
 }
 
 /// Wayfire's `wset_to_json`: a workspace set by its index, with the output
@@ -1005,10 +1049,13 @@ pub(crate) fn view_json(state: &CompositorState, window: WindowId) -> Value {
       .toplevel()
       .is_some_and(|toplevel| toplevel.window() == Some(window))
   });
+  // Relative to the set's current workspace, as Wayfire's are.
+  let offset = workspace_coords::window_offset(state, window);
   let (geometry_value, base_geometry, app_id, title, min_size, max_size, pid) =
     surface.map_or_else(
       || {
-        let floating = geometry(info.state.floating.unwrap_or_default());
+        let floating =
+          geometry(offset.apply(info.state.floating.unwrap_or_default()));
         (
           floating.clone(),
           floating,
@@ -1028,8 +1075,14 @@ pub(crate) fn view_json(state: &CompositorState, window: WindowId) -> Value {
         // The geometry includes a server-side frame, as a Wayfire view's
         // does; the base geometry is the client's surface.
         (
-          geometry(shell::window_geometry(state, &object).unwrap_or_default()),
-          geometry(shell::surface_geometry(state, &object).unwrap_or_default()),
+          geometry(
+            offset.apply(
+              shell::window_geometry(state, &object).unwrap_or_default(),
+            ),
+          ),
+          geometry(offset.apply(
+            shell::surface_geometry(state, &object).unwrap_or_default(),
+          )),
           role.app_id.clone(),
           role.title.clone(),
           role.min_size,
@@ -1240,6 +1293,7 @@ fn layout_node(
   state: &CompositorState,
   node: &shingle_core::NodeSnapshot,
   fallback: Rect,
+  offset: workspace_coords::Offset,
 ) -> Option<Value> {
   use shingle_core::{NodeSnapshot, SplitDirection};
   let rect = layout_bounds(state, node).unwrap_or(fallback);
@@ -1255,7 +1309,7 @@ fn layout_node(
       Some(json!({
           "view-id": window.0,
           "percent": 1.0,
-          "geometry": geometry(rect),
+          "geometry": geometry(offset.apply(rect)),
       }))
     }
     NodeSnapshot::Split(split) => {
@@ -1276,7 +1330,7 @@ fn layout_node(
           } else {
             child_extent as f64 / extent as f64
           };
-          let mut value = layout_node(state, &child.node, child_rect)?;
+          let mut value = layout_node(state, &child.node, child_rect, offset)?;
           value["percent"] = json!(percent);
           Some(value)
         })
@@ -1288,7 +1342,7 @@ fn layout_node(
       };
       Some(json!({
           "percent": 1.0,
-          "geometry": geometry(rect),
+          "geometry": geometry(offset.apply(rect)),
           key: children,
       }))
     }
@@ -1341,7 +1395,12 @@ fn get_layout(state: &CompositorState, data: &Value) -> Value {
       children: Vec::new(),
     });
   let node = shingle_core::NodeSnapshot::Split(root);
-  let layout = layout_node(state, &node, workarea).unwrap_or(Value::Null);
+  // Relative to the set's current workspace, as Wayfire's
+  // (wayfire:plugins/tile/tile-ipc.hpp:266-274).
+  let offset =
+    workspace_coords::workspace_offset(state, target_wset, workspace);
+  let layout =
+    layout_node(state, &node, workarea, offset).unwrap_or(Value::Null);
   json!({"result": "ok", "layout": layout})
 }
 
@@ -2205,7 +2264,7 @@ fn layout_views(state: &mut CompositorState, data: &Value) -> Value {
     updates.push((window, rect));
   }
   for (window, geometry) in updates {
-    if shell::set_floating_geometry(state, window, geometry).is_err() {
+    if workspace_coords::place_window(state, window, geometry).is_err() {
       return json_error("failed to apply view geometry");
     }
   }
@@ -2651,25 +2710,15 @@ fn configure_view(state: &mut CompositorState, data: &Value) -> Value {
     None => None,
   };
   if let Some(value) = data.get("geometry") {
-    let Some(rect) = value
-      .get("x")
-      .and_then(Value::as_i64)
-      .and_then(|x| i32::try_from(x).ok())
-      .and_then(|x| {
-        Some(Rect::new(
-          x,
-          i32::try_from(value.get("y")?.as_i64()?).ok()?,
-          u32::try_from(value.get("width")?.as_u64()?).ok()?,
-          u32::try_from(value.get("height")?.as_u64()?).ok()?,
-        ))
-      })
-    else {
+    let Some(rect) = rect_of(value) else {
       return json_error("invalid geometry");
     };
     if rect.width == 0 || rect.height == 0 {
       return json_error("geometry dimensions must be nonzero");
     }
-    if shell::set_floating_geometry(state, window, rect).is_err() {
+    // Relative to the current workspace: a rectangle on another one
+    // moves the window there.
+    if workspace_coords::place_window(state, window, rect).is_err() {
       return json_error("failed to set geometry");
     }
   }

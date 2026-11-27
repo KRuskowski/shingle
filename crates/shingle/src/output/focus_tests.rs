@@ -795,14 +795,16 @@ fn windows_on(compositor: &Compositor, output: &str) -> Vec<WindowId> {
     .collect()
 }
 
-/// Floats `window` across the boundary of HEADLESS-1 and HEADLESS-2.
+/// Floats `window` across the boundary of HEADLESS-1 and HEADLESS-2,
+/// with its centre on HEADLESS-1, so that it stays on the current
+/// workspace.
 fn straddle(compositor: &mut Compositor, window: WindowId) {
   let reply = ipc(
     compositor,
     "window-rules/configure-view",
     json!({
       "id": window.0,
-      "geometry": {"x": 1180, "y": 20, "width": 200, "height": 100},
+      "geometry": {"x": 1170, "y": 20, "width": 200, "height": 100},
     }),
   );
   assert_eq!(reply, json!({"result": "ok"}));
