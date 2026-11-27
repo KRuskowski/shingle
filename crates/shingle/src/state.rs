@@ -1379,6 +1379,10 @@ impl CompositorState {
       geometry,
       opacity: shell::opacity(self, object),
       buffer: surface.buffer.clone(),
+      layer: match &surface.role {
+        Role::Layer(role) => Some(crate::layer_shell::shell_layer(role)),
+        _ => None,
+      },
     })
   }
 

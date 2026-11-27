@@ -48,6 +48,16 @@ impl LayerState {
   }
 }
 
+/// The public name of `role`'s current layer.
+pub(crate) fn shell_layer(role: &LayerRole) -> crate::ShellLayer {
+  match role.current.layer {
+    zwlr_layer_shell_v1::Layer::Background => crate::ShellLayer::Background,
+    zwlr_layer_shell_v1::Layer::Bottom => crate::ShellLayer::Bottom,
+    zwlr_layer_shell_v1::Layer::Top => crate::ShellLayer::Top,
+    _ => crate::ShellLayer::Overlay,
+  }
+}
+
 #[derive(Clone)]
 pub(crate) struct LayerRole {
   pub(crate) resource: ZwlrLayerSurfaceV1,

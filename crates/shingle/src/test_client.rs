@@ -255,6 +255,8 @@ pub(crate) struct Events {
   /// The `wl_output`s each wlr foreign-toplevel handle is on, by handle.
   pub(crate) toplevel_outputs:
     std::collections::HashMap<ObjectId, Vec<ObjectId>>,
+  /// Every wlr foreign-toplevel handle announced, in order.
+  pub(crate) toplevel_handles: Vec<ZwlrForeignToplevelHandleV1>,
   /// ext-workspace groups as announced, by object.
   pub(crate) workspace_groups: std::collections::HashMap<ObjectId, GroupSeen>,
   /// ext-workspace workspaces as announced, by object.
@@ -1707,6 +1709,7 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for Events {
       event
     {
       events.toplevel_outputs.insert(toplevel.id(), Vec::new());
+      events.toplevel_handles.push(toplevel);
     }
   }
 

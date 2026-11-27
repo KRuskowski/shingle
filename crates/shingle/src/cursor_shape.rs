@@ -77,6 +77,7 @@ fn shape_snapshot(state: &CompositorState, shape: Shape) -> SurfaceSnapshot {
       offset_x: 0,
       offset_y: 0,
     }),
+    layer: None,
   }
 }
 

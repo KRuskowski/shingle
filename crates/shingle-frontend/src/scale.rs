@@ -376,6 +376,7 @@ mod tests {
       geometry: Rect::new(0, 0, 100, 100),
       opacity: 1.0,
       buffer: None,
+      layer: None,
     };
     assert!(scale_filter_matches(&snapshot, "alpha editor", false));
     assert!(scale_filter_matches(&snapshot, "ORG.EXAMPLE", false));

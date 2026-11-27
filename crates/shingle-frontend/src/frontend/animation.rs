@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use shingle::{BufferSnapshot, SurfaceRole, SurfaceSnapshot};
+use shingle::{BufferSnapshot, ShellLayer, SurfaceRole, SurfaceSnapshot};
 use shingle_config::ViewProperties;
 use shingle_core::WindowId as TileWindowId;
 use shingle_render::{GpuTexture, RenderRect, RenderTile, animation_progress};
@@ -50,7 +50,13 @@ impl Frontend {
     let view_type = match snapshot.role {
       SurfaceRole::Toplevel => "toplevel",
       SurfaceRole::Popup => "popup",
-      SurfaceRole::LayerShell => "overlay",
+      // Wayfire names layer views after their layer
+      // (wayfire:src/core/view-access-interface.cpp:131-141).
+      SurfaceRole::LayerShell => match snapshot.layer {
+        Some(ShellLayer::Background | ShellLayer::Bottom) => "background",
+        Some(ShellLayer::Top) => "panel",
+        _ => "overlay",
+      },
       SurfaceRole::Cursor => "cursor",
       // Wayfire's name for override-redirect X views, which its drag
       // icons are too.

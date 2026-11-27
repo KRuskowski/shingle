@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use shingle_core::{OutputId, WindowId};
+use shingle_core::{OutputId, Rect, WindowId};
 use wayland_protocols_wlr::foreign_toplevel::v1::server::{
   zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
   zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
@@ -46,6 +46,46 @@ pub(crate) struct ForeignToplevels {
   managers: HashMap<ObjectId, Manager>,
   handles: HashMap<ObjectId, Handle>,
   known: HashMap<WindowId, ForeignWindow>,
+  /// Where each window minimizes to, from `set_rectangle`, in layout
+  /// coordinates.
+  minimize_hints: HashMap<WindowId, Rect>,
+}
+
+/// Where `window` minimizes to, as a taskbar set it with `set_rectangle`.
+pub(crate) fn minimize_hint(
+  state: &CompositorState,
+  window: WindowId,
+) -> Option<Rect> {
+  state.foreign_toplevels.minimize_hints.get(&window).copied()
+}
+
+/// Records `set_rectangle`'s rectangle, relative to `surface`, as
+/// `window`'s minimize hint in layout coordinates, as Wayfire's
+/// `handle_minimize_hint` adds the surface's position
+/// (wayfire:plugins/protocols/foreign-toplevel.cpp:209-222). An empty
+/// rectangle removes the hint, as the protocol says; Wayfire keeps it and
+/// ignores it when it animates.
+fn set_minimize_hint(
+  state: &mut CompositorState,
+  window: WindowId,
+  surface: &wayland_server::protocol::wl_surface::WlSurface,
+  (x, y, width, height): (i32, i32, i32, i32),
+) {
+  let hints = &mut state.foreign_toplevels.minimize_hints;
+  if width <= 0 || height <= 0 {
+    hints.remove(&window);
+    return;
+  }
+  let Some(origin) = shell::surface_rect(state, &surface.id()) else {
+    return;
+  };
+  let hint = Rect::new(
+    origin.x.saturating_add(x),
+    origin.y.saturating_add(y),
+    width as u32,
+    height as u32,
+  );
+  state.foreign_toplevels.minimize_hints.insert(window, hint);
 }
 
 pub(crate) fn create_global(handle: &DisplayHandle) {
@@ -135,6 +175,7 @@ pub(crate) fn sync(state: &mut CompositorState, handle: &DisplayHandle) {
       }
     }
     state.foreign_toplevels.known.remove(&window);
+    state.foreign_toplevels.minimize_hints.remove(&window);
   }
 
   crate::ext_toplevel::sync(state, handle, &windows);
@@ -406,8 +447,14 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for CompositorState {
       zwlr_foreign_toplevel_handle_v1::Request::UnsetMinimized => {
         let _ = shell::set_minimized(state, window, false);
       }
-      zwlr_foreign_toplevel_handle_v1::Request::SetRectangle { .. }
-      | zwlr_foreign_toplevel_handle_v1::Request::Destroy => {}
+      zwlr_foreign_toplevel_handle_v1::Request::SetRectangle {
+        surface,
+        x,
+        y,
+        width,
+        height,
+      } => set_minimize_hint(state, window, &surface, (x, y, width, height)),
+      zwlr_foreign_toplevel_handle_v1::Request::Destroy => {}
       _ => {}
     }
   }

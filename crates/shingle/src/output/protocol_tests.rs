@@ -1095,6 +1095,41 @@ fn a_toplevel_handle_is_on_its_windows_output() {
 }
 
 #[test]
+fn a_taskbar_rectangle_is_the_minimize_hint() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let _manager = client.bind::<toplevels::ZwlrForeignToplevelManagerV1>(3);
+  client.roundtrip(&mut compositor);
+  let (toplevel, window) = mapped(&mut compositor, &mut client, "hinted");
+  client.roundtrip(&mut compositor);
+  assert_eq!(compositor.minimize_hint(window), None);
+  let handle = client.events.toplevel_handles[0].clone();
+  // Relative to the surface it names, as Wayfire adds its position.
+  let origin = compositor
+    .window_surfaces(window)
+    .into_iter()
+    .find(|snapshot| snapshot.window == Some(window))
+    .unwrap()
+    .geometry;
+  handle.set_rectangle(&toplevel.surface, 10, 20, 30, 40);
+  client.roundtrip(&mut compositor);
+  assert_eq!(
+    compositor.minimize_hint(window),
+    Some(shingle_core::Rect::new(
+      origin.x + 10,
+      origin.y + 20,
+      30,
+      40
+    ))
+  );
+  // An empty rectangle takes it back.
+  handle.set_rectangle(&toplevel.surface, 0, 0, 0, 0);
+  client.roundtrip(&mut compositor);
+  assert_eq!(compositor.minimize_hint(window), None);
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn outputs_at_negative_positions_are_warned_about_for_x() {
   let (mut compositor, _path) = two_outputs();
   assert!(

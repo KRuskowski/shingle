@@ -823,6 +823,21 @@ pub struct SurfaceSnapshot {
   pub opacity: f32,
   /// The committed buffer, or `None` when nothing is attached.
   pub buffer: Option<BufferSnapshot>,
+  /// The layer of a wlr-layer-shell surface; `None` for other roles.
+  pub layer: Option<ShellLayer>,
+}
+
+/// A wlr-layer-shell layer, bottom first.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShellLayer {
+  /// `background`.
+  Background,
+  /// `bottom`.
+  Bottom,
+  /// `top`, where panels go.
+  Top,
+  /// `overlay`.
+  Overlay,
 }
 
 /// Something the frontend may need to react to, collected while the
@@ -2660,6 +2675,13 @@ impl Compositor {
   /// when keyboard focus is on no window. `None` during show-desktop.
   pub fn focused_window(&self) -> Option<WindowId> {
     input::focused_window(&self.state)
+  }
+
+  /// Where `window` minimizes to, in layout coordinates, if a taskbar told
+  /// with `zwlr_foreign_toplevel_handle_v1.set_rectangle`, as Wayfire's
+  /// `get_minimize_hint`.
+  pub fn minimize_hint(&self, window: WindowId) -> Option<Rect> {
+    crate::foreign_toplevel::minimize_hint(&self.state, window)
   }
 
   /// The window's `wf/alpha` opacity in `0.0..=1.0`, or `None` for an unknown

@@ -2184,11 +2184,47 @@ fn only_x_drag_icons_may_animate() {
     geometry: shingle_core::Rect::new(0, 0, 32, 32),
     opacity: 1.0,
     buffer: None,
+    layer: None,
   };
   // An X client's icon is an `x-or` view, as in Wayfire; a Wayland
   // client's is no view at all.
   assert!(fixture.frontend.animation_matches(&icon(Some("XTerm"))));
   assert!(!fixture.frontend.animation_matches(&icon(None)));
+}
+
+#[test]
+fn layer_views_are_named_after_their_layer() {
+  let mut config = ShingleConfig::default();
+  config.animate.enabled_for =
+    shingle_config::ViewMatcher::try_from("type is \"panel\"".to_owned())
+      .unwrap();
+  let fixture = Fixture::new(config);
+  let layer = |layer| shingle::SurfaceSnapshot {
+    id: shingle::SurfaceId(1),
+    window: None,
+    parent: None,
+    role: shingle::SurfaceRole::LayerShell,
+    app_id: None,
+    title: None,
+    icon: None,
+    geometry: shingle_core::Rect::new(0, 0, 32, 32),
+    opacity: 1.0,
+    buffer: None,
+    layer: Some(layer),
+  };
+  // Wayfire's `panel` is the top layer; the bottom two are `background`.
+  assert!(
+    fixture
+      .frontend
+      .animation_matches(&layer(shingle::ShellLayer::Top))
+  );
+  for other in [
+    shingle::ShellLayer::Background,
+    shingle::ShellLayer::Bottom,
+    shingle::ShellLayer::Overlay,
+  ] {
+    assert!(!fixture.frontend.animation_matches(&layer(other)));
+  }
 }
 
 #[test]
