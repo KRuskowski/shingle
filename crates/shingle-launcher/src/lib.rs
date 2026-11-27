@@ -13,4 +13,5 @@ pub mod history;
 pub mod index;
 pub mod layout;
 pub mod matching;
+pub mod model;
 pub mod search;
