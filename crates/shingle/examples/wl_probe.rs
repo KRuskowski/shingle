@@ -17,8 +17,13 @@
 //!          [--size WIDTHxHEIGHT] [--damage-square SIDE]
 //!          [--report-outputs] [--layer OUTPUT] [--fullscreen]
 //!          [--decoration server|client] [--drag TEXT] [--drag-icon]
-//!          [--drop]
+//!          [--drop] [--cursor]
 //! ```
+//!
+//! With `--cursor`, the probe sets its own cursor whenever the pointer
+//! enters it: a yellow 16x16 surface with its hotspot at the centre,
+//! reported as `cursor_set`, so that capture checks can tell a capture
+//! with the cursor from one without it (docs/design/screen-sharing.md).
 //!
 //! With `--drag TEXT`, a press of the first button on the probe starts a
 //! drag (`wl_data_device.start_drag`) of a source offering
@@ -214,7 +219,12 @@ struct Options {
   drag_icon: bool,
   /// Accepts text drags and reports what is dropped.
   drop: bool,
+  /// Sets a yellow cursor when the pointer enters.
+  cursor: bool,
 }
+
+/// The size of the `--cursor` cursor.
+const CURSOR_SIZE: i32 = 16;
 
 /// The size of the `--drag-icon` icon.
 const DRAG_ICON_SIZE: i32 = 32;
@@ -285,6 +295,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
       }
       "--drag-icon" => options.drag_icon = true,
       "--drop" => options.drop = true,
+      "--cursor" => options.cursor = true,
       "--size" => {
         let value = arguments.next().ok_or("--size needs WIDTHxHEIGHT")?;
         options.size = Some(parse_size(value)?);
@@ -403,6 +414,10 @@ struct Probe {
   icon: Option<wl_surface::WlSurface>,
   /// Whether `--drop` accepts drags.
   drop_target: bool,
+  /// Whether `--cursor` sets a cursor of its own.
+  own_cursor: bool,
+  /// The `--cursor` surface, made on the first enter.
+  cursor_surface: Option<wl_surface::WlSurface>,
   /// The types each data offer announced.
   offer_types: Vec<(wl_data_offer::WlDataOffer, Vec<String>)>,
   /// The offer of the drag over the probe.
@@ -452,6 +467,48 @@ impl Probe {
     icon.attach(Some(&buffer), -size / 2, -size / 2);
     icon.damage_buffer(0, 0, size, size);
     Some(icon)
+  }
+
+  /// The `--cursor` surface with its yellow buffer attached, to commit
+  /// once it is the cursor; made once and reused. None after reporting an
+  /// error.
+  fn cursor_surface(
+    &mut self,
+    handle: &QueueHandle<Self>,
+  ) -> Option<wl_surface::WlSurface> {
+    if let Some(surface) = &self.cursor_surface {
+      return Some(surface.clone());
+    }
+    let compositor = self.compositor.as_ref()?;
+    let surface = compositor.create_surface(handle, ());
+    let shm = self.shm.as_ref()?;
+    let size = CURSOR_SIZE;
+    let Ok(fd) = rustix::fs::memfd_create(
+      "wl-probe-cursor",
+      rustix::fs::MemfdFlags::CLOEXEC,
+    ) else {
+      report("error", &[("text", "\"memfd_create failed\"".into())]);
+      return None;
+    };
+    let mut file = std::fs::File::from(fd);
+    // XRGB8888 bytes B, G, R, X: yellow.
+    let _ =
+      file.write_all(&[0, 0xff, 0xff, 0xff].repeat((size * size) as usize));
+    let pool = shm.create_pool(file.as_fd(), size * size * 4, handle, ());
+    let buffer = pool.create_buffer(
+      0,
+      size,
+      size,
+      size * 4,
+      wl_shm::Format::Xrgb8888,
+      handle,
+      (),
+    );
+    pool.destroy();
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage_buffer(0, 0, size, size);
+    self.cursor_surface = Some(surface.clone());
+    Some(surface)
   }
 
   /// A pool holding `count` white or patterned buffers of `width` by
@@ -722,7 +779,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for Probe {
     }
     if capabilities.contains(wl_seat::Capability::Pointer)
       && probe.pointer.is_none()
-      && (probe.drag_text.is_some() || probe.drop_target)
+      && (probe.drag_text.is_some() || probe.drop_target || probe.own_cursor)
     {
       probe.pointer = Some(seat.get_pointer(handle, ()));
     }
@@ -766,6 +823,20 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
     _: &Connection,
     handle: &QueueHandle<Self>,
   ) {
+    if let wl_pointer::Event::Enter { serial, .. } = event {
+      if probe.own_cursor
+        && let Some(surface) = probe.cursor_surface(handle)
+        && let Some(pointer) = &probe.pointer
+      {
+        let hotspot = CURSOR_SIZE / 2;
+        // The buffer is committed once the surface is the cursor, as
+        // toolkits do, so that the compositor keeps its pixels.
+        pointer.set_cursor(serial, Some(&surface), hotspot, hotspot);
+        surface.commit();
+        report("cursor_set", &[("size", CURSOR_SIZE.to_string())]);
+      }
+      return;
+    }
     let wl_pointer::Event::Button {
       serial,
       button: 0x110,
@@ -1497,6 +1568,7 @@ fn run(options: &Options) -> Result<(), String> {
     drag_text: options.drag.clone(),
     drag_icon: options.drag_icon,
     drop_target: options.drop,
+    own_cursor: options.cursor,
     ..Probe::default()
   };
   queue
@@ -1669,6 +1741,7 @@ mod tests {
         drag: None,
         drag_icon: false,
         drop: false,
+        cursor: false,
       }
     );
     let options = parse(&arguments(&["--drag", "text", "--drop"])).unwrap();
@@ -1680,6 +1753,7 @@ mod tests {
     assert!(options.drag_icon);
     assert!(parse(&arguments(&["--drag"])).is_err());
     assert!(parse(&arguments(&["--fullscreen"])).unwrap().fullscreen);
+    assert!(parse(&arguments(&["--cursor"])).unwrap().cursor);
     assert_eq!(
       parse(&arguments(&["--decoration", "server"]))
         .unwrap()

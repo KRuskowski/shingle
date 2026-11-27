@@ -771,6 +771,7 @@ def all_checks():
   import nested_output_checks
   import output_checks
   import resize_checks
+  import screencast_checks
   import switcher_checks
   import vswipe_checks
   import wayfire_checks
@@ -779,7 +780,8 @@ def all_checks():
           **vswipe_checks.CHECKS, **decoration_checks.CHECKS,
           **switcher_checks.CHECKS, **colour_checks.CHECKS,
           **focus_checks.CHECKS, **drag_icon_checks.CHECKS,
-          **resize_checks.CHECKS, **nested_clipboard_checks.CHECKS}
+          **resize_checks.CHECKS, **nested_clipboard_checks.CHECKS,
+          **screencast_checks.CHECKS}
 
 def run_checks(groups, binary, wl_probe, captures_directory=None):
   """Runs the check `groups` in order; returns 0 when all passed."""

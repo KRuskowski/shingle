@@ -31,7 +31,8 @@ namespaces:
                nested-outputs|nested-smoke|wayfire-plugins|wayfire-shell|
                vswipe|decoration|switcher|colours|minimize-focus|
                drag-icon|resize|resize-nested|nested-scaled|
-               nested-clipboard ...
+               nested-clipboard|screencast|image-copy-capture|
+               ext-data-control ...
 
 For example, DB-1's import test:
 
@@ -87,6 +88,18 @@ nested Shingle in it, both ways, for the clipboard and the primary
 selection at 10 bytes and 1 MiB, with a slow reader that must not
 stall either compositor, and checks `disable_primary_selection` and
 `behavior.host_clipboard: false`.
+`--checks screencast` (screencast_checks.py) runs a private D-Bus
+session bus, PipeWire, WirePlumber, xdg-desktop-portal and
+xdg-desktop-portal-wlr in the namespace against offscreen Shingle and
+reads a ScreenCast portal stream of its output with GStreamer's
+`pipewiresrc` (after tools/gpu_test/fetch_screencast_deps.py, run once
+outside the namespace): pixels, frames only on damage, the hidden and
+embedded cursor modes and a DMA-BUF stream. `--checks image-copy-capture`
+checks ext-image-copy-capture from a raw-protocol client (capture_wire.py):
+output, toplevel and cursor sessions, damage, paint_cursors and a capture
+into a GBM DMA-BUF shown in a window, and grim with and without `-c`;
+`--checks ext-data-control` copies and pastes through ext-data-control
+against wl-copy and wl-paste.
 
 It exits with the command's status, or 1 when a check failed. With
 `--checks` it prints one PASS or FAIL line per check and INFO lines for
@@ -99,7 +112,7 @@ test_nested_output_checks.py, test_wayfire_checks.py,
 test_vswipe_checks.py, test_decoration_checks.py,
 test_switcher_checks.py, test_colour_checks.py, test_focus_checks.py,
 test_drag_icon_checks.py, test_resize_checks.py,
-test_nested_clipboard_checks.py).
+test_nested_clipboard_checks.py, test_screencast_checks.py).
 The work directory under `target/` is removed afterwards unless `--keep`
 is given.
 """
@@ -127,8 +140,9 @@ SAMPLE_INTERVAL = 0.05
 # nested_output_checks.GROUPS, wayfire_checks.GROUPS,
 # vswipe_checks.GROUPS, decoration_checks.GROUPS and
 # switcher_checks.GROUPS, colour_checks.GROUPS, focus_checks.GROUPS and
-# drag_icon_checks.GROUPS, resize_checks.GROUPS and
-# nested_clipboard_checks.GROUPS, kept here so that
+# drag_icon_checks.GROUPS, resize_checks.GROUPS,
+# nested_clipboard_checks.GROUPS and screencast_checks.GROUPS, kept here so
+# that
 # `--help` works without importing them.
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
@@ -136,7 +150,8 @@ CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'nested-smoke', 'nested-scaled', 'wayfire-plugins',
                 'wayfire-shell', 'vswipe', 'decoration', 'switcher',
                 'colours', 'minimize-focus', 'drag-icon', 'resize',
-                'resize-nested', 'nested-clipboard')
+                'resize-nested', 'nested-clipboard', 'screencast',
+                'image-copy-capture', 'ext-data-control')
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset, and nested Shingle's on NVIDIA in `resize-nested`;
 # `syncobj` runs no Vulkan client.
