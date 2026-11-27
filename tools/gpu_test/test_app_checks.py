@@ -183,6 +183,17 @@ class UserTest(unittest.TestCase):
     self.assertEqual(app_checks.unprivileged_uid(
         {'SHINGLE_GPU_TEST_UID': '1001'}), '1001')
 
+class MainViewTest(unittest.TestCase):
+  """Choosing an application's main window."""
+
+  def test_the_largest_view_without_a_parent(self):
+    def view(view_id, width, parent=-1):
+      return {'id': view_id, 'parent': parent,
+              'geometry': {'width': width, 'height': 100}}
+    views = [view(1, 300), view(2, 900, parent=1), view(3, 500)]
+    self.assertEqual(app_checks.main_view(views)['id'], 3)
+    self.assertEqual(app_checks.main_view([view(2, 9, parent=1)])['id'], 2)
+
 class TableTest(unittest.TestCase):
   """The per-app table."""
 

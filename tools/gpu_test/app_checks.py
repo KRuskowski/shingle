@@ -345,6 +345,13 @@ def as_user(arguments, uid=None):
   return ['unshare', '--user', f'--map-user={uid}', f'--map-group={uid}',
           '--', *arguments]
 
+def main_view(views):
+  """The largest of `views` without a parent, else the largest."""
+  def area(view):
+    return view['geometry']['width'] * view['geometry']['height']
+  parentless = [view for view in views if view.get('parent', -1) == -1]
+  return max(parentless or views, key=area)
+
 def new_pids(before, current, keep):
   """PIDs in `current` but not `before`, without `keep`, 1 or below."""
   return sorted(pid for pid in set(current) - set(before) - set(keep)
@@ -431,14 +438,16 @@ class App:
   def __init__(self, name, command, text=None, popup='right-click',
                dialog=None, fullscreen_key=None, environment=None,
                heavy=False, prepare=None, kind='wayland', map_timeout=None,
-               copy_paste=True):
+               copy_paste=True, dismiss=None):
     """`command` may contain `{dir}` (the app's files) and `{home}`.
 
     `text` is how typed text is checked: 'shell' (typed commands write a
     file), 'editor' (select all and copy, read by wl-paste), 'browser' (a
     data: URL typed into the location bar paints the page) or None.
     `popup` is 'right-click' or None, `dialog` the chord that opens one,
-    `prepare(directory)` writes the files the command opens."""
+    `prepare(directory)` writes the files the command opens, and a first
+    window titled with the prefix `dismiss`, such as a welcome dialog, is
+    closed before the scenario."""
     self.name = name
     self.command = command
     self.text = text
@@ -451,6 +460,7 @@ class App:
     self.kind = kind
     self.map_timeout = map_timeout or MAP_TIMEOUT
     self.copy_paste = copy_paste
+    self.dismiss = dismiss
 
 def _write(path, data):
   mode = 'wb' if isinstance(data, bytes) else 'w'
@@ -460,8 +470,12 @@ def _write(path, data):
 def _prepare_pdf(directory):
   _write(os.path.join(directory, 'sweep.pdf'), minimal_pdf())
 
-def _prepare_png(directory):
+def _prepare_gimp(directory):
   _write(os.path.join(directory, 'sweep.png'), minimal_png())
+  # GIMP 3 shows a welcome dialog on its first start.
+  config = os.path.join(directory, 'config', 'GIMP', '3.0')
+  os.makedirs(config, exist_ok=True)
+  _write(os.path.join(config, 'gimprc'), '(show-welcome-dialog no)\n')
 
 def _prepare_svg(directory):
   _write(os.path.join(directory, 'sweep.svg'), SVG)
@@ -516,8 +530,9 @@ APPS = (
     App('vlc', ['vlc', '--no-qt-privacy-ask', '--no-qt-recentplay',
                 '--no-qt-error-dialogs'], dialog='ctrl+o', copy_paste=False),
     App('gimp', ['gimp', '--no-splash', '--no-data', '--no-fonts',
-                 '{dir}/sweep.png'], dialog='ctrl+n', prepare=_prepare_png,
-        copy_paste=False, heavy=True, map_timeout=180),
+                 '{dir}/sweep.png'], dialog='ctrl+n', prepare=_prepare_gimp,
+        copy_paste=False, heavy=True, map_timeout=180,
+        dismiss='Welcome to GIMP'),
     App('inkscape', ['inkscape', '--with-gui', '{dir}/sweep.svg'],
         dialog='ctrl+o', prepare=_prepare_svg, copy_paste=False, heavy=True,
         map_timeout=180),
@@ -848,12 +863,25 @@ class Scenario:
                         timeout=self.app.map_timeout)
     if not views:
       return self.record('maps', False, checks.tail(self.log(), 10))
-    # Some applications map a splash or a second window first; the
-    # largest is the main one.
+    # Some applications map a splash, a welcome dialog or a second window
+    # first; the largest view without a parent is the main one.
     time.sleep(2)
     views = self.sweep.app_views() or views
-    self.main = max(views, key=lambda view: view['geometry']['width']
-                    * view['geometry']['height'])
+    if self.app.dismiss:
+      for view in views:
+        if view['title'].startswith(self.app.dismiss):
+          print(f'INFO {self.app.name}: closing {view["title"]!r} first',
+                flush=True)
+          self.sweep.shingle.call('window-rules/close-view',
+                                  {'id': view['id']})
+      views = xw.wait_for(lambda: [
+          view for view in self.sweep.app_views()
+          if not view['title'].startswith(self.app.dismiss)],
+          timeout=self.app.map_timeout)
+      if not views:
+        return self.record('maps', False, 'only its first window mapped')
+      time.sleep(2)
+    self.main = main_view(views)
     x11 = 'xdg_toplevel' not in self.log()
     self.x11 = x11
     print(f'INFO {self.app.name}: maps as {"X11" if x11 else "Wayland"}, '
