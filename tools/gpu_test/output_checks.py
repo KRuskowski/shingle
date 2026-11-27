@@ -46,7 +46,8 @@ TOLERANCE = 0.02
 ANIMATE_FRAMES = 100000
 # A floating window across the boundary between the outputs.
 STRADDLING = {'x': 1180, 'y': 100, 'width': 200, 'height': 200}
-# A floating window on HEADLESS-2.
+# A floating window on HEADLESS-2, in layout coordinates; IPC takes and
+# reports it relative to that output, as Wayfire does.
 ON_SECOND = {'x': 1880, 'y': 400, 'width': 300, 'height': 200}
 
 def config():
@@ -198,16 +199,17 @@ def clipping_checks(results, shingle, wl_probe):
                       checks.tail(probe.output()))
         return
     ids = outputs_by_name(shingle)
+    own = local(ON_SECOND, 'HEADLESS-2')
     configure(shingle, shingle.view('straddling'),
               output_id=ids['HEADLESS-1'][0], geometry=STRADDLING)
     configure(shingle, shingle.view('second'),
-              output_id=ids['HEADLESS-2'][0], geometry=ON_SECOND)
+              output_id=ids['HEADLESS-2'][0], geometry=own)
 
     def placed():
       straddling = shingle.view('straddling') or {}
       second = shingle.view('second') or {}
       return (straddling.get('geometry') == STRADDLING
-              and second.get('geometry') == ON_SECOND)
+              and second.get('geometry') == own)
     results.check('outputs: the windows float where configure-view put them',
                   xw.wait_for(placed, timeout=10),
                   json.dumps([shingle.view('straddling'),
@@ -226,7 +228,6 @@ def clipping_checks(results, shingle, wl_probe):
         f'size {(first.width, first.height) if first else None}, pixels '
         f'{first.pixel(1230, 150) if first else None} and '
         f'{first.pixel(1230, 250) if first else None}')
-    own = local(ON_SECOND, 'HEADLESS-2')
     second = settled(shingle, 'HEADLESS-2',
                      lambda shot: not checks.pattern_mismatches(shot, own))
     results.check(
@@ -262,9 +263,11 @@ def drag_checks(results, shingle):
       lambda: (lambda view: view if view and view.get('output-id')
                == ids['HEADLESS-2'][0] else None)(shingle.view('straddling')),
       timeout=10)
+  # 300 pixels right in the layout, reported relative to HEADLESS-2.
+  dropped = local(dict(STRADDLING, x=STRADDLING['x'] + 300), 'HEADLESS-2')
   results.check(
       'outputs: a drag across the boundary moves the window to HEADLESS-2',
-      view is not None and view['geometry']['x'] == STRADDLING['x'] + 300,
+      view is not None and view['geometry']['x'] == dropped['x'],
       json.dumps(shingle.view('straddling')))
 
 def output_checks(results, binary, wl_probe, captures):

@@ -117,6 +117,16 @@ class CaptureTest(unittest.TestCase):
                            0.5)
     self.assertEqual(app_checks.changed_share(None, after, whole), 0.0)
 
+  def test_views_are_placed_in_the_layout_by_their_output(self):
+    outputs = {'HEADLESS-1': {'id': 1, 'rect': (0, 0, 1280, 720)},
+               'HEADLESS-2': {'id': 2, 'rect': (1280, 0, 1024, 768)}}
+    geometry = {'x': 10, 'y': 20, 'width': 30, 'height': 40}
+    self.assertEqual(app_checks.in_layout(geometry, 2, outputs),
+                     dict(geometry, x=1290))
+    self.assertEqual(app_checks.in_layout(geometry, 1, outputs), geometry)
+    # A parked view's output id is -1; it stays where IPC put it.
+    self.assertEqual(app_checks.in_layout(geometry, -1, outputs), geometry)
+
   def test_centred_on(self):
     area = {'x': 0, 'y': 0, 'width': 1000, 'height': 800}
     parent = {'x': 100, 'y': 100, 'width': 600, 'height': 400}

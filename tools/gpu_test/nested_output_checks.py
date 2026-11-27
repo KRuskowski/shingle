@@ -226,7 +226,9 @@ def content_checks(results, outer, nested, wl_probe, layout):
                   wait_output(nested, app_id, output),
                   json.dumps(nested.view(app_id)))
   for app_id, output in (('left', 'HEADLESS-1'), ('right', 'HEADLESS-2')):
-    offset = offset_of(windows[window_title(output)], outputs[output][1])
+    # View geometries are relative to their output, as Wayfire's are, so
+    # the output's window corner is where they start in the host.
+    offset = offset_of(windows[window_title(output)], (0, 0))
 
     def wrong(shot, app_id=app_id, offset=offset):
       view = nested.view(app_id)

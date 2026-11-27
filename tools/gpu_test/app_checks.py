@@ -352,6 +352,14 @@ def main_view(views):
   parentless = [view for view in views if view.get('parent', -1) == -1]
   return max(parentless or views, key=area)
 
+def in_layout(geometry, output_id, outputs):
+  """IPC `geometry` of a view on output `output_id` in layout coordinates:
+  IPC reports it relative to its output's corner, as Wayfire does, and
+  `outputs` is the sweep's {name: {'id', 'rect'}}."""
+  corner = next((output['rect'][:2] for output in outputs.values()
+                 if output['id'] == output_id), (0, 0))
+  return shifted(geometry, dx=corner[0], dy=corner[1])
+
 def shifted(geometry, dx=0, dy=0):
   """`geometry` moved by `dx` and `dy`."""
   return dict(geometry, x=geometry['x'] + dx, y=geometry['y'] + dy)
@@ -684,8 +692,9 @@ class Sweep:
             for view in self.views()]
 
   def rects(self):
-    """The geometry of every mapped view."""
-    return [view['geometry'] for view in self.views()]
+    """The geometry of every mapped view, in layout coordinates."""
+    return [in_layout(view['geometry'], view.get('output-id'), self.outputs)
+            for view in self.views()]
 
   def output_rects(self):
     """Every output's rectangle."""
@@ -950,9 +959,12 @@ class Scenario:
     return tuple(outcome)
 
   def base(self):
-    """The main view's client rectangle, or None."""
+    """The main view's client rectangle in layout coordinates, or None."""
     view = self.main_view()
-    return view['base-geometry'] if view else None
+    if not view:
+      return None
+    return in_layout(view['base-geometry'], view.get('output-id'),
+                     self.sweep.outputs)
 
   def step_draws(self):
     """It draws its whole view and nothing outside it."""
