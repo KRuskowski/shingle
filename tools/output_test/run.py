@@ -1402,20 +1402,21 @@ def configure_view_checks(results, shingle, probes):
   results.check('MO-4: a fullscreen window fills HEADLESS-2 (1024x768)',
                 reply == {'result': 'ok'} and configure is not None
                 and info.get('fullscreen') is True
-                and geometry_of(info) == (1280, 0, 1024, 768),
+                and geometry_of(info) == (0, 0, 1024, 768),
                 f'{reply} {geometry_of(info)} {full[0].events()[mark:]}')
   # floater floats at 100,50 on HEADLESS-1; it is scaled by 1024/1280 and
-  # 768/720 from HEADLESS-2's corner.
+  # 768/720 from HEADLESS-2's corner. IPC geometries are relative to the
+  # view's output, as Wayfire's are.
   shingle.ipc.call('window-rules/configure-view', {
       'id': floater[1],
       'geometry': {'x': 100, 'y': 50, 'width': 300, 'height': 200}})
   reply = shingle.ipc.call('window-rules/configure-view',
                            {'id': floater[1], 'output_id': 2})
   info = wait_for(lambda: (lambda value: value if geometry_of(value)
-                           == (1360, 53, 300, 200) else None)(
+                           == (80, 53, 300, 200) else None)(
                                view_info(shingle, floater[1])))
   results.check('MO-4: a floating window is scaled into HEADLESS-2 '
-                '(100,50 to 1360,53)', reply == {'result': 'ok'}
+                '(100,50 to 80,53 in its plane)', reply == {'result': 'ok'}
                 and bool(info) and info.get('output-name') == 'HEADLESS-2'
                 and floater[0].wait_event('output-enter',
                                           output='HEADLESS-2') is not None,
