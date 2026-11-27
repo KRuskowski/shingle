@@ -30,6 +30,7 @@ mod ini;
 mod input_devices;
 mod launcher;
 mod layout;
+mod lock;
 mod multi_output;
 mod output;
 mod plugins;
@@ -48,6 +49,11 @@ pub use launcher::{LauncherColors, LauncherConfig, LauncherRenderer};
 pub use layout::{
   LayoutOutput, closest_point, disjoint, layout, layout_warnings, logical_size,
   output_in_direction, output_relative, overlapping,
+};
+pub use lock::{
+  Applied, DriftConfig, IndicatorColors, InputState, LineSource, LockColor,
+  LockConfig, LockOptions, LockValue, StateColors, parse_lock_color,
+  short_option, swaylock_config_path, takes_value,
 };
 pub use multi_output::{
   OswitchConfig, OutputLayoutConfig, UnplugPolicy, WsetBinding, WsetsConfig,
@@ -243,6 +249,10 @@ pub struct ShingleConfig {
   /// How `shingle-launcher` looks and runs; Shingle itself does not read
   /// it.
   pub launcher: LauncherConfig,
+  /// The lock screen: what Shingle runs to lock, and `shingle-lock`'s
+  /// options on top of the swaylock config, which Shingle itself does
+  /// not read.
+  pub lock: LockConfig,
   /// Wayfire's `[core] plugins`: when set, only the plugins of
   /// [`PLUGINS`] it names are on, and [`ShingleConfig::plugin_enabled`]
   /// says which. A Wayfire import always sets it; default unset, which
@@ -306,6 +316,7 @@ impl Default for ShingleConfig {
       pointer: PointerBindings::default(),
       input: InputConfig::default(),
       launcher: LauncherConfig::default(),
+      lock: LockConfig::default(),
       plugins: None,
       wayfire_values: WayfireValues::default(),
       format: ConfigFormat::Yaml,
@@ -539,6 +550,7 @@ impl ShingleConfig {
   /// fields set by the same option, which the importers run after each
   /// option.
   pub(crate) fn validate_fields(&self) -> Result<(), ConfigError> {
+    self.lock.validate()?;
     if !(1..=20).contains(&self.extra_gestures.move_fingers)
       || !(1..=20).contains(&self.extra_gestures.close_fingers)
       || !(1..=10_000).contains(&self.extra_gestures.move_delay)
