@@ -239,6 +239,7 @@ impl Editor {
             "rules" => Page::WindowRules,
             "input" => Page::Input,
             "idle" => Page::IdleSession,
+            "launcher" => Page::Launcher,
             _ => return,
           };
           self.capture.cancel();
@@ -692,6 +693,33 @@ impl Editor {
         self.config.session.path =
           (!path.is_empty()).then_some(PathBuf::from(path));
       }
+      Page::Launcher => {
+        let mut colors = self.config.launcher.colors.clone();
+        let width = self.number("launcher_width")?;
+        let height = self.number("launcher_height")?;
+        let font_size = self.number("launcher_font_size")?;
+        let icon_theme = self.text("launcher_icon_theme")?;
+        let renderer = self
+          .text("launcher_renderer")?
+          .parse()
+          .map_err(|error: shingle_config::ConfigError| error.to_string())?;
+        let terminal = self.text("launcher_terminal")?;
+        for (id, _, _) in ui::launcher_colors(&colors.clone()) {
+          let value = shingle_config::parse_color(
+            &self.text(&format!("launcher_color_{id}"))?,
+          )
+          .map_err(|error| error.to_string())?;
+          *launcher_color(&mut colors, id) = value;
+        }
+        let launcher = &mut self.config.launcher;
+        launcher.width = width;
+        launcher.height = height;
+        launcher.font_size = font_size;
+        launcher.icon_theme = icon_theme;
+        launcher.renderer = renderer;
+        launcher.terminal = terminal;
+        launcher.colors = colors;
+      }
     }
     self.config.validate().map_err(|error| error.to_string())
   }
@@ -738,6 +766,22 @@ impl Editor {
         .map(Some)
         .map_err(|error| format!("invalid value for {id}: {error}"))
     }
+  }
+}
+
+/// The colour of `colors` that the Launcher page's field `id` edits.
+fn launcher_color<'a>(
+  colors: &'a mut shingle_config::LauncherColors,
+  id: &str,
+) -> &'a mut [f64; 4] {
+  match id {
+    "backdrop" => &mut colors.backdrop,
+    "panel" => &mut colors.panel,
+    "field" => &mut colors.field,
+    "text" => &mut colors.text,
+    "dim_text" => &mut colors.dim_text,
+    "accent" => &mut colors.accent,
+    _ => &mut colors.selection,
   }
 }
 
@@ -825,5 +869,55 @@ fn set_binding(config: &mut ShingleConfig, action: &str, binding: Binding) {
     "grid_slot_bottom_right" => keys.grid_slot_bottom_right = vec![binding],
     "grid_restore" => keys.grid_restore = vec![binding],
     _ => {}
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Sets the text input `id` of the editor's page to `value`.
+  fn type_into(editor: &mut Editor, id: &str, value: &str) {
+    match find_widget_mut(&mut editor.ui, id) {
+      Some(Widget::TextInput { value: field, .. }) => *field = value.into(),
+      _ => panic!("no text input {id}"),
+    }
+  }
+
+  #[test]
+  fn the_launcher_page_edits_the_launcher_section() {
+    let mut editor = Editor::new(
+      ShingleConfig::default(),
+      "in.yaml".into(),
+      "out.yaml".into(),
+    );
+    editor.handle_action("page:launcher");
+    assert_eq!(editor.page, Page::Launcher);
+    type_into(&mut editor, "launcher_width", "1000");
+    type_into(&mut editor, "launcher_font_size", "18.5");
+    type_into(&mut editor, "launcher_icon_theme", " Papirus ");
+    type_into(&mut editor, "launcher_renderer", "software");
+    type_into(&mut editor, "launcher_terminal", "foot");
+    type_into(&mut editor, "launcher_color_accent", "#ff8000");
+    type_into(&mut editor, "launcher_color_panel", "0.1 0.2 0.3 1");
+    assert_eq!(editor.sync_page(), Ok(()));
+    let launcher = &editor.config.launcher;
+    assert_eq!(launcher.width, 1000);
+    assert_eq!(launcher.font_size, 18.5);
+    assert_eq!(launcher.icon_theme, "Papirus");
+    assert_eq!(
+      launcher.renderer,
+      shingle_config::LauncherRenderer::Software
+    );
+    assert_eq!(launcher.terminal, "foot");
+    assert_eq!(launcher.colors.accent[0], 1.0);
+    assert_eq!(launcher.colors.panel, [0.1, 0.2, 0.3, 1.0]);
+    assert_eq!(launcher.colors.text, [0.92, 0.93, 0.95, 1.0]);
+    // Bad values are refused with the config's own checks.
+    type_into(&mut editor, "launcher_renderer", "gpu");
+    assert!(editor.sync_page().is_err());
+    type_into(&mut editor, "launcher_renderer", "auto");
+    type_into(&mut editor, "launcher_width", "10");
+    assert!(editor.sync_page().unwrap_err().contains("launcher.width"));
   }
 }

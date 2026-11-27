@@ -22,6 +22,32 @@ pub enum LauncherRenderer {
   Hardware,
 }
 
+impl LauncherRenderer {
+  /// The name the config uses: `auto`, `software` or `hardware`.
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Auto => "auto",
+      Self::Software => "software",
+      Self::Hardware => "hardware",
+    }
+  }
+}
+
+impl std::str::FromStr for LauncherRenderer {
+  type Err = ConfigError;
+
+  fn from_str(text: &str) -> Result<Self, ConfigError> {
+    match text.trim() {
+      "auto" => Ok(Self::Auto),
+      "software" => Ok(Self::Software),
+      "hardware" => Ok(Self::Hardware),
+      other => Err(ConfigError::Invalid(format!(
+        "launcher.renderer must be auto, software or hardware, not {other:?}"
+      ))),
+    }
+  }
+}
+
 /// The launcher's colours, `[r, g, b, a]` in 0–1 like every colour of the
 /// config.
 #[derive(Clone, Debug, Deserialize, PartialEq, serde::Serialize)]
@@ -167,6 +193,21 @@ mod tests {
       .find(|command| command.command == "shingle-launcher")
       .expect("a launcher binding");
     assert_eq!(String::from(launcher.binding.clone()), "super+space");
+  }
+
+  #[test]
+  fn renderer_names_round_trip() {
+    for renderer in [
+      LauncherRenderer::Auto,
+      LauncherRenderer::Software,
+      LauncherRenderer::Hardware,
+    ] {
+      assert_eq!(
+        renderer.as_str().parse::<LauncherRenderer>().ok(),
+        Some(renderer)
+      );
+    }
+    assert!(" gpu ".parse::<LauncherRenderer>().is_err());
   }
 
   #[test]

@@ -158,7 +158,7 @@ fn print_help() {
          without opening a window\n\
          --export-yaml       Convert and save YAML without opening a window\n\
          --page NAME         Screenshot page: general, tiling, keys, \
-         commands, rules, input, idle\n\
+         commands, rules, input, idle, launcher\n\
          --screenshot PATH   Render the selected page headlessly to a PNG \
          (default: keys)\n\
          --help              Show this help"

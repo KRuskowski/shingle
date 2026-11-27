@@ -92,10 +92,11 @@ pub enum Page {
   WindowRules,
   Input,
   IdleSession,
+  Launcher,
 }
 
 impl Page {
-  const ALL: [Self; 7] = [
+  const ALL: [Self; 8] = [
     Self::General,
     Self::Tiling,
     Self::Keybindings,
@@ -103,6 +104,7 @@ impl Page {
     Self::WindowRules,
     Self::Input,
     Self::IdleSession,
+    Self::Launcher,
   ];
 
   fn title(self) -> &'static str {
@@ -114,6 +116,7 @@ impl Page {
       Self::WindowRules => "Window rules",
       Self::Input => "Keyboard input",
       Self::IdleSession => "Idle & session",
+      Self::Launcher => "Launcher",
     }
   }
 
@@ -126,6 +129,7 @@ impl Page {
       "rules" => Some(Self::WindowRules),
       "input" => Some(Self::Input),
       "idle" => Some(Self::IdleSession),
+      "launcher" => Some(Self::Launcher),
       _ => None,
     }
   }
@@ -141,6 +145,7 @@ impl Page {
         Self::WindowRules => "rules",
         Self::Input => "input",
         Self::IdleSession => "idle",
+        Self::Launcher => "launcher",
       }
     )
   }
@@ -160,7 +165,7 @@ pub fn build(model: &UiModel<'_>) -> Widget {
   let config = model.config;
   let navigation = Page::ALL.into_iter().map(|page| {
     let selected = page == model.page;
-    let mut button = Widget::button(page.title(), page.action(), 140.0, 42.0);
+    let mut button = Widget::button(page.title(), page.action(), 122.0, 42.0);
     if selected && let Widget::Button { style, .. } = &mut button {
       style.idle = BoxStyle::fill(ACCENT).with_radius(5.0);
     }
@@ -1021,6 +1026,7 @@ pub fn build(model: &UiModel<'_>) -> Widget {
           .unwrap_or_default(),
       ),
     ],
+    Page::Launcher => launcher_page(config),
   };
 
   let mut content_widget =
@@ -1081,6 +1087,77 @@ pub fn build(model: &UiModel<'_>) -> Widget {
       ),
     ],
   )
+}
+
+/// The colours of the `launcher` section: field ID suffix, title and
+/// value.
+pub fn launcher_colors(
+  colors: &shingle_config::LauncherColors,
+) -> [(&'static str, &'static str, [f64; 4]); 7] {
+  [
+    ("backdrop", "Backdrop over the output", colors.backdrop),
+    ("panel", "Panel", colors.panel),
+    ("field", "Search field and hovered rows", colors.field),
+    ("text", "Text", colors.text),
+    ("dim_text", "Hints and counts", colors.dim_text),
+    ("accent", "Accent (caret, favourites)", colors.accent),
+    ("selection", "Selected row and category", colors.selection),
+  ]
+}
+
+/// The Launcher page: shingle-launcher's `launcher` section.
+fn launcher_page(config: &ShingleConfig) -> Vec<Widget> {
+  let launcher = &config.launcher;
+  let mut page = vec![
+    heading("Application launcher (shingle-launcher)"),
+    text_row(
+      "Panel width (logical pixels)",
+      "launcher_width",
+      launcher.width.to_string(),
+    ),
+    text_row(
+      "Panel height (logical pixels)",
+      "launcher_height",
+      launcher.height.to_string(),
+    ),
+    text_row(
+      "Font size (icons and rows scale with it)",
+      "launcher_font_size",
+      launcher.font_size.to_string(),
+    ),
+    text_row(
+      "Icon theme (empty follows KDE or GTK)",
+      "launcher_icon_theme",
+      launcher.icon_theme.clone(),
+    ),
+    text_row(
+      "Renderer (auto, software or hardware)",
+      "launcher_renderer",
+      launcher.renderer.as_str().to_owned(),
+    ),
+    text_row(
+      "Terminal (empty picks $TERMINAL, foot, ...)",
+      "launcher_terminal",
+      launcher.terminal.clone(),
+    ),
+    heading("Launcher colours (R G B A, 0 to 1)"),
+  ];
+  page.extend(launcher_colors(&launcher.colors).into_iter().map(
+    |(id, title, value)| {
+      text_row(
+        title,
+        &format!("launcher_color_{id}"),
+        value.map(|component| component.to_string()).join(" "),
+      )
+    },
+  ));
+  page.push(label(
+    "The launcher reads this when it starts; no reload is needed.",
+    15.0,
+    700.0,
+    30.0,
+  ));
+  page
 }
 
 fn binding<'a>(config: &'a ShingleConfig, name: &str) -> &'a Binding {
@@ -1401,5 +1478,23 @@ mod tests {
       text_value(&config, Page::General, "xwayland_startup_script"),
       "xrdb -merge x"
     );
+  }
+
+  #[test]
+  fn the_launcher_page_shows_the_launcher_section() {
+    let mut config = ShingleConfig::default();
+    config.launcher.width = 900;
+    config.launcher.icon_theme = "breeze".into();
+    config.launcher.renderer = shingle_config::LauncherRenderer::Hardware;
+    config.launcher.colors.accent = [1.0, 0.5, 0.0, 1.0];
+    let value = |id: &str| text_value(&config, Page::Launcher, id);
+    assert_eq!(value("launcher_width"), "900");
+    assert_eq!(value("launcher_font_size"), "16");
+    assert_eq!(value("launcher_icon_theme"), "breeze");
+    assert_eq!(value("launcher_renderer"), "hardware");
+    assert_eq!(value("launcher_terminal"), "");
+    assert_eq!(value("launcher_color_accent"), "1 0.5 0 1");
+    assert_eq!(value("launcher_color_backdrop"), "0 0 0 0.45");
+    assert_eq!(Page::named("launcher"), Some(Page::Launcher));
   }
 }
