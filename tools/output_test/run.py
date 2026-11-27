@@ -673,8 +673,10 @@ WCM_FIXTURE = os.path.join(
 # the `[wayfire-shell]` section of line 412 are read, and since WG-5
 # the `[vswipe]` section of line 376 belongs to a plugin Shingle has
 # that the list leaves out, which is not read. Since WG-6 the
-# `[decoration]` section of line 110 is read.
-WCM_WARNING_LINES = (14, 24, 40, 93, 141, 154, 175, 305, 417, 430)
+# `[decoration]` section of line 110 is read. Since `shingle-animate`
+# the `fire` of line 14 and `squeezimize` of line 24 are animations
+# Shingle has.
+WCM_WARNING_LINES = (40, 93, 141, 154, 175, 305, 417, 430)
 # Wayfire's options (tools/wayfire_options/generate.py).
 OPTION_TABLE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..', 'crates',
