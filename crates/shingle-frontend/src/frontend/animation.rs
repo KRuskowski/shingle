@@ -478,6 +478,48 @@ impl Frontend {
     self.open_animations.insert(snapshot.id, animation);
   }
 
+  /// `[animate] startup_duration`.
+  pub(super) fn startup_timing(&self) -> Timing {
+    startup_timing(&self.animate)
+  }
+
+  /// Moves an output's fade-in, `startup`, on for a frame at `now`, which
+  /// shows a
+  /// background-layer surface if `background_shown`, and returns how black
+  /// the frame is: [`StartupFrame::Black`] while the output waits for its
+  /// background, then a black overlay fading from 1 to 0 over
+  /// `startup_duration`; `None` once over
+  /// (wayfire:plugins/animate/animate.cpp:242-256, 429-442, 485-489,
+  /// wayfire:plugins/animate/system_fade.hpp:259-283).
+  pub(super) fn startup_frame(
+    config: &shingle_config::AnimateConfig,
+    startup: &mut super::outputs::Startup,
+    background_shown: bool,
+    now: Instant,
+  ) -> Option<StartupFrame> {
+    use super::outputs::{STARTUP_INHIBIT, Startup};
+    if *startup == Startup::Pending {
+      *startup = if config.startup_duration_ms == 0 {
+        Startup::Done
+      } else {
+        Startup::Inhibited(now)
+      };
+    }
+    if let Startup::Inhibited(since) = *startup
+      && (background_shown || now >= since + STARTUP_INHIBIT)
+    {
+      *startup = Startup::Fading(now);
+    }
+    match *startup {
+      Startup::Inhibited(_) => Some(StartupFrame::Black),
+      // From 1 to 0: 1 - easing(t).
+      Startup::Fading(started) => Some(StartupFrame::Fade(
+        1.0 - startup_timing(config).progress(started, now),
+      )),
+      Startup::Pending | Startup::Done => None,
+    }
+  }
+
   /// Whether any fire animation runs, so that a frame steps it.
   pub(super) fn has_fire(&self) -> bool {
     self
@@ -555,6 +597,20 @@ impl Frontend {
       self.scale_exit = None;
     }
   }
+}
+
+/// What an output starting up draws.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum StartupFrame {
+  /// Black, nothing else: rendering is inhibited.
+  Black,
+  /// Everything under black of this alpha.
+  Fade(f32),
+}
+
+/// `config`'s `startup_duration`.
+fn startup_timing(config: &shingle_config::AnimateConfig) -> Timing {
+  Timing::new(config.startup_duration_ms, config.startup_easing)
 }
 
 /// The layout rectangle of `rect`.

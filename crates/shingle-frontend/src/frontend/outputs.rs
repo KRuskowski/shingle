@@ -73,6 +73,29 @@ pub(super) struct OutputScene {
   pub(super) surface_windows: HashMap<SurfaceId, TileWindowId>,
   /// Surfaces committed since this output's last frame.
   pub(super) dirty: HashSet<SurfaceId>,
+  /// Where the output is in `[animate]`'s fade-in from black.
+  pub(super) startup: Startup,
+}
+
+/// How long an output waits for a background before it fades in anyway
+/// (wayfire:plugins/animate/animate.cpp:248-255).
+pub(super) const STARTUP_INHIBIT: std::time::Duration =
+  std::time::Duration::from_millis(400);
+
+/// The fade-in of an output that starts drawing, Wayfire's
+/// `wf_system_fade` (wayfire:plugins/animate/system_fade.hpp) after the
+/// output's rendering is inhibited until a background shows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Startup {
+  /// Nothing drawn yet.
+  Pending,
+  /// Black since then, until a background-layer surface shows or
+  /// [`STARTUP_INHIBIT`] passed.
+  Inhibited(Instant),
+  /// Fading in from black since then.
+  Fading(Instant),
+  /// Over, or `startup_duration` is 0.
+  Done,
 }
 
 impl OutputScene {
@@ -91,6 +114,7 @@ impl OutputScene {
       animation_enabled: HashMap::new(),
       surface_windows: HashMap::new(),
       dirty: HashSet::new(),
+      startup: Startup::Pending,
     }
   }
 
@@ -427,6 +451,35 @@ impl Frontend {
     for output in expired {
       self.request_redraw_on(&output);
     }
+  }
+
+  /// Asks for a frame of each output whose wait for a background ran out,
+  /// so that it starts fading in.
+  pub(super) fn expire_startup_inhibits(&mut self, now: Instant) {
+    let expired = self
+      .scenes
+      .iter()
+      .filter(|(_, scene)| {
+        matches!(scene.startup, Startup::Inhibited(since)
+          if since + STARTUP_INHIBIT <= now)
+      })
+      .map(|(output, _)| output.clone())
+      .collect::<Vec<_>>();
+    for output in expired {
+      self.request_redraw_on(&output);
+    }
+  }
+
+  /// When the next output stops waiting for a background.
+  pub(super) fn startup_deadline(&self) -> Option<Instant> {
+    self
+      .scenes
+      .values()
+      .filter_map(|scene| match scene.startup {
+        Startup::Inhibited(since) => Some(since + STARTUP_INHIBIT),
+        _ => None,
+      })
+      .min()
   }
 
   /// When the next label goes.

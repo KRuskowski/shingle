@@ -1061,6 +1061,7 @@ impl Frontend {
     self.finish_vswipe(now);
     self.pace_virtual_outputs(now);
     self.expire_labels(now);
+    self.expire_startup_inhibits(now);
     self.flush(host);
     self.publish_counts();
   }
@@ -1090,14 +1091,16 @@ impl Frontend {
   }
 
   /// Returns when [`Frontend::process`] next has timed work: a key
-  /// repeat, a frame of the outputs created over IPC, or the end of a
-  /// workspace set label. Hosts also call it at least every 16 ms, for
+  /// repeat, a frame of the outputs created over IPC, the end of a
+  /// workspace set label, or an output that stops waiting for its
+  /// background to fade in. Hosts also call it at least every 16 ms, for
   /// config reload, drag and gesture timers and child reaping.
   pub fn next_deadline(&self) -> Option<Instant> {
     [
       self.key_repeat.deadline(),
       self.virtual_frame,
       self.label_deadline(),
+      self.startup_deadline(),
     ]
     .into_iter()
     .flatten()

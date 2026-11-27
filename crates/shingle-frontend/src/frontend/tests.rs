@@ -130,8 +130,15 @@ struct Fixture {
 }
 
 impl Fixture {
-  /// Starts a frontend with `config` on a 1000x800 output.
+  /// Starts a frontend with `config` on a 1000x800 output, which shows at
+  /// once instead of waiting for a background and fading in.
   fn new(mut config: ShingleConfig) -> Self {
+    config.animate.startup_duration_ms = 0;
+    Self::with_startup(config)
+  }
+
+  /// [`Fixture::new`] with `config`'s startup fade.
+  fn with_startup(mut config: ShingleConfig) -> Self {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let name = format!(
       "shingle-frontend-test-{}-{}",
@@ -2305,6 +2312,51 @@ fn a_minimized_window_squeezes_and_comes_back_the_way_it_went() {
     .next()
     .expect("the animation turned around");
   assert_eq!(restoring.kind, crate::animate::Kind::Restore);
+}
+
+#[test]
+fn an_output_waits_for_its_background_then_fades_in() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut config = ShingleConfig::default();
+  config.animate.startup_duration_ms = 10_000;
+  let mut fixture = Fixture::with_startup(config);
+  fixture.window("alpha");
+  let render = |fixture: &mut Fixture, target: &mut RecordingTarget| {
+    fixture
+      .frontend
+      .render(&mut fixture.host, &primary(), target)
+      .expect("the frame renders");
+  };
+  // Without a background it is black for 400 ms, and nothing is drawn.
+  render(&mut fixture, &mut target);
+  assert!(target.frames.last().unwrap().is_empty());
+  let deadline = fixture.frontend.next_deadline().expect("a wake-up");
+  assert!(deadline > Instant::now());
+  assert!(deadline <= Instant::now() + Duration::from_millis(400));
+  std::thread::sleep(
+    deadline.saturating_duration_since(Instant::now())
+      + Duration::from_millis(5),
+  );
+  fixture.process();
+  render(&mut fixture, &mut target);
+  // Then the window shows under a black tile over the whole output that
+  // fades out linearly over startup_duration.
+  let frame = target.frames.last().unwrap();
+  assert_eq!(frame.len(), 2, "{frame:?}");
+  assert_eq!(
+    frame[1].0,
+    RenderRect {
+      x: 0,
+      y: 0,
+      width: 1000,
+      height: 800,
+    }
+  );
+  let black = *target.alphas.last().unwrap().last().unwrap();
+  assert!(black > 0.99 && black <= 1.0, "{black}");
+  assert!(fixture.host.redraws > 0, "the fade asks for frames");
 }
 
 #[test]

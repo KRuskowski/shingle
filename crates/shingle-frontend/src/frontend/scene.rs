@@ -20,12 +20,14 @@ use shingle_render::{
 use super::{
   Frontend,
   animation::{
-    ClosingAnimation, GeometryAnimation, apply_animation, has_effect, rect_of,
+    ClosingAnimation, GeometryAnimation, StartupFrame, apply_animation,
+    has_effect, rect_of,
   },
   drag::DragState,
   frames::map_rect,
   outputs::{
-    OutputScene, WsetLabel, label_rect, overlaps, rasterize_label, translate,
+    OutputScene, Startup, WsetLabel, label_rect, overlaps, rasterize_label,
+    translate,
   },
   scale::ScaleTitle,
 };
@@ -429,6 +431,7 @@ impl Frontend {
       .as_ref()
       .is_some_and(|shown| shown.output == *output);
     let cursor_ids: Vec<SurfaceId>;
+    let background_shown: bool;
     let (mut tiles, mut locks) = {
       let renderer = &mut *target;
       renderer.set_scale_factor(view.scale);
@@ -958,6 +961,10 @@ impl Frontend {
         .filter_map(|snapshot| snapshot.buffer.as_ref()?.dmabuf())
         .map(|content| content.lock.clone())
         .collect::<Vec<_>>();
+      background_shown = snapshots.iter().any(|snapshot| {
+        snapshot.layer == Some(shingle::ShellLayer::Background)
+          && snapshot.buffer.is_some()
+      });
       cursor_ids = snapshots
         .iter()
         .filter(|snapshot| snapshot.role == SurfaceRole::Cursor)
@@ -1061,6 +1068,25 @@ impl Frontend {
         &mut tiles,
       )?;
     }
+    let startup_black = Self::startup_frame(
+      &self.animate,
+      &mut scene.startup,
+      background_shown,
+      now,
+    );
+    match startup_black {
+      Some(StartupFrame::Black) => tiles.clear(),
+      Some(StartupFrame::Fade(alpha)) => tiles.push(RenderTile::solid(
+        RenderRect {
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+        },
+        [0.0, 0.0, 0.0, alpha],
+      )),
+      None => {}
+    }
     // Tiles are in layout coordinates; the target is the output.
     for tile in &mut tiles {
       tile.geometry = translate(tile.geometry, -rect.x, -rect.y);
@@ -1085,7 +1111,9 @@ impl Frontend {
     });
     // A shell client inhibits the output: it is cleared to black, as
     // Wayfire 0.9 drew it (wayfire-shell's `inhibit_output`).
-    let background = if self.compositor.output_inhibited(output) {
+    let background = if self.compositor.output_inhibited(output)
+      || startup_black == Some(StartupFrame::Black)
+    {
       tiles.clear();
       [0.0, 0.0, 0.0, 1.0]
     } else {
@@ -1312,7 +1340,13 @@ impl Frontend {
     // `post_frame` does; the last one ends it.
     self.finish_vswipe(now);
     self.end_switcher_frame(output, now);
+    if let Startup::Fading(started) = scene.startup
+      && self.startup_timing().linear_progress(started, now) >= 1.0
+    {
+      scene.startup = Startup::Done;
+    }
     if !scene.animations.is_empty()
+      || matches!(scene.startup, Startup::Fading(_))
       || scene.workspace_transition.is_some()
       || self.vswipe_on(output)
       || scene.zoom_animation.is_some()
