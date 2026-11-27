@@ -131,6 +131,25 @@ impl Renderer {
     capture_frame(&self.gpu, &self.state, size, tiles, clear)
   }
 
+  /// Draws the frame again at `scale` into a `size` target of device
+  /// pixels; see [`crate::capture_frame_scaled`].
+  pub fn capture_scaled(
+    &self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    size: (u32, u32),
+    scale: f64,
+  ) -> Result<Vec<u8>, RenderError> {
+    crate::capture_frame_scaled(
+      &self.gpu,
+      &self.state,
+      size,
+      scale,
+      tiles,
+      clear,
+    )
+  }
+
   /// Draws the frame into a capture client's DMA-BUF; see
   /// [`crate::capture_into_dmabuf`].
   pub fn capture_into(
@@ -233,6 +252,25 @@ impl OffscreenRenderer {
     size: (u32, u32),
   ) -> Result<Vec<u8>, RenderError> {
     capture_frame(&self.gpu, &self.state, size, tiles, clear)
+  }
+
+  /// Draws the frame again at `scale` into a `size` target of device
+  /// pixels; see [`crate::capture_frame_scaled`].
+  pub fn capture_scaled(
+    &self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    size: (u32, u32),
+    scale: f64,
+  ) -> Result<Vec<u8>, RenderError> {
+    crate::capture_frame_scaled(
+      &self.gpu,
+      &self.state,
+      size,
+      scale,
+      tiles,
+      clear,
+    )
   }
 
   /// Draws the frame into a capture client's DMA-BUF; see

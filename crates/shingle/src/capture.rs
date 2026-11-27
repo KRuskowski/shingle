@@ -437,6 +437,43 @@ impl CaptureGeometry {
   }
 }
 
+impl CaptureGeometry {
+  /// The buffer's RGBA rows cut from `frame`, the whole source drawn in
+  /// its device pixels at `size`, as a frontend draws a scaled output.
+  /// Only an untransformed source of that physical size has its pixels
+  /// there.
+  pub(crate) fn crop_device(
+    &self,
+    frame: &[u8],
+    size: (u32, u32),
+  ) -> Result<Vec<u8>, String> {
+    if self.transform != wl_output::Transform::Normal || size != self.physical {
+      return Err(format!(
+        "a {}x{} device frame for a {}x{} source turned {:?}",
+        size.0, size.1, self.physical.0, self.physical.1, self.transform
+      ));
+    }
+    if frame.len() != size.0 as usize * size.1 as usize * 4 {
+      return Err(format!(
+        "{} bytes for a {}x{} frame",
+        frame.len(),
+        size.0,
+        size.1
+      ));
+    }
+    let row = size.0 as usize * 4;
+    let left = self.buffer.x.max(0) as usize * 4;
+    let width = self.buffer.width as usize * 4;
+    let top = self.buffer.y.max(0) as usize;
+    Ok(
+      (top..top + self.buffer.height as usize)
+        .flat_map(|y| &frame[y * row + left..y * row + left + width])
+        .copied()
+        .collect(),
+    )
+  }
+}
+
 /// The buffer size of a window capture of `rect` at `scale`.
 pub(crate) fn window_buffer_size(rect: Rect, scale: f64) -> (u32, u32) {
   let size = |logical: u32| {
@@ -740,6 +777,21 @@ pub(crate) fn finish(
   answer(state, pending, result);
 }
 
+/// Answers the capture `id` with the whole source drawn in device pixels
+/// of `size`, cut to the capture's buffer.
+pub(crate) fn finish_device(
+  state: &mut CompositorState,
+  id: CaptureId,
+  result: Result<(Vec<u8>, (u32, u32)), String>,
+) {
+  let Some(pending) = state.captures.requested.remove(&id) else {
+    return;
+  };
+  let result =
+    result.and_then(|(frame, size)| pending.geometry.crop_device(&frame, size));
+  answer(state, pending, result);
+}
+
 /// Answers the capture `id` into a DMA-BUF with what the frontend did:
 /// drew into it, or why it could not.
 pub(crate) fn finish_into(
@@ -956,6 +1008,32 @@ mod tests {
     assert_eq!(rgba[8..12], [1, 0, 0, 255]);
     assert_eq!(rgba[6 * 4 * 2..6 * 4 * 2 + 4], [3, 0, 0, 255]);
     assert!(geometry.scale_logical(vec![0; 4]).is_err());
+  }
+
+  #[test]
+  fn a_device_frame_is_cut_to_the_buffer() {
+    // A region of a 4x2 output at scale 1.5, 6x3 device pixels.
+    let geometry = CaptureGeometry::new(
+      (0, 0),
+      (4, 2),
+      (6, 3),
+      Transform::Normal,
+      Some(Rect::new(2, 0, 2, 2)),
+    )
+    .unwrap();
+    assert_eq!(geometry.buffer, Rect::new(3, 0, 3, 3));
+    let frame = (0..18)
+      .flat_map(|pixel| [pixel, 0, 0, 255])
+      .collect::<Vec<u8>>();
+    let cut = geometry.crop_device(&frame, (6, 3)).unwrap();
+    let firsts = cut.chunks(4).map(|pixel| pixel[0]).collect::<Vec<_>>();
+    assert_eq!(firsts, [3, 4, 5, 9, 10, 11, 15, 16, 17]);
+    assert!(geometry.crop_device(&frame, (4, 2)).is_err());
+    assert!(geometry.crop_device(&frame[4..], (6, 3)).is_err());
+    let turned =
+      CaptureGeometry::new((0, 0), (2, 4), (4, 2), Transform::_90, None)
+        .unwrap();
+    assert!(turned.crop_device(&[0; 32], (4, 2)).is_err());
   }
 
   #[test]

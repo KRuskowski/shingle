@@ -68,6 +68,20 @@ pub trait RenderTarget {
     size: (u32, u32),
   ) -> Result<Vec<u8>, RenderError>;
 
+  /// Draws the frame just rendered again at `scale`, into a `size`
+  /// offscreen target of device pixels, for screencopy of a scaled
+  /// output ([`shingle_render::capture_frame_scaled`]); `None` when the
+  /// target cannot, and the logical [`Self::capture`] is used instead.
+  fn capture_scaled(
+    &mut self,
+    _tiles: &[RenderTile<'_>],
+    _clear: [f64; 4],
+    _size: (u32, u32),
+    _scale: f64,
+  ) -> Option<Result<Vec<u8>, RenderError>> {
+    None
+  }
+
   /// Draws the frame just rendered again, into a capture client's
   /// DMA-BUF, with the target's scale and output transform as they are,
   /// and waits for the GPU ([`shingle_render::capture_into_dmabuf`]).
@@ -142,6 +156,16 @@ impl RenderTarget for Renderer {
     Renderer::capture(self, tiles, clear, size)
   }
 
+  fn capture_scaled(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    size: (u32, u32),
+    scale: f64,
+  ) -> Option<Result<Vec<u8>, RenderError>> {
+    Some(Renderer::capture_scaled(self, tiles, clear, size, scale))
+  }
+
   fn capture_into(
     &mut self,
     tiles: &[RenderTile<'_>],
@@ -213,6 +237,18 @@ impl RenderTarget for OffscreenRenderer {
     size: (u32, u32),
   ) -> Result<Vec<u8>, RenderError> {
     OffscreenRenderer::capture(self, tiles, clear, size)
+  }
+
+  fn capture_scaled(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    size: (u32, u32),
+    scale: f64,
+  ) -> Option<Result<Vec<u8>, RenderError>> {
+    Some(OffscreenRenderer::capture_scaled(
+      self, tiles, clear, size, scale,
+    ))
   }
 
   fn capture_into(

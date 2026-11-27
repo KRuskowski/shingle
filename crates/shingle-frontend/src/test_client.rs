@@ -326,7 +326,8 @@ impl TestClient {
     cursor: bool,
     with_damage: bool,
   ) -> Capture {
-    self.capture_output(compositor, 0, region, (cursor, with_damage))
+    let buffer = (region.2, region.3);
+    self.capture_output(compositor, 0, region, buffer, (cursor, with_damage))
   }
 
   /// [`TestClient::capture`] of the `nth` `wl_output` global announced,
@@ -337,7 +338,19 @@ impl TestClient {
     nth: usize,
     region: (i32, i32, i32, i32),
   ) -> Capture {
-    self.capture_output(compositor, nth, region, (false, false))
+    let buffer = (region.2, region.3);
+    self.capture_output(compositor, nth, region, buffer, (false, false))
+  }
+
+  /// [`TestClient::capture`] into a buffer of `buffer` pixels, the
+  /// region's size on a scaled output.
+  pub(crate) fn capture_scaled(
+    &mut self,
+    compositor: &mut Compositor,
+    region: (i32, i32, i32, i32),
+    buffer: (i32, i32),
+  ) -> Capture {
+    self.capture_output(compositor, 0, region, buffer, (false, false))
   }
 
   fn capture_output(
@@ -345,6 +358,7 @@ impl TestClient {
     compositor: &mut Compositor,
     nth: usize,
     (x, y, width, height): (i32, i32, i32, i32),
+    (buffer_width, buffer_height): (i32, i32),
     (cursor, with_damage): (bool, bool),
   ) -> Capture {
     let manager = self.bind::<ZwlrScreencopyManagerV1>(3);
@@ -372,7 +386,7 @@ impl TestClient {
       &self.handle,
       (),
     );
-    let (buffer, fd, size) = self.capture_buffer(width, height);
+    let (buffer, fd, size) = self.capture_buffer(buffer_width, buffer_height);
     if with_damage {
       frame.copy_with_damage(&buffer);
     } else {

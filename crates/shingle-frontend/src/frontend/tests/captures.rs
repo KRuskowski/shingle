@@ -47,6 +47,35 @@ fn copy_with_damage_waits_for_a_frame_that_changed_something() {
 }
 
 #[test]
+fn a_scaled_output_is_captured_in_its_device_pixels() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut config = ShingleConfig::default();
+  config.output.scale = 2.0;
+  let mut fixture = Fixture::new(config);
+  let physical = fixture
+    .frontend
+    .compositor()
+    .physical_size_of(&primary())
+    .unwrap();
+  let compositor = fixture.frontend.compositor_mut();
+  let capture = fixture
+    .client
+    .capture_scaled(compositor, (1, 1, 2, 2), (4, 4));
+  draw(&mut fixture, &mut target);
+  assert_eq!(fixture.client.captures(), ["ready"]);
+  assert_eq!(target.captures, [physical], "drawn once in device pixels");
+  // Two logical pixels are four device pixels, all the background.
+  let bytes = capture.bytes();
+  assert_eq!(bytes.len(), 4 * 4 * 4);
+  assert!(
+    bytes.chunks(4).all(|pixel| pixel[0].abs_diff(26) <= 1),
+    "{bytes:?}"
+  );
+}
+
+#[test]
 fn the_cursor_is_in_a_capture_only_when_asked_for() {
   let Some(mut target) = recording_target() else {
     return;

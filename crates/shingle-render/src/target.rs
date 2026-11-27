@@ -312,8 +312,24 @@ pub fn capture_frame(
   tiles: &[RenderTile<'_>],
   clear: [f64; 4],
 ) -> Result<Vec<u8>, RenderError> {
+  capture_frame_scaled(gpu, state, (width, height), 1.0, tiles, clear)
+}
+
+/// [`capture_frame`], but drawn at `scale` into a `width` by `height`
+/// target of device pixels, so that a capture of a scaled output holds
+/// the pixels the output shows rather than its logical pixels scaled up.
+pub fn capture_frame_scaled(
+  gpu: &GpuContext,
+  state: &RenderState,
+  (width, height): (u32, u32),
+  scale: f64,
+  tiles: &[RenderTile<'_>],
+  clear: [f64; 4],
+) -> Result<Vec<u8>, RenderError> {
   let target = OffscreenTarget::new(gpu, width, height)?;
-  target.render(gpu, &capture_state(state), tiles, clear);
+  let mut drawn = capture_state(state);
+  drawn.set_scale_factor(scale);
+  target.render(gpu, &drawn, tiles, clear);
   target.read_rgba_within(gpu, Some(CAPTURE_TIMEOUT))
 }
 

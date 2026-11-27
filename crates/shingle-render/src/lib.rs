@@ -57,7 +57,7 @@ pub use renderer::{OffscreenRenderer, Renderer};
 pub use state::RenderState;
 pub use target::{
   CAPTURE_TIMEOUT, OffscreenTarget, WindowTarget, capture_frame,
-  capture_into_dmabuf,
+  capture_frame_scaled, capture_into_dmabuf,
 };
 pub use upload::{ShmImage, TextureUploader, UploadError, UploadRect};
 

@@ -1121,7 +1121,7 @@ impl Frontend {
       &mut self.compositor,
       &mut self.captures,
       output,
-      ((rect.width, rect.height), view.transform),
+      ((rect.width, rect.height), view.transform, view.scale),
       renderer,
       (&tiles, &cursors),
       background,
@@ -1419,8 +1419,10 @@ impl Frontend {
 
 /// Answers the output `captures` of `output` requested since its last
 /// frame with the frame just built from `tiles`, which are relative to the
-/// output: drawn once more offscreen at the output's logical `size` and cut
-/// to each capture's region, which the compositor scales into the client's
+/// output: drawn once more offscreen and cut to each capture's region. An
+/// untransformed output at a `scale` other than 1 is drawn in its device
+/// pixels, which the compositor cuts the buffer from; others at the
+/// output's logical `size`, which the compositor scales into the client's
 /// buffer. Captures without the cursor are drawn without the tiles of the
 /// `cursors` textures. Captures of other outputs wait for their own
 /// frames.
@@ -1428,9 +1430,10 @@ fn answer_captures(
   compositor: &mut shingle::Compositor,
   captures: &mut Vec<CaptureRequest>,
   output: &OutputHandle,
-  (size, transform): (
+  (size, transform, scale): (
     (u32, u32),
     wayland_server::protocol::wl_output::Transform,
+    f64,
   ),
   target: &mut dyn RenderTarget,
   (tiles, cursors): (&[RenderTile<'_>], &[*const GpuTexture]),
@@ -1448,6 +1451,12 @@ fn answer_captures(
   }
   let mut with = None;
   let mut without = None;
+  let device = compositor.physical_size_of(output).filter(|_| {
+    scale != 1.0
+      && transform == wayland_server::protocol::wl_output::Transform::Normal
+  });
+  let mut device_with = None;
+  let mut device_without = None;
   for request in mine {
     let CaptureSource::Output { region, .. } = request.source else {
       continue;
@@ -1468,6 +1477,28 @@ fn answer_captures(
       };
       compositor.finish_capture_into(request.id, result);
       continue;
+    }
+    if let Some(device) = device {
+      let cached = if request.cursor || cursors.is_empty() {
+        &mut device_with
+      } else {
+        &mut device_without
+      };
+      let frame = cached.get_or_insert_with(|| {
+        let tiles = if request.cursor {
+          tiles.to_vec()
+        } else {
+          without_cursor(tiles, cursors)
+        };
+        target
+          .capture_scaled(&tiles, background, device, scale)
+          .map(|drawn| drawn.map_err(|error| error.to_string()))
+      });
+      if let Some(frame) = frame {
+        let result = frame.clone().map(|rgba| (rgba, device));
+        compositor.finish_capture_device(request.id, result);
+        continue;
+      }
     }
     let frame = if request.cursor || cursors.is_empty() {
       with.get_or_insert_with(|| {

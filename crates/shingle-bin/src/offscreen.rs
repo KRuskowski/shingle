@@ -531,6 +531,23 @@ impl RenderTarget for OffscreenOutput<'_> {
       clear,
     )
   }
+
+  fn capture_scaled(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    size: (u32, u32),
+    scale: f64,
+  ) -> Option<Result<Vec<u8>, RenderError>> {
+    Some(shingle_render::capture_frame_scaled(
+      self.gpu,
+      &self.output.state,
+      size,
+      scale,
+      tiles,
+      clear,
+    ))
+  }
   fn capture_into(
     &mut self,
     tiles: &[RenderTile<'_>],

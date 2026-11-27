@@ -2582,6 +2582,20 @@ impl Compositor {
     capture::finish(&mut self.state, id, result);
   }
 
+  /// Answers [`Event::CaptureRequested`] `id` of an output with `result`:
+  /// the whole output drawn in its device pixels, `size`, which must be
+  /// its physical size ([`Self::physical_size_of`]) and its transform
+  /// normal; the capture's buffer is cut from it before `ready` is sent.
+  /// This keeps a scaled output's own pixels, which
+  /// [`Self::finish_capture`] would scale up from logical ones.
+  pub fn finish_capture_device(
+    &mut self,
+    id: CaptureId,
+    result: Result<(Vec<u8>, (u32, u32)), String>,
+  ) {
+    capture::finish_device(&mut self.state, id, result);
+  }
+
   /// Sets key repeat for clients via `wl_keyboard.repeat_info`: `rate` in keys
   /// per second (0 disables repeat) and `delay` in milliseconds.
   pub fn set_repeat(&mut self, rate: u32, delay: u32) {
