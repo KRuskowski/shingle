@@ -28,6 +28,8 @@ fn a_lock_request_hides_scale_until_the_lock_shows_a_full_frame() {
   let mut config = ShingleConfig::default();
   config.animate.open_animation = "none".into();
   config.background_color = [0.5, 0.5, 0.5, 1.0];
+  // What the lock binding starts after the crash.
+  config.lock.command = "true".into();
   let mut fixture = Fixture::new(config);
   for app_id in ["alpha", "bravo"] {
     fixture.window(app_id);
@@ -89,4 +91,18 @@ fn a_lock_request_hides_scale_until_the_lock_shows_a_full_frame() {
   let (tiles, pixel) = frame(&mut fixture, &mut target);
   assert!(tiles.is_empty());
   assert_eq!(pixel, [0, 0, 0, 255]);
+  // The lock binding still starts a new lock client then, and the output
+  // stays black meanwhile.
+  assert!(fixture.frontend.lock_client.is_none());
+  fixture.tap(KEY_F8, &[KEY_LEFTMETA]);
+  assert!(
+    fixture.frontend.lock_client.is_some(),
+    "lock.command started"
+  );
+  assert_eq!(
+    fixture.frontend.compositor().lock_state(),
+    shingle::LockState::Failed
+  );
+  let (tiles, _) = frame(&mut fixture, &mut target);
+  assert!(tiles.is_empty());
 }

@@ -55,6 +55,7 @@ const KEY_LEFTCTRL: u32 = 29;
 const KEY_LEFTSHIFT: u32 = 42;
 const KEY_LEFTALT: u32 = 56;
 const KEY_F2: u32 = 60;
+const KEY_F8: u32 = 66;
 const KEY_RIGHT: u32 = 106;
 const KEY_LEFTMETA: u32 = 125;
 const BTN_LEFT: u32 = 0x110;

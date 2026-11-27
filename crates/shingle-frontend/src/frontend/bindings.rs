@@ -474,6 +474,15 @@ impl Frontend {
         return;
       }
     }
+    // After a lock client crashed the outputs stay black and nothing
+    // else takes input; the lock binding starts a new lock client.
+    if pressed
+      && self.compositor.lock_state() == shingle::LockState::Failed
+      && self.keybindings.lock.matches(modifiers, key)
+    {
+      self.compositor.request_lock();
+      return;
+    }
     if locked {
       self.compositor.keyboard_key(device, event.code, pressed);
       return;
