@@ -10,7 +10,9 @@
 //! `load_config`). [`LockOptions::apply`] takes each such option, from
 //! the file, from the command line and from the YAML `lock.options` map
 //! alike. Options swaylock or swaylock-effects know but `shingle-lock`
-//! does not draw are ignored with a warning, as are unknown ones.
+//! does not draw are ignored with a warning, as are unknown ones. The
+//! option names are checked against swaylock's and swaylock-effects'
+//! `long_options` (docs/design/lock-screen.md#5-options).
 
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
@@ -69,6 +71,21 @@ pub struct IndicatorColors {
   pub backspace_highlight: LockColor,
   /// The ends of a highlight (`separator-color`).
   pub separator: LockColor,
+  /// While Caps Lock is on, with `indicator-caps-lock`
+  /// (`*-caps-lock-color`); its text colour is also the Caps Lock
+  /// label's.
+  pub caps_lock: StateColors,
+  /// The key highlight while Caps Lock is on, with
+  /// `indicator-caps-lock` (`caps-lock-key-hl-color`).
+  pub caps_lock_key_highlight: LockColor,
+  /// The backspace highlight then (`caps-lock-bs-hl-color`).
+  pub caps_lock_backspace_highlight: LockColor,
+  /// The keyboard layout's label: its background (`layout-bg-color`).
+  pub layout_background: LockColor,
+  /// Its outline (`layout-border-color`).
+  pub layout_border: LockColor,
+  /// Its text (`layout-text-color`).
+  pub layout_text: LockColor,
 }
 
 impl IndicatorColors {
@@ -115,6 +132,17 @@ impl Default for IndicatorColors {
       key_highlight: [0x33, 0xdb, 0x00, 0xff],
       backspace_highlight: [0xdb, 0x33, 0x00, 0xff],
       separator: black,
+      caps_lock: StateColors {
+        ring: [0xe5, 0xa4, 0x45, 0xff],
+        inside: [0x00, 0x00, 0x00, 0xc0],
+        line: black,
+        text: [0xe5, 0xa4, 0x45, 0xff],
+      },
+      caps_lock_key_highlight: [0x33, 0xdb, 0x00, 0xff],
+      caps_lock_backspace_highlight: [0xdb, 0x33, 0x00, 0xff],
+      layout_background: [0x00, 0x00, 0x00, 0xc0],
+      layout_border: [0x00, 0x00, 0x00, 0x00],
+      layout_text: [0xff, 0xff, 0xff, 0xff],
     }
   }
 }
@@ -129,6 +157,31 @@ pub enum LineSource {
   Inside,
   /// The ring colour of the same state.
   Ring,
+}
+
+/// The texts the input shows, swaylock-effects' `text-clear`,
+/// `text-caps-lock`, `text-ver` and `text-wrong`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputTexts {
+  /// After clearing; default `Cleared`.
+  pub cleared: String,
+  /// While Caps Lock is on; default `Caps Lock`.
+  pub caps_lock: String,
+  /// While PAM checks the password; default `Verifying…`.
+  pub verifying: String,
+  /// After a wrong password; default `Wrong password`.
+  pub wrong: String,
+}
+
+impl Default for InputTexts {
+  fn default() -> Self {
+    Self {
+      cleared: "Cleared".into(),
+      caps_lock: "Caps Lock".into(),
+      verifying: "Verifying…".into(),
+      wrong: "Wrong password".into(),
+    }
+  }
 }
 
 /// Everything `shingle-lock` takes from swaylock's options.
@@ -187,6 +240,20 @@ pub struct LockOptions {
   /// Enter with an empty password does nothing instead of trying it
   /// (`ignore-empty-password`, `-e`).
   pub ignore_empty_password: bool,
+  /// Caps Lock turns the input into its `*-caps-lock-color` colours
+  /// (`indicator-caps-lock`, `-l`).
+  pub caps_lock_indicator: bool,
+  /// Caps Lock shows [`InputTexts::caps_lock`] in the input; cleared by
+  /// `disable-caps-lock-text`, `-L`.
+  pub caps_lock_text: bool,
+  /// Show the keyboard layout even with only one
+  /// (`show-keyboard-layout`, `-k`).
+  pub show_keyboard_layout: bool,
+  /// Never show it, even with several (`hide-keyboard-layout`, `-K`);
+  /// it wins over `show-keyboard-layout`, as in swaylock.
+  pub hide_keyboard_layout: bool,
+  /// The input's texts.
+  pub texts: InputTexts,
 }
 
 impl Default for LockOptions {
@@ -213,6 +280,11 @@ impl Default for LockOptions {
       datestr: "%a, %x".into(),
       timestr: "%T".into(),
       ignore_empty_password: false,
+      caps_lock_indicator: false,
+      caps_lock_text: true,
+      show_keyboard_layout: false,
+      hide_keyboard_layout: false,
+      texts: InputTexts::default(),
     }
   }
 }
@@ -230,45 +302,33 @@ pub enum Applied {
 }
 
 /// swaylock's and swaylock-effects' options that `shingle-lock` knows and
-/// ignores: images, keyboard layouts, Caps Lock, the other effects and
-/// the indicator placement.
+/// ignores: images, the other effects, the indicator placement, the
+/// fade-in and debugging.
 const UNSUPPORTED: &[&str] = &[
-  "bs-hl-caps-lock-color",
-  "caps-lock-bs-hl-color",
-  "caps-lock-key-hl-color",
   "debug",
-  "disable-caps-lock-text",
   "effect-compose",
   "effect-custom",
   "effect-greyscale",
   "effect-pixelate",
   "effect-scale",
   "fade-in",
-  "hide-keyboard-layout",
   "image",
-  "indicator-caps-lock",
-  "indicator-idle-visible",
+  "indicator-image",
   "indicator-x-position",
   "indicator-y-position",
-  "inside-caps-lock-color",
-  "layout-bg-color",
-  "layout-border-color",
-  "layout-text-color",
-  "line-caps-lock-color",
-  "pass-char-keys",
   "ready-fd",
-  "ring-caps-lock-color",
   "scaling",
-  "show-keyboard-layout",
   "submit-on-touch",
-  "text-caps-lock-color",
   "tiling",
+  "time-effects",
   "trace",
 ];
 
 /// Options that take a value; every other option is a flag.
 const WITH_VALUE: &[&str] = &[
   "bs-hl-color",
+  "caps-lock-bs-hl-color",
+  "caps-lock-key-hl-color",
   "color",
   "datestr",
   "effect-blur",
@@ -278,46 +338,48 @@ const WITH_VALUE: &[&str] = &[
   "grace",
   "indicator-radius",
   "indicator-thickness",
+  "inside-caps-lock-color",
   "inside-clear-color",
   "inside-color",
   "inside-ver-color",
   "inside-wrong-color",
   "key-hl-color",
+  "layout-bg-color",
+  "layout-border-color",
+  "layout-text-color",
+  "line-caps-lock-color",
   "line-clear-color",
   "line-color",
   "line-ver-color",
   "line-wrong-color",
+  "ring-caps-lock-color",
   "ring-clear-color",
   "ring-color",
   "ring-ver-color",
   "ring-wrong-color",
   "separator-color",
+  "text-caps-lock",
+  "text-caps-lock-color",
+  "text-clear",
   "text-clear-color",
   "text-color",
+  "text-ver",
   "text-ver-color",
+  "text-wrong",
   "text-wrong-color",
   "timestr",
   // Unsupported, but their value must be skipped on the command line.
-  "bs-hl-caps-lock-color",
-  "caps-lock-bs-hl-color",
-  "caps-lock-key-hl-color",
   "effect-compose",
   "effect-custom",
   "effect-pixelate",
   "effect-scale",
   "fade-in",
   "image",
+  "indicator-image",
   "indicator-x-position",
   "indicator-y-position",
-  "inside-caps-lock-color",
-  "layout-bg-color",
-  "layout-border-color",
-  "layout-text-color",
-  "line-caps-lock-color",
   "ready-fd",
-  "ring-caps-lock-color",
   "scaling",
-  "text-caps-lock-color",
 ];
 
 /// The long name of swaylock's short option `flag`, if it has one.
@@ -335,9 +397,13 @@ pub fn short_option(flag: char) -> Option<&'static str> {
     'L' => "disable-caps-lock-text",
     'n' => "line-uses-inside",
     'r' => "line-uses-ring",
+    'R' => "ready-fd",
     's' => "scaling",
     'S' => "screenshot",
-    't' => "tiling",
+    // swaylock-effects' -t; swaylock's -t is tiling, which
+    // swaylock-effects calls -T. Neither is drawn.
+    't' => "trace",
+    'T' => "tiling",
     'u' => "no-unlock-indicator",
     _ => return None,
   })
@@ -384,7 +450,13 @@ impl LockOptions {
       "show-failed-attempts" => self.show_failed_attempts = on,
       "clock" => self.clock = on,
       "screenshot" | "screenshots" => self.screenshot = on,
-      "indicator" => self.indicator_always = on,
+      // swaylock's "show the indicator while idle" is the same as
+      // swaylock-effects' "always show it" here.
+      "indicator" | "indicator-idle-visible" => self.indicator_always = on,
+      "indicator-caps-lock" => self.caps_lock_indicator = on,
+      "disable-caps-lock-text" => self.caps_lock_text = !on,
+      "show-keyboard-layout" => self.show_keyboard_layout = on,
+      "hide-keyboard-layout" => self.hide_keyboard_layout = on,
       "no-unlock-indicator" => self.show_indicator = !on,
       "grace-no-mouse" => self.grace_no_mouse = on,
       "grace-no-touch" => self.grace_no_touch = on,
@@ -441,16 +513,28 @@ impl LockOptions {
       }
       "datestr" => self.datestr = value.to_owned(),
       "timestr" => self.timestr = value.to_owned(),
+      "text-clear" => self.texts.cleared = value.to_owned(),
+      "text-caps-lock" => self.texts.caps_lock = value.to_owned(),
+      "text-ver" => self.texts.verifying = value.to_owned(),
+      "text-wrong" => self.texts.wrong = value.to_owned(),
       "key-hl-color" => colors.key_highlight = color()?,
       "bs-hl-color" => colors.backspace_highlight = color()?,
       "separator-color" => colors.separator = color()?,
+      "caps-lock-key-hl-color" => colors.caps_lock_key_highlight = color()?,
+      "caps-lock-bs-hl-color" => {
+        colors.caps_lock_backspace_highlight = color()?
+      }
+      "layout-bg-color" => colors.layout_background = color()?,
+      "layout-border-color" => colors.layout_border = color()?,
+      "layout-text-color" => colors.layout_text = color()?,
       _ => {
-        let (part, state) = state_color(name).expect("a value option");
-        let target = match state {
-          InputState::Input => &mut colors.input,
-          InputState::Clear => &mut colors.clear,
-          InputState::Verify => &mut colors.verify,
-          InputState::Wrong => &mut colors.wrong,
+        let (part, set) = state_color(name).expect("a value option");
+        let target = match set {
+          ColorSet::State(InputState::Input) => &mut colors.input,
+          ColorSet::State(InputState::Clear) => &mut colors.clear,
+          ColorSet::State(InputState::Verify) => &mut colors.verify,
+          ColorSet::State(InputState::Wrong) => &mut colors.wrong,
+          ColorSet::CapsLock => &mut colors.caps_lock,
         };
         let value = color()?;
         match part {
@@ -466,13 +550,60 @@ impl LockOptions {
 
   /// The colours of `state` with [`LockOptions::line_source`] applied.
   pub fn state_colors(&self, state: InputState) -> StateColors {
-    let mut colors = self.colors.of(state);
+    self.with_line_source(self.colors.of(state))
+  }
+
+  fn with_line_source(&self, mut colors: StateColors) -> StateColors {
     match self.line_source {
       LineSource::Own => {}
       LineSource::Inside => colors.line = colors.inside,
       LineSource::Ring => colors.line = colors.ring,
     }
     colors
+  }
+
+  /// Whether the input takes its Caps Lock colours in `state`: Caps
+  /// Lock is on, `indicator-caps-lock` is set and the input is not
+  /// cleared, verifying or wrong (swaylock's `render.c`,
+  /// `set_color_for_state`).
+  pub fn caps_lock_colored(&self, state: InputState, caps_lock: bool) -> bool {
+    caps_lock && self.caps_lock_indicator && state == InputState::Input
+  }
+
+  /// The input's colours in `state` with Caps Lock on or off.
+  pub fn input_colors(
+    &self,
+    state: InputState,
+    caps_lock: bool,
+  ) -> StateColors {
+    if self.caps_lock_colored(state, caps_lock) {
+      self.with_line_source(self.colors.caps_lock)
+    } else {
+      self.state_colors(state)
+    }
+  }
+
+  /// The key and backspace highlights with Caps Lock on or off.
+  pub fn highlight_colors(
+    &self,
+    state: InputState,
+    caps_lock: bool,
+  ) -> (LockColor, LockColor) {
+    if self.caps_lock_colored(state, caps_lock) {
+      (
+        self.colors.caps_lock_key_highlight,
+        self.colors.caps_lock_backspace_highlight,
+      )
+    } else {
+      (self.colors.key_highlight, self.colors.backspace_highlight)
+    }
+  }
+
+  /// Whether the keyboard layout shows with `layouts` layouts in the
+  /// keymap: with more than one or with `show-keyboard-layout`, never
+  /// with `hide-keyboard-layout` (swaylock's `render.c`).
+  pub fn shows_keyboard_layout(&self, layouts: usize) -> bool {
+    !self.hide_keyboard_layout && (self.show_keyboard_layout || layouts > 1)
   }
 
   /// Applies every option of a swaylock config file's `text`, as
@@ -575,9 +706,18 @@ impl LockOptions {
   }
 }
 
-/// The part and state of a per-state colour option such as
+/// Which of the input's colour sets a colour option sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColorSet {
+  /// The colours of one state.
+  State(InputState),
+  /// The Caps Lock colours (`*-caps-lock-color`).
+  CapsLock,
+}
+
+/// The part and set of a per-state colour option such as
 /// `ring-ver-color`.
-fn state_color(name: &str) -> Option<(&'static str, InputState)> {
+fn state_color(name: &str) -> Option<(&'static str, ColorSet)> {
   let name = name.strip_suffix("-color")?;
   let (part, state) = match name.split_once('-') {
     Some((part, state)) => (part, Some(state)),
@@ -587,10 +727,11 @@ fn state_color(name: &str) -> Option<(&'static str, InputState)> {
     .into_iter()
     .find(|candidate| *candidate == part)?;
   let state = match state {
-    None => InputState::Input,
-    Some("clear") => InputState::Clear,
-    Some("ver") => InputState::Verify,
-    Some("wrong") => InputState::Wrong,
+    None => ColorSet::State(InputState::Input),
+    Some("clear") => ColorSet::State(InputState::Clear),
+    Some("ver") => ColorSet::State(InputState::Verify),
+    Some("wrong") => ColorSet::State(InputState::Wrong),
+    Some("caps-lock") => ColorSet::CapsLock,
     Some(_) => return None,
   };
   Some((part, state))
@@ -1029,6 +1170,197 @@ mod tests {
     assert!(warnings[0].1.contains("not supported"), "{warnings:?}");
     assert!(warnings[1].1.contains("unknown option"));
     assert_eq!(options, LockOptions::default());
+  }
+
+  /// swaylock-effects' `long_options` (jirutka/swaylock-effects
+  /// `main.c`) and swaylock's `ready-fd`, each with whether it takes an
+  /// argument; `config`, `help` and `version` are the command line's.
+  const SWAYLOCK_OPTIONS: &[(&str, bool)] = &[
+    ("debug", false),
+    ("ignore-empty-password", false),
+    ("daemonize", false),
+    ("indicator-caps-lock", false),
+    ("disable-caps-lock-text", false),
+    ("line-uses-inside", false),
+    ("line-uses-ring", false),
+    ("no-unlock-indicator", false),
+    ("show-keyboard-layout", false),
+    ("hide-keyboard-layout", false),
+    ("show-failed-attempts", false),
+    ("indicator-idle-visible", false),
+    ("color", true),
+    ("image", true),
+    ("scaling", true),
+    ("bs-hl-color", true),
+    ("caps-lock-bs-hl-color", true),
+    ("caps-lock-key-hl-color", true),
+    ("font", true),
+    ("font-size", true),
+    ("indicator-radius", true),
+    ("indicator-thickness", true),
+    ("indicator-x-position", true),
+    ("indicator-y-position", true),
+    ("inside-color", true),
+    ("inside-clear-color", true),
+    ("inside-caps-lock-color", true),
+    ("inside-ver-color", true),
+    ("inside-wrong-color", true),
+    ("key-hl-color", true),
+    ("layout-bg-color", true),
+    ("layout-border-color", true),
+    ("layout-text-color", true),
+    ("line-color", true),
+    ("line-clear-color", true),
+    ("line-caps-lock-color", true),
+    ("line-ver-color", true),
+    ("line-wrong-color", true),
+    ("ring-color", true),
+    ("ring-clear-color", true),
+    ("ring-caps-lock-color", true),
+    ("ring-ver-color", true),
+    ("ring-wrong-color", true),
+    ("separator-color", true),
+    ("text-color", true),
+    ("text-clear-color", true),
+    ("text-caps-lock-color", true),
+    ("text-ver-color", true),
+    ("text-wrong-color", true),
+    ("screenshots", false),
+    ("trace", false),
+    ("tiling", false),
+    ("indicator-image", true),
+    ("text-clear", true),
+    ("text-caps-lock", true),
+    ("text-ver", true),
+    ("text-wrong", true),
+    ("effect-blur", true),
+    ("effect-pixelate", true),
+    ("effect-scale", true),
+    ("effect-vignette", true),
+    ("effect-compose", true),
+    ("effect-custom", true),
+    ("effect-greyscale", false),
+    ("time-effects", false),
+    ("indicator", false),
+    ("clock", false),
+    ("timestr", true),
+    ("datestr", true),
+    ("fade-in", true),
+    ("submit-on-touch", false),
+    ("grace", true),
+    ("grace-no-mouse", false),
+    ("grace-no-touch", false),
+    ("ready-fd", true),
+  ];
+
+  #[test]
+  fn every_swaylock_effects_option_is_known() {
+    for (name, with_value) in SWAYLOCK_OPTIONS {
+      assert_eq!(takes_value(name), *with_value, "{name}");
+      let value = with_value.then(|| match *name {
+        "effect-blur" => "3x2",
+        "effect-vignette" => "0.5:0.5",
+        "font-size" | "indicator-radius" | "indicator-thickness" | "grace" => {
+          "3"
+        }
+        "color" => "123456",
+        _ if name.ends_with("-color") => "123456",
+        _ => "invented",
+      });
+      let applied = LockOptions::default().apply(name, value);
+      assert!(
+        matches!(applied, Ok(Applied::Set | Applied::Unsupported)),
+        "{name}: {applied:?}"
+      );
+    }
+    // swaylock's short options, and swaylock-effects' -t and -T.
+    for (flag, name) in [
+      ('k', "show-keyboard-layout"),
+      ('K', "hide-keyboard-layout"),
+      ('l', "indicator-caps-lock"),
+      ('L', "disable-caps-lock-text"),
+      ('R', "ready-fd"),
+      ('t', "trace"),
+      ('T', "tiling"),
+    ] {
+      assert_eq!(short_option(flag), Some(name));
+    }
+  }
+
+  #[test]
+  fn caps_lock_and_layout_options_carry_over() {
+    let mut options = LockOptions::default();
+    assert!(options.caps_lock_text && !options.caps_lock_indicator);
+    let warnings = options.apply_file(
+      "indicator-caps-lock\n\
+       ring-caps-lock-color=010203\n\
+       inside-caps-lock-color=04050607\n\
+       line-caps-lock-color=080808\n\
+       text-caps-lock-color=090909\n\
+       caps-lock-key-hl-color=0a0a0a\n\
+       caps-lock-bs-hl-color=0b0b0b\n\
+       layout-bg-color=0c0c0c\n\
+       layout-border-color=0d0d0d\n\
+       layout-text-color=0e0e0e\n\
+       show-keyboard-layout\n\
+       text-caps-lock=CAPS\n\
+       text-ver=Checking\n\
+       text-wrong=No\n\
+       text-clear=Empty\n",
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let caps = options.colors.caps_lock;
+    assert_eq!(caps.ring, [1, 2, 3, 0xff]);
+    assert_eq!(caps.inside, [4, 5, 6, 7]);
+    assert_eq!((caps.line[0], caps.text[0]), (8, 9));
+    let colors = &options.colors;
+    assert_eq!(colors.caps_lock_key_highlight[0], 0x0a);
+    assert_eq!(colors.caps_lock_backspace_highlight[0], 0x0b);
+    assert_eq!(colors.layout_background[0], 0x0c);
+    assert_eq!(colors.layout_border[0], 0x0d);
+    assert_eq!(colors.layout_text[0], 0x0e);
+    assert_eq!(
+      options.texts,
+      InputTexts {
+        cleared: "Empty".into(),
+        caps_lock: "CAPS".into(),
+        verifying: "Checking".into(),
+        wrong: "No".into(),
+      }
+    );
+    // The Caps Lock colours only while typing, as in swaylock.
+    assert_eq!(options.input_colors(InputState::Input, true), caps);
+    assert_eq!(
+      options.input_colors(InputState::Input, false),
+      options.colors.input
+    );
+    assert_eq!(
+      options.input_colors(InputState::Wrong, true),
+      options.colors.wrong
+    );
+    assert_eq!(
+      options.highlight_colors(InputState::Input, true).0,
+      colors.caps_lock_key_highlight
+    );
+    // Without indicator-caps-lock the colours stay.
+    options.caps_lock_indicator = false;
+    assert_eq!(
+      options.input_colors(InputState::Input, true),
+      options.colors.input
+    );
+    assert_eq!(
+      options.highlight_colors(InputState::Input, true).1,
+      options.colors.backspace_highlight
+    );
+    // The layout: shown with several, or asked for; hiding wins.
+    assert!(options.shows_keyboard_layout(1));
+    options.show_keyboard_layout = false;
+    assert!(!options.shows_keyboard_layout(1));
+    assert!(options.shows_keyboard_layout(2));
+    options.apply_arguments(&["-K".to_owned(), "-k".to_owned()]);
+    assert!(!options.shows_keyboard_layout(2));
+    options.apply_arguments(&["-L".to_owned()]);
+    assert!(!options.caps_lock_text);
   }
 
   #[test]

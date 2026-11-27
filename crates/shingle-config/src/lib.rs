@@ -51,8 +51,8 @@ pub use layout::{
   output_in_direction, output_relative, overlapping,
 };
 pub use lock::{
-  Applied, DriftConfig, IndicatorColors, InputState, LineSource, LockColor,
-  LockConfig, LockOptions, LockValue, StateColors, parse_lock_color,
+  Applied, DriftConfig, IndicatorColors, InputState, InputTexts, LineSource,
+  LockColor, LockConfig, LockOptions, LockValue, StateColors, parse_lock_color,
   short_option, swaylock_config_path, takes_value,
 };
 pub use multi_output::{
