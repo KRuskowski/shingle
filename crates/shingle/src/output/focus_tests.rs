@@ -827,3 +827,32 @@ fn windows_are_drawn_only_on_their_own_output_by_default() {
   assert!(compositor.window_surfaces(WindowId(999)).is_empty());
   let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn a_click_focuses_with_num_lock_on() {
+  let (mut compositor, path) = two_outputs(Config::default());
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let (_left_toplevel, left, _right_toplevel, right) =
+    one_on_each(&mut compositor, &mut client);
+  let keyboard = compositor.add_input_device(InputDeviceInfo {
+    name: "test keyboard".into(),
+    vendor: None,
+    product: None,
+    kind: InputDeviceKind::Keyboard,
+  });
+  // Num Lock locked (Mod2), as `kb_numlock_default_state = true` leaves it.
+  compositor.keyboard_modifiers(
+    keyboard,
+    crate::Modifiers {
+      locked: 0x10,
+      ..crate::Modifiers::default()
+    },
+  );
+  assert_eq!(compositor.focused_window(), Some(left));
+  let device = pointer(&mut compositor);
+  compositor.pointer_motion(device, 1300.0, 10.0);
+  compositor.pointer_button(device, BTN_LEFT, true);
+  compositor.pointer_button(device, BTN_LEFT, false);
+  assert_eq!(compositor.focused_window(), Some(right));
+  let _ = std::fs::remove_file(path);
+}

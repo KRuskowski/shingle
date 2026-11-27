@@ -1146,8 +1146,9 @@ fn pointer_button_inner(
   state.wayfire_shell.modifiers.interrupt();
   let (x, y) = (state.input.pointer_x, state.input.pointer_y);
   let modifiers = state.input.modifiers;
-  let modifiers_active =
-    modifiers.depressed != 0 || modifiers.latched != 0 || modifiers.locked != 0;
+  // Num Lock and Caps Lock are no binding modifiers: Wayfire focuses on a
+  // click with either locked even without `focus_button_with_modifiers`.
+  let modifiers_active = modifiers.depressed != 0 || modifiers.latched != 0;
   // A press on another output focuses it before anything else, as
   // Wayfire's pointer.cpp does for the first pressed button.
   if pressed {
