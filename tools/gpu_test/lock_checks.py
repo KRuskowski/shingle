@@ -18,9 +18,11 @@ typing, the verify and wrong states and the failed-attempt count, the
 fade-out after lock.input_timeout, the drift stopping while DPMS is off
 and the first frames after the wake, HEADLESS-2 turned off and on with
 wlr-randr while locked, the unlock with the test password, a SIGKILLed
-lock client leaving the outputs black, a grace-period unlock by the
-next client, and the lock binding, which starts shingle-lock through
-lock.command while the clients still show, so that it captures them.
+lock client leaving the outputs black, the lock binding starting a new
+client after that, a grace-period unlock by a client that takes over
+another crashed lock, and the lock binding while unlocked, which starts
+shingle-lock through lock.command while the clients still show, so that
+it captures them.
 
 PAM is a private /etc/pam.d, bind-mounted in this namespace only, whose
 `shingle` service runs a script that accepts only the invented password
@@ -583,6 +585,32 @@ def run_sessions(results, shingle, reader, lock_binary, swaylock, geometry,
   results.check('lock: after the crash the session stays locked, black',
                 failed is not None and failed.black and not failed.sharp,
                 describe(reader.since(moment)))
+  # The lock binding starts lock.command again, and its client unlocks.
+  moment = time.monotonic()
+  lock_binding(shingle)
+  restarted = xw.wait_for(lambda: shingle.log_text().count(
+      'shingle-lock: ready') >= 1, timeout=30)
+  results.check('lock: after the crash the lock binding starts a new lock '
+                'client', restarted, checks.tail(shingle.log_text()))
+  type_text(shingle, ACCEPTED_PHRASE)
+  tap(shingle, 'KEY_ENTER')
+  shown = reader.wait(lambda frame: frame.lock == 'unlocked' and frame.sharp,
+                      moment=moment, timeout=15)
+  between = [frame for frame in reader.since(moment)
+             if shown is None or frame.arrived < shown.arrived]
+  results.check('lock: which unlocks, the outputs black or locked until '
+                'then', shown is not None and all(
+                    frame.lock in HIDING for frame in between),
+                describe(between))
+  second.client.exited(5)
+  # Lock again for the grace period's client to take over.
+  moment = time.monotonic()
+  fourth = Lock(shingle, lock_binary, ['-C', swaylock], 'lock-fourth')
+  clients.append(fourth.client)
+  results.check('lock: a fourth lock client locks', fourth.ready(),
+                checks.tail(fourth.client.output()))
+  results.check('lock: SIGKILL reaches it', fourth.kill())
+  reader.wait(lambda frame: frame.lock == 'failed', moment=moment)
 
   # 3. The next client takes over and its grace period unlocks.
   third = Lock(shingle, lock_binary, ['-C', swaylock, '--grace', '5'],
@@ -602,11 +630,9 @@ def run_sessions(results, shingle, reader, lock_binary, swaylock, geometry,
 
   # 4. The lock binding starts lock.command while the clients still show.
   moment = time.monotonic()
-  shingle.call('stipc/feed_key', {'key': 'KEY_LEFTMETA', 'state': True})
-  tap(shingle, 'KEY_F8')
-  shingle.call('stipc/feed_key', {'key': 'KEY_LEFTMETA', 'state': False})
+  lock_binding(shingle)
   started = xw.wait_for(lambda: shingle.log_text().count(
-      'shingle-lock: ready') >= 1, timeout=30)
+      'shingle-lock: ready') >= 2, timeout=30)
   starting = [frame for frame in reader.since(moment)
               if frame.lock == 'starting']
   results.check('lock: the lock binding starts shingle-lock, which locks',
@@ -629,6 +655,12 @@ def run_sessions(results, shingle, reader, lock_binary, swaylock, geometry,
                       moment=moment, timeout=15)
   results.check('lock: and the test password unlocks it', shown is not None,
                 describe(reader.since(moment)))
+
+def lock_binding(shingle):
+  """Presses Shingle's lock binding, super+F8, over STIPC."""
+  shingle.call('stipc/feed_key', {'key': 'KEY_LEFTMETA', 'state': True})
+  tap(shingle, 'KEY_F8')
+  shingle.call('stipc/feed_key', {'key': 'KEY_LEFTMETA', 'state': False})
 
 def shingle_randr(shingle, *arguments):
   """Runs `wlr-randr` against `shingle`; returns (status, output)."""
