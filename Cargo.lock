@@ -3236,6 +3236,7 @@ dependencies = [
  "shingle-core",
  "shingle-render",
  "shingle-session",
+ "tempfile",
  "wayland-client",
  "wayland-protocols 0.32.13",
  "wayland-protocols-wlr 0.3.12",

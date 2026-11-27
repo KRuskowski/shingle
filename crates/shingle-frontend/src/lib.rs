@@ -17,6 +17,7 @@ mod frontend;
 pub mod host;
 pub mod icon_theme;
 pub mod keyboard;
+pub mod recorder;
 pub mod render_target;
 pub mod scale;
 pub mod scale_title;

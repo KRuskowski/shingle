@@ -14,6 +14,7 @@ mod drag;
 mod effects;
 mod expo;
 mod frames;
+mod lock;
 mod outputs;
 mod scale;
 mod scene;
@@ -107,6 +108,9 @@ pub struct Frontend {
   /// How long the "Workspace set N" label stays (`wsets.label_duration`).
   wsets_label_duration: Duration,
   lock_client: Option<Child>,
+  /// Every presented frame, written for the GPU harness
+  /// (`SHINGLE_RECORD_FRAMES`).
+  recorder: Option<crate::recorder::FrameRecorder>,
   session_children: Vec<Child>,
   keyboard: Keyboard,
   /// Modifier-alone bindings: `toggle_menu` and commands.
@@ -511,6 +515,7 @@ impl Frontend {
       virtual_frame: None,
       wsets_label_duration: Duration::from_millis(config.wsets.label_duration),
       lock_client: None,
+      recorder: crate::recorder::FrameRecorder::from_env(),
       session_children,
       keyboard,
       key_repeat: KeyRepeat::new(

@@ -31,6 +31,11 @@ use wayland_protocols::{
     },
     ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
   },
+  ext::session_lock::v1::client::{
+    ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+    ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
+    ext_session_lock_v1::ExtSessionLockV1,
+  },
   wp::linux_dmabuf::zv1::client::{
     zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1,
   },
@@ -104,7 +109,20 @@ pub(crate) struct Events {
   toplevels: Vec<(ExtForeignToplevelHandleV1, Option<String>)>,
   /// The buffer size each ext-image-copy-capture session announced last.
   session_sizes: Vec<(wayland_client::backend::ObjectId, (u32, u32))>,
+  /// The last lock surface configure: serial, width and height.
+  lock_configure: Option<(u32, u32, u32)>,
   synced: bool,
+}
+
+/// A session lock and its lock surface on the first output, configured
+/// and acknowledged, with no buffer yet.
+pub(crate) struct SessionLock {
+  _lock: ExtSessionLockV1,
+  /// The lock surface's `wl_surface`.
+  pub(crate) surface: wl_surface::WlSurface,
+  _lock_surface: ExtSessionLockSurfaceV1,
+  /// The configured size.
+  pub(crate) size: (i32, i32),
 }
 
 /// The user data of a frame callback: the number the test gave it.
@@ -582,6 +600,33 @@ impl TestClient {
     self.roundtrip(compositor);
   }
 
+  /// Asks for the session lock and makes a lock surface on the first
+  /// output, acknowledging its configure.
+  pub(crate) fn lock_session(
+    &mut self,
+    compositor: &mut Compositor,
+  ) -> SessionLock {
+    let output = self.bind::<wl_output::WlOutput>(4);
+    let wl_compositor = self.bind::<wl_compositor::WlCompositor>(4);
+    let manager = self.bind::<ExtSessionLockManagerV1>(1);
+    let lock = manager.lock(&self.handle, ());
+    let surface = wl_compositor.create_surface(&self.handle, ());
+    let lock_surface =
+      lock.get_lock_surface(&surface, &output, &self.handle, ());
+    self.roundtrip(compositor);
+    let (serial, width, height) = self
+      .events
+      .lock_configure
+      .expect("the lock surface is configured");
+    lock_surface.ack_configure(serial);
+    SessionLock {
+      _lock: lock,
+      surface,
+      _lock_surface: lock_surface,
+      size: (width as i32, height as i32),
+    }
+  }
+
   /// Attaches and commits a `width` by `height` shm buffer of one colour,
   /// `bgra` bytes, on `surface`.
   pub(crate) fn attach_colour(
@@ -931,7 +976,29 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for Events {
   }
 }
 
+impl Dispatch<ExtSessionLockSurfaceV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ExtSessionLockSurfaceV1,
+    event: ext_session_lock_surface_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let ext_session_lock_surface_v1::Event::Configure {
+      serial,
+      width,
+      height,
+    } = event
+    {
+      events.lock_configure = Some((serial, width, height));
+    }
+  }
+}
+
 ignore_events!(
+  ExtSessionLockManagerV1,
+  ExtSessionLockV1,
   ToplevelSources,
   ExtImageCaptureSourceV1,
   ExtImageCopyCaptureManagerV1,

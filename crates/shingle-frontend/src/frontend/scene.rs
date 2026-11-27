@@ -398,6 +398,9 @@ impl Frontend {
     now: Instant,
     present: bool,
   ) -> Result<(), Box<dyn Error>> {
+    if self.compositor.lock_hides_clients() {
+      return self.draw_lock_scene(view, scene, target, now, present);
+    }
     let output = &view.handle;
     let rect = view.rect;
     let (scale_timing, expo_timing, vswitch_timing) = (
@@ -1137,6 +1140,14 @@ impl Frontend {
       if presented {
         self.compositor.frame_now(output);
       }
+      super::lock::record_frame(
+        &mut self.recorder,
+        self.compositor.lock_state(),
+        view,
+        renderer,
+        (&tiles, background),
+        false,
+      );
     } else {
       // A capture reads its frame back before it returns.
       drop(locks);
@@ -1265,7 +1276,7 @@ impl Frontend {
 
   /// Makes sure `snapshot`'s buffer has a texture, as drawing an output
   /// does, for a window that may be on no output's screen.
-  fn prepare_texture(
+  pub(super) fn prepare_texture(
     &mut self,
     snapshot: &shingle::SurfaceSnapshot,
     renderer: &dyn RenderTarget,
@@ -1470,7 +1481,7 @@ impl Frontend {
 /// buffer. Captures without the cursor are drawn without the tiles of the
 /// `cursors` textures. Captures of other outputs wait for their own
 /// frames.
-fn answer_captures(
+pub(super) fn answer_captures(
   compositor: &mut shingle::Compositor,
   captures: &mut Vec<CaptureRequest>,
   output: &OutputHandle,

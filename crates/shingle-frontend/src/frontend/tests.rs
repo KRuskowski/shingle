@@ -33,6 +33,7 @@ mod captures;
 mod colours;
 mod cursor;
 mod frames;
+mod lock;
 mod outputs;
 mod switcher;
 mod vswipe;
