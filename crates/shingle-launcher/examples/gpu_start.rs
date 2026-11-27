@@ -1,3 +1,8 @@
+//! Times wgpu 0.20's Vulkan instance, adapter, device and a Gloomy renderer
+//! for the launcher's panel, the measurement behind choosing lavapipe
+//! (docs/design/launcher.md, section 4). Run it inside tools/gpu_test/
+//! run.py's namespace, with `VK_DRIVER_FILES` to pick one driver.
+
 use std::time::Instant;
 
 fn main() {
