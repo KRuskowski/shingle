@@ -122,6 +122,8 @@ pub struct Frontend {
   /// Every presented frame, written for the GPU harness
   /// (`SHINGLE_RECORD_FRAMES`).
   recorder: Option<crate::recorder::FrameRecorder>,
+  /// Long turns, logged for `SHINGLE_TRACE_TURNS`.
+  turns: crate::turn_trace::TurnTrace,
   session_children: Vec<Child>,
   keyboard: Keyboard,
   /// Modifier-alone bindings: `toggle_menu` and commands.
@@ -531,6 +533,7 @@ impl Frontend {
       lock_client: None,
       lock_command: config.lock.command.clone(),
       recorder: crate::recorder::FrameRecorder::from_env(),
+      turns: crate::turn_trace::TurnTrace::from_env(),
       session_children,
       keyboard,
       key_repeat: KeyRepeat::new(
@@ -1049,17 +1052,25 @@ impl Frontend {
   /// events. Calls [`Host::exit`] after the quit binding, on a signal or
   /// when dispatch fails.
   pub fn process(&mut self, host: &mut dyn Host) {
+    self.turns.begin("process");
+    self.process_turn(host);
+    self.turns.end();
+  }
+
+  fn process_turn(&mut self, host: &mut dyn Host) {
     if self.quit {
       host.exit();
       return;
     }
     // Buffers of finished frames are released by this turn's dispatch.
     self.retire_frames();
+    self.turns.mark("retire");
     if let Err(error) = self.compositor.dispatch_pending() {
       eprintln!("shingle: dispatch failed: {error}");
       host.exit();
       return;
     }
+    self.turns.mark("dispatch");
     // SIGINT and SIGTERM reach the compositor's event loop. The host
     // saves the session through `shutdown` on its way out.
     if self.compositor.shutdown_requested() {
@@ -1073,7 +1084,9 @@ impl Frontend {
     self
       .session_children
       .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
+    self.turns.mark("timers");
     let changed = self.process_events(host);
+    self.turns.mark("events");
     if changed || self.compositor.needs_frame() {
       self.request_redraw();
     }
@@ -1083,7 +1096,9 @@ impl Frontend {
     self.expire_labels(now);
     self.expire_startup_inhibits(now);
     self.publish_plugin_activations();
+    self.turns.mark("pace");
     self.flush(host);
+    self.turns.mark("flush");
     self.publish_counts();
   }
 

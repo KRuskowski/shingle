@@ -9,6 +9,7 @@ license.workspace = true
 ab_glyph = "0.2"
 image = "0.25.10"
 resvg = "0.36.0"
+rustix.workspace = true
 shingle = { path = "../shingle" }
 shingle-config = { path = "../shingle-config" }
 shingle-core = { path = "../shingle-core" }
@@ -20,7 +21,6 @@ xkbcommon.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true
-rustix.workspace = true
 serde_json.workspace = true
 tempfile = "3"
 wayland-client = "0.31"

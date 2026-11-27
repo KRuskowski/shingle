@@ -27,6 +27,7 @@ mod switcher_view;
 mod test_client;
 #[cfg(test)]
 mod test_gpu;
+pub mod turn_trace;
 pub mod vswipe;
 pub mod workspace_transition;
 

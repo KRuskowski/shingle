@@ -324,8 +324,12 @@ impl Frontend {
     output: &OutputHandle,
     target: &mut dyn RenderTarget,
   ) -> Result<(), Box<dyn Error>> {
+    self.turns.begin("render");
     let result = self.render_frame(output, target);
+    self.turns.mark("frame");
     self.flush(host);
+    self.turns.mark("flush");
+    self.turns.end();
     result
   }
 
@@ -342,6 +346,7 @@ impl Frontend {
   ) -> Result<(), Box<dyn Error>> {
     self.update_expo_layout();
     self.retire_frames();
+    self.turns.mark("retire");
     let now = Instant::now();
     let Some(view) = self.compositor.output_view(output) else {
       return Ok(());
@@ -1153,7 +1158,9 @@ impl Frontend {
     }
     if present {
       renderer.set_tearing(self.compositor.allows_tearing_on(output));
+      self.turns.mark("tiles");
       let presented = renderer.render(&tiles, background)?;
+      self.turns.mark("draw");
       // The buffers this frame samples stay locked until the GPU is done.
       if let Some(cache) = &self.dmabuf {
         locks.extend(
