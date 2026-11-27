@@ -35,7 +35,7 @@ data/shingle.desktop is a Wayland session file for display managers such as GDM,
 ```sh
 cargo build --release
 sudo install -m 755 target/release/shingle target/release/shingle-lock \
-  /usr/local/bin/
+  target/release/shingle-launcher /usr/local/bin/
 sudo install -D -m 644 data/shingle.desktop \
   /usr/local/share/wayland-sessions/shingle.desktop
 ```

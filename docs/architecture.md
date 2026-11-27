@@ -18,6 +18,7 @@
 | `shingle-auth` | PAM authentication for the lock client. |
 | `shingle-lock` | `ext-session-lock-v1` client with swaylock-style options. |
 | `shingle-wcm` | Graphical configuration manager built on [Gloomy](https://github.com/KRuskowski/gloomy). |
+| `shingle-launcher` | Application launcher: a layer-shell client drawing Gloomy widgets on lavapipe into `wl_shm`, with discovery, fuzzy matching, frecency and the user's layout file in a library unit-tested without Wayland ([design/launcher.md](design/launcher.md)). |
 
 ## Where things live
 
@@ -143,6 +144,9 @@
 | Native config model and XKB generation | `crates/shingle-config/src/lib.rs` |
 | Wayfire INI import | `crates/shingle-config/src/wayfire.rs`; wf-config's line rules `ini.rs`; activator kinds `activator.rs`; options applied one at a time with warnings, shared with i3, `import.rs`; fixtures `testdata/` |
 | i3 import | `crates/shingle-config/src/i3.rs` |
+| The launcher's `launcher:` config section (`LauncherConfig`) | `crates/shingle-config/src/launcher.rs` |
+| Launcher discovery, index cache, matching, frecency, layout file, categories, keys and edits | `crates/shingle-launcher/src/index.rs`, `matching.rs`, `search.rs`, `history.rs`, `layout.rs`, `catalog.rs`, `model.rs` (tests in `model/tests.rs`) |
+| Launcher panel as Gloomy widgets, drawing on lavapipe and readback, layer surface and input | `crates/shingle-launcher/src/view.rs`, `render.rs`, `shm.rs`, `client.rs`; real-run checks `tools/gpu_test/launcher_checks.py` |
 
 ## Design rules
 

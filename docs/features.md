@@ -192,6 +192,16 @@ vswipe:
 
 Wayfire's twelve `[vswipe]` options import with these names (`duration` in milliseconds, its easing curve ignored, as for every Shingle animation), when `[core] plugins` lists `vswipe`; Wayfire's default list does not. Tests feed swipes with Shingle's `stipc/feed_gesture` ([ipc.md](ipc.md#stipc-test-input)).
 
+## Application launcher
+
+`shingle-launcher` (crates/shingle-launcher) is rofi's type-to-run and the KDE menu's in-place editing in one panel ([design/launcher.md](design/launcher.md)). `super+space` runs it in data/shingle.yaml, and running it again while it is open closes it. It is a wlr-layer-shell client on the overlay layer with the keyboard to itself, so it works under Wayfire too; it dims the output, and a click outside the panel closes it.
+
+- **Finding and launching.** It lists the desktop entries of `$XDG_DATA_HOME/applications` and `$XDG_DATA_DIRS`, as the Desktop Entry Specification filters them, and the commands on `$PATH`. Typing filters everything at once with a fuzzy match on names, generic names, keywords and program names, ranked by how often and how recently each was launched; Enter launches the selection, and the last row, or Ctrl+Enter, runs the typed text as a command. It launches with the environment Shingle (or Wayfire) gave it and exits.
+- **Categories and favourites.** The left column has Favourites, Recent, the categories (from the entries' freedesktop main categories, or the user's own) and All, and Hidden once something is hidden; Tab, or Left and Right with nothing typed, moves through them. The launcher opens on the favourites when there are any.
+- **Editing in place.** Ctrl+D favourites or unfavourites, F2 renames, Ctrl+N makes a shortcut whose command is the typed text, Ctrl+E edits a shortcut's command, Ctrl+M moves to a category by name (a new name creates it), Ctrl+H hides or shows, Ctrl+Up and Ctrl+Down reorder, Delete removes a shortcut; Shift+F2 renames a category and Ctrl+Shift+Up and Down move it. A right click opens the same edits as a menu, and an entry dragged onto a row, a category, Favourites or Hidden goes there.
+- **Storage.** Every change is written at once to `$XDG_DATA_HOME/shingle/launcher.yaml`, a YAML file of only what was changed, readable and safe to edit by hand; launch counts go to `$XDG_STATE_HOME/shingle/launcher-history.json` and the scanned index to `$XDG_CACHE_HOME/shingle/launcher-index.json`, rescanned in the background on every start.
+- **Look.** The `launcher:` section of Shingle's config sets the panel's size, font size, colours, terminal for terminal entries, and renderer: by default lavapipe when installed, which starts the first frame in under 50 ms on the development host where the GPU's driver alone takes over 100 ms.
+
 ## Clients and protocols
 
 ### Client environment

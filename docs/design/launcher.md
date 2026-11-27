@@ -15,16 +15,16 @@ Sources: Shingle on branch `shingle-launcher`, cut from `master` at `a546046`; G
 | 3 | Toolkit and drawing | Gloomy's widgets, layout and `GloomyRenderer` draw the panel into an offscreen wgpu texture, which is read back into a `wl_shm` buffer. The launcher speaks Wayland itself (wayland-client), as shingle-lock does, because Gloomy's windowing (gloomy-app on winit 0.29) cannot make layer surfaces. |
 | 4 | GPU adapter | By default the panel is drawn on lavapipe, Mesa's CPU Vulkan driver, with only its ICD loaded; the hardware GPU is used only when lavapipe is missing or `launcher.renderer: hardware` asks for it. Measured below: NVIDIA's Vulkan instance and device take 115 to 140 ms to create, lavapipe's 15 to 25 ms. |
 | 5 | Discovery | `.desktop` files from `$XDG_DATA_HOME/applications` and every `$XDG_DATA_DIRS/applications`, by desktop file ID with the first directory winning, filtered as the specification says; and every executable on `$PATH`, by name, as rofi's run mode lists them. |
-| 6 | Index cache | The index is cached as JSON in `$XDG_CACHE_HOME/shingle/launcher-index.json`. A start draws from the cache and rescans in a background thread after the first frame; a changed index replaces the shown one and the cache. Without a cache the first start scans before drawing. |
+| 6 | Index cache | The index is cached as JSON in `$XDG_CACHE_HOME/shingle/launcher-index.json`. A start draws from the cache and always rescans in a background thread after the first frame; a changed index replaces the shown one and the cache. Without a cache the first start scans before drawing. |
 | 7 | Matching | A fuzzy subsequence match in the style of fzy, case-insensitive, scoring word starts, consecutive runs and prefixes, against the shown name, then the generic name, keywords and program name at lower weight. Ties and near ties are broken by frecency. |
 | 8 | Ranking by use | Each launch records a count and a time per entry in `$XDG_STATE_HOME/shingle/launcher-history.json`. Frecency is `ln(1 + count)` scaled by `1 / (1 + age_days / 7)`. It adds to the match score, and with an empty query it orders the Recent view. |
 | 9 | The user's layout | One human-readable YAML file, `$XDG_DATA_HOME/shingle/launcher.yaml`: favourites in order, categories in order with their entries in order, renames, hidden entries and custom shortcuts with a name and a command. It is written on every change, atomically (a temporary file renamed over it). |
-| 10 | Keyboard | Typing filters at once, Enter launches the selection, Escape clears and then closes. Ctrl+D favourites, F2 renames, Ctrl+N adds a shortcut from the typed text, Ctrl+M moves to a category, Ctrl+H hides, Ctrl+Up and Ctrl+Down reorder, Delete removes a shortcut. Tab and Shift+Tab, or Left and Right with an empty query, change category. |
+| 10 | Keyboard | Typing filters at once, Enter launches the selection, Escape clears and then closes. Ctrl+D favourites, F2 renames, Ctrl+N adds a shortcut from the typed text, Ctrl+M moves to a category, Ctrl+H hides, Ctrl+Up and Ctrl+Down reorder, Delete removes a shortcut. Tab and Shift+Tab, or Left and Right with an empty query, change category; Shift+F2 renames it and Ctrl+Shift+Up and Down move it. |
 | 11 | Mouse | A click launches or selects a category; a right click opens a context menu with the same edits; dragging an entry reorders it in its list, onto a category moves it there, and onto Favourites favourites it. The wheel scrolls. |
-| 12 | Theming | A `launcher:` section in Shingle's YAML config: panel size, font size, colours (backdrop, panel, text, dim text, accent, selection), terminal and renderer. Defaults are a dark slate panel with a blue accent, matching WCM. A Wayfire or i3 configuration gets the defaults. |
+| 12 | Theming | A `launcher:` section in Shingle's YAML config: panel size, font size, colours (backdrop, panel, field, text, dim text, accent, selection), terminal and renderer. Colours are the bytes shown, as every colour of Shingle's config. Defaults are a dark slate panel with a blue accent. A Wayfire or i3 configuration gets the defaults. |
 | 13 | Launching | Commands run through crates/shingle-session's `launch_command` (`/bin/sh -c`) with a `ClientEnvironment` built from the launcher's own environment, which Shingle (or Wayfire) gave it: its `WAYLAND_DISPLAY`, `DISPLAY` and `WAYFIRE_SOCKET` pass on and `WAYLAND_SOCKET` never does. Shingle learns each window's launch identity from `/proc` as for any client, so session restore relaunches it. |
 | 14 | Binding | `data/shingle.yaml` binds `super+space` to `shingle-launcher`. The Wayfire import is unchanged: a `[command]` binding that runs rofi stays as it is, and no launcher binding is added. |
-| 15 | Startup target | First frame under 100 ms after `exec` in a release build on this host, measured by the launcher itself and by the GPU harness. |
+| 15 | Startup target | First frame under 100 ms after `exec` in a release build on this host, measured by the launcher itself and by the GPU harness. Met: 44 to 53 ms median of warm starts ([As built](#as-built)). |
 
 ## What exists today
 
@@ -62,9 +62,9 @@ The panel is `launcher.width` × `launcher.height` logical pixels, centred, and 
 
 ### Decision
 
-The panel is built from Gloomy widgets (`Container`, `Label`, `Button` and Gloomy's flex layout), rebuilt from the launcher's model on each change, laid out with `compute_layout` and drawn with `GloomyRenderer` into a `Bgra8UnormSrgb` texture, whose bytes are already `wl_shm`'s little-endian `ARGB8888`. Hit testing uses Gloomy's `hit_test` on the same tree, with actions such as `entry:3` and `category:2`.
+The panel is built from Gloomy widgets (`Container`, `Label` and `TextInput`, which draws the search field and its caret), rebuilt from the launcher's model on each change and drawn with `GloomyRenderer` into a `Bgra8Unorm` texture, whose bytes are already `wl_shm`'s little-endian `ARGB8888`. The format is not an sRGB one, so a configured colour is the bytes it shows as, as with every colour of Shingle's config. Every widget is placed absolutely (Gloomy's `Direction::None`), so the launcher knows each row's and category's rectangle and hit-tests the pointer against them itself, rather than through Gloomy's `hit_test`. Gloomy draws all text after all boxes, so the context menu and the dragged entry are a second tree drawn on Gloomy's overlay layers, above the rows' text.
 
-Input, the event loop and Wayland are the launcher's own: wayland-client with calloop, xkbcommon for the keymap, and calloop timers for key repeat, as in shingle-lock. Gloomy's own input handling and `TextInput` widget are not used, because its focus and event model are winit's; the search field is drawn as a styled label with a caret.
+Input, the event loop and Wayland are the launcher's own: wayland-client with calloop, xkbcommon for the keymap, and calloop timers for key repeat, as in shingle-lock. Gloomy's own input handling is not used, because its focus and event model are winit's.
 
 Gloomy pins wgpu 0.20 and winit 0.29, while Shingle uses wgpu 30; the launcher depends on wgpu 0.20 directly for the device it hands Gloomy. Both versions are already in `Cargo.lock` through WCM.
 
@@ -109,13 +109,13 @@ The launcher prints `shingle-launcher: first frame after N ms` with `--timing`, 
 
 **Desktop entries.** The launcher reads `applications/` under `$XDG_DATA_HOME` (default `~/.local/share`) and then each directory of `$XDG_DATA_DIRS` (default `/usr/local/share:/usr/share`), recursively. An entry's desktop file ID is its path below `applications/` with `/` replaced by `-`; the first directory that has an ID wins, so a user's copy overrides the system's, and a user's `Hidden=true` copy removes it. It keeps `Type=Application` entries and drops `NoDisplay=true`, `Hidden=true`, entries whose `OnlyShowIn` does not name, or `NotShowIn` names, a desktop of `$XDG_CURRENT_DESKTOP`, and entries whose `TryExec` is not an executable. It reads `Name`, `GenericName`, `Comment`, `Keywords`, `Categories`, `Exec`, `Path`, `Terminal` and `Icon`, with the best locale variant for `LC_MESSAGES`/`LANG` (`lang_COUNTRY`, then `lang`, then none). Actions (`[Desktop Action …]`) are not shown in the first version.
 
-**Commands on `$PATH`.** Every regular executable file in each `$PATH` directory, by name, deduplicated with the first directory winning, as rofi's run mode lists them. They have no category of their own (they show in All and in search results), and a desktop entry whose `Exec` program has the same name hides the plain command, so `firefox` appears once.
+**Commands on `$PATH`.** Every regular executable file in each `$PATH` directory, by name, deduplicated with the first directory winning, as rofi's run mode lists them. They have no category and show only in search results (a `/usr/bin` of thousands would bury All), and a desktop entry whose `Exec` program has the same name hides the plain command, so `firefox` appears once.
 
 **Exec.** `Exec` is unquoted as the specification says, field codes `%f %F %u %U` are dropped (the launcher opens no files), `%i` becomes `--icon ICON`, `%c` the name and `%k` the file's path, and `%%` a `%`. The arguments are then quoted for `/bin/sh` and prefixed with `exec`; `Path` becomes `cd DIR && `; `Terminal=true` wraps the command in the terminal ([section 9](#9-launching)).
 
 **Categories.** An entry's default category is the first freedesktop main category it lists, shown by a readable name: AudioVideo, Audio and Video as Multimedia, Development, Education, Game as Games, Graphics, Network as Internet, Office, Science, Settings, System, Utility as Accessories; an entry with none goes to Other.
 
-**Cache.** The scanned index (entries, plus the directories scanned with their modification times) is JSON in `$XDG_CACHE_HOME/shingle/launcher-index.json`, versioned so that an incompatible cache is ignored. The start uses the cache; after the first frame a thread rescans everything and, when the result differs, sends it to the main loop, which shows it and writes the cache. With no cache the first start scans before drawing (about 20 ms for this host's applications and `$PATH`).
+**Cache.** The scanned index is JSON in `$XDG_CACHE_HOME/shingle/launcher-index.json`, versioned so that an incompatible cache is ignored. The start uses the cache; after the first frame a thread always rescans everything and, when the result differs, writes the cache and sends it to the main loop, which shows it keeping the selection. With no cache the first start scans before drawing.
 
 ### Rejected alternatives
 
@@ -160,14 +160,14 @@ shortcuts:
 ```
 
 - **Favourites** are an ordered list of entry IDs, shown first and as their own category.
-- **Categories** are listed in the order shown. An entry listed under a category is shown there, in that order, instead of in its default category; the default categories that are not listed follow, in name order, with their entries in name order. A category the user creates is listed with its entries; moving an entry out of the last listed entry of a category leaves an empty listed category, which the launcher still shows until the user removes it. Reordering inside a category writes the category's full order.
+- **Categories** are listed in the order shown. An entry listed under a category is shown there, in that order, instead of in its default category; the default categories that are not listed follow, in name order, with their entries in name order. Whenever a category is placed into, created, renamed or moved, every category shown is listed by name in the order shown, so the order the user sees stays; a listed category the user emptied is still shown until it is removed. Placing an entry, or reordering inside a category, writes that category's full order. Renaming a category writes its members under the new name; an application installed later whose default is the old name shows under the old name again.
 - **Renamed** maps an ID to the name shown and matched; renaming to an empty name removes the entry.
 - **Hidden** entries are shown only in the Hidden category, from which they can be shown again.
 - **Shortcuts** are the user's own entries with a name and a shell command, and an ID of `shortcut:` and a slug of the name, made unique.
 
 IDs are desktop file IDs, `path:NAME` for commands on `$PATH`, and `shortcut:SLUG`. An ID the index no longer has (an uninstalled application) is kept in the file and ignored, so that reinstalling brings its place back.
 
-The file is written after every change: serialised, written to `launcher.yaml.tmp` in the same directory, synced and renamed over the old one. A file that fails to parse is moved aside to `launcher.yaml.bad` with a message on stderr, as Shingle does with a corrupt session (crates/shingle-session/src/lib.rs:204), and the launcher starts unchanged.
+The file is written after every change: serialised, with empty lists left out, written to `launcher.yaml.tmp` in the same directory, synced and renamed over the old one. A file that fails to parse is moved aside to `launcher.yaml.bad` with a message on stderr, as Shingle does with a corrupt session (crates/shingle-session/src/lib.rs:204), and the launcher starts unchanged.
 
 ## 8. Theming
 
@@ -184,15 +184,15 @@ launcher:
   terminal: ""            # "" picks $TERMINAL, foot, kitty, alacritty, xterm
   colors:
     backdrop: [0.0, 0.0, 0.0, 0.45]
-    panel: [0.075, 0.085, 0.105, 1.0]
-    field: [0.105, 0.12, 0.15, 1.0]
-    text: [0.9, 0.92, 0.95, 1.0]
-    dim_text: [0.55, 0.6, 0.68, 1.0]
-    accent: [0.12, 0.42, 0.62, 1.0]
-    selection: [0.16, 0.3, 0.45, 1.0]
+    panel: [0.11, 0.12, 0.15, 1.0]
+    field: [0.16, 0.18, 0.22, 1.0]
+    text: [0.92, 0.93, 0.95, 1.0]
+    dim_text: [0.58, 0.62, 0.68, 1.0]
+    accent: [0.33, 0.58, 0.93, 1.0]
+    selection: [0.2, 0.31, 0.48, 1.0]
 ```
 
-Colours are `[r, g, b, a]` in 0 to 1, like the rest of Shingle's config. The defaults are WCM's palette, so the two look alike.
+Colours are `[r, g, b, a]` in 0 to 1, like the rest of Shingle's config, and show as those values times 255. The accent is lightened for text on the panel (the caret, special category titles, the Run row, favourite marks).
 
 ## 9. Launching
 
@@ -212,7 +212,7 @@ Shingle's session restore needs nothing from the launcher: it reads each new cli
 
 ### Decision
 
-The panel has a search field on top, a category column on the left (Favourites, Recent, the categories, All, and Hidden when anything is hidden) and the entries of the selected category, or the search results, on the right. A status line at the bottom names the keys of the current mode.
+The panel has a search field on top, a category column on the left (Favourites, Recent, the categories, All, and Hidden when anything is hidden) and the entries of the selected category, or the search results, on the right. It opens on Favourites when there are any, else on All. A status line at the bottom names the keys of the current mode, or what just failed.
 
 Keys, always available unless a prompt is open:
 
@@ -225,8 +225,10 @@ Keys, always available unless a prompt is open:
 | Tab, Shift+Tab; Left, Right with an empty query | Next and previous category. |
 | Escape | Closes a prompt or menu, else clears the query, else exits. |
 | Ctrl+D | Adds the selected entry to Favourites or removes it. |
-| F2 | Renames the selected entry (or category, when the category column has the focus) in a prompt. |
-| Ctrl+N | Adds a shortcut whose command is the typed text, then prompts for its name, in the selected category (or Accessories when searching). |
+| F2 | Renames the selected entry in a prompt. |
+| Shift+F2 | Renames the selected category. |
+| Ctrl+Shift+Up, Ctrl+Shift+Down | Move the selected category. |
+| Ctrl+N | Adds a shortcut whose command is the typed text, then prompts for its name; with nothing typed it prompts for the command first. It goes into the selected category, or Shortcuts when searching or browsing Favourites, Recent or All. |
 | Ctrl+E | Edits the selected shortcut's command. |
 | Ctrl+M | Moves the selected entry to a category, by name; a new name creates the category. |
 | Ctrl+H | Hides the selected entry, or shows it again in Hidden. |
@@ -239,7 +241,7 @@ Mouse:
 
 - A click on an entry launches it; on a category, selects it; on the backdrop, closes the launcher.
 - A right click on an entry opens a context menu at the pointer: Add to or Remove from Favourites, Rename, Move to category, Hide or Show, and for shortcuts Edit command and Remove. A right click on a category offers Rename and Remove (its entries go back to their default categories).
-- A press on an entry and a move of more than 6 pixels starts a drag: the entry follows the pointer, and an insertion line shows where it lands. Dropping it on the entry list reorders it there; on a category, moves it to that category's end; on Favourites, favourites it. Escape cancels a drag.
+- A press on an entry and a move of more than 6 pixels starts a drag: the entry follows the pointer, and an insertion line shows where it lands. Dropping it on the entry list reorders it there; on a category, moves it to that category's end; on Favourites, favourites it; on Hidden, hides it. Escape cancels a drag.
 - The wheel scrolls the list.
 
 The keyboard path does not wait for the mouse path: the categories and favourites are shown from the first frame, and typing switches to results without any mode change.
@@ -267,6 +269,9 @@ The operator was not available; each open question got the default the lead prop
 11. **Launching with `launch_command` and the launcher's own client environment.** That environment is already the one Shingle or Wayfire gives its children; Shingle's launch identities need nothing more.
 12. **`super+space` as the default binding.** `super+d`, rofi's usual key, is Shingle's show-desktop, and `super` alone toggles shell menus.
 13. **No desktop actions, icons or file arguments in the first version.** Icons need an icon theme lookup and image decoding on the start path; they are listed under open items.
+14. **Commands on `$PATH` only in search results.** They have no category, and thousands of them in All would bury the applications; typing finds them as rofi's run mode does.
+15. **The category column is the keyboard's second axis, not a focus.** Tab and Left/Right change category; Shift+F2 and Ctrl+Shift+arrows edit the category, so no key moves a focus between two columns and typing always goes to the search.
+16. **Colours are bytes, not sRGB-encoded.** The panel is drawn into a linear `Bgra8Unorm` texture, so a configured colour shows as its values times 255, as `background_color` does in Shingle.
 
 ## Open items
 
@@ -277,4 +282,10 @@ The operator was not available; each open question got the default the lead prop
 
 ## As built
 
-Filled in as the implementation lands.
+Built on branch `shingle-launcher` in crates/shingle-launcher, with the `launcher:` section in crates/shingle-config/src/launcher.rs and the `super+space` binding in data/shingle.yaml. The sections above are corrected where the code differs; the differences from the first draft are Decisions 14 to 16, the Shift+F2 and Ctrl+Shift+arrow keys for categories, the search field drawn by Gloomy's `TextInput`, hit testing by the launcher's own rectangles, the overlay tree for the menu and the drag, and the cache without directory times.
+
+- **Library** (unit-tested without Wayland or a GPU): crates/shingle-launcher/src/desktop.rs (desktop entries, locales, `Exec`, shell quoting), index.rs (discovery and the cache), matching.rs (the fzy score), search.rs (fields, bonuses and frecency), history.rs, layout.rs (`Layout`, `LayoutStore`), catalog.rs (the categories shown), model.rs (keys, pointer, prompts, menu, drags and every edit, with crates/shingle-launcher/src/model/tests.rs), view.rs (the Gloomy trees and pointer targets), theme.rs, launch.rs (terminal, environment, spawn), shm.rs, render.rs (Gloomy on wgpu 0.20, lavapipe selection and readback).
+- **Binary**: crates/shingle-launcher/src/main.rs (options, the single-instance socket, loading, `--screenshot`) and client.rs (the layer surface, keyboard with repeat, pointer with cursor-shape, buffers, frame callbacks, the background rescan and `--trace`).
+- **Startup**: 44 to 53 ms median from `main` to the first committed buffer over seven warm starts, in three runs (40.2 to 58.7 ms in all), 2 to 3 ms more from `exec` as the harness sees it, in the GPU harness's namespace on this host with the release build on lavapipe; the very first start, with no index cache and an empty Mesa shader cache, took 167 to 188 ms. The design's 100 ms target holds.
+- **Verification**: 68 unit tests in the crate and 4 for the config section; the GPU harness's group `launcher` (tools/gpu_test/launcher_checks.py), 18 checks with the run under headless Wayfire, all passing ([status.md](../status.md#application-launcher)).
+- **Wayfire**: run under the host's `wayfire` 0.9, headless inside the GPU harness's namespace, never under the operator's session. Wayfire configures the layer surface at 0x0 first and then at the output's size, which the launcher now waits through. It uses nothing Shingle-specific: wlr-layer-shell, `wl_shm`, `wl_seat` and, when offered, cursor-shape.
