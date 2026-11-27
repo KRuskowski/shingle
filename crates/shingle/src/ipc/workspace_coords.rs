@@ -6,10 +6,14 @@
 //! with no gap (wayfire:src/output/workspace-impl.cpp:501-516,
 //! `view_visible_on`). Switching the workspace moves every view of the set
 //! that is neither sticky nor carried by that difference (:596-617), and so
-//! changes their IPC `geometry`. Shingle keeps a window's rectangle in its
-//! own workspace, laid over the output, so IPC adds that offset to every
-//! geometry it reports and takes it off every geometry it is given.
-//! Geometries stay in layout coordinates otherwise (docs/ipc.md).
+//! changes their IPC `geometry`. The plane is each output's own, with the
+//! output's top-left corner at 0,0 (wayfire:src/output/workspace-impl.cpp:
+//! 198-202, `get_relative_geometry`), so a view on an output at 1920,0 is
+//! at 0,0 when it fills that output. Shingle keeps a window's rectangle in
+//! its own workspace, laid over the output in layout coordinates, so IPC
+//! takes the output's corner off and adds the workspace's offset to every
+//! geometry it reports, and does the reverse to every geometry it is
+//! given (docs/ipc.md).
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -18,8 +22,9 @@ use shingle_core::{Rect, WindowId, WindowPresence, WorkspaceId, WsetId};
 
 use crate::state::CompositorState;
 
-/// How far a workspace of a set lies from the set's current one, in
-/// logical pixels.
+/// What IPC adds to a rectangle in layout coordinates to put it in its
+/// output's plane: how far its workspace lies from its set's current one,
+/// less the corner of the output, in logical pixels.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Offset {
   /// Horizontal distance; positive to the right.
@@ -69,8 +74,9 @@ pub(crate) fn workspace_frame(state: &CompositorState, wset: WsetId) -> Rect {
     .map_or(info.workarea, |output| output.rect)
 }
 
-/// The offset of workspace `workspace` of set `wset` from the set's
-/// current workspace.
+/// The offset of workspace `workspace` of set `wset`: its distance from
+/// the set's current workspace, less the corner of the set's frame
+/// ([`workspace_frame`]).
 pub(crate) fn workspace_offset(
   state: &CompositorState,
   wset: WsetId,
@@ -83,14 +89,16 @@ pub(crate) fn workspace_offset(
   let current = info.current_workspace;
   Offset {
     dx: (i64::from(workspace.x) - i64::from(current.x))
-      * i64::from(frame.width),
+      * i64::from(frame.width)
+      - i64::from(frame.x),
     dy: (i64::from(workspace.y) - i64::from(current.y))
-      * i64::from(frame.height),
+      * i64::from(frame.height)
+      - i64::from(frame.y),
   }
 }
 
-/// The offset of `window`'s workspace; none for a sticky window, which
-/// Wayfire never moves on a switch.
+/// The offset of `window`'s workspace; only the output's corner for a
+/// sticky window, which Wayfire never moves on a switch.
 pub(crate) fn window_offset(
   state: &CompositorState,
   window: WindowId,
@@ -98,10 +106,16 @@ pub(crate) fn window_offset(
   let Ok(info) = state.core.window_info(window) else {
     return Offset::default();
   };
-  if info.state.sticky {
-    return Offset::default();
-  }
-  workspace_offset(state, info.wset, info.location.workspace)
+  let workspace = if info.state.sticky {
+    // Its own workspace is drawn as the current one.
+    state
+      .core
+      .wset(info.wset)
+      .map_or(info.location.workspace, |wset| wset.current_workspace)
+  } else {
+    info.location.workspace
+  };
+  workspace_offset(state, info.wset, workspace)
 }
 
 /// The workspace of set `wset` that IPC rectangle `rect` belongs to:
@@ -117,25 +131,15 @@ pub(crate) fn main_workspace(
     return WorkspaceId::ORIGIN;
   };
   let frame = workspace_frame(state, wset);
-  let axis = |start: i32, extent: u32, origin: i32, size: u32, current| {
+  // The rectangle is in the output's plane, whose current workspace
+  // starts at 0,0.
+  let axis = |start: i32, extent: u32, size: u32, current| {
     let centre = f64::from(start) + f64::from(extent) / 2.0;
-    let steps = ((centre - f64::from(origin)) / f64::from(size.max(1))).floor();
+    let steps = (centre / f64::from(size.max(1))).floor();
     (f64::from(current) + steps) as i64
   };
-  let column = axis(
-    rect.x,
-    rect.width,
-    frame.x,
-    frame.width,
-    info.current_workspace.x,
-  );
-  let row = axis(
-    rect.y,
-    rect.height,
-    frame.y,
-    frame.height,
-    info.current_workspace.y,
-  );
+  let column = axis(rect.x, rect.width, frame.width, info.current_workspace.x);
+  let row = axis(rect.y, rect.height, frame.height, info.current_workspace.y);
   let last = |count: u32| i64::from(count.max(1) - 1);
   WorkspaceId::new(
     column.clamp(0, last(state.workspace_width)) as u32,
@@ -163,7 +167,7 @@ pub(crate) fn place_window(
     main_workspace(state, info.wset, rect)
   };
   let local = if info.state.sticky {
-    rect
+    window_offset(state, window).remove(rect)
   } else {
     workspace_offset(state, info.wset, target).remove(rect)
   };

@@ -131,6 +131,21 @@ fn set_sticky(compositor: &mut Compositor, window: WindowId, sticky: bool) {
   assert_eq!(reply, json!({"result": "ok"}));
 }
 
+/// A compositor with a second 800x600 output right of the first.
+fn two_outputs() -> (Compositor, std::path::PathBuf) {
+  let (mut compositor, path) = test_compositor_with(Config::default());
+  compositor
+    .add_output(
+      OutputInfo {
+        name: "HEADLESS-2".into(),
+        ..OutputInfo::default()
+      },
+      (800, 600),
+    )
+    .expect("a second output");
+  (compositor, path)
+}
+
 fn floating(compositor: &Compositor, window: WindowId) -> Option<Rect> {
   compositor
     .core()
@@ -448,34 +463,35 @@ fn layout_views_places_views_on_other_workspaces() {
 }
 
 #[test]
-fn each_output_offsets_by_its_own_size() {
-  let (mut compositor, path) = test_compositor_with(Config::default());
-  compositor
-    .add_output(
-      OutputInfo {
-        name: "HEADLESS-2".into(),
-        ..OutputInfo::default()
-      },
-      (800, 600),
-    )
-    .expect("a second output");
+fn each_output_offsets_by_its_own_size_in_its_own_plane() {
+  let (mut compositor, path) = two_outputs();
   let mut client = TestClient::connect(&mut compositor, &path);
   let window = mapped(&mut compositor, &mut client, "second");
+  // The second output's plane starts at its corner, 1280,0 in the
+  // layout (wayfire:src/output/workspace-impl.cpp:198-202).
   let reply = ipc(
     &mut compositor,
     "window-rules/configure-view",
     json!({
       "id": window.0,
       "output-id": 2,
-      "geometry": {"x": 1300, "y": 20, "width": 200, "height": 100},
+      "geometry": {"x": 300, "y": 20, "width": 200, "height": 100},
     }),
   );
   assert_eq!(reply, json!({"result": "ok"}));
   assert_eq!(workspace_of(&compositor, window), WorkspaceId::ORIGIN);
+  assert_eq!(
+    floating(&compositor, window),
+    Some(Rect::new(1580, 20, 200, 100))
+  );
+  assert_eq!(
+    geometry_of(&mut compositor, window),
+    Rect::new(300, 20, 200, 100)
+  );
   send_view(&mut compositor, window, 1, 0);
   assert_eq!(
     geometry_of(&mut compositor, window),
-    Rect::new(2100, 20, 200, 100)
+    Rect::new(1100, 20, 200, 100)
   );
   // Switching the first output's workspace leaves it alone.
   ipc_events(&mut compositor);
@@ -487,20 +503,78 @@ fn each_output_offsets_by_its_own_size() {
   assert_eq!(geometry_changes(&events, window).len(), 1, "{events:?}");
   assert_eq!(
     geometry_of(&mut compositor, window),
-    Rect::new(1300, 20, 200, 100)
+    Rect::new(300, 20, 200, 100)
   );
-  // A rectangle beyond the second output's right edge, in its own
-  // terms, is its next workspace.
+  // A rectangle past the second output's right edge in its plane is its
+  // next workspace.
   configure(
     &mut compositor,
     window,
-    json!({"x": 2110, "y": 20, "width": 200, "height": 100}),
+    json!({"x": 1110, "y": 20, "width": 200, "height": 100}),
   );
   assert_eq!(workspace_of(&compositor, window), WorkspaceId::new(2, 0));
   assert_eq!(
     floating(&compositor, window),
-    Some(Rect::new(1310, 20, 200, 100))
+    Some(Rect::new(1590, 20, 200, 100))
   );
+  // Left of its corner is its previous workspaces, not the first output.
+  configure(
+    &mut compositor,
+    window,
+    json!({"x": -1290, "y": 20, "width": 200, "height": 100}),
+  );
+  assert_eq!(workspace_of(&compositor, window), WorkspaceId::ORIGIN);
+  assert_eq!(
+    floating(&compositor, window),
+    Some(Rect::new(790, 20, 200, 100))
+  );
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_sticky_view_on_the_second_output_is_in_its_plane() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let window = mapped(&mut compositor, &mut client, "pinned");
+  let reply = ipc(
+    &mut compositor,
+    "window-rules/configure-view",
+    json!({
+      "id": window.0,
+      "output-id": 2,
+      "geometry": {"x": 40, "y": 30, "width": 200, "height": 100},
+    }),
+  );
+  assert_eq!(reply, json!({"result": "ok"}));
+  set_sticky(&mut compositor, window, true);
+  switch(&mut compositor, 2, 2, 0);
+  assert_eq!(
+    geometry_of(&mut compositor, window),
+    Rect::new(40, 30, 200, 100)
+  );
+  configure(
+    &mut compositor,
+    window,
+    json!({"x": 50, "y": 30, "width": 200, "height": 100}),
+  );
+  assert_eq!(
+    floating(&compositor, window),
+    Some(Rect::new(1330, 30, 200, 100))
+  );
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn an_output_workarea_is_in_its_own_plane() {
+  let (mut compositor, path) = two_outputs();
+  let outputs = ipc(&mut compositor, "window-rules/list-outputs", json!({}));
+  let second = outputs
+    .as_array()
+    .and_then(|outputs| outputs.iter().find(|output| output["id"] == 2))
+    .expect("the second output")
+    .clone();
+  assert_eq!(rect(&second["geometry"]), Rect::new(1280, 0, 800, 600));
+  assert_eq!(rect(&second["workarea"]), Rect::new(0, 0, 800, 600));
   let _ = std::fs::remove_file(path);
 }
 
@@ -558,5 +632,37 @@ fn unsticking_a_tiled_view_keeps_its_tile_on_its_workspace() {
   );
   let events = ipc_events(&mut compositor);
   assert!(!moved_events(&events), "{events:?}");
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_view_carried_by_its_moving_output_reports_no_change() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let window = mapped(&mut compositor, &mut client, "carried");
+  let reply = ipc(
+    &mut compositor,
+    "window-rules/configure-view",
+    json!({
+      "id": window.0,
+      "output-id": 2,
+      "geometry": {"x": 40, "y": 30, "width": 200, "height": 100},
+    }),
+  );
+  assert_eq!(reply, json!({"result": "ok"}));
+  client.roundtrip(&mut compositor);
+  ipc_events(&mut compositor);
+  // The first output narrows, so the second moves left by 280.
+  let first = compositor.outputs()[0].handle.clone();
+  compositor.set_output_size(&first, (1000, 720)).unwrap();
+  client.roundtrip(&mut compositor);
+  let layout = floating(&compositor, window).expect("floating");
+  let events = ipc_events(&mut compositor);
+  assert_eq!(
+    geometry_of(&mut compositor, window),
+    Rect::new(40, 30, 200, 100),
+    "{layout:?}"
+  );
+  assert!(geometry_changes(&events, window).is_empty(), "{events:?}");
   let _ = std::fs::remove_file(path);
 }

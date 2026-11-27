@@ -288,9 +288,10 @@ fn configure_view_moves_windows_with_wayfires_geometry() {
     "window-rules/view-info",
     json!({"id": full.0}),
   );
+  // In the second output's own plane, as Wayfire's view geometries are.
   assert_eq!(
     view["info"]["geometry"],
-    json!({"x": 1280, "y": 0, "width": 800, "height": 600})
+    json!({"x": 0, "y": 0, "width": 800, "height": 600})
   );
   assert_eq!(view["info"]["output-name"], json!("HEADLESS-2"));
   assert_eq!(view["info"]["fullscreen"], json!(true));
@@ -317,7 +318,7 @@ fn a_geometry_with_an_output_places_the_window_there() {
     json!({
       "id": window.0,
       "output-id": 2,
-      "geometry": {"x": 1300, "y": 20, "width": 200, "height": 100},
+      "geometry": {"x": 20, "y": 20, "width": 200, "height": 100},
     }),
   );
   assert_eq!(reply, json!({"result": "ok"}));
@@ -325,6 +326,7 @@ fn a_geometry_with_an_output_places_the_window_there() {
     output_of(&compositor, window).as_deref(),
     Some("HEADLESS-2")
   );
+  // The geometry is in the output's plane, from its corner at 1280,0.
   assert_eq!(
     compositor
       .core()

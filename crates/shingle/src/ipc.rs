@@ -672,10 +672,17 @@ pub(crate) fn record_events(
         let current = workspace_coords::window_offset(state, *window);
         let reported = state.ipc_offsets.reported(*window).unwrap_or(current);
         state.ipc_offsets.record(*window, current);
+        let old = reported.apply(*old_geometry);
+        let view = event_view(state, *window);
+        // A window carried along by its output's move keeps its place in
+        // the output's plane, so Wayfire reports no change.
+        if reported != current && rect_of(&view["geometry"]) == Some(old) {
+          continue;
+        }
         json!({
             "event": "view-geometry-changed",
-            "old-geometry": geometry(reported.apply(*old_geometry)),
-            "view": event_view(state, *window),
+            "old-geometry": geometry(old),
+            "view": view,
         })
       }
       Event::WindowMoved {
@@ -832,6 +839,15 @@ pub(crate) fn output_json(state: &CompositorState, id: &OutputId) -> Value {
   };
   let workspace = state.core.current_workspace(id).unwrap_or_default();
   let workarea = state.core.output_workarea(id).unwrap_or(output.rect);
+  // The workarea is in the output's own plane, as Wayfire's
+  // (wayfire:src/output/workarea.cpp:20, `get_relative_geometry`); the
+  // geometry is the output's place in the layout.
+  let workarea = Rect::new(
+    workarea.x.saturating_sub(output.rect.x),
+    workarea.y.saturating_sub(output.rect.y),
+    workarea.width,
+    workarea.height,
+  );
   json!({
       "id": output.ipc_id,
       "name": output.info.name,
