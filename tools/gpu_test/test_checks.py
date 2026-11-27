@@ -185,6 +185,7 @@ class PatternTest(unittest.TestCase):
     self.assertEqual(checks.released_buffers(''), set())
 
   def test_every_group_has_a_check(self):
+    import animate_checks
     import app_checks
     import decoration_checks
     import dmabuf_checks
@@ -222,6 +223,8 @@ class PatternTest(unittest.TestCase):
     self.assertEqual(set(launcher_checks.GROUPS),
                      set(launcher_checks.CHECKS))
     self.assertEqual(set(app_checks.GROUPS), set(app_checks.CHECKS))
+    self.assertEqual(set(animate_checks.GROUPS),
+                     set(animate_checks.CHECKS))
     self.assertEqual(
         checks.GROUPS + dmabuf_checks.GROUPS + output_checks.GROUPS
         + nested_output_checks.GROUPS + wayfire_checks.GROUPS
@@ -230,7 +233,7 @@ class PatternTest(unittest.TestCase):
         + focus_checks.GROUPS + drag_icon_checks.GROUPS
         + resize_checks.GROUPS + nested_clipboard_checks.GROUPS
         + screencast_checks.GROUPS + launcher_checks.GROUPS
-        + app_checks.GROUPS,
+        + animate_checks.GROUPS + app_checks.GROUPS,
         checks.run.CHECK_GROUPS)
     # Every DB-4 and DB-5 group runs NVIDIA Vulkan clients but `syncobj`,
     # `resize-nested` runs nested Shingle on NVIDIA, and the swept

@@ -32,7 +32,7 @@ namespaces:
                vswipe|decoration|switcher|colours|minimize-focus|
                drag-icon|resize|resize-nested|nested-scaled|
                nested-clipboard|screencast|image-copy-capture|
-               ext-data-control|launcher|apps|app-NAME ...
+               ext-data-control|launcher|animate|apps|app-NAME ...
 
 For example, DB-1's import test:
 
@@ -102,7 +102,10 @@ into a GBM DMA-BUF shown in a window, and grim with and without `-c`;
 against wl-copy and wl-paste. `--checks launcher` (launcher_checks.py)
 drives shingle-launcher (`--launcher`, the release build by default)
 through STIPC keys and pointer: type-to-launch, the in-place edits,
-persistence and its startup time. `--checks apps` (app_checks.py) is the
+persistence and its startup time. `--checks animate` (animate_checks.py)
+captures every animation of Wayfire's animate, slowed to seconds, half
+way through, and the output's fade-in at start. `--checks apps`
+(app_checks.py) is the
 application compatibility sweep: every installed application, one at a
 time, through a scripted scenario against offscreen Shingle, and
 `app-NAME` runs one of them.
@@ -119,7 +122,7 @@ test_vswipe_checks.py, test_decoration_checks.py,
 test_switcher_checks.py, test_colour_checks.py, test_focus_checks.py,
 test_drag_icon_checks.py, test_resize_checks.py,
 test_nested_clipboard_checks.py, test_screencast_checks.py,
-test_app_checks.py).
+test_app_checks.py, test_animate_checks.py).
 The work directory under `target/` is removed afterwards unless `--keep`
 is given.
 """
@@ -153,8 +156,8 @@ APP_GROUPS = ('apps', 'app-kitty', 'app-konsole', 'app-kate', 'app-dolphin',
 # vswipe_checks.GROUPS, decoration_checks.GROUPS and
 # switcher_checks.GROUPS, colour_checks.GROUPS, focus_checks.GROUPS and
 # drag_icon_checks.GROUPS, resize_checks.GROUPS,
-# nested_clipboard_checks.GROUPS, screencast_checks.GROUPS and
-# launcher_checks.GROUPS, kept here so
+# nested_clipboard_checks.GROUPS, screencast_checks.GROUPS,
+# launcher_checks.GROUPS and animate_checks.GROUPS, kept here so
 # that
 # `--help` works without importing them.
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
@@ -165,7 +168,7 @@ CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'colours', 'minimize-focus', 'drag-icon', 'resize',
                 'resize-nested', 'nested-clipboard', 'screencast',
                 'image-copy-capture', 'ext-data-control',
-                'launcher') + APP_GROUPS
+                'launcher', 'animate') + APP_GROUPS
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset, and nested Shingle's on NVIDIA in `resize-nested`;
 # `syncobj` runs no Vulkan client.
