@@ -32,7 +32,7 @@ namespaces:
                vswipe|decoration|switcher|colours|minimize-focus|
                drag-icon|resize|resize-nested|nested-scaled|
                nested-clipboard|screencast|image-copy-capture|
-               ext-data-control|apps|app-NAME ...
+               ext-data-control|launcher|apps|app-NAME ...
 
 For example, DB-1's import test:
 
@@ -99,7 +99,10 @@ checks ext-image-copy-capture from a raw-protocol client (capture_wire.py):
 output, toplevel and cursor sessions, damage, paint_cursors and a capture
 into a GBM DMA-BUF shown in a window, and grim with and without `-c`;
 `--checks ext-data-control` copies and pastes through ext-data-control
-against wl-copy and wl-paste. `--checks apps` (app_checks.py) is the
+against wl-copy and wl-paste. `--checks launcher` (launcher_checks.py)
+drives shingle-launcher (`--launcher`, the release build by default)
+through STIPC keys and pointer: type-to-launch, the in-place edits,
+persistence and its startup time. `--checks apps` (app_checks.py) is the
 application compatibility sweep: every installed application, one at a
 time, through a scripted scenario against offscreen Shingle, and
 `app-NAME` runs one of them.
@@ -150,7 +153,8 @@ APP_GROUPS = ('apps', 'app-kitty', 'app-konsole', 'app-kate', 'app-dolphin',
 # vswipe_checks.GROUPS, decoration_checks.GROUPS and
 # switcher_checks.GROUPS, colour_checks.GROUPS, focus_checks.GROUPS and
 # drag_icon_checks.GROUPS, resize_checks.GROUPS,
-# nested_clipboard_checks.GROUPS and screencast_checks.GROUPS, kept here so
+# nested_clipboard_checks.GROUPS, screencast_checks.GROUPS and
+# launcher_checks.GROUPS, kept here so
 # that
 # `--help` works without importing them.
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
@@ -160,7 +164,8 @@ CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'wayfire-shell', 'vswipe', 'decoration', 'switcher',
                 'colours', 'minimize-focus', 'drag-icon', 'resize',
                 'resize-nested', 'nested-clipboard', 'screencast',
-                'image-copy-capture', 'ext-data-control') + APP_GROUPS
+                'image-copy-capture', 'ext-data-control',
+                'launcher') + APP_GROUPS
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset, and nested Shingle's on NVIDIA in `resize-nested`;
 # `syncobj` runs no Vulkan client.
@@ -401,6 +406,8 @@ def main():
                       help='run these real-client check groups')
   parser.add_argument('--binary', default='target/debug/shingle')
   parser.add_argument('--wl-probe', default='target/debug/examples/wl_probe')
+  parser.add_argument('--launcher', default='target/release/shingle-launcher',
+                      help='the shingle-launcher the launcher group runs')
   parser.add_argument('--captures', metavar='DIR',
                       help='save settled captures here')
   parser.add_argument(INNER_FLAG, metavar='WORK')
@@ -445,6 +452,7 @@ def main():
         arguments += ['--captures', checks['captures']]
     environment = dict(os.environ)
     environment['SHINGLE_GPU_TEST_UID'] = str(os.getuid())
+    environment['SHINGLE_LAUNCHER_BINARY'] = os.path.abspath(options.launcher)
     return subprocess.run(namespace + arguments + ['--'] + command,
                           env=environment).returncode
   finally:
