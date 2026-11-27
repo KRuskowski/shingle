@@ -1325,7 +1325,7 @@ pub(crate) fn touch_down(state: &mut CompositorState, id: i32, x: f64, y: f64) {
   else {
     return;
   };
-  let Some(geometry) = shell::surface_geometry(state, &object) else {
+  let Some(geometry) = shell::surface_rect(state, &object) else {
     return;
   };
   let local_x = x - f64::from(geometry.x);
@@ -1359,7 +1359,7 @@ pub(crate) fn touch_motion(
   if id == 0 {
     crate::wayfire_shell::input_moved(state, x, y);
   }
-  let Some(geometry) = shell::surface_geometry(state, &object) else {
+  let Some(geometry) = shell::surface_rect(state, &object) else {
     return;
   };
   let local_x = x - f64::from(geometry.x);
@@ -1770,11 +1770,11 @@ fn contains(rect: Rect, x: f64, y: f64) -> bool {
     && y < f64::from(rect.y) + f64::from(rect.height)
 }
 
-fn local_position(
+pub(crate) fn local_position(
   state: &CompositorState,
   object: &ObjectId,
 ) -> Option<(f64, f64)> {
-  let geometry = shell::surface_geometry(state, object)?;
+  let geometry = shell::surface_rect(state, object)?;
   Some((
     state.input.pointer_x - f64::from(geometry.x),
     state.input.pointer_y - f64::from(geometry.y),

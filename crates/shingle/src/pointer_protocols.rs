@@ -239,7 +239,7 @@ fn destroy(state: &mut CompositorState, id: &ObjectId) {
   if constraint.active
     && let Some((x, y)) = constraint.cursor_hint
     && let Some(geometry) =
-      crate::shell::surface_geometry(state, &constraint.surface)
+      crate::shell::surface_rect(state, &constraint.surface)
   {
     crate::input::pointer_warp(
       state,
@@ -292,7 +292,7 @@ fn region_rects(state: &CompositorState, constraint: &Constraint) -> Vec<Rect> {
       .collect(),
     (Some(requested), None) => requested,
     (None, Some(input)) => input.clone(),
-    (None, None) => crate::shell::surface_geometry(state, &constraint.surface)
+    (None, None) => crate::shell::surface_rect(state, &constraint.surface)
       .map(|geometry| vec![Rect::new(0, 0, geometry.width, geometry.height)])
       .unwrap_or_default(),
   }
@@ -319,7 +319,7 @@ fn closest_point(
   x: f64,
   y: f64,
 ) -> Option<(f64, f64)> {
-  let geometry = crate::shell::surface_geometry(state, &constraint.surface)?;
+  let geometry = crate::shell::surface_rect(state, &constraint.surface)?;
   let local_x = x - f64::from(geometry.x);
   let local_y = y - f64::from(geometry.y);
   region_rects(state, constraint)

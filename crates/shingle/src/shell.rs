@@ -444,7 +444,7 @@ pub(crate) fn surface_geometry(
     Role::Subsurface {
       parent, relative, ..
     } => {
-      let parent = surface_geometry(state, parent)?;
+      let parent = surface_rect(state, parent)?;
       let (width, height) = crate::viewport::dimensions(state, object)
         .unwrap_or_else(|| logical_buffer_dimensions(surface));
       Some(Rect::new(
@@ -485,6 +485,73 @@ pub(crate) fn surface_geometry(
       Some(Rect::new(0, 0, width, height))
     }
   }
+}
+
+/// Where surface `object` is drawn and takes input, in layout
+/// coordinates: [`surface_geometry`], except that an xdg surface with a
+/// window geometry (`xdg_surface.set_window_geometry`) has that part of
+/// it at its geometry and the rest, such as client-side shadows, around
+/// it, as wlroots places an xdg surface by its geometry. A toplevel drawn
+/// at another size than its window geometry is scaled as a whole, as
+/// Shingle scales a toplevel's buffer into its view; a subsurface is
+/// placed relative to its parent's drawn rectangle.
+pub(crate) fn surface_rect(
+  state: &CompositorState,
+  object: &ObjectId,
+) -> Option<Rect> {
+  let surface = state.surfaces.get(object)?;
+  match &surface.role {
+    Role::Xdg { .. } => {
+      let content = surface_geometry(state, object)?;
+      let Some(window) = surface.window_geometry else {
+        return Some(content);
+      };
+      let (width, height) = crate::viewport::dimensions(state, object)
+        .unwrap_or_else(|| logical_buffer_dimensions(surface));
+      Some(around_window_geometry(content, window, (width, height)))
+    }
+    Role::Subsurface {
+      parent, relative, ..
+    } => {
+      let parent = surface_rect(state, parent)?;
+      let (width, height) = crate::viewport::dimensions(state, object)
+        .unwrap_or_else(|| logical_buffer_dimensions(surface));
+      Some(Rect::new(
+        parent.x.saturating_add(relative.0),
+        parent.y.saturating_add(relative.1),
+        width,
+        height,
+      ))
+    }
+    _ => surface_geometry(state, object),
+  }
+}
+
+/// The rectangle of a whole `size` surface whose `window` part (in
+/// surface coordinates) is shown at `content`, scaled by `content`'s size
+/// over `window`'s.
+pub(crate) fn around_window_geometry(
+  content: Rect,
+  window: Rect,
+  size: (u32, u32),
+) -> Rect {
+  if window.width == 0 || window.height == 0 || size.0 == 0 || size.1 == 0 {
+    return content;
+  }
+  let scale_x = f64::from(content.width) / f64::from(window.width);
+  let scale_y = f64::from(content.height) / f64::from(window.height);
+  let to_i32 = |value: f64| value.round().clamp(-1e9, 1e9) as i32;
+  let to_u32 = |value: f64| value.round().clamp(1.0, 1e9) as u32;
+  Rect::new(
+    content
+      .x
+      .saturating_sub(to_i32(f64::from(window.x) * scale_x)),
+    content
+      .y
+      .saturating_sub(to_i32(f64::from(window.y) * scale_y)),
+    to_u32(f64::from(size.0) * scale_x),
+    to_u32(f64::from(size.1) * scale_y),
+  )
 }
 
 pub(crate) fn logical_buffer_dimensions(surface: &Surface) -> (u32, u32) {
@@ -2566,7 +2633,24 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
           serials.insert(serial);
         }
       }
-      xdg_surface::Request::SetWindowGeometry { .. } => {}
+      xdg_surface::Request::SetWindowGeometry {
+        x,
+        y,
+        width,
+        height,
+      } => {
+        if width <= 0 || height <= 0 {
+          resource.post_error(
+            xdg_surface::Error::InvalidSize,
+            "window geometry must have a positive size",
+          );
+          return;
+        }
+        if let Some(surface) = state.surfaces.get_mut(&object) {
+          surface.pending.window_geometry =
+            Some(Rect::new(x, y, width as u32, height as u32));
+        }
+      }
       xdg_surface::Request::AckConfigure { serial } => {
         if let Some(surface) = state.surfaces.get_mut(&object)
           && let Role::Xdg {
@@ -3644,6 +3728,163 @@ mod tests {
     assert_eq!(layout_tiles(&mut compositor.state).len(), 1);
     let floating = floating_of(&compositor.state, "late").unwrap();
     assert_eq!((floating.width, floating.height), (300, 200));
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn a_window_geometry_places_the_surface_around_the_view() {
+    use super::around_window_geometry;
+    // GTK's 45-pixel shadows around a 1232x672 tile.
+    assert_eq!(
+      around_window_geometry(
+        Rect::new(24, 24, 1232, 672),
+        Rect::new(45, 45, 1232, 672),
+        (1322, 762),
+      ),
+      Rect::new(-21, -21, 1322, 762)
+    );
+    // A client still at its old size is scaled as a whole.
+    assert_eq!(
+      around_window_geometry(
+        Rect::new(0, 0, 200, 100),
+        Rect::new(10, 10, 100, 50),
+        (120, 70),
+      ),
+      Rect::new(-20, -20, 240, 140)
+    );
+    assert_eq!(
+      around_window_geometry(
+        Rect::new(5, 5, 10, 10),
+        Rect::new(0, 0, 0, 0),
+        (10, 10)
+      ),
+      Rect::new(5, 5, 10, 10)
+    );
+  }
+
+  #[test]
+  fn a_toplevels_window_geometry_applies_on_commit() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let view = client.toplevel(&mut compositor, "shadowed");
+    let (width, height) = client
+      .events
+      .last_configure(&view.toplevel)
+      .expect("an initial configure");
+    // The client draws its configured size plus 20-pixel shadows, as GTK
+    // does, and names the part inside them its window geometry.
+    view._xdg_surface.set_window_geometry(20, 20, width, height);
+    client.attach_buffer(
+      &mut compositor,
+      &view.surface,
+      width + 40,
+      height + 40,
+    );
+    let window = windows_with(&compositor.state, "shadowed")[0];
+    let object = compositor
+      .state
+      .surfaces
+      .iter()
+      .find_map(|(object, surface)| {
+        surface
+          .role
+          .toplevel()
+          .is_some_and(|toplevel| toplevel.window() == Some(window))
+          .then(|| object.clone())
+      })
+      .unwrap();
+    let content = super::surface_geometry(&compositor.state, &object).unwrap();
+    assert_eq!(
+      (content.width as i32, content.height as i32),
+      (width, height)
+    );
+    let drawn = compositor.state.snapshot(&object).unwrap().geometry;
+    assert_eq!(
+      drawn,
+      Rect::new(
+        content.x - 20,
+        content.y - 20,
+        content.width + 40,
+        content.height + 40
+      )
+    );
+    // Pending until the next commit.
+    view
+      ._xdg_surface
+      .set_window_geometry(0, 0, width + 40, height + 40);
+    client.roundtrip(&mut compositor);
+    assert_eq!(compositor.state.snapshot(&object).unwrap().geometry, drawn);
+    view.surface.commit();
+    client.roundtrip(&mut compositor);
+    let whole = compositor.state.snapshot(&object).unwrap().geometry;
+    assert_eq!((whole.x, whole.y), (content.x, content.y));
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn the_pointer_enters_a_shadowed_toplevel_at_its_content() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let view = client.toplevel(&mut compositor, "shadowed");
+    let (width, height) = client
+      .events
+      .last_configure(&view.toplevel)
+      .expect("an initial configure");
+    view._xdg_surface.set_window_geometry(20, 20, width, height);
+    client.attach_buffer(
+      &mut compositor,
+      &view.surface,
+      width + 40,
+      height + 40,
+    );
+    let object = compositor
+      .state
+      .surfaces
+      .iter()
+      .find_map(|(object, surface)| {
+        (surface.role.toplevel().is_some()).then(|| object.clone())
+      })
+      .unwrap();
+    // As GTK does, an input region that leaves out most of the shadow,
+    // set while the pointer is in the shadow.
+    crate::input::pointer_motion(&mut compositor.state, 0.0, 0.0);
+    let wl_compositor =
+      client.bind::<wayland_client::protocol::wl_compositor::WlCompositor>(4);
+    let region = wl_compositor.create_region(&client.handle, ());
+    region.add(10, 10, width + 20, height + 20);
+    view.surface.set_input_region(Some(&region));
+    // The region is copied when it is set: GTK destroys it before the
+    // commit, which once left the window with an empty input region.
+    region.destroy();
+    view.surface.commit();
+    client.roundtrip(&mut compositor);
+    let content = super::surface_geometry(&compositor.state, &object).unwrap();
+    let centre = (
+      f64::from(content.x) + f64::from(content.width) / 2.0,
+      f64::from(content.y) + f64::from(content.height) / 2.0,
+    );
+    crate::input::pointer_motion(&mut compositor.state, centre.0, centre.1);
+    assert_eq!(compositor.state.input.pointer_focus, Some(object.clone()));
+    // Surface-local: the content starts 20 pixels into the surface.
+    let local = crate::input::local_position(&compositor.state, &object);
+    assert_eq!(
+      local,
+      Some((
+        f64::from(width) / 2.0 + 20.0,
+        f64::from(height) / 2.0 + 20.0
+      ))
+    );
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn an_empty_window_geometry_is_a_protocol_error() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let view = client.toplevel(&mut compositor, "bad");
+    view._xdg_surface.set_window_geometry(0, 0, 0, 10);
+    let error = client.protocol_error(&mut compositor).expect("an error");
+    assert_eq!(error.code, 5);
     let _ = std::fs::remove_file(path);
   }
 

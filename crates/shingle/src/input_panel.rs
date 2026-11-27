@@ -160,7 +160,7 @@ fn overlay_geometry(
   height: u32,
 ) -> Option<Rect> {
   let cursor = active.cursor_rectangle?;
-  let parent = shell::surface_geometry(state, &active.surface)?;
+  let parent = shell::surface_rect(state, &active.surface)?;
   let cursor_x =
     i64::from(parent.x) + i64::from(cursor.x) + i64::from(cursor.width) / 2;
   let cursor_top = i64::from(parent.y) + i64::from(cursor.y);

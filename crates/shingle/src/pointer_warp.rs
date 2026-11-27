@@ -58,7 +58,7 @@ impl Dispatch<WpPointerWarpV1, ()> for CompositorState {
       if !valid {
         return;
       }
-      let Some(geometry) = shell::surface_geometry(state, &object) else {
+      let Some(geometry) = shell::surface_rect(state, &object) else {
         return;
       };
       if x < 0.0

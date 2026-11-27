@@ -97,6 +97,8 @@ pub(crate) struct PendingSurface {
   /// The input region set for this update, copied from its `wl_region`
   /// when it was set; `Some(None)` is infinite.
   pub(crate) input_region: Option<Option<Vec<Rect>>>,
+  /// `xdg_surface.set_window_geometry` for this update.
+  pub(crate) window_geometry: Option<Rect>,
   /// `wp_fifo_v1.set_barrier` for this update.
   pub(crate) fifo_set_barrier: bool,
   /// `wp_fifo_v1.wait_barrier` for this update.
@@ -122,6 +124,7 @@ impl Default for PendingSurface {
       alpha: None,
       tearing: None,
       input_region: None,
+      window_geometry: None,
       fifo_set_barrier: false,
       fifo_wait_barrier: false,
       timestamp: None,
@@ -142,6 +145,9 @@ pub(crate) struct Surface {
   pub(crate) alpha: u32,
   pub(crate) tearing: bool,
   pub(crate) input_region: Option<Vec<Rect>>,
+  /// The xdg surface's window geometry in surface coordinates, from
+  /// `xdg_surface.set_window_geometry`; `None` for the whole surface.
+  pub(crate) window_geometry: Option<Rect>,
 }
 
 pub(crate) struct CompositorState {
@@ -1341,7 +1347,7 @@ impl CompositorState {
     let surface = self.surfaces.get(object)?;
     let (role, window, parent, app_id, title) =
       shell::snapshot_metadata(self, surface);
-    let geometry = shell::surface_geometry(self, object)?;
+    let geometry = shell::surface_rect(self, object)?;
     Some(SurfaceSnapshot {
       id: surface.id,
       window,
@@ -1680,6 +1686,7 @@ impl CompositorState {
         alpha: u32::MAX,
         tearing: false,
         input_region: None,
+        window_geometry: None,
       },
     );
   }
@@ -1784,6 +1791,9 @@ impl CompositorState {
     }
     if let Some(tearing) = surface.pending.tearing.take() {
       surface.tearing = tearing;
+    }
+    if let Some(geometry) = surface.pending.window_geometry.take() {
+      surface.window_geometry = Some(geometry);
     }
     let scale = surface.pending.scale;
     // Cursor images keep their pixels, which a native backend copies into
@@ -1946,6 +1956,9 @@ pub(crate) fn merge_pending(
   }
   if pending.input_region.is_some() {
     cached.input_region = pending.input_region.take();
+  }
+  if pending.window_geometry.is_some() {
+    cached.window_geometry = pending.window_geometry.take();
   }
   cached.fifo_set_barrier |= std::mem::take(&mut pending.fifo_set_barrier);
   cached.fifo_wait_barrier |= std::mem::take(&mut pending.fifo_wait_barrier);
