@@ -256,6 +256,14 @@ Shingle advertises `ext-workspace-v1` for workspace bars and switchers. Clients 
 
 `ext-foreign-toplevel-list-v1` provides read-only window handles with stable per-map identifiers, titles, app IDs, metadata updates, and close events. Each client receives its own handles for the same windows. Window control remains available through the existing WLR foreign-toplevel protocol.
 
+### Screen capture and sharing
+
+Screenshot tools, screen recorders and the screen-sharing portal capture outputs through `zwlr_screencopy_manager_v1` (version 3), as `grim` and xdg-desktop-portal-wlr 0.7 do, or through `ext_image_copy_capture_manager_v1` with `ext_output_image_capture_source_manager_v1`, as newer xdg-desktop-portal-wlr, grim and OBS do; both are what Wayfire offers. A capture shows the output as it is drawn, with inversion, zoom, Scale, Expo and animations, and the cursor only when the client asks for it (`grim -c`, the portal's embedded cursor mode, `paint_cursors`). Streams are paced by what changes: a portal stream sends no frames while the screen stands still. Captures go into shared memory or straight into the client's DMA-BUFs on the GPU. As Shingle's own addition, `ext_foreign_toplevel_image_capture_source_manager_v1` captures one window alone, from its ext-foreign-toplevel-list handle, and cursor sessions report the pointer's position and image. The design and what is checked are in [design/screen-sharing.md](design/screen-sharing.md).
+
+### Clipboard managers
+
+Clipboard managers read and set the clipboard and the primary selection through `ext_data_control_manager_v1`, which newer ones prefer, or `zwlr_data_control_manager_v1`, as with Wayfire; a selection set through either is offered through both.
+
 ### Primary selection
 
 `behavior.disable_primary_selection` matches Wayfire's workaround for disabling middle-click copy and paste. When enabled at startup, Shingle does not advertise `zwp_primary_selection_device_manager_v1` and does not bridge `PRIMARY` with X clients; wlr-data-control clients keep their own primary selection, as under Wayfire. Changing the option requires a compositor restart so existing clients and new clients see the same protocol availability. The option can be imported and edited through WCM.

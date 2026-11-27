@@ -81,11 +81,15 @@
 | What a start does (print, fail or run a backend) | `crates/shingle-bin/src/main.rs` |
 | Headless backend | `crates/shingle-bin/src/headless.rs` |
 | Offscreen backend: the frontend on the GPU without a display, a target and frame pacing per output, presentation | `crates/shingle-bin/src/offscreen.rs` |
-| Screencopy: an output's region in its physical pixels (`CaptureGeometry`), CPU composite, or frame capture answered by the frontend (`set_frame_capture`, `finish_capture`) | `crates/shingle/src/screencopy.rs`; the frontend's capture draw in `crates/shingle-frontend/src/frontend/scene.rs` (`answer_captures`), `shingle_render::capture_frame` in `crates/shingle-render/src/target.rs` |
+| Captures shared by both screencopy protocols: a source's region in its physical pixels (`CaptureGeometry`), damage trackers, CPU composite, or frame capture answered by the frontend (`set_frame_capture`, `output_damaged`, `finish_capture`, `finish_capture_into`) | `crates/shingle/src/capture.rs`; the frontend's capture draw in `crates/shingle-frontend/src/frontend/scene.rs` (`answer_captures`, `answer_window_captures`), `shingle_render::capture_frame` and `capture_into_dmabuf` in `crates/shingle-render/src/target.rs` |
+| wlr-screencopy: frames, `overlay_cursor`, `copy_with_damage`, `linux_dmabuf` | `crates/shingle/src/screencopy.rs` |
+| ext-image-capture-source and ext-image-copy-capture: output and toplevel sources, sessions, frames, cursor sessions | `crates/shingle/src/image_copy_capture.rs`; tests in `image_copy_capture/tests.rs` |
+| wlr-data-control and ext-data-control | `crates/shingle/src/data_control.rs` |
 | GPU namespace and DB-2's, DB-3's and DB-6's real-client checks (offscreen, nested, baseline, buffers, shm) | `tools/gpu_test/run.py`, `tools/gpu_test/checks.py`; the probe `crates/shingle/examples/wl_probe.rs` |
 | DB-4's and DB-5's real-client checks (dmabuf, browsers, xwayland, nested-gpu, nodmabuf, weston, syncobj, nosyncobj) | `tools/gpu_test/dmabuf_checks.py`; the stall probe `crates/shingle/examples/syncobj_probe.rs` |
 | MO-5's and MO-6's real-client checks (outputs; nested-outputs, nested-smoke) | `tools/gpu_test/output_checks.py`, `tools/gpu_test/nested_output_checks.py` |
 | Real-client checks of the nested host clipboard (nested-clipboard) | `tools/gpu_test/nested_clipboard_checks.py` |
+| Real-client checks of screen sharing through the portal and of the ext capture and data-control protocols (screencast, image-copy-capture, ext-data-control) | `tools/gpu_test/screencast_checks.py`, the portal client `tools/gpu_test/portal_client.py`, the raw-protocol client `tools/gpu_test/capture_wire.py`, `tools/gpu_test/fetch_screencast_deps.py` |
 | winit host: windows, input translation, button emulation | `crates/shingle-nested/src/lib.rs` |
 | Which nested window shows which output, window titles and sizes, keyboard focus across windows | `crates/shingle-nested/src/windows.rs` |
 | Clipboard and primary selection shared with the host session: the bridge and its loop prevention, the host's data-control connection | `crates/shingle-nested/src/clipboard.rs`, `crates/shingle-nested/src/clipboard/host.rs`; host sources in `crates/shingle/src/host_selection.rs` |

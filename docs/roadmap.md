@@ -109,6 +109,8 @@ A WCM-written `wayfire.ini` loads since WG-1, and since WG-2 it behaves like tha
 
 All seven workspaces of the survey are done, and since WG-8 to WG-10 two items of its [Later](design/wayfire-gaps.md#later) list and the drag icon XW-6 noted; the rest of the list is not planned in detail yet.
 
+Since `shingle-screen-sharing` the screen-sharing portal works: xdg-desktop-portal-wlr shares an output through PipeWire with shm or DMA-BUF buffers, paced by damage and with either cursor mode, and Shingle has Wayfire's ext-image-copy-capture with output sources, toplevel sources of its own and ext-data-control ([status.md](status.md#screen-sharing-and-capture), [design/screen-sharing.md](design/screen-sharing.md)).
+
 Since `shingle-colour-and-focus-fixes` every configured colour shows the bytes Wayfire writes for it, and the gamma LUT no longer darkens dark tones; WG-7's belief that Wayfire records the view refocused after a minimize as recently focused turned out wrong, and Shingle already matched Wayfire there ([Colour and focus fixes as built](design/wayfire-gaps.md#colour-and-focus-fixes-as-built)).
 
 ## 7. Soak tests and measurements
