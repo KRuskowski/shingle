@@ -151,29 +151,40 @@ impl Frontend {
         .core()
         .window_info(window)
         .is_ok_and(|info| info.state.floating.is_some());
-      // simple-tile takes a tiled window's drag and always moves one edge
-      // per axis, that of the half the pointer is in
-      // (wayfire:plugins/tile/tree-controller.cpp:161-184); the corner
-      // threshold is the resize plugin's, for floating windows
-      // (wayfire:plugins/single_plugins/resize.cpp:178-200).
-      let threshold = if floating {
-        self.resize.corner_threshold
+      let (horizontal, vertical) = if floating {
+        // The resize plugin's corner threshold
+        // (wayfire:plugins/single_plugins/resize.cpp:178-200).
+        let threshold = self.resize.corner_threshold;
+        let horizontal = if local_x < geometry.width as f64 * threshold {
+          Some(Direction::Left)
+        } else if local_x >= geometry.width as f64 * (1.0 - threshold) {
+          Some(Direction::Right)
+        } else {
+          None
+        };
+        let vertical = if local_y < geometry.height as f64 * threshold {
+          Some(Direction::Up)
+        } else if local_y >= geometry.height as f64 * (1.0 - threshold) {
+          Some(Direction::Down)
+        } else {
+          None
+        };
+        (horizontal, vertical)
       } else {
-        0.5
-      };
-      let horizontal = if local_x < geometry.width as f64 * threshold {
-        Some(Direction::Left)
-      } else if local_x >= geometry.width as f64 * (1.0 - threshold) {
-        Some(Direction::Right)
-      } else {
-        None
-      };
-      let vertical = if local_y < geometry.height as f64 * threshold {
-        Some(Direction::Up)
-      } else if local_y >= geometry.height as f64 * (1.0 - threshold) {
-        Some(Direction::Down)
-      } else {
-        None
+        // simple-tile takes a tiled window's drag and always moves one edge
+        // per axis, that of the half the pointer is in, halved in integers
+        // (wayfire:plugins/tile/tree-controller.cpp:161-184).
+        let horizontal = if local_x < f64::from(geometry.width / 2) {
+          Direction::Left
+        } else {
+          Direction::Right
+        };
+        let vertical = if local_y < f64::from(geometry.height / 2) {
+          Direction::Up
+        } else {
+          Direction::Down
+        };
+        (Some(horizontal), Some(vertical))
       };
       self.drag = Some(DragState::Resize {
         window,
