@@ -136,6 +136,11 @@ STRIPPED_VARIABLES = ('WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'DISPLAY',
 # What the private /dev may also hold besides the bound nodes.
 PRIVATE_ENTRIES = ('pts', 'ptmx', 'shm', 'fd', 'stdin', 'stdout', 'stderr')
 SAMPLE_INTERVAL = 0.05
+# app_checks.GROUPS: the application sweep, all of it or one app.
+APP_GROUPS = ('apps', 'app-kitty', 'app-konsole', 'app-kate', 'app-dolphin',
+              'app-okular', 'app-evince', 'app-mpv', 'app-vlc', 'app-gimp',
+              'app-inkscape', 'app-libreoffice', 'app-firefox',
+              'app-chromium', 'app-google-chrome', 'app-rofi', 'app-dunst')
 # checks.GROUPS, dmabuf_checks.GROUPS, output_checks.GROUPS,
 # nested_output_checks.GROUPS, wayfire_checks.GROUPS,
 # vswipe_checks.GROUPS, decoration_checks.GROUPS and
@@ -151,12 +156,12 @@ CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'wayfire-shell', 'vswipe', 'decoration', 'switcher',
                 'colours', 'minimize-focus', 'drag-icon', 'resize',
                 'resize-nested', 'nested-clipboard', 'screencast',
-                'image-copy-capture', 'ext-data-control')
+                'image-copy-capture', 'ext-data-control') + APP_GROUPS
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset, and nested Shingle's on NVIDIA in `resize-nested`;
 # `syncobj` runs no Vulkan client.
 MODESET_GROUPS = ('dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
-                  'weston', 'nosyncobj', 'resize-nested')
+                  'weston', 'nosyncobj', 'resize-nested') + APP_GROUPS
 
 def allowed_devices(modeset):
   """The device nodes, relative to /dev, that the namespace exposes."""

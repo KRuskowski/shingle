@@ -762,6 +762,7 @@ def all_checks():
   resizes with kitty (resize_checks.py), and the Wayfire
   comparisons of configured colours (colour_checks.py) and of focus
   after a minimize (focus_checks.py)."""
+  import app_checks
   import colour_checks
   import decoration_checks
   import drag_icon_checks
@@ -781,7 +782,7 @@ def all_checks():
           **switcher_checks.CHECKS, **colour_checks.CHECKS,
           **focus_checks.CHECKS, **drag_icon_checks.CHECKS,
           **resize_checks.CHECKS, **nested_clipboard_checks.CHECKS,
-          **screencast_checks.CHECKS}
+          **screencast_checks.CHECKS, **app_checks.CHECKS}
 
 def run_checks(groups, binary, wl_probe, captures_directory=None):
   """Runs the check `groups` in order; returns 0 when all passed."""
