@@ -31,7 +31,8 @@ pub struct Raster {
 }
 
 impl Raster {
-  fn new(width: u32, height: u32) -> Self {
+  /// A transparent image of `width` by `height`, at least 1 by 1.
+  pub fn new(width: u32, height: u32) -> Self {
     Self {
       width: width.max(1),
       height: height.max(1),
@@ -40,7 +41,7 @@ impl Raster {
   }
 
   /// Blends `color` with `coverage` (0 to 1) over the pixel at (x, y).
-  fn blend(&mut self, x: i32, y: i32, color: LockColor, coverage: f32) {
+  pub fn blend(&mut self, x: i32, y: i32, color: LockColor, coverage: f32) {
     if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
       return;
     }
@@ -362,7 +363,7 @@ fn fraction(elapsed: Duration, of: Duration) -> f32 {
 /// The signed distance from (x, y) to a rounded rectangle centred at
 /// (cx, cy) with half extents (hw, hh) and corner `radius`; negative
 /// inside.
-fn rounded_rect_distance(
+pub fn rounded_rect_distance(
   (x, y): (f32, f32),
   (cx, cy): (f32, f32),
   (hw, hh): (f32, f32),
@@ -822,7 +823,13 @@ mod tests {
     assert_eq!(x, 350);
     assert!(y > layout.clock_top + layout.text_sizes.0 as i32);
     assert_eq!(layout.border(&options), 5.0);
-    let without = Layout::new((1000, 800), &LockOptions::default());
+    let without = Layout::new(
+      (1000, 800),
+      &LockOptions {
+        clock: false,
+        ..LockOptions::default()
+      },
+    );
     assert_eq!(without.input.1, (800 - 50) / 2);
     // A narrow output keeps a margin.
     assert_eq!(Layout::new((200, 400), &options).input.2, 168);

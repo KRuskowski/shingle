@@ -56,7 +56,8 @@ struct Background {
   vignette: vec4<f32>,
   // The background colour.
   color: vec4<f32>,
-  // The shimmer's phase, and the image's cover scale in yz.
+  // The shimmer's phase, the image's cover scale in yz and its
+  // brightness in w.
   shimmer: vec4<f32>,
 };
 
@@ -70,7 +71,8 @@ fn fs_background(in: VsOut) -> @location(0) vec4<f32> {
   if (background.transform.w > 0.5) {
     let uv = (in.uv - vec2<f32>(0.5)) * background.shimmer.yz
       / background.transform.z + vec2<f32>(0.5) + background.transform.xy;
-    rgb = textureSampleLevel(image, image_sampler, uv, 0.0).rgb;
+    rgb = textureSampleLevel(image, image_sampler, uv, 0.0).rgb
+      * background.shimmer.w;
   }
   if (background.vignette.z > 0.5) {
     // swaylock-effects' effect_vignette.

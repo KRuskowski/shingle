@@ -111,11 +111,15 @@ pub fn capture_outputs(
     match globals.bind::<ZwlrScreencopyManagerV1, _, _>(&qh, 1..=3, ()) {
       Ok(manager) => manager,
       Err(error) => {
-        eprintln!("shingle-lock: no screenshot, no wlr-screencopy: {error}");
+        eprintln!(
+          "shingle-lock: warning: no screenshot, the compositor has no \
+           wlr-screencopy: {error}"
+        );
         return HashMap::new();
       }
     };
   let Ok(shm) = globals.bind::<wl_shm::WlShm, _, _>(&qh, 1..=1, ()) else {
+    eprintln!("shingle-lock: warning: no screenshot, no wl_shm");
     return HashMap::new();
   };
   let mut capturer = Capturer {
@@ -191,6 +195,19 @@ pub fn capture_outputs(
       pending.frame.destroy();
       if let Some((_, buffer)) = &pending.memory {
         buffer.destroy();
+      }
+      let name = names.get(&global).map_or("unnamed", String::as_str);
+      match &pending.done {
+        None => eprintln!(
+          "shingle-lock: warning: output {global} ({name}) was not captured \
+           within {} ms",
+          timeout.as_millis()
+        ),
+        Some(None) => eprintln!(
+          "shingle-lock: warning: the capture of output {global} ({name}) \
+           failed"
+        ),
+        Some(Some(_)) => {}
       }
       let mut shot = pending.done.flatten()?;
       shot.name = names.get(&global).cloned();

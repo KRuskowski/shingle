@@ -2,19 +2,25 @@
 //! that takes swaylock's and swaylock-effects' options and unlocks with
 //! PAM through `shingle-auth` (docs/design/lock-screen.md).
 //!
-//! With `screenshot` it captures every output before it asks for the
-//! lock, while the GPU opens, blurs the captures once on the GPU and
-//! shows them, slowly drifting, under a vignette and the clock; an output
-//! added later shows the capture of another. Typing fades in an outlined
-//! password input, with the keyboard layout and Caps Lock as small labels
-//! in it. Frames follow the compositor's frame callbacks, so nothing is
+//! Unless the config turns it off, it captures every output before it
+//! asks for the lock, while the GPU opens, blurs the captures once on the
+//! GPU and shows them, slowly drifting, under a vignette and the clock;
+//! an output added later shows the capture of another. In the minimal
+//! style (the default, crates/shingle-lock/src/minimal.rs) typing moves
+//! the clock away for a slim white outline with a dot per character; in
+//! the swaylock style an outlined input in swaylock's colours fades in.
+//! Frames follow the compositor's frame callbacks, at the output's rate
+//! while something moves and at the drift's rate otherwise, so nothing is
 //! drawn while an output is off.
 
 mod capture;
 mod clock;
 mod daemon;
+mod damage;
 mod font;
 mod gpu;
+mod minimal;
+mod motion;
 mod options;
 mod shm;
 mod ui;
@@ -29,7 +35,6 @@ use std::{
   time::{Duration, Instant, SystemTime},
 };
 
-use ab_glyph::FontArc;
 use calloop::{
   EventLoop,
   channel::{self, Event as ChannelEvent, Sender},
@@ -37,6 +42,7 @@ use calloop::{
 };
 use calloop_wayland_source::WaylandSource;
 use shingle_auth::{Authenticator, Password, ZeroOnFree};
+use shingle_config::LockStyle;
 use shm::{BufferData, ShmBuffer};
 use thiserror::Error;
 use wayland_client::{
@@ -59,7 +65,10 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
   capture::Screenshot,
-  gpu::{Drift, Frame, Gpu, Image, Target},
+  damage::Rect,
+  font::Fonts,
+  gpu::{Drift, Frame, Gpu, Image, Placement, Target},
+  minimal::Scene,
   options::{Action, Settings},
   ui::{Indicator, InputLook, Labels, Layout},
 };
@@ -76,8 +85,16 @@ const MAX_PASSWORD_BYTES: usize = 4096;
 /// that has not answered in this time is not being drawn, and its lock
 /// surface shows another output's capture.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(1);
-/// The frame interval asked for while the input fades.
+/// A wake-up while something moves, in case no frame callback comes;
+/// frames themselves follow the callbacks.
 const FADE_FRAME: Duration = Duration::from_millis(16);
+/// How long after the success fade the unlock waits at most for every
+/// output to have shown its faded frame; an output that is off sends no
+/// frame callback.
+const UNLOCK_WAIT: Duration = Duration::from_millis(250);
+/// How bright the minimal style draws the screenshot, so that its white
+/// reads over a light desktop too.
+const MINIMAL_DIM: f32 = 0.78;
 
 #[derive(Debug, Error)]
 enum LockError {
@@ -204,6 +221,8 @@ struct LockOutput {
   size: Option<(u32, u32)>,
   target: Option<Target>,
   layout: Option<Layout>,
+  /// The minimal style's layout, made with the target.
+  minimal_layout: Option<minimal::Layout>,
   buffers: Vec<ShmBuffer>,
   next_buffer_id: u64,
   /// A full frame was committed since the last configure.
@@ -214,11 +233,17 @@ struct LockOutput {
   frame_pending: bool,
   /// What it shows changed since its last frame.
   dirty: bool,
-  last_frame: Option<Instant>,
+  /// The drift step of its last frame ([`State::drift_step`]).
+  drawn_step: Option<u64>,
   clock: Option<(String, String)>,
   /// The clock image's size.
   clock_size: (u32, u32),
   input: Option<InputLook>,
+  /// The minimal input's image: what it shows, its size and where the
+  /// outline sits in it.
+  minimal_input: Option<minimal::ShownInput>,
+  /// A frame drawn after the success fade ended.
+  faded: bool,
   frames: u64,
 }
 
@@ -249,8 +274,13 @@ struct State {
   captures: Vec<Capture>,
   /// The status of the keyboard that last reported one.
   keyboard: KeyboardStatus,
-  font: FontArc,
+  fonts: Fonts,
   indicator: Indicator,
+  /// The minimal style's animations.
+  scene: Scene,
+  /// When PAM accepted the password and the minimal style began to fade
+  /// out; the unlock follows the fade.
+  leaving: Option<Instant>,
   started: Instant,
   /// When the process started, for the timings it reports.
   launched: Instant,
@@ -304,15 +334,18 @@ impl State {
         size: None,
         target: None,
         layout: None,
+        minimal_layout: None,
         buffers: Vec::new(),
         next_buffer_id: 0,
         committed: false,
         frame_pending: false,
         dirty: true,
-        last_frame: None,
+        drawn_step: None,
         clock: None,
         clock_size: (0, 0),
         input: None,
+        minimal_input: None,
+        faded: false,
         frames: 0,
       },
     );
@@ -446,14 +479,36 @@ impl State {
     if output.size.is_none() || output.frame_pending {
       return false;
     }
-    if output.dirty || self.indicator.animating(now) {
+    if output.dirty || self.animating(now) {
       return true;
     }
-    let interval = Duration::from_secs_f64(1.0 / self.settings.drift.fps);
-    self.drifts(name)
-      && output
-        .last_frame
-        .is_none_or(|last| now.saturating_duration_since(last) >= interval)
+    if self.leaving.is_some() && self.scene.left(now) && !output.faded {
+      return true;
+    }
+    self.drifts(name) && output.drawn_step != Some(self.drift_step(now))
+  }
+
+  /// Whether the input or the scene moves at `now`, which wants a frame
+  /// at every frame callback.
+  fn animating(&self, now: Instant) -> bool {
+    match self.settings.style {
+      LockStyle::Minimal => self.scene.animating(now),
+      LockStyle::Swaylock => self.indicator.animating(now),
+    }
+  }
+
+  /// The drift's step at `now`: it moves in steps of `drift.fps`, so
+  /// that between two steps the background stays and a frame that only
+  /// moves the clock or the input reads back only their part.
+  fn drift_step(&self, now: Instant) -> u64 {
+    let elapsed = now.saturating_duration_since(self.started).as_secs_f64();
+    (elapsed * self.settings.drift.fps).floor() as u64
+  }
+
+  /// When drift step `step` begins.
+  fn drift_step_at(&self, step: u64) -> Instant {
+    self.started
+      + Duration::from_secs_f64(step as f64 / self.settings.drift.fps)
   }
 
   /// When something wants a frame next without input.
@@ -462,16 +517,23 @@ impl State {
     let mut consider = |at: Instant| {
       next = Some(next.map_or(at, |next| next.min(at)));
     };
-    if self.indicator.animating(now) {
+    if self.animating(now) {
       consider(now + FADE_FRAME);
     }
-    if let Some(at) = self.indicator.next_change(now) {
+    let change = match self.settings.style {
+      LockStyle::Minimal => self.scene.next_change(now),
+      LockStyle::Swaylock => self.indicator.next_change(now),
+    };
+    if let Some(at) = change {
       consider(at);
     }
-    let interval = Duration::from_secs_f64(1.0 / self.settings.drift.fps);
+    if let Some(leaving) = self.leaving {
+      consider((leaving + minimal::LEAVE).max(now + FADE_FRAME));
+    }
+    let next_step = self.drift_step_at(self.drift_step(now) + 1);
     for (name, output) in &self.outputs {
       if self.drifts(*name) && !output.frame_pending {
-        consider(output.last_frame.map_or(now, |last| last + interval));
+        consider(next_step);
       }
     }
     if self.settings.options.clock {
@@ -535,18 +597,75 @@ impl State {
       }
     }
     self.maybe_report_ready();
+    self.maybe_unlock_after_fade(now);
+  }
+
+  /// Unlocks once the success fade is over and every output showed its
+  /// faded frame, or [`UNLOCK_WAIT`] after the fade for outputs that do
+  /// not draw.
+  fn maybe_unlock_after_fade(&mut self, now: Instant) {
+    let Some(leaving) = self.leaving else {
+      return;
+    };
+    if !self.active() || !self.scene.left(now) {
+      return;
+    }
+    let shown = self
+      .outputs
+      .values()
+      .all(|output| output.faded && !output.frame_pending);
+    if !shown && now < leaving + minimal::LEAVE + UNLOCK_WAIT {
+      return;
+    }
+    eprintln!(
+      "shingle-lock: unlocking after the fade, {} ms after the password \
+       was accepted",
+      now.saturating_duration_since(leaving).as_millis()
+    );
+    self.unlock_requested = true;
+    self.lock.unlock_and_destroy();
   }
 
   fn clock_text(&self) -> (String, String) {
     let now = SystemTime::now();
     let options = &self.settings.options;
+    let style = self.settings.style;
     (
-      clock::format(&options.timestr, now),
-      clock::format(&options.datestr, now),
+      clock::format(options.time_format(style), now),
+      clock::format(options.date_format(style), now),
     )
   }
 
+  /// The minimal style's labels below the input: Caps Lock, the layout
+  /// and the failed attempts, each when it applies.
+  fn minimal_labels(&self) -> Vec<String> {
+    let options = &self.settings.options;
+    let mut labels = Vec::new();
+    if self.keyboard.caps_lock
+      && options.caps_lock_text
+      && !options.texts.caps_lock.is_empty()
+    {
+      labels.push(options.texts.caps_lock.clone());
+    }
+    if let Some(layout) = self
+      .keyboard
+      .layout
+      .as_deref()
+      .filter(|name| !name.is_empty())
+      .filter(|_| options.shows_keyboard_layout(self.keyboard.layouts))
+    {
+      labels.push(layout.to_owned());
+    }
+    let attempts = self.indicator.attempts();
+    if options.show_failed_attempts && attempts > 0 {
+      let plural = if attempts == 1 { "" } else { "s" };
+      labels.push(format!("{attempts} failed attempt{plural}"));
+    }
+    labels
+  }
+
   fn render_output(&mut self, name: u32, now: Instant) -> Result<(), String> {
+    let style = self.settings.style;
     let clock = self.settings.options.clock.then(|| self.clock_text());
     let look = self.input_look(now);
     let opacity = if self.settings.options.show_indicator {
@@ -554,6 +673,11 @@ impl State {
     } else {
       0.0
     };
+    let scene = self.scene.look(now);
+    let left = self.leaving.is_some() && self.scene.left(now);
+    let labels = self.minimal_labels();
+    let step = self.drift_step(now);
+    let drift_seconds = step as f64 / self.settings.drift.fps;
     let qh = self.qh.clone();
     let Some((width, height)) =
       self.outputs.get(&name).and_then(|output| output.size)
@@ -586,8 +710,14 @@ impl State {
         );
       }
       output.layout = Some(Layout::new((width, height), options));
+      output.minimal_layout =
+        Some(minimal::Layout::new((width, height), options.font_size));
       output.clock = None;
       output.input = None;
+      output.minimal_input = None;
+      for buffer in &mut output.buffers {
+        buffer.holds = None;
+      }
     }
     if output.buffers.is_empty() {
       for _ in 0..2 {
@@ -605,12 +735,22 @@ impl State {
       return Ok(());
     };
     let layout = output.layout.expect("made with the target");
+    let minimal_layout = output.minimal_layout.expect("made with the target");
     let target = output.target.as_mut().expect("made above");
     if output.clock != clock {
-      let raster = clock.as_ref().and_then(|(time, date)| {
-        let color =
-          options.state_colors(shingle_config::InputState::Input).text;
-        ui::rasterize_clock(time, date, &layout, color, &self.font)
+      let raster = clock.as_ref().and_then(|(time, date)| match style {
+        LockStyle::Minimal => minimal::rasterize_clock(
+          time,
+          date,
+          &minimal_layout,
+          &self.fonts.clock,
+          &self.fonts.text,
+        ),
+        LockStyle::Swaylock => {
+          let color =
+            options.state_colors(shingle_config::InputState::Input).text;
+          ui::rasterize_clock(time, date, &layout, color, &self.fonts.text)
+        }
       });
       target.set_clock(&self.gpu, raster.as_ref());
       output.clock_size = raster
@@ -618,83 +758,149 @@ impl State {
         .map_or((0, 0), |raster| (raster.width, raster.height));
       output.clock = clock;
     }
-    if opacity > 0.0 && output.input.as_ref() != Some(&look) {
-      let raster = ui::rasterize_input(&layout, options, &look, &self.font);
-      target.set_input(&self.gpu, Some(&raster));
-      if self.trace {
-        eprintln!(
-          "shingle-lock: input of output {name}: {:?}, caps lock {}, \
-           layout label {:?}, caps lock label {:?}",
-          look.state,
-          if look.caps_lock { "on" } else { "off" },
-          look.labels.layout,
-          look.labels.caps_lock,
-        );
+    let (clock_placement, input_placement) = match style {
+      LockStyle::Swaylock => {
+        if opacity > 0.0 && output.input.as_ref() != Some(&look) {
+          let raster =
+            ui::rasterize_input(&layout, options, &look, &self.fonts.text);
+          target.set_input(&self.gpu, Some(&raster));
+          if self.trace {
+            eprintln!(
+              "shingle-lock: input of output {name}: {:?}, caps lock {}, \
+               layout label {:?}, caps lock label {:?}",
+              look.state,
+              if look.caps_lock { "on" } else { "off" },
+              look.labels.layout,
+              look.labels.caps_lock,
+            );
+          }
+          output.input = Some(look);
+        }
+        // Centred; the image is as wide as its widest line.
+        let clock_at = output.clock.as_ref().map(|_| {
+          Placement::at(
+            (
+              (layout.size.0 as i32 - output.clock_size.0 as i32) / 2,
+              layout.clock_top,
+            ),
+            1.0,
+          )
+        });
+        let input_at = (opacity > 0.0)
+          .then(|| Placement::at((layout.input.0, layout.input.1), opacity));
+        (clock_at, input_at)
       }
-      output.input = Some(look);
-    }
-    // Centred; the image is as wide as its widest line.
-    let clock_at = output.clock.as_ref().map(|_| {
-      (
-        (layout.size.0 as i32 - output.clock_size.0 as i32) / 2,
-        layout.clock_top,
-      )
-    });
-    let elapsed = now.saturating_duration_since(self.started).as_secs_f64();
+      LockStyle::Minimal => {
+        let (clock_at, input_at, redrawn) = minimal::update_overlays(
+          &self.gpu,
+          target,
+          &minimal_layout,
+          &scene,
+          labels,
+          &self.fonts.text,
+          &mut output.minimal_input,
+          output.clock.as_ref().map(|_| output.clock_size),
+        );
+        if redrawn
+          && self.trace
+          && let Some((shown, _, _)) = &output.minimal_input
+        {
+          eprintln!(
+            "shingle-lock: minimal input of output {name}: {} dots, \
+             labels {:?}",
+            shown.dots.len(),
+            shown.labels
+          );
+        }
+        (clock_at, input_at)
+      }
+    };
     let drifts = self.settings.drift.enabled
       && self.settings.drift.amplitude > 0.0
       && output.capture.is_some();
     let frame = Frame {
       drift: if drifts {
-        Drift::at(elapsed, &self.settings.drift, (width, height))
+        Drift::at(drift_seconds, &self.settings.drift, (width, height))
       } else {
         Drift::STILL
       },
       vignette: options.vignette,
       color: options.color,
-      clock: clock_at.map(|at| (at, 1.0)),
-      input: (opacity > 0.0)
-        .then_some(((layout.input.0, layout.input.1), opacity)),
+      dim: match style {
+        LockStyle::Minimal => MINIMAL_DIM,
+        LockStyle::Swaylock => 1.0,
+      },
+      clock: clock_placement,
+      input: input_placement,
     };
     let buffer = &mut output.buffers[index];
     let stride = buffer.stride();
+    let holds = buffer.holds;
     let bytes = buffer
       .bytes_mut()
       .map_err(|error| format!("the frame's buffer: {error}"))?;
-    target
-      .draw(&self.gpu, &frame, bytes, stride)
+    let drawn = target
+      .draw(&self.gpu, &frame, bytes, stride, holds)
       .map_err(|error| {
         format!("GPU rendering failed on output {name}: {error}")
       })?;
+    output.buffers[index].holds = Some(drawn.serial);
     let (w, h) = (
       i32::try_from(width).map_err(|_| "the output is too wide".to_owned())?,
       i32::try_from(height).map_err(|_| "the output is too tall".to_owned())?,
     );
-    if !output.committed {
+    let damage = if output.committed {
+      drawn.damage
+    } else {
       let region = self.compositor.create_region(&qh, ());
       region.add(0, 0, w, h);
       output.surface.set_opaque_region(Some(&region));
       region.destroy();
-    }
+      Rect::full((width, height))
+    };
     output.buffers[index].busy = true;
     output
       .surface
       .attach(Some(&output.buffers[index].buffer), 0, 0);
-    output.surface.damage_buffer(0, 0, w, h);
+    if !damage.is_empty() {
+      output.surface.damage_buffer(
+        damage.x as i32,
+        damage.y as i32,
+        damage.width as i32,
+        damage.height as i32,
+      );
+    }
     output.surface.frame(&qh, name);
     output.surface.commit();
     output.frame_pending = true;
     output.committed = true;
     output.dirty = false;
-    output.last_frame = Some(now);
+    output.drawn_step = Some(step);
+    output.faded = left;
     output.frames += 1;
     if self.trace {
       eprintln!(
-        "shingle-lock: frame {} of output {} at {} ms",
+        "shingle-lock: frame {} of output {} at {} ms, read back {}x{}",
         output.frames,
         output.global,
-        elapsed_ms(self.started)
+        elapsed_ms(self.started),
+        drawn.copied.width,
+        drawn.copied.height,
       );
+      if style == LockStyle::Minimal {
+        eprintln!(
+          "shingle-lock: look of output {}: clock {:.2} input {:.2} \
+           rise {:.2} shake {:.2} outline {:.2} tint {:.2} dots {}",
+          output.global,
+          scene.clock_opacity,
+          scene.input_opacity,
+          scene.input_below,
+          scene.shake,
+          scene.outline_alpha,
+          scene.tint,
+          scene.dots.len(),
+        );
+      }
     }
     Ok(())
   }
@@ -730,7 +936,11 @@ impl State {
   }
 
   fn process_key(&mut self, keysym: xkb::Keysym, text: String) {
-    if !self.active() || !self.locked || self.auth_running {
+    if !self.active()
+      || !self.locked
+      || self.auth_running
+      || self.leaving.is_some()
+    {
       return;
     }
     if self.in_grace() {
@@ -745,14 +955,18 @@ impl State {
       }
       xkb::keysyms::KEY_BackSpace => {
         if self.password.pop().is_some() {
-          self.indicator.deleted(self.password.chars().count(), now);
+          let chars = self.password.chars().count();
+          self.indicator.deleted(chars, now);
+          self.scene.deleted(chars, now);
         } else {
           self.indicator.cleared(now);
+          self.scene.cleared(now);
         }
       }
       xkb::keysyms::KEY_Escape | xkb::keysyms::KEY_Delete => {
         self.password.zeroize();
         self.indicator.cleared(now);
+        self.scene.cleared(now);
       }
       _ => {
         let previous_len = self.password.len();
@@ -767,9 +981,12 @@ impl State {
           self.password.push(character);
         }
         if self.password.len() != previous_len {
-          self.indicator.typed(self.password.chars().count(), now);
+          let chars = self.password.chars().count();
+          self.indicator.typed(chars, now);
+          self.scene.typed(chars, now);
         } else {
           self.indicator.poked(now);
+          self.scene.poked(now);
         }
       }
     }
@@ -783,11 +1000,13 @@ impl State {
     let now = Instant::now();
     if self.password.is_empty() && self.settings.options.ignore_empty_password {
       self.indicator.poked(now);
+      self.scene.poked(now);
       self.mark_dirty();
       return;
     }
     self.auth_running = true;
     self.indicator.verifying(now);
+    self.scene.verifying(now);
     self.mark_dirty();
     let mut password = std::mem::take(&mut self.password);
     let password = Password::new(std::mem::take(&mut *password));
@@ -831,15 +1050,25 @@ impl State {
           return;
         }
         self.password.zeroize();
-        self.unlock_requested = true;
-        self.lock.unlock_and_destroy();
         eprintln!(
           "shingle-lock: PAM authentication and account validation succeeded"
         );
+        if self.settings.style == LockStyle::Minimal {
+          // The input fades out over the blur; the unlock follows.
+          let now = Instant::now();
+          self.leaving = Some(now);
+          self.scene.accepted(now);
+          self.mark_dirty();
+        } else {
+          self.unlock_requested = true;
+          self.lock.unlock_and_destroy();
+        }
       }
       AuthOutcome::Denied => {
         self.password.zeroize();
-        self.indicator.denied(Instant::now());
+        let now = Instant::now();
+        self.indicator.denied(now);
+        self.scene.denied(now);
         let attempts = self.indicator.attempts();
         let plural = if attempts == 1 { "" } else { "s" };
         eprintln!(
@@ -885,6 +1114,37 @@ fn until_next_second(now: SystemTime) -> Duration {
 
 fn elapsed_ms(since: Instant) -> u128 {
   since.elapsed().as_millis()
+}
+
+/// What to warn about the screenshots when `outputs` outputs got
+/// `captured` captures with `screenshot` on or off; `None` when every
+/// output was captured.
+fn capture_warning(
+  screenshot: bool,
+  outputs: usize,
+  captured: usize,
+) -> Option<String> {
+  if !screenshot {
+    return Some(
+      "no screenshot: the config turns screenshot off; the background is \
+       the colour"
+        .to_owned(),
+    );
+  }
+  if captured == 0 {
+    return Some(
+      "no screenshot was taken (the reason is above); the background is \
+       the colour"
+        .to_owned(),
+    );
+  }
+  (captured < outputs).then(|| {
+    format!(
+      "{} of {outputs} outputs were not captured; they show the capture \
+       closest in shape",
+      outputs - captured
+    )
+  })
 }
 
 /// The screenshots uploaded and blurred, in the order of their outputs'
@@ -1006,8 +1266,8 @@ fn run(
       let start = Instant::now();
       let gpu = Gpu::new();
       let opened = start.elapsed();
-      let font = font::load(&family);
-      (gpu, opened, font, start.elapsed() - opened)
+      let fonts = font::load(&family);
+      (gpu, opened, fonts, start.elapsed() - opened)
     })?;
   let shots = if settings.options.screenshot {
     capture::capture_outputs(&connection, &globals, CAPTURE_TIMEOUT)
@@ -1015,7 +1275,7 @@ fn run(
     HashMap::new()
   };
   timing.mark("capture");
-  let (gpu, opened, font, loaded) = opening
+  let (gpu, opened, fonts, loaded) = opening
     .join()
     .map_err(|_| LockError::Message("opening the GPU panicked".to_owned()))?;
   let gpu =
@@ -1028,6 +1288,23 @@ fn run(
     timing.mark("blur");
     eprintln!("shingle-lock: captured {} output(s)", captures.len());
   }
+  let outputs = initial_globals
+    .iter()
+    .filter(|global| global.interface == "wl_output")
+    .count();
+  if let Some(warning) =
+    capture_warning(settings.options.screenshot, outputs, captures.len())
+  {
+    eprintln!("shingle-lock: warning: {warning}");
+  }
+  eprintln!(
+    "shingle-lock: {} style, fonts: {}",
+    match settings.style {
+      LockStyle::Minimal => "minimal",
+      LockStyle::Swaylock => "swaylock",
+    },
+    fonts.description
+  );
   let lock = manager.lock(&qh, ());
   eprintln!("shingle-lock: timing: {}", timing.report());
 
@@ -1045,6 +1322,11 @@ fn run(
     settings.options.indicator_always,
     started,
   );
+  let scene = Scene::new(
+    settings.input_timeout,
+    settings.options.show_indicator,
+    started,
+  );
   let mut state = State {
     connection: connection.clone(),
     qh: qh.clone(),
@@ -1060,8 +1342,10 @@ fn run(
     gpu,
     captures,
     keyboard: KeyboardStatus::default(),
-    font,
+    fonts,
     indicator,
+    scene,
+    leaving: None,
     started,
     launched,
     locked_at: None,
@@ -1594,6 +1878,148 @@ mod tests {
     let status = KeyboardStatus::of(&state);
     assert!(status.caps_lock);
     assert_ne!(status.layout.unwrap(), first);
+  }
+
+  /// A binary PPM's width, height and RGB bytes.
+  fn read_ppm(bytes: &[u8]) -> Option<(u32, u32, &[u8])> {
+    let mut fields = Vec::new();
+    let mut at = 0;
+    while fields.len() < 4 {
+      while bytes.get(at)?.is_ascii_whitespace() {
+        at += 1;
+      }
+      let start = at;
+      while !bytes.get(at)?.is_ascii_whitespace() {
+        at += 1;
+      }
+      fields.push(std::str::from_utf8(&bytes[start..at]).ok()?);
+    }
+    let (width, height) = (fields[1].parse().ok()?, fields[2].parse().ok()?);
+    (fields[0] == "P6").then_some((width, height, &bytes[at + 1..]))
+  }
+
+  /// The minimal style in each state at 1920x1080, over the PPM that
+  /// `SHINGLE_LOCK_PREVIEW_BACKGROUND` names, blurred as a screenshot
+  /// is, written as PPMs into `SHINGLE_LOCK_PREVIEW_DIR`, through the
+  /// same layout, images, placements and GPU target as the lock's
+  /// frames: `cargo test -p shingle-lock -- --ignored preview
+  /// --nocapture`.
+  #[test]
+  #[ignore = "writes images for a person to look at"]
+  fn preview_states() {
+    let (Some(background), Some(directory)) = (
+      std::env::var_os("SHINGLE_LOCK_PREVIEW_BACKGROUND"),
+      std::env::var_os("SHINGLE_LOCK_PREVIEW_DIR"),
+    ) else {
+      eprintln!("no SHINGLE_LOCK_PREVIEW_BACKGROUND or _DIR; skipped");
+      return;
+    };
+    let Ok(gpu) = Gpu::new() else {
+      eprintln!("no GPU; skipped");
+      return;
+    };
+    let bytes = std::fs::read(background).unwrap();
+    let (width, height, rgb) = read_ppm(&bytes).unwrap();
+    let size = (width, height);
+    let shot = Screenshot {
+      name: None,
+      width,
+      height,
+      bgra: rgb
+        .chunks_exact(3)
+        .flat_map(|p| [p[2], p[1], p[0], 255])
+        .collect(),
+    };
+    let options = shingle_config::LockOptions::default();
+    let image = gpu.image(&shot, options.blur);
+    let fonts = font::load(&options.font);
+    eprintln!("fonts: {}", fonts.description);
+    let layout = minimal::Layout::new(size, None);
+    let start = Instant::now();
+    let at = |millis: u64| start + Duration::from_millis(millis);
+    let typed = |scene: &mut Scene, count: usize, from: u64| {
+      for index in 1..=count {
+        scene.typed(index, at(from + 90 * index as u64));
+      }
+    };
+    let mut states: Vec<(&str, Scene, Instant, Vec<String>)> = Vec::new();
+    let timeout = Duration::from_secs(5);
+    let rest = Scene::new(timeout, true, start);
+    states.push(("rest", rest.clone(), at(1000), Vec::new()));
+    let mut typing = rest.clone();
+    typed(&mut typing, 7, 1000);
+    states.push(("typing", typing.clone(), at(2600), Vec::new()));
+    let mut crossing = rest.clone();
+    crossing.typed(1, at(1000));
+    states.push(("transition", crossing, at(1140), Vec::new()));
+    let mut verifying = typing.clone();
+    verifying.verifying(at(2700));
+    states.push(("verifying", verifying.clone(), at(3500), Vec::new()));
+    let mut wrong = verifying.clone();
+    wrong.denied(at(4000));
+    states.push(("wrong", wrong, at(4030), Vec::new()));
+    let caps = vec!["Caps Lock".to_owned(), "English (US)".to_owned()];
+    states.push(("caps-lock", typing.clone(), at(2600), caps));
+    let mut leaving = verifying;
+    leaving.accepted(at(4000));
+    states.push(("success-fade", leaving, at(4120), Vec::new()));
+    let config = shingle_config::DriftConfig::default();
+    let clock =
+      minimal::rasterize_clock("21:47", "", &layout, &fonts.clock, &fonts.text);
+    for (name, scene, now, labels) in states {
+      let mut target = Target::new(&gpu, size, Some(&image));
+      target.set_clock(&gpu, clock.as_ref());
+      let look = scene.look(now);
+      let mut shown = None;
+      let (clock_at, input_at, _) = minimal::update_overlays(
+        &gpu,
+        &mut target,
+        &layout,
+        &look,
+        labels,
+        &fonts.text,
+        &mut shown,
+        clock.as_ref().map(|raster| (raster.width, raster.height)),
+      );
+      let frame = Frame {
+        drift: Drift::at(3.0, &config, size),
+        vignette: options.vignette,
+        color: options.color,
+        dim: MINIMAL_DIM,
+        clock: clock_at,
+        input: input_at,
+      };
+      let stride = width as usize * 4;
+      let mut out = vec![0; stride * height as usize];
+      target.draw(&gpu, &frame, &mut out, stride, None).unwrap();
+      let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+      for pixel in out.chunks_exact(4) {
+        ppm.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+      }
+      let path = std::path::Path::new(&directory).join(format!("{name}.ppm"));
+      std::fs::write(&path, ppm).unwrap();
+      eprintln!("wrote {}", path.display());
+    }
+  }
+
+  #[test]
+  fn ppm_headers_are_read() {
+    let ppm = b"P6\n2 1\n255\n\x01\x02\x03\x04\x05\x06";
+    assert_eq!(read_ppm(ppm), Some((2, 1, &ppm[11..])));
+    assert_eq!(read_ppm(b"P5\n2 1\n255\n\x01\x02"), None);
+    assert_eq!(read_ppm(b"P6\n2"), None);
+  }
+
+  #[test]
+  fn missing_captures_are_warned_about() {
+    assert!(capture_warning(false, 2, 0).unwrap().contains("turns"));
+    assert!(
+      capture_warning(true, 2, 0)
+        .unwrap()
+        .contains("no screenshot")
+    );
+    assert!(capture_warning(true, 2, 1).unwrap().starts_with("1 of 2"));
+    assert_eq!(capture_warning(true, 2, 2), None);
   }
 
   #[test]

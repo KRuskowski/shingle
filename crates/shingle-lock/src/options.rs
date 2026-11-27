@@ -11,11 +11,13 @@ use std::{
   time::Duration,
 };
 
-use shingle_config::{DriftConfig, LockConfig, LockOptions};
+use shingle_config::{DriftConfig, LockConfig, LockOptions, LockStyle};
 
 /// What `shingle-lock` runs with.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
+  /// How it looks: `--style`, else `lock.style`.
+  pub style: LockStyle,
   /// swaylock's options.
   pub options: LockOptions,
   /// The background's movement.
@@ -78,7 +80,7 @@ fn flag_value(
     if names.contains(&argument.as_str()) {
       let value = arguments
         .get(index + 1)
-        .ok_or_else(|| format!("{argument} needs a path"))?;
+        .ok_or_else(|| format!("{argument} needs a value"))?;
       found = Some(value.clone());
       index += 2;
       continue;
@@ -92,7 +94,7 @@ fn flag_value(
   }
   match found {
     Some(value) if value.is_empty() => {
-      Err("a config path cannot be empty".into())
+      Err(format!("{} cannot be empty", names[0]))
     }
     found => Ok(found),
   }
@@ -167,14 +169,41 @@ pub fn resolve(
     warnings.push(format!("{error}; the lock section's options are skipped"));
   }
   warnings.extend(options.apply_arguments(arguments));
+  let style = match flag_value(arguments, &["--style"])? {
+    Some(name) => LockStyle::parse(&name).ok_or_else(|| {
+      format!("--style must be minimal or swaylock, not {name:?}")
+    })?,
+    None => section.style,
+  };
+  if style == LockStyle::Minimal && swaylock_look_set(&options) {
+    warnings.push(
+      "the indicator's colour, size and visibility options have no effect \
+       in the minimal style; lock.style: swaylock (or --style=swaylock) \
+       draws them"
+        .to_owned(),
+    );
+  }
   Ok(Action::Run(
     Box::new(Settings {
+      style,
       options,
       drift: section.drift.clone(),
       input_timeout: Duration::from_secs_f64(section.input_timeout),
     }),
     warnings,
   ))
+}
+
+/// Whether `options` set any of what only the swaylock style draws: the
+/// indicator's colours, size, thickness and `indicator`.
+fn swaylock_look_set(options: &LockOptions) -> bool {
+  let defaults = LockOptions::default();
+  options.colors != defaults.colors
+    || options.line_source != defaults.line_source
+    || options.indicator_radius != defaults.indicator_radius
+    || options.indicator_thickness != defaults.indicator_thickness
+    || options.indicator_always != defaults.indicator_always
+    || options.caps_lock_indicator != defaults.caps_lock_indicator
 }
 
 /// The usage `--help` prints.
@@ -188,21 +217,25 @@ as --NAME[=VALUE] or in a swaylock config as NAME[=VALUE], among them:
   -C, --config <PATH>            Read this swaylock config
       --shingle-config <PATH>    Read the lock section of this Shingle
                                  config
+      --style <NAME>             minimal (the default) or swaylock
   -f, --daemonize                Detach once the session is locked
-  -S, --screenshot               Blur a capture of every output
-      --effect-blur <RxT>        Blur radius and passes
-      --effect-vignette <B:F>    Darken the edges
-      --clock                    Show the time and date
+  -S, --screenshot               Blur a capture of every output (on
+                                 unless --screenshot=false)
+      --effect-blur <RxT>        Blur radius and passes (24x3, none)
+      --effect-vignette <B:F>    Darken the edges (0.5:0.5, none)
+      --clock                    Show the time (on unless
+                                 --clock=false)
       --timestr, --datestr <F>   strftime formats of the clock
   -c, --color <RRGGBB[AA]>       Background colour
       --font <NAME>              Font family
+The swaylock style also takes:
       --indicator                Show the password input at rest too
-  -u, --no-unlock-indicator      Never show the password input
       --indicator-radius <N>     The input's height
       --indicator-thickness <N>  Twice the input's border width
       --ring-color, --inside-color, --line-color, --text-color and
       their -clear, -ver and -wrong forms, --key-hl-color,
       --bs-hl-color, --separator-color <RRGGBB[AA]>
+  -u, --no-unlock-indicator      Never show the password input
   -F, --show-failed-attempts     Count failed attempts
   -e, --ignore-empty-password    Enter without a password does nothing
       --grace <SECONDS>          Unlock without a password at first
@@ -289,6 +322,7 @@ mod tests {
     fake.section = Ok(section);
     let (settings, warnings) = run(fake.resolve(&["--effect-blur=9x1"]));
     assert!(settings.options.clock);
+    assert_eq!(settings.style, LockStyle::Minimal);
     assert_eq!(settings.options.color, [0x44, 0x55, 0x66, 0xff]);
     assert_eq!(settings.options.blur, Some((9, 1)));
     assert_eq!(settings.drift.fps, 3.0);
@@ -311,7 +345,7 @@ mod tests {
     assert!(settings.options.screenshot);
     fake.files.insert(
       "/home/invented/.config/swaylock/config".into(),
-      "clock\n".into(),
+      "clock=false\n".into(),
     );
     fake
       .env
@@ -321,7 +355,31 @@ mod tests {
       ..LockConfig::default()
     });
     let (settings, _) = run(fake.resolve(&[]));
-    assert!(!settings.options.clock, "the swaylock config is not read");
+    assert!(settings.options.clock, "the swaylock config is not read");
+  }
+
+  #[test]
+  fn the_style_comes_from_the_section_or_the_command_line() {
+    let mut fake = Fake::new();
+    fake
+      .env
+      .insert("SHINGLE_CONFIG_FILE", "/invented.yaml".into());
+    fake.section = Ok(LockConfig {
+      style: LockStyle::Swaylock,
+      ..LockConfig::default()
+    });
+    let (settings, warnings) = run(fake.resolve(&["--ring-color=ff0000"]));
+    assert_eq!(settings.style, LockStyle::Swaylock);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (settings, warnings) =
+      run(fake.resolve(&["--style", "minimal", "--ring-color=ff0000"]));
+    assert_eq!(settings.style, LockStyle::Minimal);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("no effect in the minimal style"));
+    let (settings, _) = run(fake.resolve(&["--style=swaylock"]));
+    assert_eq!(settings.style, LockStyle::Swaylock);
+    assert!(fake.resolve(&["--style=pink"]).is_err());
+    assert!(fake.resolve(&["--style"]).is_err());
   }
 
   #[test]

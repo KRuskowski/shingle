@@ -184,6 +184,39 @@ impl Default for InputTexts {
   }
 }
 
+/// The blur without an `effect-blur`: a radius of 24 pixels, 3 passes,
+/// soft enough that no text of the screen under it reads.
+pub const DEFAULT_BLUR: (u32, u32) = (24, 3);
+/// The vignette without an `effect-vignette`: full brightness in the
+/// middle, half in the corners.
+pub const DEFAULT_VIGNETTE: (f64, f64) = (0.5, 0.5);
+
+/// How `shingle-lock` draws its clock and input (`lock.style`).
+#[derive(
+  Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, serde::Serialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum LockStyle {
+  /// A slim white outline over the blur, white dots and text, the time
+  /// in the middle at rest; swaylock's colour options do not apply.
+  #[default]
+  Minimal,
+  /// The outlined input in swaylock's per-state colours, with messages
+  /// and highlights, as before the minimal style.
+  Swaylock,
+}
+
+impl LockStyle {
+  /// The style named `name`, as `lock.style` and `--style` write it.
+  pub fn parse(name: &str) -> Option<Self> {
+    match name.trim() {
+      "minimal" => Some(Self::Minimal),
+      "swaylock" => Some(Self::Swaylock),
+      _ => None,
+    }
+  }
+}
+
 /// Everything `shingle-lock` takes from swaylock's options.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LockOptions {
@@ -191,15 +224,19 @@ pub struct LockOptions {
   pub daemonize: bool,
   /// Show the number of failed attempts (`show-failed-attempts`, `-F`).
   pub show_failed_attempts: bool,
-  /// Show the time and date (`clock`).
+  /// Show the time and date (`clock`); on by default, `clock=false`
+  /// turns it off.
   pub clock: bool,
-  /// Capture every output as the background (`screenshot`, `-S`).
+  /// Capture every output as the background (`screenshot`, `-S`); on
+  /// by default, `screenshot=false` turns it off.
   pub screenshot: bool,
   /// Blur the background: radius in pixels and passes (`effect-blur`,
-  /// `RxT`).
+  /// `RxT`); default [`DEFAULT_BLUR`], `effect-blur=none` or `0x0`
+  /// turns it off.
   pub blur: Option<(u32, u32)>,
   /// Darken the background towards the edges: base and factor
-  /// (`effect-vignette`, `B:F`), as swaylock-effects computes it.
+  /// (`effect-vignette`, `B:F`), as swaylock-effects computes it;
+  /// default [`DEFAULT_VIGNETTE`], `effect-vignette=none` turns it off.
   pub vignette: Option<(f64, f64)>,
   /// The background colour, under the screenshot or alone (`color`,
   /// `-c`). Unlike swaylock's white, the default is a dark blue-black.
@@ -233,10 +270,14 @@ pub struct LockOptions {
   pub grace_no_mouse: bool,
   /// Touches do not end it (`grace-no-touch`).
   pub grace_no_touch: bool,
-  /// The date line, a `strftime` format (`datestr`, default `%a, %x`).
-  pub datestr: String,
-  /// The time line, a `strftime` format (`timestr`, default `%T`).
-  pub timestr: String,
+  /// The date line, a `strftime` format (`datestr`); `None` leaves it to
+  /// the style: no date in the minimal style, `%a, %x` in the swaylock
+  /// style ([`LockOptions::date_format`]).
+  pub datestr: Option<String>,
+  /// The time line, a `strftime` format (`timestr`); `None` leaves it to
+  /// the style: `%H:%M` in the minimal style, `%T` in the swaylock style
+  /// ([`LockOptions::time_format`]).
+  pub timestr: Option<String>,
   /// Enter with an empty password does nothing instead of trying it
   /// (`ignore-empty-password`, `-e`).
   pub ignore_empty_password: bool,
@@ -261,10 +302,10 @@ impl Default for LockOptions {
     Self {
       daemonize: false,
       show_failed_attempts: false,
-      clock: false,
-      screenshot: false,
-      blur: None,
-      vignette: None,
+      clock: true,
+      screenshot: true,
+      blur: Some(DEFAULT_BLUR),
+      vignette: Some(DEFAULT_VIGNETTE),
       color: [0x1e, 0x22, 0x2e, 0xff],
       font: "sans-serif".into(),
       font_size: None,
@@ -277,8 +318,8 @@ impl Default for LockOptions {
       grace: Duration::ZERO,
       grace_no_mouse: false,
       grace_no_touch: false,
-      datestr: "%a, %x".into(),
-      timestr: "%T".into(),
+      datestr: None,
+      timestr: None,
       ignore_empty_password: false,
       caps_lock_indicator: false,
       caps_lock_text: true,
@@ -502,8 +543,14 @@ impl LockOptions {
       "indicator-thickness" => {
         self.indicator_thickness = parse_number(name, value)?
       }
-      "effect-blur" => self.blur = Some(parse_blur(value)?),
-      "effect-vignette" => self.vignette = Some(parse_vignette(value)?),
+      "effect-blur" => self.blur = parse_blur(value)?,
+      "effect-vignette" => {
+        self.vignette = if value.eq_ignore_ascii_case("none") {
+          None
+        } else {
+          Some(parse_vignette(value)?)
+        }
+      }
       "grace" => {
         let seconds = parse_number::<f64>(name, value)?;
         if !seconds.is_finite() || seconds < 0.0 {
@@ -511,8 +558,8 @@ impl LockOptions {
         }
         self.grace = Duration::from_secs_f64(seconds);
       }
-      "datestr" => self.datestr = value.to_owned(),
-      "timestr" => self.timestr = value.to_owned(),
+      "datestr" => self.datestr = Some(value.to_owned()),
+      "timestr" => self.timestr = Some(value.to_owned()),
       "text-clear" => self.texts.cleared = value.to_owned(),
       "text-caps-lock" => self.texts.caps_lock = value.to_owned(),
       "text-ver" => self.texts.verifying = value.to_owned(),
@@ -606,6 +653,24 @@ impl LockOptions {
     !self.hide_keyboard_layout && (self.show_keyboard_layout || layouts > 1)
   }
 
+  /// The clock's time format in `style`: `timestr`, else `%H:%M` in the
+  /// minimal style and swaylock-effects' `%T` in the swaylock style.
+  pub fn time_format(&self, style: LockStyle) -> &str {
+    self.timestr.as_deref().unwrap_or(match style {
+      LockStyle::Minimal => "%H:%M",
+      LockStyle::Swaylock => "%T",
+    })
+  }
+
+  /// The clock's date format in `style`: `datestr`, else none in the
+  /// minimal style and swaylock-effects' `%a, %x` in the swaylock style.
+  pub fn date_format(&self, style: LockStyle) -> &str {
+    self.datestr.as_deref().unwrap_or(match style {
+      LockStyle::Minimal => "",
+      LockStyle::Swaylock => "%a, %x",
+    })
+  }
+
   /// Applies every option of a swaylock config file's `text`, as
   /// swaylock reads it; returns a warning per option ignored or
   /// malformed, with its 1-based line. A malformed value leaves that
@@ -648,16 +713,17 @@ impl LockOptions {
   /// Applies swaylock-style command-line `arguments` (without the
   /// program name): long options as `--name`, `--name=value` or `--name
   /// value`, swaylock's short options, and bundles of short flags such
-  /// as `-fF`. `--config`/`-C` and its path, `--help`, `--version` and
-  /// `--shingle-config` and its path are skipped; the caller handles
-  /// them. Returns a warning per argument ignored or malformed.
+  /// as `-fF`. `--config`/`-C` and its path, `--help`, `--version`,
+  /// `--shingle-config` and `--style` and their values are skipped; the
+  /// caller handles them. Returns a warning per argument ignored or malformed.
   pub fn apply_arguments(&mut self, arguments: &[String]) -> Vec<String> {
     let mut warnings = Vec::new();
     let mut index = 0;
     while index < arguments.len() {
       let argument = &arguments[index];
       index += 1;
-      let skipped_with_value = ["-C", "--config", "--shingle-config"];
+      let skipped_with_value =
+        ["-C", "--config", "--shingle-config", "--style"];
       if skipped_with_value.contains(&argument.as_str()) {
         index += 1;
         continue;
@@ -665,6 +731,7 @@ impl LockOptions {
       if ["-h", "--help", "-v", "--version"].contains(&argument.as_str())
         || argument.starts_with("--config=")
         || argument.starts_with("--shingle-config=")
+        || argument.starts_with("--style=")
       {
         continue;
       }
@@ -780,8 +847,12 @@ pub fn parse_lock_color(text: &str) -> Result<LockColor, String> {
   Ok(color)
 }
 
-/// swaylock-effects' `effect-blur`: `RADIUSxTIMES`.
-fn parse_blur(value: &str) -> Result<(u32, u32), String> {
+/// swaylock-effects' `effect-blur`: `RADIUSxTIMES`; `none`, or a radius
+/// or passes of 0, is no blur.
+fn parse_blur(value: &str) -> Result<Option<(u32, u32)>, String> {
+  if value.eq_ignore_ascii_case("none") {
+    return Ok(None);
+  }
   let invalid = || format!("effect-blur must be RADIUSxTIMES, not {value:?}");
   let (radius, times) = value.split_once('x').ok_or_else(invalid)?;
   let radius = radius.trim().parse::<u32>().map_err(|_| invalid())?;
@@ -789,7 +860,7 @@ fn parse_blur(value: &str) -> Result<(u32, u32), String> {
   if radius > 200 || times > 20 {
     return Err(format!("effect-blur {value} is too large"));
   }
-  Ok((radius, times))
+  Ok((radius > 0 && times > 0).then_some((radius, times)))
 }
 
 /// swaylock-effects' `effect-vignette`: `BASE:FACTOR`, each from 0 to 1.
@@ -875,6 +946,8 @@ pub struct LockConfig {
   /// `$XDG_CONFIG_HOME/swaylock/config`, `~/.swaylock/config` or
   /// `/etc/swaylock/config`.
   pub swaylock_config: Option<PathBuf>,
+  /// How the lock screen looks; default [`LockStyle::Minimal`].
+  pub style: LockStyle,
   /// swaylock options by their long name, applied after the swaylock
   /// config and before the command line: `screenshot: true`,
   /// `effect-blur: 7x5`, `ring-color: 337d00`. `false` turns a flag off.
@@ -892,6 +965,7 @@ impl Default for LockConfig {
       command: "shingle-lock".into(),
       read_swaylock_config: true,
       swaylock_config: None,
+      style: LockStyle::default(),
       options: BTreeMap::new(),
       drift: DriftConfig::default(),
       input_timeout: 5.0,
@@ -1037,10 +1111,43 @@ mod tests {
     assert_eq!(config.lock.command, "shingle-lock");
     let mut options = LockOptions::default();
     config.lock.apply_to(&mut options).unwrap();
-    assert!(options.screenshot && options.clock);
-    assert_eq!(options.blur, Some((7, 5)));
-    assert_eq!(options.vignette, Some((0.5, 0.5)));
+    assert_eq!(options, LockOptions::default());
+    assert_eq!(config.lock.style, LockStyle::Minimal);
     assert_eq!(config.lock.drift, DriftConfig::default());
+  }
+
+  #[test]
+  fn the_defaults_blur_a_screenshot_and_show_the_clock() {
+    let defaults = LockOptions::default();
+    assert!(defaults.screenshot && defaults.clock);
+    assert_eq!(defaults.blur, Some(DEFAULT_BLUR));
+    assert_eq!(defaults.vignette, Some(DEFAULT_VIGNETTE));
+    assert_eq!(defaults.time_format(LockStyle::Minimal), "%H:%M");
+    assert_eq!(defaults.date_format(LockStyle::Minimal), "");
+    assert_eq!(defaults.time_format(LockStyle::Swaylock), "%T");
+    assert_eq!(defaults.date_format(LockStyle::Swaylock), "%a, %x");
+    // Each turns off only when the config says so.
+    let mut options = LockOptions::default();
+    let off = "screenshot=false\nclock=no\neffect-blur=none\n\
+               effect-vignette=none\n";
+    assert!(options.apply_file(off).is_empty());
+    assert!(!options.screenshot && !options.clock);
+    assert_eq!((options.blur, options.vignette), (None, None));
+    let mut options = LockOptions::default();
+    assert!(
+      options
+        .apply_file("effect-blur=0x3\ndatestr=%A\n")
+        .is_empty()
+    );
+    assert_eq!(options.blur, None);
+    assert_eq!(options.date_format(LockStyle::Minimal), "%A");
+    // The style from YAML, or by name.
+    let section: LockConfig =
+      serde_yaml::from_str("style: swaylock\n").expect("a lock section");
+    assert_eq!(section.style, LockStyle::Swaylock);
+    assert!(serde_yaml::from_str::<LockConfig>("style: pink\n").is_err());
+    assert_eq!(LockStyle::parse("minimal"), Some(LockStyle::Minimal));
+    assert_eq!(LockStyle::parse("ring"), None);
   }
 
   #[test]
@@ -1107,7 +1214,10 @@ mod tests {
     assert_eq!(options.grace, Duration::from_millis(2500));
     assert!(options.grace_no_mouse && options.grace_no_touch);
     assert_eq!(
-      (options.datestr.as_str(), options.timestr.as_str()),
+      (
+        options.date_format(LockStyle::Swaylock),
+        options.time_format(LockStyle::Swaylock)
+      ),
       ("%d.%m.", "%H:%M")
     );
     assert!(options.ignore_empty_password);

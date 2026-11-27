@@ -332,15 +332,16 @@ launcher:
 # first, $XDG_CONFIG_HOME/swaylock/config unless swaylock_config names
 # another, then the swaylock options below by their long names, then its
 # command line. drift moves the blurred screenshot; input_timeout is how
-# long the password input stays without a key.
+# long the password input stays without a key. style is minimal (a slim
+# white outline, the time in the middle at rest) or swaylock (the input
+# in swaylock's colours). The screenshot, its blur and vignette and the
+# clock are on unless an option turns them off, such as
+# `screenshot: false`, `effect-blur: none` or `clock: false`.
 lock:
   command: shingle-lock
   read_swaylock_config: true
-  options:
-    screenshot: true
-    effect-blur: 7x5
-    effect-vignette: 0.5:0.5
-    clock: true
+  style: minimal
+  options: {}
   drift:
     enabled: true
     fps: 8

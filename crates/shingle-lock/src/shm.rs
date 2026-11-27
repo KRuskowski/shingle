@@ -24,6 +24,8 @@ pub struct ShmBuffer {
   pub id: u64,
   pub buffer: wl_buffer::WlBuffer,
   pub busy: bool,
+  /// The frame it holds, by its target's frame number.
+  pub holds: Option<u64>,
   pool: wl_shm_pool::WlShmPool,
   _file: File,
   mapping: NonNull<std::ffi::c_void>,
@@ -99,6 +101,7 @@ impl ShmBuffer {
       id,
       buffer,
       busy: false,
+      holds: None,
       pool,
       _file: file,
       mapping,

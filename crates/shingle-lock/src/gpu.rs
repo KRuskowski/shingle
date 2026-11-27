@@ -13,7 +13,11 @@ use bytemuck::{Pod, Zeroable};
 use shingle_config::DriftConfig;
 use shingle_render::{GpuContext, GpuOptions};
 
-use crate::{capture::Screenshot, ui::Raster};
+use crate::{
+  capture::Screenshot,
+  damage::{History, Rect},
+  ui::Raster,
+};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 /// The blur's radius in texels at most; larger ones blur a smaller copy.
@@ -467,10 +471,45 @@ fn write(
 
 /// An overlay's texture and where it goes.
 struct Overlay {
-  _texture: wgpu::Texture,
+  texture: wgpu::Texture,
   size: (u32, u32),
   uniform: wgpu::Buffer,
   bind: wgpu::BindGroup,
+}
+
+/// Where an overlay goes in one frame and how it looks there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+  /// Its top-left corner at full size, in pixels; fractions move it
+  /// smoothly between pixels.
+  pub at: (f32, f32),
+  /// Its size, scaled about its centre.
+  pub scale: f32,
+  /// Its opacity.
+  pub alpha: f32,
+}
+
+impl Placement {
+  /// At `at`, full size, with opacity `alpha`.
+  pub fn at((x, y): (i32, i32), alpha: f32) -> Self {
+    Self {
+      at: (x as f32, y as f32),
+      scale: 1.0,
+      alpha,
+    }
+  }
+
+  /// The box it covers for an image of `size`: top-left and
+  /// bottom-right corners.
+  fn corners(&self, size: (u32, u32)) -> ((f32, f32), (f32, f32)) {
+    let (width, height) = (size.0 as f32, size.1 as f32);
+    let centre = (self.at.0 + width / 2.0, self.at.1 + height / 2.0);
+    let half = (width * self.scale / 2.0, height * self.scale / 2.0);
+    (
+      (centre.0 - half.0, centre.1 - half.1),
+      (centre.0 + half.0, centre.1 + half.1),
+    )
+  }
 }
 
 /// What one frame shows besides the background's drift.
@@ -482,10 +521,22 @@ pub struct Frame {
   pub vignette: Option<(f64, f64)>,
   /// The background colour, sRGB bytes.
   pub color: [u8; 4],
-  /// The clock's top-left corner and opacity, if it shows.
-  pub clock: Option<((i32, i32), f32)>,
-  /// The input's top-left corner and opacity, if it shows.
-  pub input: Option<((i32, i32), f32)>,
+  /// How bright the screenshot is drawn, 1 as it was.
+  pub dim: f32,
+  /// The clock, if it shows.
+  pub clock: Option<Placement>,
+  /// The input, if it shows.
+  pub input: Option<Placement>,
+}
+
+impl Frame {
+  /// Whether `self` and `other` draw the same background.
+  fn same_background(&self, other: &Self) -> bool {
+    self.drift == other.drift
+      && self.vignette == other.vignette
+      && self.color == other.color
+      && self.dim == other.dim
+  }
 }
 
 /// One output's target, its background and overlays, and the buffer its
@@ -495,7 +546,6 @@ pub struct Target {
   view: wgpu::TextureView,
   texture: wgpu::Texture,
   readback: wgpu::Buffer,
-  padded_row: u32,
   background_uniform: wgpu::Buffer,
   background: wgpu::BindGroup,
   has_image: bool,
@@ -503,6 +553,22 @@ pub struct Target {
   cover: [f32; 2],
   clock: Option<Overlay>,
   input: Option<Overlay>,
+  /// The last frame drawn and the overlays' boxes in it.
+  last: Option<(Frame, Rect)>,
+  /// Set when an overlay's image changed since the last frame.
+  overlays_changed: Rect,
+  history: History,
+}
+
+/// A frame drawn into a buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Drawn {
+  /// Its number, which the buffer now holds.
+  pub serial: u64,
+  /// What changed from the frame before, for `wl_surface.damage_buffer`.
+  pub damage: Rect,
+  /// What was read back into the buffer.
+  pub copied: Rect,
 }
 
 impl Target {
@@ -532,13 +598,15 @@ impl Target {
       view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
       texture,
       readback,
-      padded_row,
       background_uniform,
       background,
       has_image: image.is_some(),
       cover: image.map_or([1.0, 1.0], |image| cover_scale(image.size, size)),
       clock: None,
       input: None,
+      last: None,
+      overlays_changed: Rect::default(),
+      history: History::default(),
     }
   }
 
@@ -547,8 +615,15 @@ impl Target {
     self.size
   }
 
-  fn overlay(gpu: &Gpu, raster: &Raster) -> Overlay {
+  /// Puts `raster` into `slot`, reusing its texture when the size is the
+  /// same.
+  fn set_overlay(gpu: &Gpu, slot: &mut Option<Overlay>, raster: &Raster) {
     let size = (raster.width, raster.height);
+    if let Some(overlay) = slot.as_ref().filter(|overlay| overlay.size == size)
+    {
+      write(gpu.queue(), &overlay.texture, size, &raster.rgba);
+      return;
+    }
     let texture = texture(
       gpu.device(),
       size,
@@ -556,39 +631,80 @@ impl Target {
       wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
     );
     write(gpu.queue(), &texture, size, &raster.rgba);
-    let (texture, view) = with_view(texture);
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let uniform = gpu.uniform(&OverlayUniform::zeroed());
     let bind = gpu.bind(&view, &uniform);
-    Overlay {
-      _texture: texture,
+    *slot = Some(Overlay {
+      texture,
       size,
       uniform,
       bind,
-    }
+    });
   }
 
-  /// Replaces the clock's image.
+  /// The boxes of the overlays `frame` places, together.
+  fn overlay_rect(&self, frame: &Frame) -> Rect {
+    [(&self.clock, frame.clock), (&self.input, frame.input)]
+      .into_iter()
+      .filter_map(|(overlay, placement)| {
+        let (overlay, placement) = (overlay.as_ref()?, placement?);
+        let (from, to) = placement.corners(overlay.size);
+        Some(Rect::around(from, to, self.size))
+      })
+      .fold(Rect::default(), Rect::union)
+  }
+
+  /// Replaces the clock's image; it is redrawn where the last frame
+  /// placed it.
   pub fn set_clock(&mut self, gpu: &Gpu, raster: Option<&Raster>) {
-    self.clock = raster.map(|raster| Self::overlay(gpu, raster));
+    self.note_overlay_change();
+    match raster {
+      Some(raster) => Self::set_overlay(gpu, &mut self.clock, raster),
+      None => self.clock = None,
+    }
   }
 
   /// Replaces the input's image.
   pub fn set_input(&mut self, gpu: &Gpu, raster: Option<&Raster>) {
-    self.input = raster.map(|raster| Self::overlay(gpu, raster));
+    self.note_overlay_change();
+    match raster {
+      Some(raster) => Self::set_overlay(gpu, &mut self.input, raster),
+      None => self.input = None,
+    }
   }
 
-  /// The clip-space rectangle of `size` pixels at `at`.
-  fn clip_rect(&self, (x, y): (i32, i32), size: (u32, u32)) -> [f32; 4] {
+  fn note_overlay_change(&mut self) {
+    if let Some((_, rect)) = self.last {
+      self.overlays_changed = self.overlays_changed.union(rect);
+    }
+  }
+
+  /// The clip-space rectangle of `placement` for an image of `size`.
+  fn clip_rect(&self, placement: &Placement, size: (u32, u32)) -> [f32; 4] {
     let (width, height) = (self.size.0 as f32, self.size.1 as f32);
-    let x0 = x as f32 / width * 2.0 - 1.0;
-    let y0 = 1.0 - y as f32 / height * 2.0;
-    let x1 = (x as f32 + size.0 as f32) / width * 2.0 - 1.0;
-    let y1 = 1.0 - (y as f32 + size.1 as f32) / height * 2.0;
-    [x0, y0, x1, y1]
+    let ((x0, y0), (x1, y1)) = placement.corners(size);
+    [
+      x0 / width * 2.0 - 1.0,
+      1.0 - y0 / height * 2.0,
+      x1 / width * 2.0 - 1.0,
+      1.0 - y1 / height * 2.0,
+    ]
   }
 
-  /// Draws `frame` and copies it into `out`, rows `stride` bytes apart,
-  /// as `XRGB8888`.
+  /// What changed between the last frame and `frame`, whose overlays
+  /// cover `overlays`: everything when the background did.
+  fn damage(&self, frame: &Frame, overlays: Rect) -> Rect {
+    match &self.last {
+      Some((last, last_overlays)) if last.same_background(frame) => {
+        overlays.union(*last_overlays).union(self.overlays_changed)
+      }
+      _ => Rect::full(self.size),
+    }
+  }
+
+  /// Draws `frame` and reads it back into `out`, rows `stride` bytes
+  /// apart, as `XRGB8888`. `holds` is the frame `out` holds from an
+  /// earlier draw, if any: only what changed since is read back.
   ///
   /// # Errors
   ///
@@ -599,12 +715,22 @@ impl Target {
     frame: &Frame,
     out: &mut [u8],
     stride: usize,
-  ) -> Result<(), String> {
+    holds: Option<u64>,
+  ) -> Result<Drawn, String> {
     let (width, height) = self.size;
     let row = width as usize * 4;
     if stride < row || out.len() < stride * (height as usize - 1) + row {
       return Err("the buffer does not fit the frame".into());
     }
+    let overlays = self.overlay_rect(frame);
+    let damage = self.damage(frame, overlays);
+    let serial = self.history.push(damage);
+    self.last = Some((*frame, overlays));
+    self.overlays_changed = Rect::default();
+    let copied = self
+      .history
+      .since(holds)
+      .unwrap_or_else(|| Rect::full(self.size));
     let byte = |value: u8| f32::from(value) / 255.0;
     let (base, factor) = frame.vignette.unwrap_or((1.0, 0.0));
     let uniform = BackgroundUniform {
@@ -626,7 +752,7 @@ impl Target {
         byte(frame.color[2]),
         1.0,
       ],
-      shimmer: [frame.drift.phase, self.cover[0], self.cover[1], 0.0],
+      shimmer: [frame.drift.phase, self.cover[0], self.cover[1], frame.dim],
     };
     gpu.queue().write_buffer(
       &self.background_uniform,
@@ -647,15 +773,15 @@ impl Target {
     for (overlay, placement) in
       [(&self.clock, frame.clock), (&self.input, frame.input)]
     {
-      let (Some(overlay), Some((at, alpha))) = (overlay, placement) else {
+      let (Some(overlay), Some(placement)) = (overlay, placement) else {
         continue;
       };
-      if alpha <= 0.0 {
+      if placement.alpha <= 0.0 {
         continue;
       }
       let uniform = OverlayUniform {
-        rect: self.clip_rect(at, overlay.size),
-        alpha: [alpha.min(1.0), 0.0, 0.0, 0.0],
+        rect: self.clip_rect(&placement, overlay.size),
+        alpha: [placement.alpha.min(1.0), 0.0, 0.0, 0.0],
       };
       gpu.queue().write_buffer(
         &overlay.uniform,
@@ -671,35 +797,49 @@ impl Target {
         false,
       );
     }
+    if copied.is_empty() {
+      gpu.queue().submit([encoder.finish()]);
+      return Ok(Drawn {
+        serial,
+        damage,
+        copied,
+      });
+    }
+    // The part read back starts at the buffer's beginning, its rows
+    // padded to wgpu's alignment.
+    let padded = (copied.width * 4).div_ceil(256) * 256;
     encoder.copy_texture_to_buffer(
       wgpu::TexelCopyTextureInfo {
         texture: &self.texture,
         mip_level: 0,
-        origin: wgpu::Origin3d::ZERO,
+        origin: wgpu::Origin3d {
+          x: copied.x,
+          y: copied.y,
+          z: 0,
+        },
         aspect: wgpu::TextureAspect::All,
       },
       wgpu::TexelCopyBufferInfo {
         buffer: &self.readback,
         layout: wgpu::TexelCopyBufferLayout {
           offset: 0,
-          bytes_per_row: Some(self.padded_row),
-          rows_per_image: Some(height),
+          bytes_per_row: Some(padded),
+          rows_per_image: Some(copied.height),
         },
       },
       wgpu::Extent3d {
-        width,
-        height,
+        width: copied.width,
+        height: copied.height,
         depth_or_array_layers: 1,
       },
     );
     gpu.queue().submit([encoder.finish()]);
+    let length = u64::from(padded) * u64::from(copied.height);
     let (sender, receiver) = std::sync::mpsc::channel();
-    self
-      .readback
-      .clone()
-      .map_async(wgpu::MapMode::Read, .., move |result| {
-        let _ = sender.send(result);
-      });
+    let slice = self.readback.slice(..length);
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+      let _ = sender.send(result);
+    });
     gpu
       .device()
       .poll(wgpu::PollType::Wait {
@@ -712,25 +852,34 @@ impl Target {
       .map_err(|error| error.to_string())?
       .map_err(|error| error.to_string())?;
     {
-      let mapped = self
-        .readback
-        .get_mapped_range(..)
+      let mapped = slice
+        .get_mapped_range()
         .map_err(|error| error.to_string())?;
-      for (y, source) in mapped
-        .chunks_exact(self.padded_row as usize)
-        .take(height as usize)
-        .enumerate()
-      {
-        let destination = &mut out[y * stride..y * stride + row];
-        destination.copy_from_slice(&source[..row]);
-        // XRGB8888 ignores the X byte; it stays opaque either way.
-        for pixel in destination.chunks_exact_mut(4) {
-          pixel[3] = 0xff;
+      let (x, part) = (copied.x as usize * 4, copied.width as usize * 4);
+      if copied.x == 0 && part == stride && padded as usize == stride {
+        // Whole rows, laid out as the buffer's: one copy.
+        let start = copied.y as usize * stride;
+        out[start..start + mapped.len()].copy_from_slice(&mapped);
+      } else {
+        for (index, source) in mapped
+          .chunks_exact(padded as usize)
+          .take(copied.height as usize)
+          .enumerate()
+        {
+          let start = (copied.y as usize + index) * stride + x;
+          out[start..start + part].copy_from_slice(&source[..part]);
         }
       }
     }
     self.readback.unmap();
-    Ok(())
+    // Every pass writes an alpha of 1: the passes are opaque and the
+    // overlays blend premultiplied over them, so XRGB8888's X byte is
+    // 0xff without touching it.
+    Ok(Drawn {
+      serial,
+      damage,
+      copied,
+    })
   }
 }
 
@@ -847,16 +996,17 @@ mod tests {
       drift: Drift::STILL,
       vignette: None,
       color: [0, 0, 0, 255],
+      dim: 1.0,
       clock: None,
       input: None,
     };
     let mut target = Target::new(&gpu, (64, 32), Some(&sharp));
-    target.draw(&gpu, &plain, &mut frame, 256).unwrap();
+    target.draw(&gpu, &plain, &mut frame, 256, None).unwrap();
     assert_eq!(at(&frame, 30, 16), [0, 0, 255]);
     assert_eq!(at(&frame, 33, 16), [0, 255, 0]);
     assert!(frame.chunks_exact(4).all(|pixel| pixel[3] == 255));
     let mut target = Target::new(&gpu, (64, 32), Some(&blurred));
-    target.draw(&gpu, &plain, &mut frame, 256).unwrap();
+    target.draw(&gpu, &plain, &mut frame, 256, None).unwrap();
     let [_, green, red] = at(&frame, 31, 16);
     assert!(red > 60 && green > 60, "the edge is blurred: {red} {green}");
     assert!(at(&frame, 2, 16)[2] > 200, "far from it stays red");
@@ -871,10 +1021,10 @@ mod tests {
     );
     let overlaid = Frame {
       vignette: Some((0.0, 1.0)),
-      input: Some(((8, 8), 1.0)),
+      input: Some(Placement::at((8, 8), 1.0)),
       ..plain
     };
-    target.draw(&gpu, &overlaid, &mut frame, 256).unwrap();
+    target.draw(&gpu, &overlaid, &mut frame, 256, None).unwrap();
     assert_eq!(at(&frame, 9, 9), [255, 255, 255]);
     assert!(at(&frame, 0, 0)[2] < 10, "the corner is dark");
     assert!(at(&frame, 16, 16)[2] > 150, "the middle is not");
@@ -883,7 +1033,7 @@ mod tests {
     let stripes = gpu.image(&stripes(), None);
     let mut square = Target::new(&gpu, (32, 32), Some(&stripes));
     let mut small = vec![0; 256 * 32];
-    square.draw(&gpu, &plain, &mut small, 256).unwrap();
+    square.draw(&gpu, &plain, &mut small, 256, None).unwrap();
     assert_eq!(at(&small, 4, 16), [0, 255, 0], "green, not red");
     assert_eq!(at(&small, 28, 16), [255, 0, 0], "blue, not white");
     // Without a screenshot the colour shows.
@@ -892,8 +1042,218 @@ mod tests {
       color: [0x10, 0x20, 0x30, 0xff],
       ..plain
     };
-    target.draw(&gpu, &coloured, &mut frame, 256).unwrap();
+    target.draw(&gpu, &coloured, &mut frame, 256, None).unwrap();
     assert_eq!(at(&frame, 5, 5), [0x30, 0x20, 0x10]);
+    // Dimmed, the screenshot is darker; the colour is not.
+    let mut dimmed = Target::new(&gpu, (64, 32), Some(&sharp));
+    let dark = Frame { dim: 0.5, ..plain };
+    dimmed.draw(&gpu, &dark, &mut frame, 256, None).unwrap();
+    let red = at(&frame, 2, 16)[2];
+    assert!((120..=135).contains(&red), "{red}");
+  }
+
+  /// A 4x4 white square in a transparent pixel's border, as the
+  /// overlays have, so that they move smoothly between pixels.
+  fn square() -> Raster {
+    let mut rgba = vec![0; 6 * 6 * 4];
+    for y in 1..5 {
+      for x in 1..5 {
+        rgba[(y * 6 + x) * 4..(y * 6 + x) * 4 + 4].fill(255);
+      }
+    }
+    Raster {
+      width: 6,
+      height: 6,
+      rgba,
+    }
+  }
+
+  #[test]
+  fn a_frame_that_only_moves_an_overlay_reads_back_only_that() {
+    let Ok(gpu) = Gpu::new() else {
+      eprintln!("no GPU; skipped");
+      return;
+    };
+    let image = gpu.image(&halves(), None);
+    let mut target = Target::new(&gpu, (64, 32), Some(&image));
+    target.set_input(&gpu, Some(&square()));
+    let frame = Frame {
+      drift: Drift::STILL,
+      vignette: None,
+      color: [0, 0, 0, 255],
+      dim: 1.0,
+      clock: None,
+      input: Some(Placement::at((4, 4), 1.0)),
+    };
+    // Two buffers, as an output alternates them.
+    let mut buffers = [vec![0_u8; 256 * 32], vec![0_u8; 256 * 32]];
+    let first = target
+      .draw(&gpu, &frame, &mut buffers[0], 256, None)
+      .unwrap();
+    assert_eq!(first.copied, Rect::full((64, 32)));
+    let second = target
+      .draw(&gpu, &frame, &mut buffers[1], 256, None)
+      .unwrap();
+    // Nothing moved: only the input's box.
+    assert_eq!(
+      second.damage,
+      Rect {
+        x: 4,
+        y: 4,
+        width: 6,
+        height: 6,
+      }
+    );
+    // The input moves by 10.5 pixels: the old buffer gets both frames'
+    // boxes, the new place smoothly between pixels.
+    let moved = Frame {
+      input: Some(Placement {
+        at: (14.5, 4.0),
+        scale: 1.0,
+        alpha: 1.0,
+      }),
+      ..frame
+    };
+    let third = target
+      .draw(&gpu, &moved, &mut buffers[0], 256, Some(first.serial))
+      .unwrap();
+    let expected = Rect {
+      x: 4,
+      y: 4,
+      width: 17,
+      height: 6,
+    };
+    assert_eq!(third.damage, expected);
+    assert_eq!(third.copied, expected);
+    // The old place is red again, the new one white, half covered at
+    // its edges.
+    assert_eq!(at(&buffers[0], 6, 6), [0, 0, 255]);
+    assert_eq!(at(&buffers[0], 17, 6), [255, 255, 255]);
+    let edge = at(&buffers[0], 15, 6);
+    assert!(edge[0] > 100 && edge[0] < 160, "{edge:?}");
+    // Outside the box the buffer kept what it had.
+    assert_eq!(at(&buffers[0], 40, 20), [0, 255, 0]);
+    // A drift step changes the background: all of it.
+    let drifted = Frame {
+      drift: Drift {
+        offset: [0.01, 0.0],
+        ..Drift::STILL
+      },
+      ..moved
+    };
+    let fourth = target
+      .draw(&gpu, &drifted, &mut buffers[1], 256, Some(second.serial))
+      .unwrap();
+    assert_eq!(fourth.copied, Rect::full((64, 32)));
+    // A new image for the input redraws its box though nothing moved.
+    target.set_input(&gpu, Some(&square()));
+    let fifth = target
+      .draw(&gpu, &drifted, &mut buffers[0], 256, Some(fourth.serial))
+      .unwrap();
+    assert_eq!(
+      fifth.damage,
+      Rect::around((14.5, 4.0), (20.5, 10.0), (64, 32))
+    );
+    // A scaled overlay covers its scaled box about its centre.
+    let scaled = Placement {
+      at: (8.0, 8.0),
+      scale: 0.5,
+      alpha: 1.0,
+    };
+    assert_eq!(scaled.corners((4, 4)), ((9.0, 9.0), (11.0, 11.0)));
+  }
+
+  /// The cost of one frame, the GPU's drawing and the read-back into
+  /// memory, at 1080p and 4K: `cargo test --release -p shingle-lock --
+  /// --ignored frame_cost --nocapture` (docs/design/lock-screen.md).
+  #[test]
+  #[ignore = "a measurement, run by hand"]
+  fn frame_cost() {
+    let Ok(gpu) = Gpu::new() else {
+      eprintln!("no GPU; skipped");
+      return;
+    };
+    for size in [(1920_u32, 1080_u32), (3840, 2160)] {
+      let shot = Screenshot {
+        name: None,
+        width: size.0,
+        height: size.1,
+        bgra: (0..size.0 * size.1 * 4).map(|i| (i % 251) as u8).collect(),
+      };
+      let image = gpu.image(&shot, Some((24, 3)));
+      let mut target = Target::new(&gpu, size, Some(&image));
+      target.set_input(
+        &gpu,
+        Some(&Raster {
+          width: 320,
+          height: 80,
+          rgba: vec![128; 320 * 80 * 4],
+        }),
+      );
+      let stride = size.0 as usize * 4;
+      let mut out = vec![0_u8; stride * size.1 as usize];
+      let config = DriftConfig::default();
+      let mut times = Vec::new();
+      for index in 0..120 {
+        let frame = Frame {
+          drift: Drift::at(f64::from(index) / 60.0, &config, size),
+          vignette: Some((0.5, 0.5)),
+          color: [0, 0, 0, 255],
+          dim: 0.8,
+          clock: None,
+          input: Some(Placement::at((800, 500 + index % 20), 0.5)),
+        };
+        let start = std::time::Instant::now();
+        target.draw(&gpu, &frame, &mut out, stride, None).unwrap();
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
+      }
+      report("full", size, &mut times);
+      // The background still between drift steps: only the input's box
+      // changes, in the buffer of two frames before.
+      let still = Drift::at(0.5, &config, size);
+      let mut buffers = [out.clone(), out];
+      let mut serials = [None, None];
+      for index in 0..120 {
+        let frame = Frame {
+          drift: still,
+          vignette: Some((0.5, 0.5)),
+          color: [0, 0, 0, 255],
+          dim: 0.8,
+          clock: None,
+          input: Some(Placement {
+            at: (800.0 + index as f32 * 0.7, 500.0),
+            scale: 1.0,
+            alpha: 0.5,
+          }),
+        };
+        let buffer = index % 2;
+        let start = std::time::Instant::now();
+        let drawn = target
+          .draw(&gpu, &frame, &mut buffers[buffer], stride, serials[buffer])
+          .unwrap();
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
+        serials[buffer] = Some(drawn.serial);
+      }
+      report("overlay only", size, &mut times);
+    }
+  }
+
+  /// Prints the mean, median, 95th percentile and maximum of `times`
+  /// after the first ten, and empties it.
+  fn report(what: &str, size: (u32, u32), times: &mut Vec<f64>) {
+    times.drain(..10);
+    times.sort_by(f64::total_cmp);
+    let mean = times.iter().sum::<f64>() / times.len() as f64;
+    eprintln!(
+      "frame cost {}x{} {what}: mean {mean:.2} ms, median {:.2} ms, \
+       p95 {:.2} ms, max {:.2} ms",
+      size.0,
+      size.1,
+      times[times.len() / 2],
+      times[times.len() * 95 / 100],
+      times[times.len() - 1],
+    );
+    times.clear();
   }
 
   #[test]
