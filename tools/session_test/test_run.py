@@ -92,6 +92,65 @@ class LayoutTest(unittest.TestCase):
     self.assertIsNone(run.saved_shares(session(root), 1, 2))
     self.assertIsNone(run.saved_shares({}, 1, 2))
 
+class FakeIpc:
+  """An IPC connection that records requests and fails `bad` ones."""
+
+  def __init__(self, bad=()):
+    self.requests = []
+    self.bad = bad
+
+  def call(self, method, data=None):
+    """Records the request and replies."""
+    self.requests.append((method, data))
+    if data in self.bad:
+      return {'error': 'no'}
+    return {'result': 'ok'}
+
+class SamplingTest(unittest.TestCase):
+  """The timed layout changes and the /proc samples."""
+
+  def test_changes_send_each_step_and_collect_the_failures(self):
+    ipc = FakeIpc(bad=(2,))
+    sends, latencies, errors = run.change_layouts(
+        ipc, lambda percent: percent, [1, 2, 3], interval=0)
+    self.assertEqual(ipc.requests, [('simple-tile/set-layout', step)
+                                    for step in (1, 2, 3)])
+    self.assertEqual(len(sends), 3)
+    self.assertEqual(sends, sorted(sends))
+    self.assertTrue(all(latency >= 0 for latency in latencies))
+    self.assertEqual(errors, [{'error': 'no'}])
+
+  def test_sched_gives_cpu_milliseconds_and_involuntary_switches(self):
+    text = ('shingle (8, #threads: 40)\n-------\n'
+            'se.sum_exec_runtime                          :'
+            '          1234.567890\n'
+            'nr_switches                                  :'
+            '                  900\n'
+            'nr_involuntary_switches                      :'
+            '                   12\n')
+    self.assertEqual(run.parse_sched(text), (1234.56789, 12))
+    self.assertIsNone(run.parse_sched('nothing: here\n'))
+
+  def test_cpu_during_takes_the_first_and_last_sample_inside(self):
+    cpu = [(0.0, 'nested', 10.0, 1), (1.0, 'nested', 12.0, 1),
+           (1.5, 'outer', 5.0, 0), (2.0, 'nested', 20.0, 3),
+           (3.0, 'nested', 90.0, 9)]
+    self.assertEqual(run.cpu_during(cpu, 0.5, 2.5), {
+        'nested': {'wall_ms': 1000.0, 'cpu_ms': 8.0, 'preempted': 2}})
+
+  def test_summaries_count_states_within_the_window(self):
+    samples = [(1.0, 'nested/main', 'S', 'futex_wait_queue', 202),
+               (1.1, 'nested/main', 'S', 'futex_wait_queue', 202),
+               (1.2, 'nested/shingle:10', 'R', '0', -1),
+               (5.0, 'nested/main', 'R', '0', -1)]
+    self.assertEqual(run.summarize_samples(samples, 1.0, 2.0), [
+        ('nested/main S futex_wait_queue 202', 2),
+        ('nested/shingle:10 R 0 -1', 1)])
+
+  def test_threads_are_told_apart_by_their_id(self):
+    self.assertEqual(run.thread_label(8, '8', 'shingle'), 'main')
+    self.assertEqual(run.thread_label(8, '10', 'shingle'), 'shingle:10')
+
 class RoundTripTest(unittest.TestCase):
   """The pure helpers of round_trip.py."""
 

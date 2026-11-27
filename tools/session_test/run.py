@@ -15,10 +15,14 @@ The nested Shingle's `XDG_STATE_HOME` is a FUSE mount
 seconds, as this host's busy `/home` did for 8 to 17 s
 (docs/status.md#sessions). Two `wl_probe` clients map in it, and while
 a session write is stuck in fsync the harness changes the layout with
-`simple-tile/set-layout` every 100 ms and times each reply. It checks
-that every reply came within 50 ms, that the bursts were coalesced into
-few writes, that SIGTERM exits with status 0, and that the session on
-disk afterwards holds the last layout.
+`simple-tile/set-layout` every 100 ms for 3 s, once to warm up lavapipe's
+shaders and once timing each reply. It checks that every timed reply
+came within 50 ms, that the bursts were coalesced into few writes, that
+nested's main thread idles afterwards (under 10 % of a CPU), that SIGTERM
+exits with status 0, and that the session on disk afterwards holds the
+last layout. `--latency-log FILE` appends the latencies and, sampled
+from /proc every millisecond, what each thread of both Shingles did
+during any slow reply (docs/status.md#ipc-latency).
 
 Usage, from the repository root and outside any sandbox that forbids
 user namespaces (needs python3-fuse and a readable `/dev/fuse`):
@@ -47,6 +51,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 def _load_output_harness():
@@ -78,6 +83,12 @@ REPLY_LIMIT = 0.05
 # How long the layout keeps changing, and how often.
 CHANGE_PERIOD = 3.0
 CHANGE_INTERVAL = 0.1
+# How long nested is watched while idle, and the share of it its main
+# thread may spend on a CPU: a debug build's turns every 16 ms and at the
+# 50 ms tick cost about 5 %, a loop woken over and over by a descriptor
+# that stays readable all of it.
+IDLE_PERIOD = 2.0
+IDLE_CPU_LIMIT = 0.1
 
 def parse_events(text):
   """The (event, time, path) tuples in a slowfs log."""
@@ -211,6 +222,144 @@ def thread_states(pid):
       states.append(f'{name}:{state}:{wchan}')
   return states
 
+def task_sample(pid, tid):
+  """(state, wchan, syscall number) of thread `tid` of `pid` now, or
+  None once it is gone. The syscall number is -1 while the thread runs
+  in user space and None if it cannot be read."""
+  base = f'/proc/{pid}/task/{tid}'
+  try:
+    with open(f'{base}/stat') as file:
+      state = file.read().rsplit(')', 1)[1].split()[0]
+    with open(f'{base}/wchan') as file:
+      wchan = file.read().strip()
+    try:
+      with open(f'{base}/syscall') as file:
+        call = file.read().split()[0]
+      syscall = -1 if call == 'running' else int(call)
+    except (OSError, ValueError, IndexError):
+      syscall = None
+  except OSError:
+    return None
+  return state, wchan, syscall
+
+def parse_sched(text):
+  """(CPU time in ms, involuntary context switches) from the text of a
+  /proc/PID/task/TID/sched file, or None."""
+  values = {}
+  for line in text.splitlines():
+    if ':' in line:
+      key, value = line.split(':', 1)
+      values[key.strip()] = value.strip()
+  try:
+    return (float(values['se.sum_exec_runtime']),
+            int(values['nr_involuntary_switches']))
+  except (KeyError, ValueError):
+    return None
+
+def main_thread_cpu(pid):
+  """`parse_sched` of the main thread of `pid`, or None."""
+  try:
+    with open(f'/proc/{pid}/task/{pid}/sched') as file:
+      return parse_sched(file.read())
+  except OSError:
+    return None
+
+def idle_cpu_share(pid, seconds):
+  """The share of `seconds` the main thread of `pid` spent on a CPU, or
+  None if /proc does not say."""
+  before = main_thread_cpu(pid)
+  started = time.monotonic()
+  time.sleep(seconds)
+  after = main_thread_cpu(pid)
+  elapsed = time.monotonic() - started
+  if before is None or after is None:
+    return None
+  return (after[0] - before[0]) / (elapsed * 1000)
+
+def cpu_during(cpu, start, end):
+  """Per process name, the wall and CPU ms and the involuntary switches
+  of its main thread between its first and last samples within [start,
+  end], from (time, name, CPU ms, switches) samples."""
+  result = {}
+  for name in {entry[1] for entry in cpu}:
+    inside = [entry for entry in cpu
+              if entry[1] == name and start <= entry[0] <= end]
+    if len(inside) >= 2:
+      first, last = inside[0], inside[-1]
+      result[name] = {
+          'wall_ms': round((last[0] - first[0]) * 1000, 1),
+          'cpu_ms': round(last[2] - first[2], 1),
+          'preempted': last[3] - first[3]}
+  return result
+
+def task_name(pid, tid):
+  """The comm of thread `tid` of `pid`, or `?`."""
+  try:
+    with open(f'/proc/{pid}/task/{tid}/comm') as file:
+      return file.read().strip()
+  except OSError:
+    return '?'
+
+def thread_label(pid, tid, comm):
+  """`main` for the main thread of `pid`, `COMM:TID` for the others,
+  since many threads share a name."""
+  return 'main' if int(tid) == pid else f'{comm}:{tid}'
+
+class ThreadSampler:
+  """Samples every thread of the given processes every `interval`
+  seconds on a thread of its own, as (time, `NAME/THREAD`, state, wchan,
+  syscall), and each main thread's CPU time, for off-CPU analysis where
+  perf is not allowed. It reads only /proc of the PIDs it is given,
+  children of this harness in its PID namespace, and never signals or
+  traces them."""
+
+  def __init__(self, processes, interval=0.001):
+    self.processes = processes
+    self.interval = interval
+    self.samples = []
+    # (time, name, CPU ms, involuntary switches) of each main thread.
+    self.cpu = []
+    self._stop = threading.Event()
+    self._thread = threading.Thread(target=self._run, daemon=True)
+
+  def start(self):
+    """Starts sampling."""
+    self._thread.start()
+
+  def stop(self):
+    """Stops sampling and returns the samples."""
+    self._stop.set()
+    self._thread.join()
+    return self.samples
+
+  def _run(self):
+    while not self._stop.is_set():
+      now = time.monotonic()
+      for name, pid in self.processes.items():
+        cpu = main_thread_cpu(pid)
+        if cpu:
+          self.cpu.append((now, name, *cpu))
+        try:
+          tasks = os.listdir(f'/proc/{pid}/task')
+        except OSError:
+          continue
+        for tid in tasks:
+          sample = task_sample(pid, tid)
+          if sample:
+            thread = thread_label(pid, tid, task_name(pid, tid))
+            self.samples.append((now, f'{name}/{thread}', *sample))
+      time.sleep(self.interval)
+
+def summarize_samples(samples, start, end):
+  """Counts of `name state wchan syscall` among `samples` within
+  [start, end], most frequent first."""
+  counts = {}
+  for stamp, name, state, wchan, syscall in samples:
+    if start <= stamp <= end:
+      key = f'{name} {state} {wchan or "-"} {syscall}'
+      counts[key] = counts.get(key, 0) + 1
+  return sorted(counts.items(), key=lambda item: -item[1])
+
 def stop_shingle(shingle, timeout):
   """SIGTERM through `signal_checked`, then waits up to `timeout`; returns
   (status, seconds, thread states sampled 1 s after the signal)."""
@@ -267,9 +416,31 @@ def nested_views(nested, count):
            if view.get('mapped')}
   return views if len(views) == count else None
 
-def slow_write_checks(results, binary, wl_probe, delay):
+def change_layouts(ipc, request, sequence, interval=CHANGE_INTERVAL):
+  """Sends `simple-tile/set-layout` over `ipc` with `request(percent)`
+  for each step of `sequence`, one every `interval` seconds; returns the
+  send times (`time.monotonic`), the reply latencies in seconds and the
+  replies that were not `ok`."""
+  sends, latencies, errors = [], [], []
+  started = time.monotonic()
+  for index, percent in enumerate(sequence):
+    sent = time.monotonic()
+    sends.append(sent)
+    reply = ipc.call('simple-tile/set-layout', request(percent))
+    latencies.append(time.monotonic() - sent)
+    if reply.get('result') != 'ok':
+      errors.append(reply)
+    time.sleep(max(0.0, started + (index + 1) * interval
+                   - time.monotonic()))
+  return sends, latencies, errors
+
+def slow_write_checks(results, binary, wl_probe, delay, latency_log=None):
   """Layout changes stay responsive while a session write is stuck, and
-  the session on disk after exit is the last one."""
+  the session on disk after exit is the last one. With `latency_log`, one
+  JSON line is appended to it: each timed reply's send time
+  (`time.monotonic`) and latency in seconds, the warm-up's latencies,
+  the main threads' CPU time over the timed pass and, for each reply
+  over the limit, what every thread of both Shingles was doing."""
   backing = '/tmp/slow-backing'
   state = '/tmp/slow-state'
   log_path = '/tmp/slowfs.log'
@@ -303,31 +474,51 @@ def slow_write_checks(results, binary, wl_probe, delay):
                      timeout=10, interval=0.005)
     results.check('a session write is stuck in fsync', stuck,
                   str(read_log(log_path)))
-    latencies = []
-    errors = []
     direction = root_direction(nested.ipc.call(
         'simple-tile/get-layout',
         {'wset-index': 1, 'workspace': {'x': 0, 'y': 0}}))
     sequence = layout_steps(int(CHANGE_PERIOD / CHANGE_INTERVAL))
+
+    def request(percent):
+      return layout_request(direction, first, second, percent)
+
+    # lavapipe compiles the shaders of each draw state on first use, on
+    # its queue thread, and nested's frame waits 50 to 90 ms for that on
+    # a cold Mesa cache, which the namespace's private HOME always has
+    # (docs/status.md#ipc-latency). The warm-up draws every state of the
+    # sequence once, so that the timed pass measures what slow writes do.
+    _, warm_latencies, errors = change_layouts(nested.ipc, request,
+                                               sequence)
+    sampler = None
+    if latency_log:
+      sampler = ThreadSampler({'nested': nested.process.pid,
+                               'outer': outer.process.pid})
+      sampler.start()
     started = time.monotonic()
-    for index, percent in enumerate(sequence):
-      sent = time.monotonic()
-      reply = nested.ipc.call(
-          'simple-tile/set-layout',
-          layout_request(direction, first, second, percent))
-      latencies.append(time.monotonic() - sent)
-      if reply.get('result') != 'ok':
-        errors.append(reply)
-      time.sleep(max(0.0, started + (index + 1) * CHANGE_INTERVAL
-                     - time.monotonic()))
+    sends, latencies, timed_errors = change_layouts(nested.ipc, request,
+                                                    sequence)
+    errors += timed_errors
     finished = time.monotonic()
+    if latency_log:
+      samples = sampler.stop()
+      slow = [summarize_samples(samples, sent, sent + latency)
+              + [cpu_during(sampler.cpu, sent, sent + latency)]
+              for sent, latency in zip(sends, latencies)
+              if latency >= REPLY_LIMIT]
+      with open(latency_log, 'a') as file:
+        file.write(json.dumps({'sent': sends, 'latencies': latencies,
+                               'warm-up': warm_latencies,
+                               'cpu': cpu_during(sampler.cpu, started,
+                                                 finished),
+                               'slow': slow}) + '\n')
     worst = max(latencies)
     results.check('set-layout succeeds', not errors, str(errors[:3]))
     results.check(
         f'every IPC reply within {REPLY_LIMIT * 1000:.0f} ms during slow '
         'writes', worst < REPLY_LIMIT,
         f'{len(latencies)} replies, worst {worst * 1000:.1f} ms, median '
-        f'{sorted(latencies)[len(latencies) // 2] * 1000:.1f} ms')
+        f'{sorted(latencies)[len(latencies) // 2] * 1000:.1f} ms; warm-up '
+        f'worst {max(warm_latencies) * 1000:.1f} ms')
     during = overlapping(fsync_intervals(read_log(log_path)), started,
                          finished)
     results.check('session writes were stuck in fsync meanwhile',
@@ -338,6 +529,14 @@ def slow_write_checks(results, binary, wl_probe, delay):
                   0 < len(during) <= limit,
                   f'{len(sequence)} changes, {len(during)} writes, '
                   f'at most {limit}')
+    # Animations of the last change end first.
+    time.sleep(0.5)
+    share = idle_cpu_share(nested.process.pid, IDLE_PERIOD)
+    used = 'unknown' if share is None else f'{share * 100:.1f} %'
+    results.check('nested idles while nothing changes',
+                  share is not None and share < IDLE_CPU_LIMIT,
+                  f'main thread {used} of {IDLE_PERIOD:.0f} s, at most '
+                  f'{IDLE_CPU_LIMIT * 100:.0f} %')
     status, exit_time, states = stop_shingle(nested, 30)
     nested_log = nested.log_text()
     nested = None
@@ -388,14 +587,15 @@ def _load_round_trip():
   spec.loader.exec_module(module)
   return module
 
-def check_groups(names, binary, wl_probe, delay, master_binary):
+def check_groups(names, binary, wl_probe, delay, master_binary,
+                 latency_log=None):
   """The (name, function of results returning a log) of each group in
   `names`, in order."""
   round_trip = _load_round_trip()
   harness = sys.modules[__name__]
   groups = {
       'slow': lambda results: slow_write_checks(results, binary, wl_probe,
-                                                delay),
+                                                delay, latency_log),
       'round-trip': lambda results: round_trip.round_trip_checks(
           harness, results, binary, wl_probe),
   }
@@ -405,7 +605,8 @@ def check_groups(names, binary, wl_probe, delay, master_binary):
         harness, results, binary, master_binary, wl_probe)))
   return selected
 
-def inner(binary, wl_probe, delay, names=('slow',), master_binary=None):
+def inner(binary, wl_probe, delay, names=('slow',), master_binary=None,
+          latency_log=None):
   """Runs the checks inside the namespace; returns the exit status."""
   work = os.environ['SESSION_TEST_WORK']
   private_tmp = os.path.join(work, 'tmp')
@@ -423,7 +624,7 @@ def inner(binary, wl_probe, delay, names=('slow',), master_binary=None):
   results.check('no host display variable is set',
                 not any(name in os.environ for name in HOST_VARIABLES))
   for name, checks in check_groups(names, binary, wl_probe, delay,
-                                   master_binary):
+                                   master_binary, latency_log):
     log = ''
     try:
       log = checks(results)
@@ -445,15 +646,20 @@ def main():
                       choices=['slow', 'round-trip'])
   parser.add_argument('--master-binary')
   parser.add_argument('--keep', action='store_true')
+  parser.add_argument('--latency-log',
+                      help='append the latencies and thread samples of '
+                      'the slow group to this file as one JSON line')
   parser.add_argument(INNER_FLAG, action='store_true')
   options = parser.parse_args()
   binary = os.path.abspath(options.binary)
   wl_probe = os.path.abspath(options.wl_probe)
   master_binary = (os.path.abspath(options.master_binary)
                    if options.master_binary else None)
+  latency_log = (os.path.abspath(options.latency_log)
+                 if options.latency_log else None)
   if options.inner:
     return inner(binary, wl_probe, options.delay, options.checks,
-                 master_binary)
+                 master_binary, latency_log)
   if 'slow' in options.checks:
     if importlib.util.find_spec('fuse') is None:
       print('python3-fuse is not installed', file=sys.stderr)
@@ -475,7 +681,9 @@ def main():
                '--binary', binary, '--wl-probe', wl_probe,
                '--delay', str(options.delay), '--checks', *options.checks,
                *(['--master-binary', master_binary] if master_binary
-                 else []), INNER_FLAG]
+                 else []),
+               *(['--latency-log', latency_log] if latency_log else []),
+               INNER_FLAG]
     return subprocess.run(command,
                           env=host_uid_environment(environment)).returncode
   finally:
