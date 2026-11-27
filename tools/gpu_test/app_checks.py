@@ -493,12 +493,30 @@ def _write(path, data):
 def _prepare_pdf(directory):
   _write(os.path.join(directory, 'sweep.pdf'), minimal_pdf())
 
+def gimp_version(run=subprocess.run):
+  """The installed GIMP's version, such as '3.0.4', or None."""
+  try:
+    done = run(['gimp', '--version'], capture_output=True, text=True,
+               timeout=30)
+  except (OSError, subprocess.TimeoutExpired):
+    return None
+  match = re.search(r'version (\d+(?:\.\d+)+)', done.stdout)
+  return match.group(1) if match else None
+
+def gimprc(version):
+  """A gimprc that keeps GIMP's welcome dialog closed."""
+  text = '(show-welcome-dialog no)\n'
+  if version:
+    text += f'(config-version "{version}")\n'
+  return text
+
 def _prepare_gimp(directory):
   _write(os.path.join(directory, 'sweep.png'), minimal_png())
-  # GIMP 3 shows a welcome dialog on its first start.
+  # GIMP 3 shows a welcome dialog on its first start and on the first
+  # start of a new version, which `config-version` says it has seen.
   config = os.path.join(directory, 'config', 'GIMP', '3.0')
   os.makedirs(config, exist_ok=True)
-  _write(os.path.join(config, 'gimprc'), '(show-welcome-dialog no)\n')
+  _write(os.path.join(config, 'gimprc'), gimprc(gimp_version()))
 
 def _prepare_svg(directory):
   _write(os.path.join(directory, 'sweep.svg'), SVG)

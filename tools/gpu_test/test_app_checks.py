@@ -144,6 +144,23 @@ class AppsTest(unittest.TestCase):
     orphans = [app.name for app in app_checks.APPS if app.orphan_dialog]
     self.assertEqual(orphans, ['vlc'])
 
+class GimpTest(unittest.TestCase):
+  """GIMP's prepared configuration."""
+
+  def test_gimprc_names_the_version(self):
+    self.assertEqual(app_checks.gimprc('3.0.4'),
+                     '(show-welcome-dialog no)\n(config-version "3.0.4")\n')
+    self.assertEqual(app_checks.gimprc(None), '(show-welcome-dialog no)\n')
+
+  def test_version_from_its_output(self):
+    class Done:
+      stdout = 'GNU Image Manipulation Program version 3.0.4\n'
+    self.assertEqual(app_checks.gimp_version(lambda *a, **k: Done()), '3.0.4')
+
+    def missing(*args, **kwargs):
+      raise FileNotFoundError('gimp')
+    self.assertIsNone(app_checks.gimp_version(missing))
+
 class LoadTest(unittest.TestCase):
   """Waiting for the load."""
 
