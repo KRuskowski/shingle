@@ -4,7 +4,7 @@ Work items in priority order. Refer to items by name, not number, from other doc
 
 ## 1. Host input checks after the rename
 
-The smoke test, IPC fixtures, session round trip and Tilefire migration were repeated with real clients on 2026-11-25 ([status.md](status.md#with-real-clients)). What remains needs physical input from the operator: input-device gating of real host keyboard, pointer and touch events, the nested switcher and drag clean-up on disable, modifiers held across host keyboard focus changes, a clean quit followed by a restore, and, since the 2026-11-26 fixes, pointer drags on a scaled host monitor and kitty's redraw during a resize, and since the host clipboard bridge, copying and pasting between the host desktop and nested applications through the host's ext-data-control. The steps are in [status.md](status.md#needs-operator-host-input); record the results there and delete this item.
+The smoke test, IPC fixtures, session round trip and Tilefire migration were repeated with real clients on 2026-11-25 ([status.md](status.md#with-real-clients)). What remains needs physical input from the operator: input-device gating of real host keyboard, pointer and touch events, the nested switcher and drag clean-up on disable, modifiers held across host keyboard focus changes, a clean quit followed by a restore, and, since the 2026-11-26 fixes, pointer drags on a scaled host monitor and kitty's redraw during a resize (in the namespace, nested Shingle's slow redraw after a resize was its shm uploads, fixed on 2026-11-27: [status.md](status.md#shm-upload-speed)), and since the host clipboard bridge, copying and pasting between the host desktop and nested applications through the host's ext-data-control. The steps are in [status.md](status.md#needs-operator-host-input); record the results there and delete this item.
 
 ## 2. Native backend
 
@@ -115,7 +115,7 @@ Since `shingle-colour-and-focus-fixes` every configured colour shows the bytes W
 
 Add long-running nested and native soak tests. Measure CPU, RSS, frame latency and GPU behaviour before making any resource or stability claims.
 
-Headless, offscreen and nested soaks are done: tools/soak_test/run.py, a two-hour offscreen run and 30-minute headless and nested runs, and fixes for the leaks they found ([status.md](status.md#soak-tests)). What remains: the native soak, step 53 of [native-testing.md](native-testing.md), on the test machine; and the cause of the slow second nested run recorded in [status.md](status.md#soak-tests).
+Headless, offscreen and nested soaks are done: tools/soak_test/run.py, a two-hour offscreen run and 30-minute headless and nested runs, and fixes for the leaks they found ([status.md](status.md#soak-tests)). The slow second nested run was shm uploads into wgpu's staging memory in the crowded PCIe BAR, now staged in system memory ([status.md](status.md#shm-upload-speed)). What remains: the native soak, step 53 of [native-testing.md](native-testing.md), on the test machine.
 
 ## 8. Application launcher
 

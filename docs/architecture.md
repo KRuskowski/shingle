@@ -119,6 +119,7 @@
 | WG-4's real-client wayfire-shell checks and their raw Wayland client | `tools/output_test/wayfire_shell_checks.py`, `tools/output_test/wayland_wire.py` |
 | Real-client check of responsiveness during slow session writes (nested on a FUSE mount with slow fsync) | `tools/session_test/run.py`, `tools/session_test/slowfs.py` |
 | Soak tests of headless, offscreen and nested Shingle (and native, attached, on the test machine): workload, sampler, trend test, CSV and summary; the counts they read | `tools/soak_test/run.py`, `tools/soak_test/workload.py`, `tools/soak_test/soak.py`; `stipc/object_counts` in `crates/shingle/src/object_counts.rs` |
+| Benchmark of shm commits to presentation by buffer and damage size, offscreen and nested, per upload variant | `tools/shm_bench/run.py`, `tools/shm_bench/bench.py` |
 | Real-client session round trips through SIGKILL, SIGTERM and a version 1 session from `master` | `tools/session_test/round_trip.py`, run by `tools/session_test/run.py --checks round-trip` |
 | Host keyboard focus changes | `crates/shingle-nested/src/host_keyboard.rs` |
 | xkb keyboard state, key names, keysyms, modifier masks | `crates/shingle-frontend/src/keyboard.rs` |
@@ -133,6 +134,7 @@
 | Window and offscreen render targets | `crates/shingle-render/src/target.rs` |
 | DMA-BUF device setup, modifier caps, fourcc table, import, foreign queue-family barriers | `crates/shingle-render/src/dmabuf.rs`; caps of every adapter: `examples/dmabuf_caps.rs`; device tests `tests/dmabuf_import.rs` |
 | shm textures in the client's byte order, damage writes with the client's stride, rebinding and GPU copies (`TextureUploader`) | `crates/shingle-render/src/upload.rs`; pixel tests in `tests/offscreen_pixels.rs` |
+| Staging buffers in system memory for shm uploads, their memory type and reuse (`StagingPool`, `SHINGLE_SHM_STAGING`) | `crates/shingle-render/src/staging.rs`; CPU write speed of each memory type: `examples/staging_probe.rs` |
 | GPU test namespace with a private `/dev` (render node and NVIDIA nodes only) | `tools/gpu_test/run.py` |
 | Native config model and XKB generation | `crates/shingle-config/src/lib.rs` |
 | Wayfire INI import | `crates/shingle-config/src/wayfire.rs`; wf-config's line rules `ini.rs`; activator kinds `activator.rs`; options applied one at a time with warnings, shared with i3, `import.rs`; fixtures `testdata/` |
