@@ -56,7 +56,7 @@ struct Background {
   vignette: vec4<f32>,
   // The background colour.
   color: vec4<f32>,
-  // The shimmer's phase.
+  // The shimmer's phase, and the image's cover scale in yz.
   shimmer: vec4<f32>,
 };
 
@@ -68,8 +68,8 @@ struct Background {
 fn fs_background(in: VsOut) -> @location(0) vec4<f32> {
   var rgb = background.color.rgb;
   if (background.transform.w > 0.5) {
-    let uv = (in.uv - vec2<f32>(0.5)) / background.transform.z
-      + vec2<f32>(0.5) + background.transform.xy;
+    let uv = (in.uv - vec2<f32>(0.5)) * background.shimmer.yz
+      / background.transform.z + vec2<f32>(0.5) + background.transform.xy;
     rgb = textureSampleLevel(image, image_sampler, uv, 0.0).rgb;
   }
   if (background.vignette.z > 0.5) {

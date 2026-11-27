@@ -22,6 +22,9 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 /// One output's pixels.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Screenshot {
+  /// The output's `wl_output` name, such as `DP-1`, if the compositor
+  /// sent one (version 4).
+  pub name: Option<String>,
   /// Width in pixels.
   pub width: u32,
   /// Height in pixels.
@@ -53,6 +56,8 @@ struct Pending {
 struct Capturer {
   shm: wl_shm::WlShm,
   pending: HashMap<u32, Pending>,
+  /// Each output's `wl_output` name by its global.
+  names: HashMap<u32, String>,
 }
 
 /// Converts `stride`-separated rows of `format` to [`Screenshot::bgra`],
@@ -84,6 +89,7 @@ fn convert(data: &[u8], shape: Shape, y_invert: bool) -> Option<Screenshot> {
     }
   }
   Some(Screenshot {
+    name: None,
     width: shape.width,
     height: shape.height,
     bgra,
@@ -115,16 +121,19 @@ pub fn capture_outputs(
   let mut capturer = Capturer {
     shm,
     pending: HashMap::new(),
+    names: HashMap::new(),
   };
   let mut outputs = Vec::new();
   for global in globals.contents().clone_list() {
     if global.interface != "wl_output" {
       continue;
     }
-    let output: wl_output::WlOutput =
-      globals
-        .registry()
-        .bind(global.name, global.version.min(4), &qh, ());
+    let output: wl_output::WlOutput = globals.registry().bind(
+      global.name,
+      global.version.min(4),
+      &qh,
+      global.name,
+    );
     let frame = manager.capture_output(0, &output, &qh, global.name);
     capturer.pending.insert(
       global.name,
@@ -174,15 +183,18 @@ pub fn capture_outputs(
       let _ = guard.read();
     }
   }
+  let names = std::mem::take(&mut capturer.names);
   let shots = capturer
     .pending
     .drain()
-    .filter_map(|(name, pending)| {
+    .filter_map(|(global, pending)| {
       pending.frame.destroy();
       if let Some((_, buffer)) = &pending.memory {
         buffer.destroy();
       }
-      Some((name, pending.done.flatten()?))
+      let mut shot = pending.done.flatten()?;
+      shot.name = names.get(&global).cloned();
+      Some((global, shot))
     })
     .collect();
   for output in outputs {
@@ -313,12 +325,26 @@ macro_rules! ignore {
   };
 }
 
+impl Dispatch<wl_output::WlOutput, u32> for Capturer {
+  fn event(
+    state: &mut Self,
+    _: &wl_output::WlOutput,
+    event: wl_output::Event,
+    global: &u32,
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wl_output::Event::Name { name } = event {
+      state.names.insert(*global, name);
+    }
+  }
+}
+
 ignore!(
   ZwlrScreencopyManagerV1,
   wl_shm::WlShm,
   wl_shm_pool::WlShmPool,
   wl_buffer::WlBuffer,
-  wl_output::WlOutput,
 );
 
 #[cfg(test)]

@@ -123,6 +123,25 @@ pub struct Gpu {
 pub struct Image {
   _texture: wgpu::Texture,
   view: wgpu::TextureView,
+  /// The screenshot's size in pixels, whose aspect ratio
+  /// [`Target::new`] keeps.
+  size: (u32, u32),
+}
+
+/// The texture-coordinate scale that makes an image of `image` pixels
+/// cover a target of `target` pixels with its aspect ratio kept: the
+/// image is scaled until both sides fit and the overflow on one axis is
+/// cut off evenly, so that a screenshot shown on an output of another
+/// shape is neither stretched nor letterboxed.
+pub fn cover_scale(image: (u32, u32), target: (u32, u32)) -> [f32; 2] {
+  let aspect =
+    |(width, height): (u32, u32)| width.max(1) as f32 / height.max(1) as f32;
+  let (image, target) = (aspect(image), aspect(target));
+  if target > image {
+    [1.0, image / target]
+  } else {
+    [target / image, 1.0]
+  }
 }
 
 impl Gpu {
@@ -331,6 +350,7 @@ impl Gpu {
       return Image {
         _texture: source_texture,
         view: source,
+        size,
       };
     };
     let (divisor, scaled, radius) = blur_plan(radius, size);
@@ -385,6 +405,7 @@ impl Gpu {
     Image {
       _texture: ping_texture,
       view: ping,
+      size,
     }
   }
 }
@@ -478,12 +499,15 @@ pub struct Target {
   background_uniform: wgpu::Buffer,
   background: wgpu::BindGroup,
   has_image: bool,
+  /// [`cover_scale`] of the image on this target.
+  cover: [f32; 2],
   clock: Option<Overlay>,
   input: Option<Overlay>,
 }
 
 impl Target {
-  /// A target of `size` logical pixels over `image`, or over the plain
+  /// A target of `size` logical pixels over `image`, scaled to cover it
+  /// with its aspect ratio kept ([`cover_scale`]), or over the plain
   /// background colour without one.
   pub fn new(gpu: &Gpu, size: (u32, u32), image: Option<&Image>) -> Self {
     let size = (size.0.max(1), size.1.max(1));
@@ -512,6 +536,7 @@ impl Target {
       background_uniform,
       background,
       has_image: image.is_some(),
+      cover: image.map_or([1.0, 1.0], |image| cover_scale(image.size, size)),
       clock: None,
       input: None,
     }
@@ -601,7 +626,7 @@ impl Target {
         byte(frame.color[2]),
         1.0,
       ],
-      shimmer: [frame.drift.phase, 0.0, 0.0, 0.0],
+      shimmer: [frame.drift.phase, self.cover[0], self.cover[1], 0.0],
     };
     gpu.queue().write_buffer(
       &self.background_uniform,
@@ -763,10 +788,44 @@ mod tests {
       }
     }
     Screenshot {
+      name: None,
       width: 64,
       height: 32,
       bgra,
     }
+  }
+
+  /// A 64x32 screenshot of four 16 pixel wide stripes: red, green, blue
+  /// and white.
+  fn stripes() -> Screenshot {
+    let colours: [[u8; 4]; 4] = [
+      [0, 0, 255, 255],
+      [0, 255, 0, 255],
+      [255, 0, 0, 255],
+      [255, 255, 255, 255],
+    ];
+    let mut bgra = Vec::new();
+    for _ in 0..32 {
+      for x in 0..64 {
+        bgra.extend_from_slice(&colours[x / 16]);
+      }
+    }
+    Screenshot {
+      name: None,
+      width: 64,
+      height: 32,
+      bgra,
+    }
+  }
+
+  #[test]
+  fn other_shapes_are_covered_not_stretched() {
+    assert_eq!(cover_scale((1920, 1080), (1920, 1080)), [1.0, 1.0]);
+    assert_eq!(cover_scale((3840, 2160), (1920, 1080)), [1.0, 1.0]);
+    // A wider output shows the middle rows, a taller one the middle
+    // columns.
+    assert_eq!(cover_scale((1600, 1000), (2000, 1000)), [1.0, 0.8]);
+    assert_eq!(cover_scale((2000, 1000), (1000, 1000)), [0.5, 1.0]);
   }
 
   /// The B, G, R bytes at (x, y) of a 64 pixel wide frame.
@@ -819,6 +878,14 @@ mod tests {
     assert_eq!(at(&frame, 9, 9), [255, 255, 255]);
     assert!(at(&frame, 0, 0)[2] < 10, "the corner is dark");
     assert!(at(&frame, 16, 16)[2] > 150, "the middle is not");
+    // A screenshot of another shape covers the target, cut evenly: the
+    // middle half of four stripes on a square target.
+    let stripes = gpu.image(&stripes(), None);
+    let mut square = Target::new(&gpu, (32, 32), Some(&stripes));
+    let mut small = vec![0; 256 * 32];
+    square.draw(&gpu, &plain, &mut small, 256).unwrap();
+    assert_eq!(at(&small, 4, 16), [0, 255, 0], "green, not red");
+    assert_eq!(at(&small, 28, 16), [255, 0, 0], "blue, not white");
     // Without a screenshot the colour shows.
     let mut target = Target::new(&gpu, (64, 32), None);
     let coloured = Frame {

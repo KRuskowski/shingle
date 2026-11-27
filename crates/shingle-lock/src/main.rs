@@ -4,11 +4,11 @@
 //!
 //! With `screenshot` it captures every output before it asks for the
 //! lock, blurs the captures once on the GPU and shows them, slowly
-//! drifting, under a vignette and the clock; typing fades in an outlined
-//! password input, with the keyboard layout and Caps Lock as small labels
-//! in it. Frames follow the compositor's frame callbacks, so nothing is
-//! drawn while an output is off.
-
+//! drifting, under a vignette and the clock; an output added later shows
+//! the capture of another. Typing fades in an outlined password input,
+//! with the keyboard layout and Caps Lock as small labels in it. Frames
+//! follow the compositor's frame callbacks, so nothing is drawn while an
+//! output is off.
 mod capture;
 mod clock;
 mod daemon;
@@ -57,6 +57,7 @@ use xkbcommon::xkb;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+  capture::Screenshot,
   gpu::{Drift, Frame, Gpu, Image, Target},
   options::{Action, Settings},
   ui::{Indicator, InputLook, Labels, Layout},
@@ -137,9 +138,64 @@ impl KeyboardStatus {
   }
 }
 
+/// A screenshot on the GPU, kept for the whole lock so that an output
+/// that comes back or is added gets a blurred background too.
+struct Capture {
+  /// The `wl_output` global it was taken of.
+  global: u32,
+  /// That output's name, if the compositor sent one.
+  name: Option<String>,
+  /// Its size in pixels.
+  size: (u32, u32),
+  image: Image,
+}
+
+/// Which of `captures`, as (global, name, size), an output shows: its
+/// own, by `global` or else by `name` (an output turned off and on
+/// again comes back under a new global), otherwise the capture whose
+/// aspect ratio is closest to `size`'s, the larger on a tie, then the
+/// first. `None` without captures.
+fn pick_capture(
+  captures: &[(u32, Option<&str>, (u32, u32))],
+  global: u32,
+  name: Option<&str>,
+  size: (u32, u32),
+) -> Option<usize> {
+  if let Some(own) = captures.iter().position(|capture| capture.0 == global) {
+    return Some(own);
+  }
+  if let Some(name) = name
+    && let Some(same) =
+      captures.iter().position(|capture| capture.1 == Some(name))
+  {
+    return Some(same);
+  }
+  let aspect = |(width, height): (u32, u32)| {
+    (f64::from(width.max(1)) / f64::from(height.max(1))).ln()
+  };
+  let wanted = aspect(size);
+  let mut best: Option<(usize, f64, u64)> = None;
+  for (index, (_, _, size)) in captures.iter().enumerate() {
+    let distance = (aspect(*size) - wanted).abs();
+    let area = u64::from(size.0) * u64::from(size.1);
+    let better = best.is_none_or(|(_, best_distance, best_area)| {
+      distance < best_distance - 1e-9
+        || (distance <= best_distance + 1e-9 && area > best_area)
+    });
+    if better {
+      best = Some((index, distance, area));
+    }
+  }
+  best.map(|(index, _, _)| index)
+}
+
 struct LockOutput {
   global: u32,
   output: wl_output::WlOutput,
+  /// Its `wl_output` name, once the compositor sent it.
+  name: Option<String>,
+  /// The index in [`State::captures`] it shows, chosen with its target.
+  capture: Option<usize>,
   surface: wl_surface::WlSurface,
   lock_surface: ExtSessionLockSurfaceV1,
   size: Option<(u32, u32)>,
@@ -186,7 +242,8 @@ struct State {
   xkb_context: xkb::Context,
   settings: Settings,
   gpu: Gpu,
-  images: HashMap<u32, Image>,
+  /// Every screenshot, in the order of the outputs' globals.
+  captures: Vec<Capture>,
   /// The status of the keyboard that last reported one.
   keyboard: KeyboardStatus,
   font: FontArc,
@@ -226,7 +283,10 @@ impl State {
       return;
     }
     let qh = self.qh.clone();
-    let output = self.globals.registry().bind(name, version.min(4), &qh, ());
+    let output = self
+      .globals
+      .registry()
+      .bind(name, version.min(4), &qh, name);
     let surface = self.compositor.create_surface(&qh, ());
     let lock_surface = self.lock.get_lock_surface(&surface, &output, &qh, name);
     self.outputs.insert(
@@ -234,6 +294,8 @@ impl State {
       LockOutput {
         global: name,
         output,
+        name: None,
+        capture: None,
         surface,
         lock_surface,
         size: None,
@@ -254,9 +316,9 @@ impl State {
   }
 
   fn remove_output(&mut self, name: u32) {
+    // Its capture stays, for the output if it comes back.
     if let Some(output) = self.outputs.remove(&name) {
       output.destroy();
-      self.images.remove(&name);
       self.ready_reported = self.ready_reported && !self.outputs.is_empty();
     }
   }
@@ -324,11 +386,25 @@ impl State {
     self.seats.get_mut(&seat)?.keyboard.as_mut()
   }
 
-  /// Whether the screenshot of output `global` drifts.
+  /// Whether the screenshot on output `global` drifts.
   fn drifts(&self, global: u32) -> bool {
     self.settings.drift.enabled
       && self.settings.drift.amplitude > 0.0
-      && self.images.contains_key(&global)
+      && self
+        .outputs
+        .get(&global)
+        .is_some_and(|output| output.capture.is_some())
+  }
+
+  /// The capture output `global` of `size` shows ([`pick_capture`]).
+  fn capture_for(&self, global: u32, size: (u32, u32)) -> Option<usize> {
+    let candidates = self
+      .captures
+      .iter()
+      .map(|capture| (capture.global, capture.name.as_deref(), capture.size))
+      .collect::<Vec<_>>();
+    let name = self.outputs.get(&global)?.name.as_deref();
+    pick_capture(&candidates, global, name, size)
   }
 
   /// Takes `status` from a keyboard; redraws on a change.
@@ -475,12 +551,14 @@ impl State {
     } else {
       0.0
     };
-    let drifts = self.drifts(name);
     let qh = self.qh.clone();
-    let Some(output) = self.outputs.get_mut(&name) else {
+    let Some((width, height)) =
+      self.outputs.get(&name).and_then(|output| output.size)
+    else {
       return Ok(());
     };
-    let Some((width, height)) = output.size else {
+    let capture = self.capture_for(name, (width, height));
+    let Some(output) = self.outputs.get_mut(&name) else {
       return Ok(());
     };
     let options = &self.settings.options;
@@ -489,11 +567,21 @@ impl State {
       .as_ref()
       .is_none_or(|target| target.size() != (width, height))
     {
-      output.target = Some(Target::new(
-        &self.gpu,
-        (width, height),
-        self.images.get(&name),
-      ));
+      output.capture = capture;
+      let image = capture.map(|index| &self.captures[index].image);
+      output.target = Some(Target::new(&self.gpu, (width, height), image));
+      if self.trace {
+        let shown = capture.map(|index| &self.captures[index]);
+        eprintln!(
+          "shingle-lock: output {name} ({}) shows {}",
+          output.name.as_deref().unwrap_or("unnamed"),
+          shown.map_or("the colour".to_owned(), |capture| format!(
+            "the capture of output {} ({})",
+            capture.global,
+            capture.name.as_deref().unwrap_or("unnamed")
+          ))
+        );
+      }
       output.layout = Some(Layout::new((width, height), options));
       output.clock = None;
       output.input = None;
@@ -550,6 +638,9 @@ impl State {
       )
     });
     let elapsed = now.saturating_duration_since(self.started).as_secs_f64();
+    let drifts = self.settings.drift.enabled
+      && self.settings.drift.amplitude > 0.0
+      && output.capture.is_some();
     let frame = Frame {
       drift: if drifts {
         Drift::at(elapsed, &self.settings.drift, (width, height))
@@ -793,6 +884,26 @@ fn elapsed_ms(since: Instant) -> u128 {
   since.elapsed().as_millis()
 }
 
+/// The screenshots uploaded and blurred, in the order of their outputs'
+/// globals.
+fn blur_captures(
+  gpu: &Gpu,
+  shots: HashMap<u32, Screenshot>,
+  blur: Option<(u32, u32)>,
+) -> Vec<Capture> {
+  let mut shots = shots.into_iter().collect::<Vec<_>>();
+  shots.sort_by_key(|(global, _)| *global);
+  shots
+    .into_iter()
+    .map(|(global, shot)| Capture {
+      global,
+      size: (shot.width, shot.height),
+      image: gpu.image(&shot, blur),
+      name: shot.name,
+    })
+    .collect()
+}
+
 /// How long each step before the lock request took, for the report on
 /// standard error that the GPU harness reads.
 struct Timing {
@@ -882,16 +993,16 @@ fn run(
   timing.mark("gpu");
   let font = font::load(&settings.options.font);
   timing.mark("font");
-  let mut images = HashMap::new();
+  let shots = if settings.options.screenshot {
+    capture::capture_outputs(&connection, &globals, CAPTURE_TIMEOUT)
+  } else {
+    HashMap::new()
+  };
+  timing.mark("capture");
+  let captures = blur_captures(&gpu, shots, settings.options.blur);
   if settings.options.screenshot {
-    let shots =
-      capture::capture_outputs(&connection, &globals, CAPTURE_TIMEOUT);
-    timing.mark("capture");
-    for (name, shot) in &shots {
-      images.insert(*name, gpu.image(shot, settings.options.blur));
-    }
     timing.mark("blur");
-    eprintln!("shingle-lock: captured {} output(s)", shots.len());
+    eprintln!("shingle-lock: captured {} output(s)", captures.len());
   }
   let lock = manager.lock(&qh, ());
   eprintln!("shingle-lock: timing: {}", timing.report());
@@ -923,7 +1034,7 @@ fn run(
     xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
     settings,
     gpu,
-    images,
+    captures,
     keyboard: KeyboardStatus::default(),
     font,
     indicator,
@@ -1380,9 +1491,25 @@ macro_rules! noop_dispatch {
     };
 }
 
+impl Dispatch<wl_output::WlOutput, u32> for State {
+  fn event(
+    state: &mut Self,
+    _proxy: &wl_output::WlOutput,
+    event: wl_output::Event,
+    global: &u32,
+    _conn: &Connection,
+    _qh: &QueueHandle<Self>,
+  ) {
+    if let wl_output::Event::Name { name } = event
+      && let Some(output) = state.outputs.get_mut(global)
+    {
+      output.name = Some(name);
+    }
+  }
+}
+
 noop_dispatch!(
   wl_compositor::WlCompositor,
-  wl_output::WlOutput,
   wl_region::WlRegion,
   wl_shm::WlShm,
   wl_shm_pool::WlShmPool,
@@ -1393,6 +1520,30 @@ noop_dispatch!(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn an_output_shows_its_own_capture_or_the_closest_shape() {
+    let captures = [
+      (12, Some("HEADLESS-1"), (640, 400)),
+      (13, Some("HEADLESS-2"), (640, 400)),
+      (14, None, (1000, 1000)),
+      (15, None, (2000, 1000)),
+    ];
+    assert_eq!(pick_capture(&captures, 13, None, (640, 400)), Some(1));
+    // Back under a new global: its own by name.
+    assert_eq!(
+      pick_capture(&captures, 40, Some("HEADLESS-2"), (640, 400)),
+      Some(1)
+    );
+    // New: the closest aspect ratio, the larger, then the first.
+    assert_eq!(pick_capture(&captures, 41, None, (300, 290)), Some(2));
+    assert_eq!(
+      pick_capture(&captures, 41, Some("DP-3"), (3000, 1400)),
+      Some(3)
+    );
+    assert_eq!(pick_capture(&captures, 41, None, (1280, 800)), Some(0));
+    assert_eq!(pick_capture(&[], 41, None, (1280, 800)), None);
+  }
 
   #[test]
   fn the_keyboard_status_follows_caps_lock_and_the_group() {
