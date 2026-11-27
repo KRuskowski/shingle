@@ -12,6 +12,8 @@ NB-6 has no KMS output yet. While `shingle` runs on a VT, the seat daemon has pu
 
 ### Step 0: prepare the test machine
 
+From the development host, `tools/native_test/bringup.py check HOST` checks items 1 to 4 and prints the command for each one missing, and `bringup.py deploy HOST` does item 3 without sudo: it installs a release build in `~/shingle-bringup` and links it into `~/.local/bin` ([laptop-bringup.md](laptop-bringup.md#the-bring-up-driver)).
+
 1. Install the build dependencies from [development.md](development.md#requirements), plus `seatd`, `wev`, `python3-evdev`, `wayland-utils` and `procps`.
 2. Mark the machine, so that tools/native_test/uinput.py agrees to create devices there and nowhere else:
 
@@ -54,6 +56,8 @@ NB-6 has no KMS output yet. While `shingle` runs on a VT, the seat daemon has pu
    ```
 
    `wev` is the test client: it maps one window, which Shingle tiles over the whole output and focuses, and it logs every keyboard, pointer and touch event with its `time`.
+
+   `shingle-tty1 --step N` (tools/native_test/start_tty1.py, installed by `bringup.py deploy`) is the same start for any step, with that step's config, client and trace variables; it keeps the run's files in `~/.local/state/shingle/bringup/current` instead of `/tmp`, where `bringup.py step N HOST` and `bringup.py collect HOST` read them.
 
 ### Step 1: a VT login selects native, under logind and under seatd
 
@@ -823,3 +827,18 @@ tools/soak_test/run.py soaks headless, offscreen and nested Shingle on a develop
 ## Results
 
 Record results in [status.md](status.md#with-real-clients). None of the steps above has been run yet: the test machine does not exist so far.
+
+Each result is one entry: a headline with the step's number and title, the date, the commit under test (from `~/shingle-bringup/DEPLOYED.json`, marked `(dirty)` for a build of uncommitted changes), the test machine, the verdict with the number of checks passed, failed and left to check by hand, and the libseat backend, card, renderer, outputs and number of input devices from that run's log; then one bullet per check, `PASS:`, `FAIL:`, `INFO:` for a measured value and `MANUAL:` for what needs eyes on the screen or hands on the keyboard, with the operator's finding added after it. `tools/native_test/bringup.py step N HOST` writes the entries of the steps it drives in this format, to target/bringup/HOST/results.md:
+
+```
+Step 45 (the cursor moves on its plane without drawing frames), 2026-11-28,
+commit 5312c4b0a1b2, on laptop: passed, 5 checks passed, 0 failed, 1 to
+check by hand. libseat logind backend, card /dev/dri/card1, renderer Intel(R)
+Graphics (ADL GT2), outputs eDP-1 1920x1200@60, 2 input devices.
+
+- PASS: stderr says the native backend
+- PASS: 0 frames and 10 cursor plane flips for 10 motions
+- MANUAL: the pointer follows smoothly with no trail; ...
+```
+
+(The headline is one line; it is wrapped here only for the code block.)

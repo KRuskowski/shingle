@@ -454,7 +454,7 @@ class InstructionsTest(unittest.TestCase):
     self.assertIn('bringup.py step 11 laptop', text)
     self.assertIn('present_check.py', text)
     prepare = bringup_steps.instructions(0, self.plan())
-    self.assertNotIn('shingle-tty1', prepare)
+    self.assertNotIn('shingle-tty1 --step 0', prepare)
     self.assertIn('/etc/shingle-native-test-machine', prepare)
     manual = bringup_steps.instructions(43, self.plan())
     self.assertIn('not driven over SSH', manual)
