@@ -32,7 +32,8 @@ namespaces:
                vswipe|decoration|switcher|colours|minimize-focus|
                drag-icon|resize|resize-nested|nested-scaled|
                nested-clipboard|screencast|image-copy-capture|
-               ext-data-control|launcher|animate|lock|apps|app-NAME ...
+               ext-data-control|launcher|animate|lock|rehearsal|apps|
+               app-NAME ... [--wayfire-ini PATH]
 
 For example, DB-1's import test:
 
@@ -110,7 +111,12 @@ default) and checks every presented frame, recorded with
 `SHINGLE_RECORD_FRAMES`: no client unblurred from the lock request to
 the unlock, black until the lock surface, across DPMS, an output turned
 off and on and a killed lock client, the drift, the input's states and
-the grace period. `--checks apps`
+the grace period. `--checks rehearsal --wayfire-ini PATH`
+(rehearsal_checks.py) rehearses a real wayfire.ini: a harness-safe copy
+under offscreen Shingle and headless Wayfire, every binding it
+configures pressed through STIPC in both and the effects compared; the
+detailed table is copied to $TMPDIR, and without `--wayfire-ini` the
+group is skipped. `--checks apps`
 (app_checks.py) is the
 application compatibility sweep: every installed application, one at a
 time, through a scripted scenario against offscreen Shingle, and
@@ -128,7 +134,8 @@ test_vswipe_checks.py, test_decoration_checks.py,
 test_switcher_checks.py, test_colour_checks.py, test_focus_checks.py,
 test_drag_icon_checks.py, test_resize_checks.py,
 test_nested_clipboard_checks.py, test_screencast_checks.py,
-test_app_checks.py, test_animate_checks.py, test_lock_checks.py).
+test_app_checks.py, test_animate_checks.py, test_lock_checks.py,
+test_rehearsal_checks.py).
 The work directory under `target/` is removed afterwards unless `--keep`
 is given.
 """
@@ -139,6 +146,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 
 INNER_FLAG = '--inner'
@@ -152,6 +160,15 @@ STRIPPED_VARIABLES = ('WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'DISPLAY',
 # What the private /dev may also hold besides the bound nodes.
 PRIVATE_ENTRIES = ('pts', 'ptmx', 'shm', 'fd', 'stdin', 'stdout', 'stderr')
 SAMPLE_INTERVAL = 0.05
+# The rehearsal group's input file and the table it writes into the work
+# directory, which main copies to $TMPDIR before removing the directory
+# (rehearsal_checks.INI_VARIABLE and REPORT_VARIABLE).
+REHEARSAL_INI_VARIABLE = 'SHINGLE_REHEARSAL_INI'
+REHEARSAL_REPORT_VARIABLE = 'SHINGLE_REHEARSAL_REPORT'
+REHEARSAL_REPORT = 'rehearsal.md'
+# The caller's HOME, which the namespace replaces: a `~/` path of an
+# autostart entry gets a stand-in where it names something there.
+REHEARSAL_HOME_VARIABLE = 'SHINGLE_REHEARSAL_HOME'
 # app_checks.GROUPS: the application sweep, all of it or one app.
 APP_GROUPS = ('apps', 'app-kitty', 'app-konsole', 'app-kate', 'app-dolphin',
               'app-okular', 'app-evince', 'app-mpv', 'app-vlc', 'app-gimp',
@@ -163,10 +180,9 @@ APP_GROUPS = ('apps', 'app-kitty', 'app-konsole', 'app-kate', 'app-dolphin',
 # switcher_checks.GROUPS, colour_checks.GROUPS, focus_checks.GROUPS and
 # drag_icon_checks.GROUPS, resize_checks.GROUPS,
 # nested_clipboard_checks.GROUPS, screencast_checks.GROUPS,
-# launcher_checks.GROUPS, animate_checks.GROUPS and lock_checks.GROUPS,
-# kept here so
-# that
-# `--help` works without importing them.
+# launcher_checks.GROUPS, animate_checks.GROUPS, lock_checks.GROUPS and
+# rehearsal_checks.GROUPS, kept here so that `--help` works without
+# importing them.
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
                 'weston', 'syncobj', 'nosyncobj', 'outputs', 'nested-outputs',
@@ -175,7 +191,7 @@ CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'colours', 'minimize-focus', 'drag-icon', 'resize',
                 'resize-nested', 'nested-clipboard', 'screencast',
                 'image-copy-capture', 'ext-data-control',
-                'launcher', 'animate', 'lock') + APP_GROUPS
+                'launcher', 'animate', 'lock', 'rehearsal') + APP_GROUPS
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset, and nested Shingle's on NVIDIA in `resize-nested`;
 # `syncobj` runs no Vulkan client.
@@ -302,6 +318,18 @@ class DeviceSampler:
     while not self._stop.wait(SAMPLE_INTERVAL):
       self.opened.update(open_devices())
 
+def keep_report(report, directory, pid):
+  """Copies the rehearsal `report` to `directory` as
+  shingle-rehearsal-PID.md, readable by its owner only; returns the
+  path."""
+  kept = os.path.join(directory, f'shingle-rehearsal-{pid}.md')
+  with open(report) as source:
+    text = source.read()
+  descriptor = os.open(kept, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+  with os.fdopen(descriptor, 'w') as file:
+    file.write(text)
+  return kept
+
 def mount(*arguments):
   """Runs mount(8), failing loudly."""
   subprocess.run(['mount', *arguments], check=True)
@@ -422,6 +450,8 @@ def main():
                       help='the shingle-lock the lock group runs')
   parser.add_argument('--captures', metavar='DIR',
                       help='save settled captures here')
+  parser.add_argument('--wayfire-ini', metavar='PATH',
+                      help='the wayfire.ini the rehearsal group rehearses')
   parser.add_argument(INNER_FLAG, metavar='WORK')
   parser.add_argument('command', nargs='*')
   options = parser.parse_args()
@@ -466,8 +496,18 @@ def main():
     environment['SHINGLE_GPU_TEST_UID'] = str(os.getuid())
     environment['SHINGLE_LAUNCHER_BINARY'] = os.path.abspath(options.launcher)
     environment['SHINGLE_LOCK_BINARY'] = os.path.abspath(options.lock)
-    return subprocess.run(namespace + arguments + ['--'] + command,
-                          env=environment).returncode
+    report = os.path.join(work, REHEARSAL_REPORT)
+    if options.wayfire_ini:
+      environment[REHEARSAL_INI_VARIABLE] = os.path.abspath(
+          os.path.expanduser(options.wayfire_ini))
+      environment[REHEARSAL_REPORT_VARIABLE] = report
+      environment[REHEARSAL_HOME_VARIABLE] = os.path.expanduser('~')
+    status = subprocess.run(namespace + arguments + ['--'] + command,
+                            env=environment).returncode
+    if os.path.exists(report):
+      kept = keep_report(report, tempfile.gettempdir(), os.getpid())
+      print(f'gpu_test: the rehearsal table is in {kept}', flush=True)
+    return status
   finally:
     if not options.keep:
       shutil.rmtree(work, ignore_errors=True)

@@ -38,9 +38,10 @@ def unprivileged_uid():
 class Wayfire:
   """One headless Wayfire in /tmp/NAME."""
 
-  def __init__(self, name, ini):
-    """Starts Wayfire on `ini`, the text of a wayfire.ini; raises
-    RuntimeError with the reason when it does not come up."""
+  def __init__(self, name, ini, outputs=1, extra_environment=None):
+    """Starts Wayfire on `ini`, the text of a wayfire.ini, with `outputs`
+    headless outputs and `extra_environment` added to its environment;
+    raises RuntimeError with the reason when it does not come up."""
     if shutil.which('wayfire') is None:
       raise RuntimeError('no wayfire on PATH')
     self.directory = os.path.join('/tmp', name)
@@ -58,9 +59,10 @@ class Wayfire:
         'WLR_BACKENDS': 'headless',
         'WLR_RENDERER': 'gles2',
         'WLR_RENDER_DRM_DEVICE': '/dev/dri/renderD128',
-        'WLR_HEADLESS_OUTPUTS': '1',
+        'WLR_HEADLESS_OUTPUTS': str(outputs),
         '_WAYFIRE_SOCKET': self.ipc_path,
     })
+    self.environment.update(extra_environment or {})
     self.log_path = os.path.join(self.directory, 'wayfire.log')
     self.log = open(self.log_path, 'w')
     uid = unprivileged_uid()
