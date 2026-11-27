@@ -438,7 +438,7 @@ class App:
   def __init__(self, name, command, text=None, popup='right-click',
                dialog=None, fullscreen_key=None, environment=None,
                heavy=False, prepare=None, kind='wayland', map_timeout=None,
-               copy_paste=True, dismiss=None):
+               copy_paste=True, dismiss=None, orphan_dialog=None):
     """`command` may contain `{dir}` (the app's files) and `{home}`.
 
     `text` is how typed text is checked: 'shell' (typed commands write a
@@ -447,7 +447,10 @@ class App:
     `popup` is 'right-click' or None, `dialog` the chord that opens one,
     `prepare(directory)` writes the files the command opens, and a first
     window titled with the prefix `dismiss`, such as a welcome dialog, is
-    closed before the scenario."""
+    closed before the scenario. `orphan_dialog`, when set, says why the
+    app's dialog has no parent, so that it is tiled as Wayfire tiles it:
+    the dialog step then checks only that it is drawn, focused and
+    closed."""
     self.name = name
     self.command = command
     self.text = text
@@ -461,6 +464,7 @@ class App:
     self.map_timeout = map_timeout or MAP_TIMEOUT
     self.copy_paste = copy_paste
     self.dismiss = dismiss
+    self.orphan_dialog = orphan_dialog
 
 def _write(path, data):
   mode = 'wb' if isinstance(data, bytes) else 'w'
@@ -528,7 +532,8 @@ APPS = (
                 '--loop=inf', 'av://lavfi:testsrc=size=640x480:rate=15'],
         popup=None, fullscreen_key='f', copy_paste=False),
     App('vlc', ['vlc', '--no-qt-privacy-ask', '--no-qt-recentplay',
-                '--no-qt-error-dialogs'], dialog='ctrl+o', copy_paste=False),
+                '--no-qt-error-dialogs'], dialog='ctrl+o', copy_paste=False,
+        orphan_dialog='WM_TRANSIENT_FOR names Qt\'s hidden leader window'),
     App('gimp', ['gimp', '--no-splash', '--no-data', '--no-fonts',
                  '{dir}/sweep.png'], dialog='ctrl+n', prepare=_prepare_gimp,
         copy_paste=False, heavy=True, map_timeout=180,
@@ -1093,9 +1098,14 @@ class Scenario:
       print(f'INFO {self.app.name}: dialog X properties: '
             f'{self.sweep.x_properties(dialog["title"])}', flush=True)
     problems = []
-    if dialog['parent'] != self.main['id']:
+    if self.app.orphan_dialog:
+      print(f'INFO {self.app.name}: dialog parent and tiling not checked: '
+            f'{self.app.orphan_dialog}', flush=True)
+    elif dialog['parent'] != self.main['id']:
       problems.append(f'parent {dialog["parent"]}, not {self.main["id"]}')
-    if dialog['tiled-edges'] != 0:
+    if self.app.orphan_dialog:
+      pass
+    elif dialog['tiled-edges'] != 0:
       problems.append('tiled')
     elif not centred_on(dialog['geometry'], self.main_view()['geometry'],
                         self.output_rect()):

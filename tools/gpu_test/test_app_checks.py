@@ -127,6 +127,13 @@ class CaptureTest(unittest.TestCase):
     # Pushed against the output's edge.
     self.assertTrue(app_checks.centred_on(dict(child, x=0), parent, area))
 
+class AppsTest(unittest.TestCase):
+  """The swept applications' settings."""
+
+  def test_only_vlc_has_an_orphan_dialog(self):
+    orphans = [app.name for app in app_checks.APPS if app.orphan_dialog]
+    self.assertEqual(orphans, ['vlc'])
+
 class LoadTest(unittest.TestCase):
   """Waiting for the load."""
 
