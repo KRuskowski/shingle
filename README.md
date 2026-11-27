@@ -2,7 +2,9 @@
 
 Shingle is a tiling Wayland compositor written in Rust, built around Wayfire's tiling behaviour and compatible with Wayfire's configuration and IPC. Windows live in a persistent tiling tree rather than as independent positions, so the exact layout survives logout and login. Rendering uses wgpu.
 
-Shingle currently runs **nested** inside another Wayland or X11 session, or headless. It is not yet a replacement for Wayfire on real hardware: the native backend (libseat, libinput and atomic KMS) is built but has not run on hardware yet, and there is no DMA-BUF, X11 windows do not map yet (Xwayland itself runs), and multi-output support is incomplete. See [docs/status.md](docs/status.md).
+It reads a WCM-written `wayfire.ini` and behaves like Wayfire with it: simple-tile, vswitch, wsets, oswitch, expo, scale, the switcher, animate, window rules, decorations and wf-shell's protocol, with Wayfire's IPC. Xwayland windows, several monitors, client DMA-BUFs with explicit sync, screen sharing through xdg-desktop-portal-wlr, `shingle-launcher` (an application launcher edited in place) and `shingle-lock` (a blurred lock screen that reads swaylock's config and never shows the desktop before an unlock) are built in.
+
+Shingle runs **nested** inside another Wayland or X11 session, offscreen or headless today. The native backend (libseat, libinput, atomic KMS with planes, VRR and zero-copy scanout) is built and unit-tested but has not run on hardware yet, so it is not yet a replacement for Wayfire on a real seat. See [docs/status.md](docs/status.md).
 
 ## Quick start
 
