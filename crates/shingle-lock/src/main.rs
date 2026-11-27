@@ -342,9 +342,8 @@ impl State {
       }
     }
     if self.settings.options.clock {
-      // The clock is checked once a second.
-      let since = self.started.elapsed().as_millis() as u64 % 1000;
-      consider(now + Duration::from_millis(1000 - since));
+      // The clock is checked at every turn of the wall clock's second.
+      consider(now + until_next_second(SystemTime::now()));
     }
     if let Some(end) = self.grace_end()
       && end > now
@@ -727,6 +726,14 @@ fn release_devices(seat: &mut Seat, capabilities: wl_seat::Capability) {
   {
     touch.release();
   }
+}
+
+/// How long from `now` until the wall clock's next whole second.
+fn until_next_second(now: SystemTime) -> Duration {
+  let into = now
+    .duration_since(SystemTime::UNIX_EPOCH)
+    .map_or(0, |since| since.subsec_nanos());
+  Duration::from_nanos(u64::from(1_000_000_000 - into))
 }
 
 fn elapsed_ms(since: Instant) -> u128 {
@@ -1277,3 +1284,15 @@ noop_dispatch!(
   wl_surface::WlSurface,
   ExtSessionLockManagerV1,
 );
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn the_clock_wakes_at_the_next_whole_second() {
+    let at = |millis| SystemTime::UNIX_EPOCH + Duration::from_millis(millis);
+    assert_eq!(until_next_second(at(10_250)), Duration::from_millis(750));
+    assert_eq!(until_next_second(at(10_000)), Duration::from_secs(1));
+  }
+}
