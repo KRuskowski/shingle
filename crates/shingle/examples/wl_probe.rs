@@ -17,8 +17,13 @@
 //!          [--size WIDTHxHEIGHT] [--damage-square SIDE]
 //!          [--report-outputs] [--layer OUTPUT] [--fullscreen]
 //!          [--decoration server|client] [--drag TEXT] [--drag-icon]
-//!          [--drop] [--cursor]
+//!          [--drop] [--cursor] [--report-buttons]
 //! ```
+//!
+//! With `--report-buttons`, the probe reports each pointer button it
+//! gets as `button` (the evdev code and whether it was pressed), so that
+//! the rehearsal checks can tell a button binding the compositor took
+//! from one that reached the client (tools/gpu_test/rehearsal_checks.py).
 //!
 //! With `--cursor`, the probe sets its own cursor whenever the pointer
 //! enters it: a yellow 16x16 surface with its hotspot at the centre,
@@ -221,6 +226,8 @@ struct Options {
   drop: bool,
   /// Sets a yellow cursor when the pointer enters.
   cursor: bool,
+  /// Reports the pointer buttons it gets.
+  report_buttons: bool,
 }
 
 /// The size of the `--cursor` cursor.
@@ -256,7 +263,7 @@ fn buffer_bytes(width: i32, height: i32, pattern: bool) -> Vec<u8> {
 /// Parses `wl_probe [APP_ID] [--copy TEXT] [--delay-ms N] [--pattern]
 /// [--fifo] [--damage] [--animate FRAMES] [--presentation]
 /// [--report-outputs] [--layer OUTPUT] [--fullscreen]
-/// [--decoration server|client]`.
+/// [--decoration server|client] [--report-buttons]`.
 fn parse(arguments: &[String]) -> Result<Options, String> {
   let mut options = Options::default();
   let mut arguments = arguments.iter();
@@ -296,6 +303,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
       "--drag-icon" => options.drag_icon = true,
       "--drop" => options.drop = true,
       "--cursor" => options.cursor = true,
+      "--report-buttons" => options.report_buttons = true,
       "--size" => {
         let value = arguments.next().ok_or("--size needs WIDTHxHEIGHT")?;
         options.size = Some(parse_size(value)?);
@@ -416,6 +424,8 @@ struct Probe {
   drop_target: bool,
   /// Whether `--cursor` sets a cursor of its own.
   own_cursor: bool,
+  /// Whether `--report-buttons` reports pointer buttons.
+  report_buttons: bool,
   /// The `--cursor` surface, made on the first enter.
   cursor_surface: Option<wl_surface::WlSurface>,
   /// The types each data offer announced.
@@ -779,7 +789,10 @@ impl Dispatch<wl_seat::WlSeat, ()> for Probe {
     }
     if capabilities.contains(wl_seat::Capability::Pointer)
       && probe.pointer.is_none()
-      && (probe.drag_text.is_some() || probe.drop_target || probe.own_cursor)
+      && (probe.drag_text.is_some()
+        || probe.drop_target
+        || probe.own_cursor
+        || probe.report_buttons)
     {
       probe.pointer = Some(seat.get_pointer(handle, ()));
     }
@@ -836,6 +849,19 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
         report("cursor_set", &[("size", CURSOR_SIZE.to_string())]);
       }
       return;
+    }
+    if probe.report_buttons
+      && let wl_pointer::Event::Button { button, state, .. } = &event
+    {
+      let pressed =
+        matches!(state, WEnum::Value(wl_pointer::ButtonState::Pressed));
+      report(
+        "button",
+        &[
+          ("button", button.to_string()),
+          ("pressed", pressed.to_string()),
+        ],
+      );
     }
     let wl_pointer::Event::Button {
       serial,
@@ -1569,6 +1595,7 @@ fn run(options: &Options) -> Result<(), String> {
     drag_icon: options.drag_icon,
     drop_target: options.drop,
     own_cursor: options.cursor,
+    report_buttons: options.report_buttons,
     ..Probe::default()
   };
   queue
@@ -1742,6 +1769,7 @@ mod tests {
         drag_icon: false,
         drop: false,
         cursor: false,
+        report_buttons: false,
       }
     );
     let options = parse(&arguments(&["--drag", "text", "--drop"])).unwrap();
@@ -1754,6 +1782,11 @@ mod tests {
     assert!(parse(&arguments(&["--drag"])).is_err());
     assert!(parse(&arguments(&["--fullscreen"])).unwrap().fullscreen);
     assert!(parse(&arguments(&["--cursor"])).unwrap().cursor);
+    assert!(
+      parse(&arguments(&["--report-buttons"]))
+        .unwrap()
+        .report_buttons
+    );
     assert_eq!(
       parse(&arguments(&["--decoration", "server"]))
         .unwrap()
