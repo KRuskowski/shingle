@@ -3,9 +3,9 @@
 //! PAM through `shingle-auth` (docs/design/lock-screen.md).
 //!
 //! With `screenshot` it captures every output before it asks for the
-//! lock, blurs the captures once on the GPU and shows them, slowly
-//! drifting, under a vignette and the clock; an output added later shows
-//! the capture of another. Typing fades in an outlined password input,
+//! lock, while the GPU opens, blurs the captures once on the GPU and
+//! shows them, slowly drifting, under a vignette and the clock; an output
+//! added later shows the capture of another. Typing fades in an outlined password input,
 //! with the keyboard layout and Caps Lock as small labels in it. Frames
 //! follow the compositor's frame callbacks, so nothing is drawn while an
 //! output is off.
@@ -71,8 +71,10 @@ static ALLOCATOR: ZeroOnFree<std::alloc::System> =
 
 const MAX_PASSWORD_BYTES: usize = 4096;
 /// How long the screenshots may take before the lock goes ahead without
-/// the missing ones.
-const CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
+/// the missing ones. A drawn output answers within a frame or two; one
+/// that has not answered in this time is not being drawn, and its lock
+/// surface shows another output's capture.
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(1);
 /// The frame interval asked for while the input fades.
 const FADE_FRAME: Duration = Duration::from_millis(16);
 
@@ -929,6 +931,11 @@ impl Timing {
     self.last = now;
   }
 
+  /// Notes that `name`, which ran beside the other steps, took `took`.
+  fn note(&mut self, name: &'static str, took: Duration) {
+    self.steps.push((name, took));
+  }
+
   /// `name N ms, ...` and the total since the process started.
   fn report(&self) -> String {
     let steps = self
@@ -987,18 +994,34 @@ fn run(
   }
   // Everything that can fail or take long happens before the lock is
   // asked for: once it is, the compositor shows no client any more.
+  //
+  // The captures wait for the compositor to draw a frame of each output;
+  // the GPU and the font are opened on another thread meanwhile.
   let mut timing = Timing::new(launched);
-  let gpu = Gpu::new()
-    .map_err(|error| LockError::Message(format!("no GPU: {error}")))?;
-  timing.mark("gpu");
-  let font = font::load(&settings.options.font);
-  timing.mark("font");
+  let family = settings.options.font.clone();
+  let opening = thread::Builder::new()
+    .name("shingle-lock-gpu".to_owned())
+    .spawn(move || {
+      let start = Instant::now();
+      let gpu = Gpu::new();
+      let opened = start.elapsed();
+      let font = font::load(&family);
+      (gpu, opened, font, start.elapsed() - opened)
+    })?;
   let shots = if settings.options.screenshot {
     capture::capture_outputs(&connection, &globals, CAPTURE_TIMEOUT)
   } else {
     HashMap::new()
   };
   timing.mark("capture");
+  let (gpu, opened, font, loaded) = opening
+    .join()
+    .map_err(|_| LockError::Message("opening the GPU panicked".to_owned()))?;
+  let gpu =
+    gpu.map_err(|error| LockError::Message(format!("no GPU: {error}")))?;
+  timing.mark("waiting for the GPU");
+  timing.note("gpu", opened);
+  timing.note("font", loaded);
   let captures = blur_captures(&gpu, shots, settings.options.blur);
   if settings.options.screenshot {
     timing.mark("blur");
