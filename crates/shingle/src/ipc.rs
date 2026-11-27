@@ -679,9 +679,13 @@ pub(crate) fn record_events(
         })
       }
       Event::WindowMoved {
+        reported: false, ..
+      } => continue,
+      Event::WindowMoved {
         window,
         from,
         workspace,
+        ..
       } => json!({
           "event": "view-workspace-changed",
           "from": {
@@ -1740,6 +1744,7 @@ fn set_layout(state: &mut CompositorState, data: &Value) -> Value {
         window,
         from,
         workspace: index + 1,
+        reported: true,
       });
     }
   }

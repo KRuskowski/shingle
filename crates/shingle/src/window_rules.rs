@@ -353,6 +353,7 @@ fn assign_workspace(
       window,
       from,
       workspace: index + 1,
+      reported: true,
     });
   }
 }

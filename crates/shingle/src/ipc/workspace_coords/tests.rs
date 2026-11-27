@@ -115,6 +115,13 @@ fn configure(compositor: &mut Compositor, window: WindowId, rect: Value) {
   assert_eq!(reply, json!({"result": "ok"}));
 }
 
+/// Whether `events` hold a `view-workspace-changed`.
+fn moved_events(events: &[Value]) -> bool {
+  events
+    .iter()
+    .any(|event| event["event"] == "view-workspace-changed")
+}
+
 fn floating(compositor: &Compositor, window: WindowId) -> Option<Rect> {
   compositor
     .core()
@@ -333,6 +340,9 @@ fn a_rectangle_on_another_workspace_moves_the_view_there() {
   assert_eq!(changes.len(), 1, "{events:?}");
   assert_eq!(rect(&changes[0]["old-geometry"]), tile);
   assert_eq!(changes[0]["view"]["geometry"], target);
+  // Wayfire's configure-view only sets the geometry, and sends no
+  // view-workspace-changed (wayfire:plugins/ipc-rules/ipc-rules.cpp:302).
+  assert!(!moved_events(&events), "{events:?}");
   // The centre decides: this one is mostly on the first workspace.
   configure(
     &mut compositor,
@@ -418,6 +428,9 @@ fn layout_views_places_views_on_other_workspaces() {
     floating(&compositor, window),
     Some(Rect::new(20, 10, 100, 50))
   );
+  let events = ipc_events(&mut compositor);
+  assert!(!moved_events(&events), "{events:?}");
+  assert_eq!(geometry_changes(&events, window).len(), 1, "{events:?}");
   assert_eq!(
     geometry_of(&mut compositor, window),
     Rect::new(1300, 10, 100, 50)

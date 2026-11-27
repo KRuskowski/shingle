@@ -855,7 +855,8 @@ pub enum Event {
     surface: SurfaceId,
   },
   /// A window was moved to another workspace (IPC
-  /// `view-workspace-changed`). Workspaces are 1-based row-major indices.
+  /// `view-workspace-changed` when `reported`). Workspaces are 1-based
+  /// row-major indices.
   WindowMoved {
     /// The moved window.
     window: WindowId,
@@ -863,6 +864,13 @@ pub enum Event {
     from: u32,
     /// The 1-based workspace it is now on.
     workspace: u32,
+    /// Whether IPC reports the move. It does not when only the window's
+    /// rectangle put it there (`configure-view`, `stipc/layout_views`) or
+    /// unsticking left it on the current workspace, as Wayfire sends
+    /// `view-workspace-changed` only from the plugins that move a view
+    /// between workspaces (wayfire:plugins/vswitch/vswitch.cpp:50,
+    /// wayfire:plugins/ipc-rules/ipc-rules.cpp:302-310 sends none).
+    reported: bool,
   },
   /// A toplevel was configured to a new rectangle (IPC
   /// `view-geometry-changed`). Not emitted for the first configure.

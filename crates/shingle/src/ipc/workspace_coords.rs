@@ -148,7 +148,8 @@ pub(crate) fn main_workspace(
 /// geometry (wayfire:plugins/ipc-rules/ipc-rules.cpp:302-310): floating,
 /// on the workspace holding the centre, at `rect` less that workspace's
 /// offset. A sticky window and a window of a parked set stay on their
-/// workspace.
+/// workspace. Wayfire sends no `view-workspace-changed` for it, so the
+/// move is not reported.
 pub(crate) fn place_window(
   state: &mut CompositorState,
   window: WindowId,
@@ -170,7 +171,7 @@ pub(crate) fn place_window(
   if target != info.location.workspace {
     let index =
       target.y as usize * state.workspace_width as usize + target.x as usize;
-    state.move_window_to_workspace(window, index)?;
+    state.move_window_to_workspace_as(window, index, false)?;
   }
   Ok(())
 }

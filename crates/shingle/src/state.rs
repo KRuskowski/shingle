@@ -693,6 +693,18 @@ impl CompositorState {
     window: WindowId,
     index: usize,
   ) -> Result<(), crate::Error> {
+    self.move_window_to_workspace_as(window, index, true)
+  }
+
+  /// [`Self::move_window_to_workspace`], with IPC reporting the move as
+  /// `view-workspace-changed` only when `reported`
+  /// ([`crate::Event::WindowMoved`]).
+  pub(crate) fn move_window_to_workspace_as(
+    &mut self,
+    window: WindowId,
+    index: usize,
+    reported: bool,
+  ) -> Result<(), crate::Error> {
     if index >= self.workspace_width as usize * self.workspace_height as usize {
       return Err(crate::Error::InvalidWorkspace(index));
     }
@@ -718,6 +730,7 @@ impl CompositorState {
       window,
       from,
       workspace: index as u32 + 1,
+      reported,
     });
     Ok(())
   }
