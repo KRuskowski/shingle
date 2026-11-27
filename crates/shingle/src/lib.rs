@@ -1563,6 +1563,10 @@ impl Compositor {
   /// dispatches clients, serves IPC, advances idle timers and flushes replies.
   /// Returns the number of client requests dispatched.
   ///
+  /// What was sent to clients since the last turn, by the frontend or the
+  /// backend, is flushed before the wait, so that it reaches them at once
+  /// and not when something next wakes the loop.
+  ///
   /// Events produced during the turn wait in [`Compositor::drain_events`].
   ///
   /// # Errors
@@ -1576,6 +1580,10 @@ impl Compositor {
     let events_before = self.state.events.len();
     output::restore(&mut self.state);
     self.state.reap_ipc_children();
+    // Left unflushed, what was sent since the last turn, such as frame
+    // callbacks, would wait out the timeout.
+    self.state.buffer_releases.flush();
+    self.display.flush_clients()?;
     self
       .event_loop
       .dispatch(timeout, &mut self.state)
@@ -4896,6 +4904,47 @@ pub(crate) mod tests {
     // Dispatching consumes the expiration, so the descriptor does not stay
     // readable and spin a backend's loop.
     assert!(!readable(compositor.as_fd(), Duration::ZERO));
+  }
+
+  // A backend changes the compositor between turns, as when it reports
+  // a frame or describes an output, and then polls. What that sent must
+  // reach the clients before the poll waits, or a client drawing on
+  // frame callbacks hears of them only when something next wakes the
+  // loop, and its output misses frames.
+  #[test]
+  fn a_turn_flushes_what_was_sent_since_the_last_one_before_it_waits() {
+    use wayland_client::protocol::wl_output::WlOutput;
+    let (mut compositor, path) = test_compositor();
+    let mut client = test_client::TestClient::connect(&mut compositor, &path);
+    let _output = client.bind::<WlOutput>(4);
+    client.roundtrip(&mut compositor);
+    let socket = client.socket();
+    // Right after a housekeeping tick the next one is 50 ms away, so that
+    // nothing else ends the wait early.
+    assert!(readable(compositor.as_fd(), Duration::from_millis(500)));
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    compositor.set_output_info(dell_output());
+    assert!(
+      !readable(socket.as_fd(), Duration::ZERO),
+      "nothing sent yet"
+    );
+    let started = std::time::Instant::now();
+    let watcher = std::thread::spawn(move || {
+      readable(socket.as_fd(), Duration::from_secs(2))
+        .then(std::time::Instant::now)
+    });
+    compositor
+      .poll(Some(Duration::from_secs(1)))
+      .expect("the turn succeeds");
+    let arrived = watcher
+      .join()
+      .expect("the watcher finishes")
+      .expect("the output's events arrive");
+    let delay = arrived.duration_since(started);
+    assert!(
+      delay < Duration::from_millis(25),
+      "the output's events arrived {delay:?} into the turn"
+    );
   }
 
   #[test]

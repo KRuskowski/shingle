@@ -450,6 +450,17 @@ impl TestClient {
     }
   }
 
+  /// A duplicate of the client's socket, which another thread can watch
+  /// for the compositor's events arriving.
+  pub(crate) fn socket(&self) -> OwnedFd {
+    self
+      .connection
+      .backend()
+      .poll_fd()
+      .try_clone_to_owned()
+      .expect("the client socket is duplicated")
+  }
+
   /// Binds the first global of interface `I` at `version`.
   pub(crate) fn bind<I>(&self, version: u32) -> I
   where
