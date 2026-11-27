@@ -824,6 +824,19 @@ tools/soak_test/run.py soaks headless, offscreen and nested Shingle on a develop
 5. While it runs, watch the monitor now and then: windows open and close, vkcube spins for a few seconds each cycle, and Scale and Expo open and close. Record anything drawn wrong, and whether the picture ever froze.
 6. Afterwards, end Shingle with `kill -TERM`: `exit=0`. Record in [status.md](status.md#soak-tests) the commit, the GPU, the duration, the cycles, the first and last RSS and fds, the CPU per minute, the frame latency line and the result, from `summary.md` and `samples.csv`.
 
+## Lock screen on the native backend
+
+While the session lock hides the clients, a native modeset shows a black buffer instead of a frame drawn before the lock: DPMS on, the seat's resume after a VT switch and the modesets of a hotplug ([design/lock-screen.md](design/lock-screen.md#3-the-no-flash-guarantee)). Unit-tested through the fake card only (crates/shingle-native/src/display/lock_tests.rs); the offscreen side is checked frame by frame by `tools/gpu_test/run.py --checks lock`.
+
+### Step 54: no pre-lock frame on wake, VT return or replug
+
+1. Unlock with a test PAM service, never a real password: install a service file `/etc/pam.d/shingle-test` with `auth required pam_exec.so expose_authtok quiet /usr/local/bin/shingle-test-phrase` and `account required pam_permit.so`, where the script exits 0 only for an invented phrase, and start Shingle on tty1 as in step 9 with `SHINGLE_PAM_SERVICE=shingle-test` exported. Open `wl_probe --pattern` full screen.
+2. Over SSH, with the variables of step 0: `wlopm --off '*'` (or wait for `idle.dpms_seconds`), then run `shingle-lock -f --screenshot --effect-blur 10x3`. Wake the monitor with a key: the first picture is black or the blurred lock, never the sharp pattern. Film the monitor at 60 fps or more if the eye cannot tell.
+3. Switch to tty2 and back with Ctrl+Alt+F2 and Ctrl+Alt+F1 while locked: the return shows black or the lock, never the pattern.
+4. Unplug and replug the second monitor while locked: it shows black, then the lock.
+5. `kill -KILL` the lock client: both monitors go black and stay black; `super+f8` starts a new `shingle-lock`, which unlocks with the phrase.
+6. Record what each monitor showed in each case.
+
 ## Results
 
 Record results in [status.md](status.md#with-real-clients). None of the steps above has been run yet: the test machine does not exist so far.

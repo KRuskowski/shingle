@@ -57,6 +57,10 @@ cargo run -p shingle-wcm -- \
   --config wayfire.ini --output shingle.yaml --export-yaml
 ```
 
+### Locking
+
+`shingle-lock` locks the session; the lock binding (`super+f8`) and `idle.lock_seconds` run it. It reads your swaylock config (`~/.config/swaylock/config`, swaylock's and swaylock-effects' options) and the `lock` section of Shingle's config, which adds the background's drift. A Wayfire config that runs `swaylock` runs `shingle-lock` instead; write `/usr/bin/swaylock` to keep swaylock. With swayidle, use `swayidle -w ... before-sleep 'shingle-lock -f'` so that a suspend waits until the lock is up. PAM uses the `shingle` service (data/pam/shingle). Details are in [docs/design/lock-screen.md](docs/design/lock-screen.md#6-switching-from-swaylock).
+
 ## Scripting
 
 Shingle serves Wayfire-compatible IPC and exports `WAYFIRE_SOCKET` to the programs it starts, so Wayfire scripts work unchanged. Those programs get Shingle's own `DISPLAY` and never inherit the host session's `DISPLAY`, `WAYLAND_SOCKET` or `WAYFIRE_SOCKET`. See [docs/ipc.md](docs/ipc.md).

@@ -14,9 +14,9 @@
 | `shingle-xwayland` | XWayland without `wayland-server`: X display sockets and lock, the supervised Xwayland process with its restart rule, and the X window manager (x11rb) behind an `XConnection` trait: property parsers, classification, `Pairing` of windows and surfaces by serial, the `ConfigureRequest` policy, ICCCM focus and the `FocusIn` guard, client messages, restacking and the root cursor, the clipboard and primary selection bridge with its MIME mapping and non-blocking transfers, the Xdnd drag and drop bridge, and the `xw_probe` test client (examples/). |
 | `shingle-config` | Validated YAML model, Wayfire INI and i3 imports, XKB keymap generation. |
 | `shingle-session` | Atomic session persistence, the background session writer and relaunching saved applications. |
-| `shingle-idle` | Idle, DPMS, fullscreen suppression and lock coordination. |
+| `shingle-idle` | Idle, DPMS, fullscreen suppression and the lock state machine, with `Starting` and `LockState::hides_clients`. |
 | `shingle-auth` | PAM authentication for the lock client. |
-| `shingle-lock` | `ext-session-lock-v1` client with swaylock-style options. |
+| `shingle-lock` | The lock screen: an `ext-session-lock-v1` client with swaylock's options, screenshots through wlr-screencopy blurred and drifting on the GPU, the clock and the outlined password input. |
 | `shingle-wcm` | Graphical configuration manager built on [Gloomy](https://github.com/KRuskowski/gloomy). |
 | `shingle-launcher` | Application launcher: a layer-shell client drawing Gloomy widgets on lavapipe into `wl_shm`, with discovery, fuzzy matching, frecency and the user's layout file in a library unit-tested without Wayland ([design/launcher.md](design/launcher.md)). |
 
@@ -31,6 +31,8 @@
 | Background session writes: coalescing, order, final save, error reporting (`SessionWriter`) | `crates/shingle-session/src/writer.rs`; frontend callers in `crates/shingle-frontend/src/frontend/session.rs` and `Frontend::shutdown` |
 | Environment of every child process (`ClientEnvironment`, with Wayfire's variables from `with_desktop`), launching clients | `crates/shingle-session/src/environment.rs`, `crates/shingle-session/src/lib.rs` |
 | Public compositor API and renderer events | `crates/shingle/src/lib.rs` |
+| What a locked output shows: only the active lock's surface once it has a full opaque frame (`shown_lock_surface`), the lock scene over black, black native modesets under the lock, the frame recorder | `crates/shingle/src/shell.rs`, `state.rs` (`visible_surfaces_on`); `crates/shingle-frontend/src/frontend/lock.rs`, `recorder.rs`; `crates/shingle-native/src/display.rs` (`set_lock_hides_clients`) |
+| swaylock's options and the `lock` config section; the lock client's option order, screenshots, GPU passes, clock and input | `crates/shingle-config/src/lock.rs`; `crates/shingle-lock/src/options.rs`, `capture.rs`, `gpu.rs`, `lock.wgsl`, `ui.rs` |
 | Protocol timestamps (`CLOCK_MONOTONIC`) | `crates/shingle/src/clock.rs` |
 | In-process Wayland test client | `crates/shingle/src/test_client.rs` |
 | Shared state and workspace transitions | `crates/shingle/src/state.rs` |
