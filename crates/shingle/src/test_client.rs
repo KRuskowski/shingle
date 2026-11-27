@@ -19,6 +19,14 @@ use wayland_client::{
     wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
   },
 };
+use wayland_protocols::xdg::foreign::{
+  zv1::client::{
+    zxdg_exported_v1, zxdg_exporter_v1, zxdg_imported_v1, zxdg_importer_v1,
+  },
+  zv2::client::{
+    zxdg_exported_v2, zxdg_exporter_v2, zxdg_imported_v2, zxdg_importer_v2,
+  },
+};
 use wayland_protocols::{
   ext::data_control::v1::client::{
     ext_data_control_device_v1::{self, ExtDataControlDeviceV1},
@@ -262,6 +270,9 @@ pub(crate) struct Events {
   /// `org_kde_kwin_server_decoration.mode` events, in order: the manager's
   /// as `default N`, a decoration's as `mode N`.
   pub(crate) kde_decoration: Vec<String>,
+  /// xdg-foreign events of both versions, in order: `handle H` of exports
+  /// and `destroyed` of imports.
+  pub(crate) foreign: Vec<String>,
   /// `wl_data_device` drag events, in order: `enter`, `leave`, `motion`
   /// and `drop`.
   pub(crate) drag: Vec<&'static str>,
@@ -1464,6 +1475,62 @@ impl Dispatch<OrgKdeKwinServerDecoration, ()> for Events {
   }
 }
 
+impl Dispatch<zxdg_exported_v1::ZxdgExportedV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &zxdg_exported_v1::ZxdgExportedV1,
+    event: zxdg_exported_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let zxdg_exported_v1::Event::Handle { handle } = event {
+      events.foreign.push(format!("handle {handle}"));
+    }
+  }
+}
+
+impl Dispatch<zxdg_exported_v2::ZxdgExportedV2, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &zxdg_exported_v2::ZxdgExportedV2,
+    event: zxdg_exported_v2::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let zxdg_exported_v2::Event::Handle { handle } = event {
+      events.foreign.push(format!("handle {handle}"));
+    }
+  }
+}
+
+impl Dispatch<zxdg_imported_v1::ZxdgImportedV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &zxdg_imported_v1::ZxdgImportedV1,
+    _: zxdg_imported_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.foreign.push("destroyed".into());
+  }
+}
+
+impl Dispatch<zxdg_imported_v2::ZxdgImportedV2, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &zxdg_imported_v2::ZxdgImportedV2,
+    _: zxdg_imported_v2::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.foreign.push("destroyed".into());
+  }
+}
+
 /// Implements `Dispatch` for objects whose events the tests ignore.
 macro_rules! ignore_events {
   ($($interface:ty),* $(,)?) => {
@@ -1751,6 +1818,10 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for Events {
 }
 
 ignore_events!(
+  zxdg_exporter_v1::ZxdgExporterV1,
+  zxdg_importer_v1::ZxdgImporterV1,
+  zxdg_exporter_v2::ZxdgExporterV2,
+  zxdg_importer_v2::ZxdgImporterV2,
   ExtDataControlManagerV1,
   ZxdgDecorationManagerV1,
   ZwfShellManagerV2,
