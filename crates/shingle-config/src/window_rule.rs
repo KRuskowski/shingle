@@ -78,10 +78,12 @@ pub enum RuleAction {
     /// Zero-based workspace row.
     y: u32,
   },
-  /// `set geometry X Y W H`: float the view at this rectangle in output
-  /// coordinates. Width and height must be nonzero.
+  /// `set geometry X Y W H`: put the view at this rectangle in output
+  /// coordinates; a tiled view keeps its tile, as for `move`. Width and
+  /// height must be nonzero.
   SetGeometry(Rect),
-  /// `set geometry_ppt X Y W H`: float the view at a rectangle given in percent
+  /// `set geometry_ppt X Y W H`: put the view (a tiled one keeps its tile)
+  /// at a rectangle given in percent
   /// of the output size, measured from the output's origin. Values are clamped
   /// to 0–100 when applied.
   SetGeometryPercent {
@@ -116,7 +118,9 @@ pub enum RuleAction {
     /// edge to the view's bottom edge, clamped likewise.
     y_from_bottom: bool,
   },
-  /// `move X Y`: float the view at this position, keeping its size.
+  /// `move X Y`: move the view to this position, keeping its size and
+  /// inside the workspace grid. A tiled view keeps its tile and floats
+  /// there when it leaves the tree, as under Wayfire's simple-tile.
   Move {
     /// New left edge in output coordinates.
     x: i32,
@@ -129,8 +133,9 @@ pub enum RuleAction {
   /// (plugins/window-rules/view-action-interface.cpp, `_start_on_output`).
   /// Dialogs stay with their parent; a name no output has does nothing.
   StartOnOutput(String),
-  /// `resize W H`: float the view at this size, keeping its position. Both must
-  /// be nonzero.
+  /// `resize W H`: give the view this size, from 40x30 to the output's,
+  /// keeping its position; a tiled view keeps its tile, as for `move`. Both
+  /// must be nonzero.
   Resize {
     /// New width.
     width: u32,

@@ -828,6 +828,93 @@ fn windows_are_drawn_only_on_their_own_output_by_default() {
   let _ = std::fs::remove_file(path);
 }
 
+/// Rules of `lines`, each a window-rules value.
+fn rules(lines: &[&str]) -> Vec<WindowRule> {
+  lines
+    .iter()
+    .map(|line| WindowRule::try_from((*line).to_owned()).unwrap())
+    .collect()
+}
+
+#[test]
+fn rules_after_start_on_output_keep_the_window_tiled_on_that_output() {
+  let config = Config {
+    window_rules: rules(&[
+      "on created if app_id is \"second\" then start_on_output HEADLESS-2",
+      "on created if app_id is \"second\" then assign_workspace 0 0",
+      "on created if app_id is \"second\" then resize 400 300",
+      "on created if app_id is \"second\" then move 100 100",
+    ]),
+    ..Config::default()
+  };
+  let (mut compositor, path) = two_outputs(config);
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let (_first_toplevel, first) = mapped(&mut compositor, &mut client, "first");
+  let (_second_toplevel, _) = mapped(&mut compositor, &mut client, "second");
+  let second = compositor
+    .core()
+    .window_ids()
+    .find(|window| *window != first)
+    .unwrap();
+  // assign_workspace takes the window's own output, not the focused one.
+  assert_eq!(
+    output_of(&compositor, second).as_deref(),
+    Some("HEADLESS-2")
+  );
+  // The new window took the focus, and its output with it.
+  assert_eq!(compositor.active_output(), handle("HEADLESS-2"));
+  assert_eq!(compositor.focused_window(), Some(second));
+  // Moved and resized, it stays in its tile, as under simple-tile.
+  let info = compositor.core().window_info(second).unwrap();
+  assert_eq!(info.state.floating, None);
+  // Untiled, it floats where the rules put it, in its output's plane.
+  let output = compositor.state.output_of_window(second).rect;
+  crate::shell::toggle_tiling(&mut compositor.state, second).unwrap();
+  let floating = compositor
+    .core()
+    .window_info(second)
+    .unwrap()
+    .state
+    .floating;
+  assert_eq!(
+    floating,
+    Some(Rect::new(output.x + 100, output.y + 100, 400, 300))
+  );
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_move_rule_keeps_a_floating_window_inside_the_workspace_grid() {
+  let config = Config {
+    window_rules: rules(&["on created if app_id is \"far\" then resize 20 10"]),
+    ..Config::default()
+  };
+  let (mut compositor, path) = two_outputs(config);
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let (_toplevel, window) = mapped(&mut compositor, &mut client, "far");
+  crate::shell::toggle_tiling(&mut compositor.state, window).unwrap();
+  let move_rule = rules(&["on created if app_id is \"far\" then move -50 -60"]);
+  compositor.state.window_rules = move_rule;
+  crate::window_rules::apply_created(
+    &mut compositor.state,
+    window,
+    &shingle_core::LaunchIdentity {
+      app_id: "far".into(),
+      ..Default::default()
+    },
+  );
+  let floating = compositor
+    .core()
+    .window_info(window)
+    .unwrap()
+    .state
+    .floating;
+  let output = compositor.state.output_of_window(window).rect;
+  // Clamped to the grid's corner; resize gave it Wayfire's 40x30 minimum.
+  assert_eq!(floating, Some(Rect::new(output.x, output.y, 40, 30)));
+  let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn a_click_focuses_with_num_lock_on() {
   let (mut compositor, path) = two_outputs(Config::default());

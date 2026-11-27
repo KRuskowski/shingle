@@ -67,11 +67,14 @@ fn apply(
           shingle_core::StackingMode::AlwaysOnBottom,
         );
       }
-      RuleAction::StartOnOutput(name) => start_on_output(state, window, &name),
+      RuleAction::StartOnOutput(name) => {
+        start_on_output(state, window, &name, event == RuleEvent::Created)
+      }
       RuleAction::AssignWorkspace { x, y } => {
         assign_workspace(state, window, WorkspaceId::new(x, y));
       }
       RuleAction::SetGeometry(geometry) => {
+        let geometry = output_plane_to_layout(state, window, geometry);
         set_geometry(state, window, geometry)
       }
       RuleAction::SetGeometryPercent {
@@ -106,16 +109,16 @@ fn apply(
         }
       }
       RuleAction::Move { x, y } => {
-        if let Some(mut geometry) = floating_geometry(state, window) {
-          geometry.x = x;
-          geometry.y = y;
+        if let Some(geometry) = floating_geometry(state, window) {
+          let geometry = moved_within_grid(state, window, geometry, x, y);
           set_geometry(state, window, geometry);
         }
       }
       RuleAction::Resize { width, height } => {
         if let Some(mut geometry) = floating_geometry(state, window) {
-          geometry.width = width;
-          geometry.height = height;
+          let output = state.output_of_window(window).rect;
+          geometry.width = width.clamp(40, output.width.max(40));
+          geometry.height = height.clamp(30, output.height.max(30));
           set_geometry(state, window, geometry);
         }
       }
@@ -160,6 +163,8 @@ pub(crate) fn view_properties<'a>(
   }
 }
 
+/// The window's geometry out of the tiling tree, in layout coordinates: its
+/// floating one, the one a rule gave it while tiled, or its tile.
 fn floating_geometry(
   state: &CompositorState,
   window: WindowId,
@@ -169,6 +174,7 @@ fn floating_geometry(
     .window_info(window)
     .ok()
     .and_then(|info| info.state.floating)
+    .or_else(|| shell::windowed_geometry(state, window))
     .or_else(|| {
       state
         .core
@@ -255,6 +261,45 @@ fn x11_geometry(
   })
 }
 
+/// `geometry`, in a rule's coordinates, which are the window's output's
+/// own with its top-left corner at 0,0, in layout coordinates.
+fn output_plane_to_layout(
+  state: &CompositorState,
+  window: WindowId,
+  geometry: Rect,
+) -> Rect {
+  crate::ipc::workspace_coords::window_offset(state, window).remove(geometry)
+}
+
+/// `geometry` (layout coordinates) moved to `x`, `y` of the window's
+/// output plane and kept inside its workspace grid, as Wayfire's
+/// `view_action_interface_t::_move` clamps it.
+fn moved_within_grid(
+  state: &CompositorState,
+  window: WindowId,
+  geometry: Rect,
+  x: i32,
+  y: i32,
+) -> Rect {
+  let output = state.output_of_window(window).rect;
+  let columns = i64::from(state.workspace_width.max(1));
+  let rows = i64::from(state.workspace_height.max(1));
+  let clamp = |value: i32, size: u32, extent: u32, count: i64| {
+    let room = i64::from(extent) * count - i64::from(size);
+    i32::try_from(i64::from(value).clamp(0, room.max(0))).unwrap_or(value)
+  };
+  // The grid starts at the window's own workspace's corner.
+  let plane = Rect {
+    x: clamp(x, geometry.width, output.width, columns),
+    y: clamp(y, geometry.height, output.height, rows),
+    ..geometry
+  };
+  output_plane_to_layout(state, window, plane)
+}
+
+/// Gives the window `geometry` (layout coordinates). A floating window
+/// moves there; a tiled one stays in its tile, as Wayfire's tiled views
+/// do, and floats there when it leaves the tree.
 fn set_geometry(state: &mut CompositorState, window: WindowId, geometry: Rect) {
   let Ok(geometry) = geometry.validate() else {
     return;
@@ -263,8 +308,8 @@ fn set_geometry(state: &mut CompositorState, window: WindowId, geometry: Rect) {
     .core
     .window_info(window)
     .is_ok_and(|info| info.state.floating.is_none())
-    && shell::toggle_tiling(state, window).is_err()
   {
+    shell::set_windowed_geometry(state, window, geometry);
     return;
   }
   if state.core.set_floating(window, Some(geometry)).is_ok() {
@@ -301,7 +346,15 @@ fn named_output(
 /// Moves `window` to the output a `start_on_output` rule names, as
 /// `move_view_to_output` with `RECONFIGURE`. Dialogs stay with their
 /// parent, and a name no output has does nothing.
-fn start_on_output(state: &mut CompositorState, window: WindowId, name: &str) {
+/// Moves `window` to the output `name` names. A new window takes that
+/// output's focus with it, as Wayfire focuses a view on map and the focus
+/// follows it to its output.
+fn start_on_output(
+  state: &mut CompositorState,
+  window: WindowId,
+  name: &str,
+  created: bool,
+) {
   let Some(output) = named_output(state, name) else {
     eprintln!("shingle: window-rules: no output matches {name:?}");
     return;
@@ -320,6 +373,11 @@ fn start_on_output(state: &mut CompositorState, window: WindowId, name: &str) {
     crate::output::MoveGeometry::Scale,
   ) {
     eprintln!("shingle: window-rules: start_on_output failed: {error}");
+    return;
+  }
+  if created && output != state.active_output {
+    crate::output::focus_output(state, &output);
+    crate::input::focus_window(state, window);
   }
 }
 
@@ -328,16 +386,15 @@ fn assign_workspace(
   window: WindowId,
   workspace: WorkspaceId,
 ) {
-  if state
-    .core
-    .ensure_workspace(&state.active_output, workspace)
-    .is_err()
-  {
-    return;
-  }
   let Ok(previous) = state.core.window_location(window) else {
     return;
   };
+  // The window's own output, as Wayfire's `_assign_ws` takes the view's
+  // workspace set, not the focused output's.
+  let output = previous.output.clone();
+  if state.core.ensure_workspace(&output, workspace).is_err() {
+    return;
+  }
   let from =
     previous.workspace.y * state.workspace_width + previous.workspace.x + 1;
   let Ok(detached) = state.core.detach_window(window) else {
@@ -345,7 +402,7 @@ fn assign_workspace(
   };
   if state
     .core
-    .reattach_window(detached, &state.active_output, workspace)
+    .reattach_window(detached, &output, workspace)
     .is_ok()
   {
     let index = workspace.y * state.workspace_width + workspace.x;

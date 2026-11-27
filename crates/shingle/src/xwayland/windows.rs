@@ -309,6 +309,7 @@ fn new_toplevel(
     configured_geometry: None,
     configure: crate::shell::ConfigureState::default(),
     created_rules_pending: None,
+    windowed: None,
     unmapped: false,
     pid,
     client_decorated: info.draws_own_frame(),

@@ -229,6 +229,11 @@ pub(crate) struct ToplevelRole {
   /// sent.
   pub(crate) configure: ConfigureState,
   pub(crate) created_rules_pending: Option<bool>,
+  /// Where a tiled window floats when it leaves the tree, in layout
+  /// coordinates, once a window rule moved or resized it: Wayfire's rules
+  /// change a view's geometry before simple-tile tiles it, and untiling
+  /// gives it back (`update_last_windowed_geometry`).
+  pub(crate) windowed: Option<Rect>,
   /// A null buffer unmapped the toplevel, so its next commit without a
   /// buffer is a new initial commit, which xdg-shell answers with a
   /// configure.
@@ -2195,6 +2200,35 @@ pub(crate) fn grid_slot(
   }
 }
 
+/// The geometry a window rule gave tiled `window` (`ToplevelRole::windowed`).
+pub(crate) fn windowed_geometry(
+  state: &CompositorState,
+  window: WindowId,
+) -> Option<Rect> {
+  state.surfaces.values().find_map(|surface| {
+    surface
+      .role
+      .toplevel()
+      .filter(|toplevel| toplevel.window() == Some(window))
+      .and_then(|toplevel| toplevel.windowed)
+  })
+}
+
+/// Records where tiled `window` floats when it leaves the tree.
+pub(crate) fn set_windowed_geometry(
+  state: &mut CompositorState,
+  window: WindowId,
+  geometry: Rect,
+) {
+  for surface in state.surfaces.values_mut() {
+    if let Some(toplevel) = surface.role.toplevel_mut()
+      && toplevel.window() == Some(window)
+    {
+      toplevel.windowed = Some(geometry);
+    }
+  }
+}
+
 pub(crate) fn sync_floating_geometry(
   state: &mut CompositorState,
   window: WindowId,
@@ -2303,11 +2337,20 @@ pub(crate) fn toggle_tiling(
           Err(error)
         }
       });
-    Some(info.state.restore_geometry.map_or(tile, Ok)?)
+    let windowed = state
+      .surfaces
+      .get(&object)
+      .and_then(|surface| surface.role.toplevel())
+      .and_then(|toplevel| toplevel.windowed);
+    Some(
+      windowed
+        .map_or_else(|| info.state.restore_geometry.map_or(tile, Ok), Ok)?,
+    )
   } else {
     None
   };
-  let old_edges = state.core.window_info(window)?.state.tiled_edges;
+  let old = state.core.window_info(window)?.state;
+  let old_edges = old.tiled_edges;
   state.core.set_floating(window, geometry)?;
   if let Some(surface) = state.surfaces.get_mut(&object)
     && let Some(toplevel) = surface.role.toplevel_mut()
@@ -2315,6 +2358,10 @@ pub(crate) fn toggle_tiling(
     toplevel.tiled = !tiled;
     if let Some(geometry) = geometry {
       toplevel.floating_geometry = geometry;
+    }
+    // Tiling again keeps where it floated, for the next untiling.
+    if !tiled && let Some(floating) = old.floating {
+      toplevel.windowed = Some(floating);
     }
   }
   state.events.push(Event::TilingChanged {
@@ -2638,6 +2685,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
               configured_geometry: None,
               configure: ConfigureState::default(),
               created_rules_pending: None,
+              windowed: None,
               unmapped: false,
               pid,
               client_decorated: true,
