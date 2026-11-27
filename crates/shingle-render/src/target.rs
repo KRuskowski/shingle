@@ -464,6 +464,17 @@ mod tests {
     rgba.render(&gpu, &state, &tiles, [0.0; 4]);
     rgba.render(&gpu, &state, &tiles, [0.0; 4]);
     assert_eq!(gpu.pipeline_count(), 1);
+    // The effect pipelines wait for the first frame with an effect.
+    assert_eq!(gpu.effect_pipeline_count(), 0);
+    let particles = [crate::Particle {
+      center: [1.0, 1.0],
+      radius: 1.0,
+      color: [1.0; 4],
+    }];
+    let mut fire = tiles[0].clone();
+    fire.effect = crate::TileEffect::Particles(&particles);
+    rgba.render(&gpu, &state, &[fire], [0.0; 4]);
+    assert_eq!(gpu.effect_pipeline_count(), 1);
     let bgra = gpu.device().create_texture(&wgpu::TextureDescriptor {
       label: None,
       size: wgpu::Extent3d {

@@ -7,7 +7,9 @@ use wgpu::util::DeviceExt;
 
 use crate::{
   ForeignAccess, GpuContext, RenderRect, RenderState, RenderTile,
-  TextureTransform, state::Zoom,
+  TextureTransform,
+  state::Zoom,
+  tile_effects::{self, ParticleInstance, SqueezeVertex, TileEffect},
 };
 
 #[repr(C)]
@@ -25,6 +27,15 @@ pub(crate) struct Vertex {
 }
 
 impl Vertex {
+  /// A vertex at clip-space `position` with nothing else set.
+  pub(crate) fn at(position: [f32; 2]) -> Self {
+    Self {
+      position,
+      w: 1.0,
+      ..Self::zeroed()
+    }
+  }
+
   pub(crate) const LAYOUT: wgpu::VertexBufferLayout<'static> =
     wgpu::VertexBufferLayout {
       array_stride: size_of::<Self>() as wgpu::BufferAddress,
@@ -77,26 +88,29 @@ pub fn draw_with_access(
     device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
       label: Some("shingle frame encoder"),
     });
-  let vertices = tiles
-    .iter()
-    .flat_map(|tile| {
-      quad(
-        tile,
-        size.0,
-        size.1,
-        state.scale_factor(),
-        state.zoom_state(),
-        state.output_transform(),
-      )
+  let plan = Plan::new(tiles, size, state);
+  let buffer = |label, contents: &[u8]| {
+    (!contents.is_empty()).then(|| {
+      device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(label),
+        contents,
+        usage: wgpu::BufferUsages::VERTEX,
+      })
     })
-    .collect::<Vec<_>>();
-  let vertex_buffer = (!vertices.is_empty()).then(|| {
-    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-      label: Some("shingle quad vertices"),
-      contents: bytemuck::cast_slice(&vertices),
-      usage: wgpu::BufferUsages::VERTEX,
-    })
-  });
+  };
+  let vertex_buffer = buffer(
+    "shingle quad vertices",
+    bytemuck::cast_slice(&plan.vertices),
+  );
+  let squeeze_buffer = buffer(
+    "shingle squeeze vertices",
+    bytemuck::cast_slice(&plan.squeezed),
+  );
+  let particle_buffer =
+    buffer("shingle particles", bytemuck::cast_slice(&plan.particles));
+  let format = view.texture().format();
+  let effect_pipelines =
+    plan.has_effects().then(|| gpu.effect_pipelines(format));
   {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
       label: Some("shingle composite pass"),
@@ -116,16 +130,57 @@ pub fn draw_with_access(
       })],
       ..Default::default()
     });
-    if let Some(vertex_buffer) = &vertex_buffer {
-      pass.set_pipeline(&gpu.pipeline(view.texture().format()));
-      pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-      for (index, tile) in tiles.iter().enumerate() {
-        let texture = tile.texture.unwrap_or(&gpu.white_texture);
-        pass.set_bind_group(0, &texture.bind_group, &[]);
-        pass.set_bind_group(1, &gpu.gamma_lut.bind_group, &[]);
-        pass.set_bind_group(2, &gpu.effects.bind_group, &[]);
-        let first = (index * 6) as u32;
-        pass.draw(first..first + 6, 0..1);
+    pass.set_bind_group(1, &gpu.gamma_lut.bind_group, &[]);
+    pass.set_bind_group(2, &gpu.effects.bind_group, &[]);
+    // Which pipeline and vertex buffer are bound: the tile pipeline,
+    // squeezing, or one of the two particle passes.
+    let mut bound = None;
+    for (tile, step) in tiles.iter().zip(&plan.steps) {
+      let texture = tile.texture.unwrap_or(&gpu.white_texture);
+      match *step {
+        Step::Quad(first) => {
+          let Some(vertex_buffer) = &vertex_buffer else {
+            continue;
+          };
+          if bound != Some(0) {
+            pass.set_pipeline(&gpu.pipeline(format));
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            bound = Some(0);
+          }
+          pass.set_bind_group(0, &texture.bind_group, &[]);
+          pass.draw(first..first + 6, 0..1);
+        }
+        Step::Squeeze(first) => {
+          let (Some(buffer), Some(pipelines)) =
+            (&squeeze_buffer, &effect_pipelines)
+          else {
+            continue;
+          };
+          if bound != Some(1) {
+            pass.set_pipeline(&pipelines.squeeze);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            bound = Some(1);
+          }
+          pass.set_bind_group(0, &texture.bind_group, &[]);
+          pass.draw(first..first + 6, 0..1);
+        }
+        Step::Particles(first, count) => {
+          let (Some(buffer), Some(pipelines)) =
+            (&particle_buffer, &effect_pipelines)
+          else {
+            continue;
+          };
+          if count == 0 {
+            continue;
+          }
+          pass.set_bind_group(0, &gpu.white_texture.bind_group, &[]);
+          pass.set_vertex_buffer(0, buffer.slice(..));
+          for pipeline in [&pipelines.darken, &pipelines.glow] {
+            pass.set_pipeline(pipeline);
+            pass.draw(0..6, first..first + count);
+          }
+          bound = None;
+        }
       }
     }
   }
@@ -133,6 +188,75 @@ pub fn draw_with_access(
     foreign.add_texture(texture);
   }
   foreign.submit(gpu, encoder.finish())
+}
+
+/// How each tile of a frame is drawn: the first vertex or instance of its
+/// draw in the buffer of its kind.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Step {
+  Quad(u32),
+  Squeeze(u32),
+  Particles(u32, u32),
+}
+
+/// The vertices and instances of a frame's tiles, by kind.
+struct Plan {
+  steps: Vec<Step>,
+  vertices: Vec<Vertex>,
+  squeezed: Vec<SqueezeVertex>,
+  particles: Vec<ParticleInstance>,
+}
+
+impl Plan {
+  fn new(
+    tiles: &[RenderTile<'_>],
+    size: (u32, u32),
+    state: &RenderState,
+  ) -> Self {
+    let mut plan = Self {
+      steps: Vec::with_capacity(tiles.len()),
+      vertices: Vec::with_capacity(tiles.len() * 6),
+      squeezed: Vec::new(),
+      particles: Vec::new(),
+    };
+    let (scale, zoom, transform) = (
+      state.scale_factor(),
+      state.zoom_state(),
+      state.output_transform(),
+    );
+    for tile in tiles {
+      let step = match tile.effect {
+        TileEffect::None => {
+          let first = plan.vertices.len() as u32;
+          plan
+            .vertices
+            .extend(quad(tile, size.0, size.1, scale, zoom, transform));
+          Step::Quad(first)
+        }
+        TileEffect::Squeeze(squeeze) => {
+          let first = plan.squeezed.len() as u32;
+          plan.squeezed.extend(tile_effects::squeeze_vertices(
+            tile, &squeeze, size, scale, zoom, transform,
+          ));
+          Step::Squeeze(first)
+        }
+        TileEffect::Particles(particles) => {
+          let first = plan.particles.len() as u32;
+          plan.particles.extend(tile_effects::particle_instances(
+            tile, particles, size, scale, zoom, transform,
+          ));
+          Step::Particles(first, plan.particles.len() as u32 - first)
+        }
+      };
+      plan.steps.push(step);
+    }
+    plan
+  }
+
+  /// Whether a tile needs the effect pipelines.
+  fn has_effects(&self) -> bool {
+    !self.squeezed.is_empty() || !self.particles.is_empty()
+  }
 }
 
 /// Applies the inversion effect to the clear colour, which the shader never
@@ -265,7 +389,7 @@ pub(crate) fn zoom_crop(
   )
 }
 
-fn zoom_vertex(
+pub(crate) fn zoom_vertex(
   vertex: &mut Vertex,
   output_width: f32,
   output_height: f32,
@@ -280,7 +404,7 @@ fn zoom_vertex(
       + 1.0;
 }
 
-fn output_vertex(vertex: &mut Vertex, transform: TextureTransform) {
+pub(crate) fn output_vertex(vertex: &mut Vertex, transform: TextureTransform) {
   if matches!(
     transform,
     TextureTransform::FlipHorizontal
@@ -299,16 +423,17 @@ fn output_vertex(vertex: &mut Vertex, transform: TextureTransform) {
   };
 }
 
-fn transformed_vertex(
+/// The texture coordinates `tile` samples at (`u`, `v`) of its geometry,
+/// 0 to 1 from its top left corner: through its `uv` rectangle, then with
+/// its buffer transform undone.
+pub(crate) fn texture_coordinates(
   tile: &RenderTile<'_>,
-  x: f32,
-  y: f32,
   u: f32,
   v: f32,
-) -> Vertex {
+) -> (f32, f32) {
   let u = tile.uv[0] + u * (tile.uv[2] - tile.uv[0]);
   let v = tile.uv[1] + v * (tile.uv[3] - tile.uv[1]);
-  let (u, v) = match tile.transform {
+  match tile.transform {
     TextureTransform::Normal => (u, v),
     TextureTransform::FlipHorizontal => (1.0 - u, v),
     TextureTransform::Rotate90 => (v, 1.0 - u),
@@ -317,7 +442,17 @@ fn transformed_vertex(
     TextureTransform::Transpose => (v, u),
     TextureTransform::FlipVertical => (u, 1.0 - v),
     TextureTransform::AntiTranspose => (1.0 - v, 1.0 - u),
-  };
+  }
+}
+
+fn transformed_vertex(
+  tile: &RenderTile<'_>,
+  x: f32,
+  y: f32,
+  u: f32,
+  v: f32,
+) -> Vertex {
+  let (u, v) = texture_coordinates(tile, u, v);
   Vertex {
     position: [x, y],
     uv: [u, v],

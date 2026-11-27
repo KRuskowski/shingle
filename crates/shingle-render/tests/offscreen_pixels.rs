@@ -571,3 +571,104 @@ fn a_damaged_rectangle_replaces_only_its_texels() {
   assert!(!uploader.fits(&texture, &other));
   assert!(uploader.write(&texture, &other, &[[0, 0, 1, 1]]).is_err());
 }
+
+/// The RGBA of pixel (`x`, `y`) of a `WIDTH` wide frame.
+fn pixel(rgba: &[u8], x: u32, y: u32) -> [u8; 4] {
+  let start = ((y * WIDTH + x) * 4) as usize;
+  rgba[start..start + 4].try_into().expect("four channels")
+}
+
+/// A squeezed tile over the whole frame whose window is the left half at
+/// `progress`, going towards a small box at the bottom centre.
+fn squeezed<'a>(texture: &'a GpuTexture, progress: f32) -> RenderTile<'a> {
+  let mut tile = RenderTile::textured(rect(0, 0, WIDTH, HEIGHT), texture);
+  tile.effect = shingle_render::TileEffect::Squeeze(shingle_render::Squeeze {
+    progress,
+    source: [0.0, 0.0, 0.5, 0.75],
+    target: [0.4, 0.9, 0.6, 1.0],
+    upward: false,
+    horizontal: false,
+  });
+  tile
+}
+
+#[test]
+fn a_squeeze_starts_as_the_window_and_ends_in_its_target() {
+  let Some(gpu) = gpu() else {
+    return;
+  };
+  let state = RenderState::default();
+  let texture = gpu
+    .create_texture(4, 4, &checker_rgba(), state.texture_filter())
+    .expect("texture upload");
+  // At 0 the warp is the window, where a plain tile would draw it.
+  let start = draw_frame(
+    &gpu,
+    &state,
+    (WIDTH, HEIGHT),
+    &[squeezed(&texture, 0.0)],
+    CLEAR,
+  );
+  let plain = draw_frame(
+    &gpu,
+    &state,
+    (WIDTH, HEIGHT),
+    &[RenderTile::textured(
+      rect(0, 0, WIDTH / 2, HEIGHT * 3 / 4),
+      &texture,
+    )],
+    CLEAR,
+  );
+  for (x, y) in [(4, 4), (40, 4), (4, 40), (40, 40), (70, 10), (70, 60)] {
+    let (actual, expected) = (pixel(&start, x, y), pixel(&plain, x, y));
+    let diff = actual
+      .iter()
+      .zip(expected)
+      .map(|(a, e)| a.abs_diff(e))
+      .max()
+      .unwrap();
+    assert!(diff <= 3, "({x}, {y}): {actual:?} is not {expected:?}");
+  }
+  // At 1 the window has gone into the box: its top corner is clear.
+  let end = draw_frame(
+    &gpu,
+    &state,
+    (WIDTH, HEIGHT),
+    &[squeezed(&texture, 1.0)],
+    CLEAR,
+  );
+  assert_eq!(pixel(&end, 4, 4), pixel(&plain, 80, 10));
+}
+
+#[test]
+fn particles_darken_then_light_what_is_below() {
+  let Some(gpu) = gpu() else {
+    return;
+  };
+  let state = RenderState::default();
+  let particles = [shingle_render::Particle {
+    center: [8.0, 8.0],
+    radius: 8.0,
+    color: [1.0, 0.5, 0.0, 1.0],
+  }];
+  let background = RenderTile::solid(rect(0, 0, WIDTH, HEIGHT), [0.5; 4]);
+  let mut fire = RenderTile::solid(rect(20, 20, 0, 0), [1.0; 4]);
+  fire.effect = shingle_render::TileEffect::Particles(&particles);
+  let rgba = draw_frame(
+    &gpu,
+    &state,
+    (WIDTH, HEIGHT),
+    &[background.clone(), fire],
+    CLEAR,
+  );
+  let plain = draw_frame(&gpu, &state, (WIDTH, HEIGHT), &[background], CLEAR);
+  // The middle of the particle, at (28, 28), turns orange; beyond its
+  // radius nothing changes.
+  let middle = pixel(&rgba, 28, 28);
+  let below = pixel(&plain, 28, 28);
+  assert!(middle[0] > below[0], "{middle:?} over {below:?}");
+  assert!(middle[2] < below[2], "{middle:?} over {below:?}");
+  assert_eq!(pixel(&rgba, 28, 40), pixel(&plain, 28, 40));
+  // 0.75 of the radius wide: 8 pixels to the side is outside.
+  assert_eq!(pixel(&rgba, 36, 28), pixel(&plain, 36, 28));
+}

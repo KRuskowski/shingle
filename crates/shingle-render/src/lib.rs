@@ -39,6 +39,7 @@ mod renderer;
 pub mod staging;
 mod state;
 mod target;
+mod tile_effects;
 pub mod upload;
 
 use std::time::{Duration, Instant};
@@ -59,6 +60,7 @@ pub use target::{
   CAPTURE_TIMEOUT, OffscreenTarget, WindowTarget, capture_frame,
   capture_frame_scaled, capture_into_dmabuf,
 };
+pub use tile_effects::{Particle, Squeeze, TileEffect};
 pub use upload::{ShmImage, TextureUploader, UploadError, UploadRect};
 
 use state::Zoom;
@@ -274,6 +276,8 @@ pub struct RenderTile<'a> {
   /// A perspective transform of the tile's corners, applied before
   /// everything else; `None` draws the tile flat.
   pub projection: Option<Projection>,
+  /// A shader of its own instead of the plain quad.
+  pub effect: TileEffect<'a>,
 }
 
 /// A 3D transform of a tile, as Wayfire's `view_3d_transformer_t` draws a
@@ -325,7 +329,49 @@ impl<'a> RenderTile<'a> {
       transform: TextureTransform::Normal,
       rotation: 0.0,
       projection: None,
+      effect: TileEffect::None,
     }
+  }
+
+  /// Cuts the tile down to the part of its geometry inside `rect`, with
+  /// the texture coordinates of that part, so what remains shows what it
+  /// showed before. A tile outside `rect` keeps a zero size. For tiles
+  /// without rotation or projection, which would turn the cut with them.
+  pub fn crop(&mut self, rect: RenderRect) {
+    let geometry = self.geometry;
+    let left = geometry.x.max(rect.x);
+    let top = geometry.y.max(rect.y);
+    let right = (i64::from(geometry.x) + i64::from(geometry.width))
+      .min(i64::from(rect.x) + i64::from(rect.width));
+    let bottom = (i64::from(geometry.y) + i64::from(geometry.height))
+      .min(i64::from(rect.y) + i64::from(rect.height));
+    let width = (right - i64::from(left)).max(0) as u32;
+    let height = (bottom - i64::from(top)).max(0) as u32;
+    if geometry.width > 0 && geometry.height > 0 {
+      let fraction = |offset: i64, extent: u32| offset as f32 / extent as f32;
+      let u = |offset| {
+        self.uv[0]
+          + fraction(offset, geometry.width) * (self.uv[2] - self.uv[0])
+      };
+      let v = |offset| {
+        self.uv[1]
+          + fraction(offset, geometry.height) * (self.uv[3] - self.uv[1])
+      };
+      let x0 = i64::from(left) - i64::from(geometry.x);
+      let y0 = i64::from(top) - i64::from(geometry.y);
+      self.uv = [
+        u(x0),
+        v(y0),
+        u(x0 + i64::from(width)),
+        v(y0 + i64::from(height)),
+      ];
+    }
+    self.geometry = RenderRect {
+      x: left,
+      y: top,
+      width,
+      height,
+    };
   }
 
   /// A quad showing all of `texture` at full opacity, untransformed. The
@@ -339,6 +385,7 @@ impl<'a> RenderTile<'a> {
       transform: TextureTransform::Normal,
       rotation: 0.0,
       projection: None,
+      effect: TileEffect::None,
     }
   }
 }
@@ -492,5 +539,25 @@ mod tests {
       super::zoom_output_point(point.0, point.1, 1280, 720, 2.5, 400.0, 200.0);
     assert!((output.0 - 913.0).abs() < 0.0001);
     assert!((output.1 - 277.0).abs() < 0.0001);
+  }
+
+  #[test]
+  fn a_cropped_tile_keeps_what_it_showed() {
+    let rect = |x, y, width, height| super::RenderRect {
+      x,
+      y,
+      width,
+      height,
+    };
+    let mut tile = super::RenderTile::solid(rect(100, 100, 200, 100), [1.0; 4]);
+    tile.uv = [0.5, 0.0, 1.0, 0.5];
+    tile.crop(rect(0, 0, 1000, 125));
+    assert_eq!(tile.geometry, rect(100, 100, 200, 25));
+    assert_eq!(tile.uv, [0.5, 0.0, 1.0, 0.125]);
+    tile.crop(rect(150, 0, 100, 1000));
+    assert_eq!(tile.geometry, rect(150, 100, 100, 25));
+    assert_eq!(tile.uv, [0.625, 0.0, 0.875, 0.125]);
+    tile.crop(rect(0, 500, 10, 10));
+    assert_eq!(tile.geometry.width * tile.geometry.height, 0);
   }
 }

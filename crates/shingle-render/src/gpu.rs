@@ -60,6 +60,14 @@ pub(crate) struct Effects {
   pub(crate) preserve_hue: bool,
 }
 
+/// The pipelines of [`crate::TileEffect`]s for one target format.
+#[derive(Clone)]
+pub(crate) struct EffectPipelines {
+  pub(crate) squeeze: wgpu::RenderPipeline,
+  pub(crate) darken: wgpu::RenderPipeline,
+  pub(crate) glow: wgpu::RenderPipeline,
+}
+
 /// Instance, adapter, device and queue, plus the pipeline, layouts,
 /// samplers, gamma LUT and colour effects that every target draws with.
 pub struct GpuContext {
@@ -72,6 +80,9 @@ pub struct GpuContext {
   shader: wgpu::ShaderModule,
   // Render pipelines by target format, built when a format is first drawn.
   pipelines: Mutex<Vec<(wgpu::TextureFormat, wgpu::RenderPipeline)>>,
+  // The squeeze and particle pipelines by target format, built when a
+  // frame first has such a tile.
+  effect_pipelines: Mutex<Vec<(wgpu::TextureFormat, EffectPipelines)>>,
   linear_sampler: wgpu::Sampler,
   nearest_sampler: wgpu::Sampler,
   pub(crate) white_texture: GpuTexture,
@@ -146,6 +157,7 @@ impl GpuContext {
       pipeline_layout,
       shader,
       pipelines: Mutex::new(Vec::new()),
+      effect_pipelines: Mutex::new(Vec::new()),
       linear_sampler,
       nearest_sampler,
       white_texture,
@@ -325,6 +337,98 @@ impl GpuContext {
     pipeline
   }
 
+  /// Returns the effect pipelines for targets of `format`, building them
+  /// once.
+  pub(crate) fn effect_pipelines(
+    &self,
+    format: wgpu::TextureFormat,
+  ) -> EffectPipelines {
+    let mut pipelines = self
+      .effect_pipelines
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, pipelines)) =
+      pipelines.iter().find(|(existing, _)| *existing == format)
+    {
+      return pipelines.clone();
+    }
+    let blend = |src, dst| {
+      let component = wgpu::BlendComponent {
+        src_factor: src,
+        dst_factor: dst,
+        operation: wgpu::BlendOperation::Add,
+      };
+      wgpu::BlendState {
+        color: component,
+        alpha: component,
+      }
+    };
+    let created = EffectPipelines {
+      squeeze: self.create_effect_pipeline(
+        format,
+        ("vs_squeeze", "fs_squeeze"),
+        crate::tile_effects::SqueezeVertex::LAYOUT,
+        wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+      ),
+      // GL_ZERO, GL_ONE_MINUS_SRC_ALPHA and GL_SRC_ALPHA, GL_ONE
+      // (wayfire:plugins/animate/fire/particle.cpp:321-330).
+      darken: self.create_effect_pipeline(
+        format,
+        ("vs_particle", "fs_particle_darken"),
+        crate::tile_effects::ParticleInstance::LAYOUT,
+        blend(wgpu::BlendFactor::Zero, wgpu::BlendFactor::OneMinusSrcAlpha),
+      ),
+      glow: self.create_effect_pipeline(
+        format,
+        ("vs_particle", "fs_particle_glow"),
+        crate::tile_effects::ParticleInstance::LAYOUT,
+        blend(wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One),
+      ),
+    };
+    pipelines.push((format, created.clone()));
+    created
+  }
+
+  fn create_effect_pipeline(
+    &self,
+    format: wgpu::TextureFormat,
+    (vertex, fragment): (&str, &str),
+    layout: wgpu::VertexBufferLayout<'static>,
+    blend: wgpu::BlendState,
+  ) -> wgpu::RenderPipeline {
+    self
+      .device
+      .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("shingle effect pipeline"),
+        layout: Some(&self.pipeline_layout),
+        vertex: wgpu::VertexState {
+          module: &self.shader,
+          entry_point: Some(vertex),
+          compilation_options: Default::default(),
+          buffers: &[Some(layout)],
+        },
+        primitive: wgpu::PrimitiveState {
+          topology: wgpu::PrimitiveTopology::TriangleList,
+          cull_mode: None,
+          ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+          module: &self.shader,
+          entry_point: Some(fragment),
+          compilation_options: Default::default(),
+          targets: &[Some(wgpu::ColorTargetState {
+            format,
+            blend: Some(blend),
+            write_mask: wgpu::ColorWrites::ALL,
+          })],
+        }),
+        multiview_mask: None,
+        cache: None,
+      })
+  }
+
   fn create_pipeline(
     &self,
     format: wgpu::TextureFormat,
@@ -366,6 +470,15 @@ impl GpuContext {
   pub(crate) fn pipeline_count(&self) -> usize {
     self
       .pipelines
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .len()
+  }
+
+  #[cfg(test)]
+  pub(crate) fn effect_pipeline_count(&self) -> usize {
+    self
+      .effect_pipelines
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .len()
