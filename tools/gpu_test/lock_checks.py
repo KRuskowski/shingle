@@ -10,9 +10,17 @@ hides the clients: no frame then may hold two of the pattern's
 neighbouring colours, pure, six pixels apart, and every frame without a
 lock surface must be black.
 
-The group `lock` locks with shingle-lock (`--lock`, the debug build by
-default) and an invented swaylock config: screenshot, effect-blur,
-effect-vignette, clock and test colours for the input's states. It
+The group `lock` first locks with shingle-lock's defaults (an empty
+swaylock config, the minimal style): the time in the centre at rest
+over the blurred capture, typing moving it away for the slim input at
+the output's frame rate, with only the input's box read back between
+drift steps, the outline breathing while PAM checks, the shake, warm
+tint and fading dots of a wrong password, the Caps Lock and layout
+labels below the input, the way back to the time after the input
+timeout, and the fade of everything before the unlock. Then it locks
+with `--style=swaylock` and an invented swaylock config: screenshot,
+effect-blur, effect-vignette, clock and test colours for the input's
+states. It
 checks the blurred screenshot and its drift, the input appearing on
 typing, the verify and wrong states and the failed-attempt count, Caps
 Lock in its own colours with its label, the keyboard layout's label
@@ -117,11 +125,30 @@ HORIZONTAL_PAIRS = {('red', 'green'), ('green', 'red'), ('blue', 'white'),
 VERTICAL_PAIRS = {('red', 'blue'), ('blue', 'red'), ('green', 'white'),
                   ('white', 'green')}
 SHARP_DISTANCE = 8
+# How pure both colours of such a pair must be: the pattern draws 0 and
+# 255.
+PURE_HIGH, PURE_LOW = 235, 20
 ROW_STEP = 4
 COLUMN_STEP = 2
 HIDING = ('pending', 'locked', 'failed')
 # How long the lock binding may take until every output shows the lock.
 LOCK_UP_SECONDS = 1.0
+# The minimal style: a red channel at least this high is its white, which
+# the dimmed blur never reaches.
+BRIGHT = 230
+BRIGHT_TABLE = bytes(1 if value >= BRIGHT else 0 for value in range(256))
+# Rows around the outputs' middle: the input's box (33 pixels high on a
+# 400 pixel output) and the rows above it, where only the time is.
+BAND = 18
+ABOVE = (75, 21)
+# The frames a second a transition must keep up at least; offscreen
+# outputs refresh at 60.
+TRANSITION_FPS = 40
+LOOK = re.compile(
+    r'shingle-lock: frame (\d+) of output (\d+) at (\d+) ms, read back '
+    r'(\d+)x(\d+)\nshingle-lock: look of output \d+: clock ([\d.]+) '
+    r'input ([\d.]+) rise ([\d.]+) shake (-?[\d.]+) outline ([\d.]+) '
+    r'tint ([\d.]+) dots (\d+)')
 
 def parse_frame(data):
   """(info, width, height, RGB bytes) of a recorded frame, or None; info
@@ -169,6 +196,15 @@ def sampled_rows(frame):
   return [(y, row_classes(frame, y, COLUMN_STEP))
           for y in range(0, height, ROW_STEP)]
 
+def unblurred(frame, *points):
+  """Whether every pixel at `points` of `frame` is as pure as the
+  probe's pattern draws it: each channel at least PURE_HIGH or at most
+  PURE_LOW. The lock's blur under the minimal style's dim (0.78) never
+  is, so its white outline and dots over a blurred quadrant are not
+  taken for the pattern."""
+  return all(all(value >= PURE_HIGH or value <= PURE_LOW
+                 for value in pixel(frame, x, y)) for x, y in points)
+
 def sharp_at(frame, rows=None):
   """Where `frame` shows the probe's pattern unblurred: the first point
   with two of its neighbouring colours, pure, SHARP_DISTANCE pixels
@@ -178,13 +214,17 @@ def sharp_at(frame, rows=None):
   down = SHARP_DISTANCE // ROW_STEP
   for index, (y, here) in enumerate(rows):
     for column, (left, right) in enumerate(zip(here, here[across:])):
-      if (left, right) in HORIZONTAL_PAIRS:
-        return (column * COLUMN_STEP, y)
+      x = column * COLUMN_STEP
+      if ((left, right) in HORIZONTAL_PAIRS
+          and unblurred(frame, (x, y), (x + SHARP_DISTANCE, y))):
+        return (x, y)
     if index + down < len(rows):
       below = rows[index + down][1]
       for column, (top, bottom) in enumerate(zip(here, below)):
-        if (top, bottom) in VERTICAL_PAIRS:
-          return (column * COLUMN_STEP, y)
+        x = column * COLUMN_STEP
+        if ((top, bottom) in VERTICAL_PAIRS
+            and unblurred(frame, (x, y), (x, y + SHARP_DISTANCE))):
+          return (x, y)
   return None
 
 def sharp_pattern(frame):
@@ -202,6 +242,17 @@ def colour_count(frame, name, rows=None):
   """How many sampled pixels of `frame` classify as `name`."""
   rows = sampled_rows(frame) if rows is None else rows
   return sum(classes.count(name) for _, classes in rows)
+
+def bright(frame, rows):
+  """How many pixels of `rows` of `frame` have a red channel of at least
+  BRIGHT."""
+  _, width, height, pixels = frame
+  total = 0
+  for y in rows:
+    if 0 <= y < height:
+      row = pixels[y * width * 3:(y + 1) * width * 3:3]
+      total += row.translate(BRIGHT_TABLE).count(1)
+  return total
 
 def reddish(rgb):
   """Whether `rgb` is clearly more red than anything else."""
@@ -235,6 +286,10 @@ class Frame:
     self.magenta = colour_count(frame, 'magenta', rows)
     self.violet = colour_count(frame, VIOLET, rows)
     self.mint = colour_count(frame, MINT, rows)
+    middle = frame[2] // 2
+    self.bright_band = bright(frame, range(middle - BAND, middle + BAND + 1))
+    self.bright_above = bright(frame, range(middle - ABOVE[0],
+                                            middle - ABOVE[1] + 1))
     self.frame = frame if keep else None
 
 class FrameReader:
@@ -480,12 +535,233 @@ def locked_frames(reader, moment, output='HEADLESS-1'):
   return [frame for frame in reader.since(moment, output)
           if frame.lock == 'locked' and frame.lock_surface]
 
+class Look:
+  """One frame of the minimal style as shingle-lock's trace tells it."""
+
+  def __init__(self, match):
+    self.number = int(match.group(1))
+    self.output = int(match.group(2))
+    self.ms = int(match.group(3))
+    self.read_back = int(match.group(4)) * int(match.group(5))
+    (self.clock, self.input, self.rise, self.shake, self.outline,
+     self.tint) = (float(match.group(index)) for index in range(6, 12))
+    self.dots = int(match.group(12))
+
+def looks(lock):
+  """Every traced frame of `lock` of its first output, in order."""
+  found = [Look(match) for match in LOOK.finditer(lock.client.output())]
+  first = min((look.output for look in found), default=None)
+  return [look for look in found if look.output == first]
+
+def frame_rate(frames):
+  """Frames a second over `frames` by their trace times."""
+  if len(frames) < 2 or frames[-1].ms == frames[0].ms:
+    return 0.0
+  return (len(frames) - 1) * 1000 / (frames[-1].ms - frames[0].ms)
+
+def span(frames, start, end):
+  """`frames` from the first that `start` accepts to the first after it
+  that `end` accepts, both included; empty without both."""
+  first = next((index for index, look in enumerate(frames)
+                if start(look)), None)
+  if first is None:
+    return []
+  last = next((index for index in range(first, len(frames))
+               if end(frames[index])), None)
+  return [] if last is None else frames[first:last + 1]
+
+def describe_looks(frames):
+  """A short account of traced looks for a message."""
+  if not frames:
+    return 'no traced frames'
+  return (f'{len(frames)} frames over {frames[-1].ms - frames[0].ms} ms, '
+          f'{frame_rate(frames):.0f} a second, clock '
+          f'{frames[0].clock:.2f} to {frames[-1].clock:.2f}, input '
+          f'{frames[0].input:.2f} to {frames[-1].input:.2f}')
+
+def minimal_checks(results, shingle, reader, lock_binary, empty, clients):
+  """The minimal style with shingle-lock's defaults; see the module
+  docstring. Ends unlocked."""
+  moment = time.monotonic()
+  lock = Lock(shingle, lock_binary, ['-C', empty], 'lock-minimal')
+  clients.append(lock.client)
+  results.check('lock: minimal: shingle-lock locks with its defaults',
+                lock.ready(), checks.tail(lock.client.output()))
+  output = lock.client.output()
+  results.check('lock: minimal: the defaults are the minimal style over '
+                'blurred captures of both outputs',
+                'minimal style' in output and 'captured 2 output(s)' in output
+                and 'blurred a 640x400 screenshot' in output
+                and 'warning' not in output, checks.tail(output))
+  time.sleep(2.0)
+  reader.drain()
+  rest = locked_frames(reader, moment)
+  traced = looks(lock)
+  results.check('lock: minimal: at rest the time is in the centre and the '
+                'input is not shown',
+                rest and all(frame.bright_above > 20 for frame in rest[-3:])
+                and traced and traced[-1].clock == 1.0
+                and traced[-1].input == 0.0,
+                f'{describe(rest)}, bright above the middle '
+                f'{[frame.bright_above for frame in rest[-3:]]}, '
+                f'{describe_looks(traced[-3:])}')
+  recent = [look for look in traced if look.ms >= traced[-1].ms - 1500]
+  rate = frame_rate(recent)
+  results.check('lock: minimal: at rest frames come at the drift\'s rate',
+                DRIFT_FPS * 0.5 <= rate <= DRIFT_FPS * 1.5,
+                describe_looks(recent))
+  # Typing: the time leaves and the input comes, at the frame rate.
+  index = len(traced)
+  moment = time.monotonic()
+  type_text(shingle, 'a')
+  time.sleep(1.0)
+  reader.drain()
+  after = looks(lock)[index:]
+  moving = span(after, lambda look: look.clock < 1.0,
+                lambda look: look.input == 1.0 and look.clock == 0.0)
+  took = moving[-1].ms - moving[0].ms if moving else 0
+  results.check('lock: minimal: typing crossfades the time away and the '
+                'input into the centre at the output\'s frame rate',
+                moving and frame_rate(moving) >= TRANSITION_FPS
+                and 250 <= took <= 700
+                and all(a.input <= b.input and a.clock >= b.clock
+                        and a.rise >= b.rise
+                        for a, b in zip(moving, moving[1:])),
+                describe_looks(moving))
+  partial = [look for look in moving if look.read_back < WIDTH * HEIGHT]
+  results.check('lock: minimal: frames between drift steps read back only '
+                'the moving part', moving and len(partial) * 2 >= len(moving),
+                f'{len(partial)} of {len(moving)} read back less than the '
+                f'output, {[look.read_back for look in moving[:8]]}')
+  typed = reader.wait(lambda frame: frame.lock == 'locked'
+                      and frame.output == 'HEADLESS-1'
+                      and frame.bright_above == 0 and frame.bright_band > 100,
+                      moment=moment)
+  results.check('lock: minimal: then the slim white input is in the centre '
+                'and the time is gone', typed is not None,
+                describe(reader.since(moment, 'HEADLESS-1')))
+  tap(shingle, 'KEY_CAPSLOCK')
+  results.check('lock: minimal: Caps Lock and the layout are labels below '
+                'the input',
+                xw.wait_for(lambda: f'labels ["Caps Lock", "{LAYOUTS[0]}"]'
+                            in lock.client.output(), timeout=5),
+                checks.tail(lock.client.output()))
+  without = f'labels ["{LAYOUTS[0]}"]'
+  shown = lock.client.output().count(without)
+  tap(shingle, 'KEY_CAPSLOCK')
+  xw.wait_for(lambda: lock.client.output().count(without) > shown,
+              timeout=5)
+  # A wrong password: breathing, then the shake, the tint and the dots.
+  type_text(shingle, REFUSED_PHRASE[1:])
+  index = len(looks(lock))
+  tap(shingle, 'KEY_ENTER')
+  denied = xw.wait_for(lambda: 'authentication failed'
+                       in lock.client.output(), timeout=10)
+  time.sleep(1.5)
+  after = looks(lock)[index:]
+  verifying = span(after, lambda look: look.outline < 1.0,
+                   lambda look: look.shake != 0.0)
+  results.check('lock: minimal: while PAM checks, the outline breathes at '
+                'the frame rate',
+                denied and verifying
+                and min(look.outline for look in verifying) < 0.6
+                and frame_rate(verifying[:-1]) >= TRANSITION_FPS,
+                f'{describe_looks(verifying)}, outline down to '
+                f'{min((look.outline for look in verifying), default=1):.2f}')
+  shaking = [look for look in after if look.shake != 0.0]
+  widest = max((abs(look.shake) for look in shaking), default=0.0)
+  results.check('lock: minimal: a wrong password shakes the input a few '
+                'pixels, damped',
+                1.0 <= widest <= 6.5 and abs(shaking[-1].shake) < 1.0
+                and any(look.shake > 0 for look in shaking)
+                and any(look.shake < 0 for look in shaking),
+                f'{len(shaking)} frames, widest {widest:.2f}, '
+                f'{[look.shake for look in shaking[:12]]}')
+  tint = max((look.tint for look in after), default=0.0)
+  results.check('lock: minimal: warms the outline faintly, then fades the '
+                'tint, and fades the dots out',
+                0.3 <= tint <= 0.56 and after[-1].tint == 0.0
+                and after[-1].dots == 0 and after[-1].outline == 1.0
+                and any(look.dots > 0 for look in shaking),
+                f'tint up to {tint:.2f}, last {describe_looks(after[-1:])} '
+                f'tint {after[-1].tint if after else None} dots '
+                f'{after[-1].dots if after else None}')
+  results.check('lock: minimal: and counts the failed attempt',
+                '1 failed attempt' in lock.client.output(),
+                checks.tail(lock.client.output()))
+  # The input timeout: back to the time, at the frame rate.
+  index = len(looks(lock))
+  moment = time.monotonic()
+  time.sleep(INPUT_TIMEOUT + 1.5)
+  reader.drain()
+  after = looks(lock)[index:]
+  back = span(after, lambda look: look.input < 1.0,
+              lambda look: look.clock == 1.0 and look.input == 0.0)
+  results.check('lock: minimal: after lock.input_timeout the time comes '
+                'back the same way, at the frame rate',
+                back and frame_rate(back) >= TRANSITION_FPS
+                and all(a.input >= b.input and a.clock <= b.clock
+                        for a, b in zip(back, back[1:])),
+                describe_looks(back))
+  rest = reader.wait(lambda frame: frame.lock == 'locked'
+                     and frame.output == 'HEADLESS-1'
+                     and frame.bright_above > 20 and frame.bright_band > 0,
+                     moment=moment + INPUT_TIMEOUT)
+  results.check('lock: minimal: and shows it in the centre again',
+                rest is not None, describe(reader.since(moment, 'HEADLESS-1')))
+  # The right password: everything fades over the blur, then the unlock.
+  index = len(looks(lock))
+  type_text(shingle, ACCEPTED_PHRASE)
+  moment = time.monotonic()
+  tap(shingle, 'KEY_ENTER')
+  status = lock.client.exited(15)
+  output = lock.client.output()
+  unlocking = re.search(r'unlocking after the fade, (\d+) ms', output)
+  results.check('lock: minimal: the test password fades the input out, '
+                'then unlocks',
+                status == 0 and unlocking is not None
+                and 380 <= int(unlocking.group(1)) <= 1000,
+                checks.tail(output))
+  after = looks(lock)[index:]
+  # From the last frame with the input fully shown, which was verifying.
+  shown = max((index for index, look in enumerate(after)
+               if look.input == 1.0), default=len(after))
+  fading = after[shown:]
+  results.check('lock: minimal: the fade runs at the frame rate and ends '
+                'transparent',
+                after and after[-1].input == 0.0 and after[-1].clock == 0.0
+                and frame_rate(fading) >= TRANSITION_FPS,
+                f'{describe_looks(fading)}; last {describe_looks(after[-1:])}')
+  reader.drain()
+  session = sorted(reader.since(moment, 'HEADLESS-1'),
+                   key=lambda frame: frame.arrived)
+  unlocked = next((index for index, frame in enumerate(session)
+                   if frame.lock == 'unlocked'), None)
+  last = [frame for frame in session[:unlocked] if frame.lock_surface]
+  results.check('lock: minimal: the last frame of the lock shows only the '
+                'blur, the frame after it the clients',
+                unlocked is not None and last
+                and last[-1].bright_band == 0 and last[-1].bright_above == 0
+                and session[unlocked].lock == 'unlocked',
+                f'{describe(session)}, last locked bright '
+                f'{last[-1].bright_band if last else None} in the middle, '
+                f'{last[-1].bright_above if last else None} above it')
+  reader.wait(lambda frame: frame.lock == 'unlocked' and frame.sharp,
+              moment=moment)
+
 def run_sessions(results, shingle, reader, lock_binary, swaylock, geometry,
                  clients):
-  """Three lock clients and the lock binding, one after another."""
+  """The minimal style, three lock clients and the lock binding, one
+  after another."""
+  # 0. The minimal style with the defaults.
+  empty = os.path.join(os.path.dirname(swaylock), 'empty-config')
+  with open(empty, 'w') as file:
+    file.write('# no options: shingle-lock\'s defaults\n')
+  minimal_checks(results, shingle, reader, lock_binary, empty, clients)
   # 1. Lock, look, type, fail, fade, sleep, wake, replug, unlock.
   before = time.monotonic()
-  first = Lock(shingle, lock_binary, ['-C', swaylock], 'lock-first')
+  first = Lock(shingle, lock_binary, ['-C', swaylock, '--style=swaylock'],
+               'lock-first')
   clients.append(first.client)
   results.check('lock: shingle-lock reports the session locked',
                 first.ready(), checks.tail(first.client.output()))

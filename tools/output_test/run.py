@@ -1212,8 +1212,10 @@ def type_text(ipc, text):
 
 def lock_checks(results, shingle, lock_binary):
   """shingle-lock covers both outputs, and a typed password unlocks."""
-  lock = shingle.client([lock_binary, '--color', 'ff0000'], 'shingle-lock',
-                        {'VK_ICD_FILENAMES': _HARNESS.LAVAPIPE})
+  # The colour alone: the screenshot and vignette are on by default.
+  lock = shingle.client([lock_binary, '--screenshot=false',
+                         '--effect-vignette=none', '--color', 'ff0000'],
+                        'shingle-lock', {'VK_ICD_FILENAMES': _HARNESS.LAVAPIPE})
   try:
     ready = lock.wait_line('opaque lock surfaces committed on 2 output(s)',
                            timeout=30)

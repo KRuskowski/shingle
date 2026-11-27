@@ -83,5 +83,63 @@ class FrameTest(unittest.TestCase):
   def test_letters_become_evdev_keys(self):
     self.assertEqual(lock_checks.key_names('ab'), ['KEY_A', 'KEY_B'])
 
+  def test_white_over_a_dimmed_blur_is_not_the_pattern(self):
+    # The minimal style's white dots beside a blurred quadrant dimmed to
+    # 201: both classify as pattern colours, but the blue is not pure.
+    def dots(x, y):
+      return WHITE if x % 16 < 4 else (1, 0, 201)
+    frame_ = lock_checks.parse_frame(frame(64, 48, dots))
+    self.assertFalse(lock_checks.sharp_pattern(frame_))
+    self.assertTrue(lock_checks.unblurred(frame_, (0, 0)))
+    self.assertFalse(lock_checks.unblurred(frame_, (0, 0), (8, 0)))
+
+  def test_the_minimal_styles_white_is_counted_by_rows(self):
+    # A white bar in the middle rows of a 32x200 frame, a grey above.
+    def bar(x, y):
+      if 95 <= y <= 105:
+        return WHITE
+      return (200, 200, 200) if y < 80 else (0, 0, 0)
+    parsed = lock_checks.parse_frame(frame(32, 200, bar))
+    self.assertEqual(lock_checks.bright(parsed, range(90, 110)), 11 * 32)
+    verdicts = lock_checks.Frame(parsed[0], parsed, False)
+    self.assertEqual(verdicts.bright_band, 11 * 32)
+    self.assertEqual(verdicts.bright_above, 0)
+
+class LookTest(unittest.TestCase):
+  """The trace of the minimal style's frames."""
+
+  TRACE = (
+      'shingle-lock: frame {n} of output {o} at {ms} ms, read back 64x4\n'
+      'shingle-lock: look of output {o}: clock {c:.2f} input {i:.2f} rise '
+      '0.00 shake -1.50 outline 1.00 tint 0.20 dots 3\n')
+
+  def looks(self):
+    """Five frames of output 12 and one of output 40."""
+    text = ''.join(self.TRACE.format(n=n, o=12, ms=100 + 16 * n,
+                                     c=1 - n / 4, i=n / 4)
+                   for n in range(5))
+    text += self.TRACE.format(n=1, o=40, ms=5, c=1, i=0)
+    return [lock_checks.Look(match)
+            for match in lock_checks.LOOK.finditer(text)]
+
+  def test_each_frame_is_read(self):
+    looks = self.looks()
+    self.assertEqual(len(looks), 6)
+    first = looks[0]
+    self.assertEqual((first.output, first.ms, first.read_back), (12, 100, 256))
+    self.assertEqual((first.clock, first.input, first.shake, first.tint,
+                      first.dots), (1.0, 0.0, -1.5, 0.2, 3))
+
+  def test_rates_and_spans(self):
+    looks = [look for look in self.looks() if look.output == 12]
+    self.assertAlmostEqual(lock_checks.frame_rate(looks), 62.5)
+    self.assertEqual(lock_checks.frame_rate(looks[:1]), 0.0)
+    moving = lock_checks.span(looks, lambda look: look.clock < 1.0,
+                              lambda look: look.input == 1.0)
+    self.assertEqual([look.number for look in moving], [1, 2, 3, 4])
+    self.assertEqual(lock_checks.span(looks, lambda look: False,
+                                      lambda look: True), [])
+    self.assertIn('4 frames', lock_checks.describe_looks(moving))
+
 if __name__ == '__main__':
   unittest.main()
