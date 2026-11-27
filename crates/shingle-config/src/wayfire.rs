@@ -67,6 +67,23 @@ fn supported(name: &str) -> bool {
     || name.starts_with("input-device:")
 }
 
+/// `command` with a bare `swaylock` replaced by `shingle-lock`, which
+/// reads the same config and options, noting the change; Wayfire's own
+/// configs lock with swaylock (wayfire.ini, `[command] command_lock` and
+/// `[autostart]`). A path such as `/usr/bin/swaylock` keeps swaylock.
+fn swaylock_swapped(command: &str, notes: &mut Vec<String>) -> String {
+  match crate::lock::swap_swaylock(command) {
+    Some(swapped) => {
+      notes.push(format!(
+        "runs shingle-lock instead of swaylock ({swapped}); write \
+         /usr/bin/swaylock to keep swaylock"
+      ));
+      swapped
+    }
+    None => command.to_owned(),
+  }
+}
+
 /// A `[command]` binding, waiting for its `command_NAME`.
 struct CommandEntry {
   value: String,
@@ -351,6 +368,7 @@ pub(crate) fn parse(
     };
     let applied =
       importer.option(entry.line, &entry.context, |config, notes| {
+        let command = swaylock_swapped(&command, notes);
         config.commands.push(crate::CommandBinding {
           binding: import::binding_or_modifiers(&entry.value, notes)?,
           command,
@@ -1183,7 +1201,7 @@ fn apply(
     // Read by `parse`, which adds wf-shell's clients at the end.
     ("autostart", "autostart_wf_shell") => {}
     ("autostart", _) if !value.is_empty() => {
-      config.autostart.push(value.to_owned());
+      config.autostart.push(swaylock_swapped(value, notes));
     }
     ("session", "restore") => {
       config.session.restore = boolean(value)?;
@@ -1455,10 +1473,33 @@ mod tests {
     let (config, warnings) = import(STOCK);
     assert_eq!(
       warnings,
-      [concat!(
-        "line 276: [cube] belongs to a plugin Shingle does not have; ",
-        "its option is ignored"
-      ),]
+      [
+        concat!(
+          "line 154: [autostart] idle: runs shingle-lock instead of ",
+          "swaylock (swayidle before-sleep shingle-lock); write ",
+          "/usr/bin/swaylock to keep swaylock"
+        ),
+        concat!(
+          "line 189: [command] binding_lock: runs shingle-lock instead of ",
+          "swaylock (shingle-lock); write /usr/bin/swaylock to keep swaylock"
+        ),
+        concat!(
+          "line 276: [cube] belongs to a plugin Shingle does not have; ",
+          "its option is ignored"
+        ),
+      ]
+    );
+    // Wayfire's swaylock becomes shingle-lock.
+    assert!(
+      config
+        .commands
+        .iter()
+        .any(|command| command.command == "shingle-lock")
+    );
+    assert!(
+      config
+        .autostart
+        .contains(&"swayidle before-sleep shingle-lock".to_owned())
     );
     assert_eq!(text(&config.keybindings.toggle_menu), "super");
     assert_eq!(text(&config.keybindings.close), "super+q");
