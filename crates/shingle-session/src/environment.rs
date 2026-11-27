@@ -125,6 +125,15 @@ impl ClientEnvironment {
     self
   }
 
+  /// Also sets `name` to `value`, after everything else, for one child
+  /// such as the lock client.
+  pub fn with_variable(mut self, name: &str, value: &OsStr) -> Self {
+    self
+      .variables
+      .push((OsString::from(name), Some(value.to_owned())));
+    self
+  }
+
   /// Every variable this environment changes, with its value or `None` for
   /// a removed one, in the order they are applied.
   pub fn variables(&self) -> &[(OsString, Option<OsString>)] {
@@ -157,6 +166,24 @@ impl ClientEnvironment {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn one_child_can_get_a_variable_of_its_own() {
+    let environment =
+      ClientEnvironment::new(OsStr::new("wayland-1"), None, None)
+        .with_variable("SHINGLE_CONFIG_FILE", OsStr::new("/invented.yaml"));
+    assert_eq!(
+      environment.value("SHINGLE_CONFIG_FILE"),
+      Some(OsStr::new("/invented.yaml"))
+    );
+    assert_eq!(
+      environment
+        .variables()
+        .last()
+        .map(|(name, _)| name.as_os_str()),
+      Some(OsStr::new("SHINGLE_CONFIG_FILE"))
+    );
+  }
 
   /// The variables `command` changes, as `(name, value)` strings.
   fn changes(command: &Command) -> Vec<(String, Option<String>)> {

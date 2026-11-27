@@ -108,6 +108,8 @@ pub struct Frontend {
   /// How long the "Workspace set N" label stays (`wsets.label_duration`).
   wsets_label_duration: Duration,
   lock_client: Option<Child>,
+  /// What locking runs (`lock.command`), unless `SHINGLE_LOCK` says.
+  lock_command: String,
   /// Every presented frame, written for the GPU harness
   /// (`SHINGLE_RECORD_FRAMES`).
   recorder: Option<crate::recorder::FrameRecorder>,
@@ -515,6 +517,7 @@ impl Frontend {
       virtual_frame: None,
       wsets_label_duration: Duration::from_millis(config.wsets.label_duration),
       lock_client: None,
+      lock_command: config.lock.command.clone(),
       recorder: crate::recorder::FrameRecorder::from_env(),
       session_children,
       keyboard,

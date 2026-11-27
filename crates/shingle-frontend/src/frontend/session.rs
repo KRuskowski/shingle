@@ -9,6 +9,10 @@ use shingle_config::ShingleConfig;
 
 use super::Frontend;
 
+/// The variable that names Shingle's config file for the lock client,
+/// which reads its `lock` section (crates/shingle-lock/src/options.rs).
+pub const LOCK_CONFIG_VARIABLE: &str = "SHINGLE_CONFIG_FILE";
+
 impl Frontend {
   pub(super) fn start_lock_client(&mut self) {
     if self
@@ -21,8 +25,14 @@ impl Frontend {
     // TILEFIRE_LOCK is the pre-rename name and is still honoured.
     let program = std::env::var_os("SHINGLE_LOCK")
       .or_else(|| std::env::var_os("TILEFIRE_LOCK"))
-      .unwrap_or_else(|| "shingle-lock".into());
-    let environment = self.compositor.client_environment();
+      .unwrap_or_else(|| self.lock_command.clone().into());
+    let mut environment = self.compositor.client_environment();
+    // shingle-lock reads its `lock` section from the file Shingle read.
+    if let Some(path) = self.config_path.as_deref() {
+      let path = std::path::absolute(path).unwrap_or_else(|_| path.into());
+      environment =
+        environment.with_variable(LOCK_CONFIG_VARIABLE, path.as_os_str());
+    }
     match shingle_session::launch_program(&program, &[], &environment) {
       Ok(child) => self.lock_client = Some(child),
       Err(error) => {
@@ -89,6 +99,7 @@ impl Frontend {
         }
         self.wsets_label_duration =
           Duration::from_millis(config.wsets.label_duration);
+        self.lock_command = config.lock.command.clone();
         self.scale_exit = None;
         self.scale_titles.clear();
         self.scale_icons.clear();
