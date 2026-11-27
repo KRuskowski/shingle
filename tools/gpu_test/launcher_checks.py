@@ -11,7 +11,9 @@ shows and where, and `launcher.yaml` what it saved. The group `launcher`
 checks type-to-launch, favouriting, renaming, a shortcut from the typed
 text, moving to a category by keyboard and by drag, the context menu,
 persistence across restarts, the toggle, closing by a click outside, and
-the startup time.
+the startup time; then type-to-launch again under the host's `wayfire`,
+headless in the namespace (wayfire_reference.py), since the launcher is
+meant to work there too.
 
 Signals go through `run.signal_checked`, via checks.py's Shingle and Client
 helpers, and the launched probes through `signal_checked` with their comm.
@@ -25,6 +27,7 @@ import time
 
 import checks
 import run
+import wayfire_reference
 
 xw = checks.xw
 GROUPS = ('launcher',)
@@ -35,6 +38,11 @@ LAUNCHER_COMM = 'shingle-launcher'
 STARTUP_TARGET_MS = 100.0
 # Warm starts measured.
 STARTS = 7
+# Headless Wayfire with IPC and STIPC for keys, and layer-shell, which is
+# Wayfire's own.
+WAYFIRE_INI = """[core]
+plugins = ipc ipc-rules stipc
+"""
 # Colours the checks can tell apart in captures.
 PANEL = [1.0, 0.0, 1.0, 1.0]
 BACKDROP = [0.0, 0.0, 0.0, 0.5]
@@ -245,6 +253,35 @@ def launcher_checks(results, binary, wl_probe, captures):
     results.check('launcher: SIGTERM exits offscreen Shingle with status 0',
                   status == 0,
                   f'status {status}, {checks.tail(shingle.log_text())}')
+  _under_wayfire(results, launcher_binary, fixture, config_path)
+
+def _under_wayfire(results, binary, fixture, config_path):
+  """Type-to-launch under headless Wayfire; INFO when it cannot run."""
+  try:
+    wayfire = wayfire_reference.Wayfire('launcher-wayfire', WAYFIRE_INI)
+  except RuntimeError as error:
+    print(f'INFO launcher: no headless Wayfire to run under: {error}',
+          flush=True)
+    return
+  launched = []
+  try:
+    launcher, frame = _start(wayfire, binary, fixture, config_path, results,
+                             'under Wayfire')
+    if frame is None:
+      return
+    launcher.type('beta')
+    launcher.wait_frame(lambda frame: frame['rows']
+                        and frame['rows'][0]['name'] == 'Beta Probe')
+    launcher.key('enter')
+    status = launcher.exited()
+    _finish(launcher, launched)
+    mapped = xw.wait_for(lambda: wayfire.view('beta'), timeout=15)
+    results.check('launcher: under headless Wayfire it shows, takes typed '
+                  'text and launches', status == 0 and bool(mapped),
+                  f'status {status}, {checks.tail(launcher.client.output())}')
+  finally:
+    end_launched(launched)
+    wayfire.stop()
 
 def _start(shingle, binary, fixture, config_path, results, step):
   """Starts the launcher and waits for its first frame."""
