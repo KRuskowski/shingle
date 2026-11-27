@@ -153,13 +153,27 @@ impl GlobalDispatch<ExtForeignToplevelListV1, ()> for CompositorState {
     let manager = data_init.init(resource, ());
     let id = Resource::id(&manager);
     state.ext_toplevels.managers.insert(
-      id,
+      id.clone(),
       Manager {
         resource: manager,
         stopped: false,
       },
     );
+    // Windows known before this list was bound are announced to it here;
+    // the sync announces new ones to every list.
+    let known = state
+      .ext_toplevels
+      .known
+      .keys()
+      .copied()
+      .collect::<Vec<_>>();
     crate::foreign_toplevel::sync(state, handle);
+    let windows = crate::foreign_toplevel::windows(state);
+    for window in known {
+      if let Some(info) = windows.get(&window) {
+        create_handle(state, handle, &id, window, info);
+      }
+    }
   }
 }
 
@@ -216,5 +230,38 @@ impl Dispatch<ExtForeignToplevelHandleV1, ()> for CompositorState {
     _data: &(),
   ) {
     state.ext_toplevels.handles.remove(&Resource::id(resource));
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+  };
+
+  use crate::{test_client::TestClient, tests::test_compositor};
+
+  #[test]
+  fn a_list_bound_after_a_toplevel_mapped_is_told_about_it() {
+    let (mut compositor, socket) = test_compositor();
+    let mut app = TestClient::connect(&mut compositor, &socket);
+    let early = app.bind::<ExtForeignToplevelListV1>(1);
+    let toplevel = app.toplevel(&mut compositor, "mapped");
+    app.attach_buffer(&mut compositor, &toplevel.surface, 8, 8);
+    assert_eq!(app.events.ext_toplevels.len(), 1, "the early list");
+    let mut late = TestClient::connect(&mut compositor, &socket);
+    let _list = late.bind::<ExtForeignToplevelListV1>(1);
+    late.roundtrip(&mut compositor);
+    let listed = late
+      .events
+      .ext_toplevels
+      .iter()
+      .map(|(_, app_id)| app_id.clone())
+      .collect::<Vec<_>>();
+    assert_eq!(listed, [Some("mapped".to_owned())]);
+    // Nothing twice for the early list.
+    app.roundtrip(&mut compositor);
+    assert_eq!(app.events.ext_toplevels.len(), 1);
+    drop(early);
   }
 }

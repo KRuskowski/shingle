@@ -20,6 +20,10 @@ use wayland_client::{
   },
 };
 use wayland_protocols::{
+  ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
+    ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
+  },
   ext::session_lock::v1::client::{
     ext_session_lock_manager_v1::ExtSessionLockManagerV1,
     ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
@@ -180,6 +184,8 @@ pub(crate) struct Events {
   pub(crate) control_cancelled: Vec<ObjectId>,
   /// Every wlr-screencopy frame event, in order.
   pub(crate) screencopy: Vec<zwlr_screencopy_frame_v1::Event>,
+  /// ext-foreign-toplevel-list handles with the app IDs they announced.
+  pub(crate) ext_toplevels: Vec<(ExtForeignToplevelHandleV1, Option<String>)>,
   /// The `wl_buffer`s that received `release`, in order.
   pub(crate) buffer_releases: Vec<ObjectId>,
   /// `zwp_linux_dmabuf_v1` `format` and `modifier` events, as (format,
@@ -1211,6 +1217,46 @@ impl Dispatch<ZwlrDataControlSourceV1, ()> for Events {
         events.control_cancelled.push(source.id());
       }
       _ => {}
+    }
+  }
+}
+
+impl Dispatch<ExtForeignToplevelListV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ExtForeignToplevelListV1,
+    event: ext_foreign_toplevel_list_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } = event {
+      events.ext_toplevels.push((toplevel, None));
+    }
+  }
+
+  wayland_client::event_created_child!(Events, ExtForeignToplevelListV1, [
+    ext_foreign_toplevel_list_v1::EVT_TOPLEVEL_OPCODE =>
+      (ExtForeignToplevelHandleV1, ()),
+  ]);
+}
+
+impl Dispatch<ExtForeignToplevelHandleV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    handle: &ExtForeignToplevelHandleV1,
+    event: ext_foreign_toplevel_handle_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let ext_foreign_toplevel_handle_v1::Event::AppId { app_id } = event
+      && let Some((_, known)) = events
+        .ext_toplevels
+        .iter_mut()
+        .find(|(known, _)| known == handle)
+    {
+      *known = Some(app_id);
     }
   }
 }
