@@ -1951,7 +1951,7 @@ mod tests {
     states.push(("typing", typing.clone(), at(2600), Vec::new()));
     let mut crossing = rest.clone();
     crossing.typed(1, at(1000));
-    states.push(("transition", crossing, at(1140), Vec::new()));
+    states.push(("transition", crossing, at(1070), Vec::new()));
     let mut verifying = typing.clone();
     verifying.verifying(at(2700));
     states.push(("verifying", verifying.clone(), at(3500), Vec::new()));
