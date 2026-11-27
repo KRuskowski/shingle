@@ -15,8 +15,8 @@ use wayland_client::{
   protocol::{
     wl_buffer, wl_callback, wl_compositor, wl_data_device,
     wl_data_device_manager, wl_data_offer, wl_data_source, wl_keyboard,
-    wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool,
-    wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
+    wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm,
+    wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
   },
 };
 use wayland_protocols::{
@@ -1712,6 +1712,7 @@ ignore_events!(
   ZwlrOutputPowerManagerV1,
   ZwlrGammaControlManagerV1,
   wl_compositor::WlCompositor,
+  wl_region::WlRegion,
   ZwlrLayerShellV1,
   ExtSessionLockManagerV1,
   WpFractionalScaleManagerV1,

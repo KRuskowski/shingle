@@ -27,7 +27,6 @@ use wayland_server::{
     wl_callback::{self, WlCallback},
     wl_compositor::{self, WlCompositor},
     wl_output::{self, WlOutput},
-    wl_region::WlRegion,
     wl_shm::{self, WlShm},
     wl_shm_pool::{self, WlShmPool},
     wl_surface::{self, WlSurface},
@@ -95,7 +94,9 @@ pub(crate) struct PendingSurface {
   pub(crate) offset_y: i32,
   pub(crate) alpha: Option<u32>,
   pub(crate) tearing: Option<bool>,
-  pub(crate) input_region: Option<Option<WlRegion>>,
+  /// The input region set for this update, copied from its `wl_region`
+  /// when it was set; `Some(None)` is infinite.
+  pub(crate) input_region: Option<Option<Vec<Rect>>>,
   /// `wp_fifo_v1.set_barrier` for this update.
   pub(crate) fifo_set_barrier: bool,
   /// `wp_fifo_v1.wait_barrier` for this update.
