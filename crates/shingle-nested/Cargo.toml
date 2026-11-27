@@ -8,6 +8,7 @@ description = "Nested winit backend of the shingle binary"
 
 [dependencies]
 pollster.workspace = true
+rustix.workspace = true
 shingle = { path = "../shingle" }
 shingle-config = { path = "../shingle-config" }
 shingle-frontend = { path = "../shingle-frontend" }

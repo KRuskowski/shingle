@@ -14,11 +14,13 @@
 
 mod clipboard;
 mod host_keyboard;
+mod waker;
 mod windows;
 
 use std::{
   error::Error,
   ffi::OsString,
+  os::fd::AsFd,
   path::{Path, PathBuf},
   sync::Arc,
   time::{Duration, Instant},
@@ -386,6 +388,9 @@ struct App {
   /// The clipboard and primary selection shared with the host, while the
   /// bridge runs.
   clipboard: Option<clipboard::host::HostClipboard<SelectionSourceId>>,
+  /// Wakes the loop when the compositor has work; without it, clients
+  /// and IPC wait for the 16 ms poll.
+  waker: Option<waker::Waker>,
 }
 
 impl App {
@@ -421,6 +426,7 @@ impl App {
       config,
       outputs: outputs.max(1),
       clipboard,
+      waker: None,
     })
   }
 
@@ -945,6 +951,11 @@ impl ApplicationHandler for App {
       .next_deadline()
       .map_or(poll, |deadline| deadline.min(poll));
     event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
+    // This turn dispatched the compositor, so its descriptor is worth
+    // watching again.
+    if let Some(waker) = &self.waker {
+      waker.arm();
+    }
   }
 
   fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -1016,6 +1027,15 @@ pub fn run(
     outputs,
     host_socket.as_deref(),
   )?;
+  let proxy = event_loop.create_proxy();
+  match waker::Waker::start(app.frontend.compositor().as_fd(), move || {
+    proxy.send_event(()).is_ok()
+  }) {
+    Ok(waker) => app.waker = Some(waker),
+    Err(error) => eprintln!(
+      "shingle: clients wait for the 16 ms poll, no waker thread: {error}"
+    ),
+  }
   event_loop.run_app(&mut app)?;
   Ok(())
 }
