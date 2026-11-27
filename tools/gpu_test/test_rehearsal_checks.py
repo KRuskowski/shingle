@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import rehearsal_checks as rehearsal
@@ -344,6 +345,83 @@ class CopyTest(unittest.TestCase):
       self.assertEqual(sorted(record['process']),
                        ['SigBlk', 'SigIgn', 'nofile'])
 
+  def test_the_recorder_runs_its_command_only_after_its_gate(self):
+    with tempfile.TemporaryDirectory() as directory:
+      recorder = os.path.join(directory, 'record')
+      with open(recorder, 'w') as file:
+        file.write(rehearsal.RECORDER)
+      ran = os.path.join(directory, 'ran')
+      process = subprocess.Popen([sys.executable, recorder, directory,
+                                  'gated', '/bin/sh', '-c', f'touch {ran}'])
+      try:
+        record = os.path.join(directory, 'gated.json')
+        for _ in range(200):
+          if os.path.exists(record):
+            break
+          time.sleep(0.02)
+        self.assertTrue(os.path.exists(record))
+        time.sleep(0.2)
+        self.assertFalse(os.path.exists(ran))
+        open(os.path.join(directory, 'gated.go'), 'w').close()
+        self.assertEqual(process.wait(10), 0)
+        self.assertTrue(os.path.exists(ran))
+      finally:
+        if process.poll() is None:
+          process.kill()
+          process.wait()
+
+class FakeSession:
+  """Views that appear when a gate opens, on a fake clock."""
+
+  def __init__(self, directory, maps):
+    self.records = directory
+    self.maps = maps
+    self.now = 0.0
+    self.order = []
+
+  def clock(self):
+    return self.now
+
+  def pause(self, seconds):
+    self.now += seconds
+    for name, count in self.maps.items():
+      if (os.path.exists(os.path.join(self.records, f'autostart-{name}.go'))
+          and name not in self.order):
+        self.order.append(name)
+    for name in list(self.maps):
+      if not os.path.exists(os.path.join(self.records,
+                                         f'autostart-{name}.json')):
+        open(os.path.join(self.records, f'autostart-{name}.json'),
+             'w').close()
+
+  def snapshot(self):
+    views = {}
+    for name in self.order:
+      for index in range(self.maps[name]):
+        views[f'{name}-{index}'] = {}
+    return {'views': views}
+
+class OrderTest(unittest.TestCase):
+  """The autostart clients start one after another."""
+
+  def test_entries_start_in_file_order_after_the_one_before_mapped(self):
+    with tempfile.TemporaryDirectory() as directory:
+      session = FakeSession(directory, {'first': 1, 'never': 0,
+                                        'second': 2})
+      plan = rehearsal.Plan()
+      plan.autostart = [('bus', False), ('first', True), ('never', True),
+                        ('second', True)]
+      released = rehearsal.release_in_order(session, plan, session.clock,
+                                            session.pause)
+      self.assertEqual(released, ['first', 'never', 'second'])
+      self.assertEqual(session.order, ['first', 'never', 'second'])
+      self.assertFalse(os.path.exists(os.path.join(directory,
+                                                   'autostart-bus.go')))
+      # The entry that maps nothing waits out its timeout; the others
+      # only their quiet time.
+      self.assertLess(session.now, 2 * rehearsal.ENTRY_TIMEOUT)
+      self.assertGreater(session.now, rehearsal.ENTRY_TIMEOUT)
+
 class CompareTest(unittest.TestCase):
   """Snapshots, their differences and the comparison."""
 
@@ -426,24 +504,14 @@ class CompareTest(unittest.TestCase):
     self.assertIn('grab', reason)
     self.assertEqual(rehearsal.verdict('x', 'y', {'delivered': [1]}, {})[0],
                      'DIFFERS')
+    # A geometry that differs is no longer explained: since
+    # `shingle-initial-size` a view floats at its own size, as in Wayfire.
     floated = {'changes': {'view b: tiled': [True, False],
                            'view b: geometry': [[0, 0, 9, 9], [1, 1, 3, 3]]}}
     other = {'changes': {'view b: tiled': [True, False],
                          'view b: geometry': [[0, 0, 9, 9], [5, 5, 2, 2]]}}
     self.assertEqual(rehearsal.verdict('simple-tile', 'key_toggle', floated,
-                                       other)[0], 'explained')
-    self.assertEqual(rehearsal.verdict('x', 'y', floated, other)[0],
-                     'DIFFERS')
-
-  def test_geometry_alone_of_an_appearing_view(self):
-    first = {'changes': {'view a': ['absent', {'tiled': False,
-                                               'geometry': [0, 0, 9, 9]}]}}
-    second = {'changes': {'view a': ['absent', {'tiled': False,
-                                                'geometry': [1, 1, 2, 2]}]}}
-    tiled = {'changes': {'view a': ['absent', {'tiled': True,
-                                               'geometry': [1, 1, 2, 2]}]}}
-    self.assertTrue(rehearsal.only_geometry_differs(first, second))
-    self.assertFalse(rehearsal.only_geometry_differs(first, tiled))
+                                       other)[0], 'DIFFERS')
 
   def test_table_and_counts(self):
     rows = [{'binding': '[a] b', 'value': '<super> KEY_A | KEY_B',

@@ -126,11 +126,21 @@ TOLERANCE = 4
 # How long autostart clients get to map.
 AUTOSTART_TIMEOUT = 60.0
 AUTOSTART_QUIET = 8.0
+# How long the autostart clients get to map one after another: each
+# runnable entry starts once the one before it mapped a window, or after
+# ENTRY_TIMEOUT, and counts as mapped after ENTRY_QUIET without a new
+# view (`autostart_run`).
+ENTRY_TIMEOUT = 45.0
+ENTRY_QUIET = 2.0
+GATE_TIMEOUT = 300
 # The record each recorder writes: argv, environment, inherited signal
 # mask and dispositions, and the open-files limit. With --no-exec it
-# stops there; otherwise it executes the rest of its arguments.
+# stops there; otherwise it waits for the harness to create NAME.go
+# beside the record (at most GATE_TIMEOUT seconds), so that autostart
+# clients map in file order under both compositors, and executes the
+# rest of its arguments.
 RECORDER = r'''#!/usr/bin/env python3
-import json, os, resource, sys
+import json, os, resource, sys, time
 arguments = sys.argv[1:]
 execute = arguments[0] != '--no-exec'
 if not execute:
@@ -150,8 +160,12 @@ with open(path + '.part', 'w') as file:
   json.dump(record, file)
 os.rename(path + '.part', path)
 if execute and command:
+  deadline = time.monotonic() + GATE_TIMEOUT
+  while (not os.path.exists(os.path.join(directory, name + '.go'))
+         and time.monotonic() < deadline):
+    time.sleep(0.05)
   os.execvp(command[0], command)
-'''
+'''.replace('GATE_TIMEOUT', str(GATE_TIMEOUT))
 # What a stand-in for a kitty session file holds: one window with the
 # default shell.
 SESSION_STAND_IN = 'launch\n'
@@ -176,16 +190,6 @@ ACCEPTED = {
         'to drag: Wayfire\'s simple-tile activates for it and changes '
         'nothing, Shingle starts no drag'),
 }
-# Bindings and matchers whose views may differ in geometry alone, and why.
-GEOMETRY_ACCEPTED = {
-    ('simple-tile', 'key_toggle'),
-    ('simple-tile', 'tile_by_default'),
-}
-GEOMETRY_REASON = (
-    'Shingle configures a new toplevel at its tile size from the first '
-    'configure, where Wayfire\'s is 0x0, so a view that floats from the '
-    'start or is untiled before it was ever floating takes its tile\'s '
-    'size, not the client\'s own at (100, 100)')
 
 def parse_ini(text):
   """wf-config's reading of `text`: [(section, option, value)] in file
@@ -651,26 +655,6 @@ def same_effect(shingle, wayfire):
                if not close_enough(shingle.get(key), wayfire.get(key))]
   return not differing, differing
 
-def only_geometry_differs(first, second):
-  """Whether two observations differ in view geometry alone."""
-  def without_geometry(observation):
-    stripped = {}
-    for key, value in observation.items():
-      if key != 'changes':
-        stripped[key] = value
-        continue
-      changes = {}
-      for change, values in value.items():
-        if change.endswith(': geometry'):
-          continue
-        changes[change] = tuple(
-            {name: field for name, field in item.items()
-             if name != 'geometry'} if isinstance(item, dict) else item
-            for item in values)
-      stripped[key] = changes
-    return stripped
-  return close_enough(without_geometry(first), without_geometry(second))
-
 def verdict(section, name, mine, theirs):
   """(result, reason) of one comparison: 'match', 'explained' with the
   reason the difference stays, or 'DIFFERS'."""
@@ -680,9 +664,6 @@ def verdict(section, name, mine, theirs):
   accepted = ACCEPTED.get((section, name))
   if accepted and differing == [accepted[0]]:
     return 'explained', accepted[1]
-  if (section, name) in GEOMETRY_ACCEPTED and only_geometry_differs(
-      mine, theirs):
-    return 'explained', GEOMETRY_REASON
   return 'DIFFERS', f'differs in {", ".join(differing)}'
 
 def describe(observation):
@@ -1199,9 +1180,46 @@ def rule_runs(session, names):
       observed[name] = {'error': str(error)}
   return observed
 
+def view_count(session):
+  """How many views are mapped now."""
+  return len(session.snapshot()['views'])
+
+def release_in_order(session, plan, clock=time.monotonic, pause=time.sleep):
+  """Lets the runnable autostart entries start one after another, in file
+  order: each once its record is written and the one before it mapped a
+  window and then `ENTRY_QUIET` seconds passed without another, or after
+  `ENTRY_TIMEOUT`. Under Wayfire and Shingle alike a new view opens on
+  the output focused when it is created, and a window rule may move the
+  focus, so which output a later client opens on depends on the order
+  the earlier ones mapped in; autostart starts them all at once, which
+  leaves that order to timing. Returns the names released."""
+  released = []
+  for name, runs in plan.autostart:
+    if not runs:
+      continue
+    record = os.path.join(session.records, f'autostart-{name}.json')
+    started = clock()
+    while not os.path.exists(record) and clock() - started < ENTRY_TIMEOUT:
+      pause(0.1)
+    before = view_count(session)
+    with open(os.path.join(session.records, f'autostart-{name}.go'), 'w'):
+      pass
+    released.append(name)
+    started = clock()
+    changed = None
+    while clock() - started < ENTRY_TIMEOUT:
+      count = view_count(session)
+      if count != before:
+        before, changed = count, clock()
+      elif changed is not None and clock() - changed > ENTRY_QUIET:
+        break
+      pause(0.25)
+  return released
+
 def autostart_run(session, plan):
-  """Waits for the autostart clients to map; returns their windows and
-  each entry's record."""
+  """Lets the autostart clients start in order and waits for them to map;
+  returns their windows and each entry's record."""
+  release_in_order(session, plan)
   last = None
   quiet_since = started = time.monotonic()
   while time.monotonic() - started < AUTOSTART_TIMEOUT:
