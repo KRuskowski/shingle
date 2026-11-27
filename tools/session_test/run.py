@@ -31,8 +31,8 @@ user namespaces (needs python3-fuse and a readable `/dev/fuse`):
 `--checks round-trip` instead runs the session round trips of
 tools/session_test/round_trip.py, which need no FUSE: five clients'
 layout survives SIGKILL and SIGTERM with a restart after each, and with
-`--master-binary` (a `shingle` built from `master`) a version 1 session
-saved by it restores unchanged. `--checks slow round-trip` runs both.
+`--master-binary` (a `shingle` built from `master`) a session saved by
+it, version 1 or 2, restores unchanged. `--checks slow round-trip` runs both.
 
 It prints one line per check and exits 0 when all pass. Signals go only
 to processes started here, through `signal_checked`. The pure helpers
@@ -401,7 +401,7 @@ def check_groups(names, binary, wl_probe, delay, master_binary):
   }
   selected = [(name, groups[name]) for name in names]
   if master_binary and 'round-trip' in names:
-    selected.append(('version-1', lambda results: round_trip.version_1_checks(
+    selected.append(('master', lambda results: round_trip.master_checks(
         harness, results, binary, master_binary, wl_probe)))
   return selected
 

@@ -9,8 +9,9 @@ SIGTERM and started again; each restart must relaunch the five clients
 from their saved command lines and show the same layouts and views.
 
 With a Shingle built from `master` (`--master-binary`), the same layout
-is saved by it as a version 1 session and restored by the Shingle under
-test, which must show it unchanged and save it back as version 2.
+is saved by it, as a version 1 session before workspace sets and as
+version 2 since, and restored by the Shingle under test, which must show
+it unchanged and save it back as version 2.
 
 Every Shingle runs with an explicit `--headless` or `--backend nested`,
 and every signal goes through `signal_checked`.
@@ -127,6 +128,14 @@ def _floating(split, window):
       if found:
         return found
   return None
+
+def master_session_ok(saved, window):
+  """Whether `saved`, written by `master`, is a session of a version the
+  build under test reads (1 per output, 2 per workspace set) and floats
+  `window` at `ECHO_FLOATING`."""
+  records = {1: 'outputs', 2: 'wsets'}.get(saved.get('version'))
+  return (records is not None and records in saved
+          and session_floating(saved, window) == ECHO_FLOATING)
 
 def read_session(state):
   """The session saved under the state directory `state`, or None."""
@@ -315,60 +324,59 @@ def round_trip_checks(harness, results, binary, wl_probe):
     results.check('round trip: SIGTERM exits headless with status 0',
                   outer_status == 0, str(outer_status))
 
-def version_1_checks(harness, results, binary, master_binary, wl_probe):
-  """A session `master` saved as version 1 restores unchanged and is
-  saved back as version 2."""
-  outer = harness.Headless(binary, 'version-1-outer', json.dumps({
+def master_checks(harness, results, binary, master_binary, wl_probe):
+  """A session `master` saved, as version 1 or 2, restores unchanged and
+  is saved back as version 2."""
+  outer = harness.Headless(binary, 'master-outer', json.dumps({
       'output': {'mode': '1280x720@60'},
       'xwayland': {'mode': False},
       'session': {'restore': False},
       'workspaces': {'width': 1, 'height': 1},
   }), 'yaml')
-  trip = RoundTrip(harness, results, outer, '/tmp/version-1-state')
+  trip = RoundTrip(harness, results, outer, '/tmp/master-state')
   nested = None
   try:
     nested = trip.start(master_binary)
     views = trip.map_clients(nested, wl_probe)
-    results.check('version 1: five clients map in master', views, str(views))
+    results.check('master: five clients map in master', views, str(views))
     if not views:
       return nested.log_text()
     errors = trip.arrange(nested, views)
-    results.check('version 1: master builds the layout', not errors,
+    results.check('master: master builds the layout', not errors,
                   str(errors))
     before = trip.observe(nested)
     status = nested.stop()
     nested = None
     trip.stop_probes()
-    results.check('version 1: master exits with status 0 on SIGTERM',
+    results.check('master: master exits with status 0 on SIGTERM',
                   status == 0, str(status))
     saved = read_session(trip.state) or {}
-    results.check('version 1: master saved a version 1 session',
-                  saved.get('version') == 1 and 'outputs' in saved
-                  and session_floating(saved, views['echo'])
-                  == ECHO_FLOATING, json.dumps(saved)[:300])
+    results.check('master: master saved a session of a known version',
+                  master_session_ok(saved, views['echo']),
+                  json.dumps(saved)[:300])
     nested = trip.start(binary)
     restored = harness.wait_for(
         lambda: harness.nested_views(nested, len(APPS)), timeout=30)
-    results.check('version 1: the clients are relaunched and claim their '
+    results.check('master: the clients are relaunched and claim their '
                   'windows', restored == views, f'{restored} {views}')
     # Master may report views on other workspaces in their own
     # workspace's coordinates, so both are compared there.
     width = output_width(nested)
     after = own_workspace(trip.observe(nested), width)
     before = own_workspace(before, width)
-    results.check('version 1: every layout is as master showed it',
+    results.check('master: every layout is as master showed it',
                   after['layouts'] == before['layouts'],
                   f'{after["layouts"]} != {before["layouts"]}')
-    results.check('version 1: every view is as master showed it',
+    results.check('master: every view is as master showed it',
                   after['views'] == before['views'],
                   f'{after["views"]} != {before["views"]}')
     status = nested.stop()
     log = nested.log_text()
     nested = None
-    results.check('version 1: SIGTERM exits with status 0', status == 0,
+    results.check('master: SIGTERM exits with status 0', status == 0,
                   str(status))
     resaved = read_session(trip.state) or {}
-    results.check('version 1: the session is saved back as version 2 with '
+    results.check('master: the session is saved back as version 2 with '
                   'the same trees',
                   resaved.get('version') == 2
                   and session_roots(resaved) == session_roots(saved),
@@ -379,5 +387,5 @@ def version_1_checks(harness, results, binary, master_binary, wl_probe):
     if nested:
       nested.stop()
     outer_status = outer.stop()
-    results.check('version 1: SIGTERM exits headless with status 0',
+    results.check('master: SIGTERM exits headless with status 0',
                   outer_status == 0, str(outer_status))

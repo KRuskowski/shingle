@@ -147,5 +147,25 @@ class RoundTripTest(unittest.TestCase):
     self.assertEqual(round_trip.session_roots(saved),
                      [[({'x': 0, 'y': 0}, root)]])
 
+  def test_a_master_session_of_either_version_is_accepted(self):
+    floating = dict(round_trip.ECHO_FLOATING)
+    root = {'direction': 'vertical', 'children': [
+        {'weight': 1, 'node': {'kind': 'leaf', 'window': 5,
+                               'state': {'floating': floating}}}]}
+    workspaces = [{'root': root}]
+    self.assertTrue(round_trip.master_session_ok(
+        {'version': 1, 'outputs': [{'workspaces': workspaces}]}, 5))
+    self.assertTrue(round_trip.master_session_ok(
+        {'version': 2, 'wsets': [{'workspaces': workspaces}]}, 5))
+    # A version with the other version's records, an unknown version or
+    # a session without the floating rectangle is not.
+    self.assertFalse(round_trip.master_session_ok(
+        {'version': 2, 'outputs': [{'workspaces': workspaces}]}, 5))
+    self.assertFalse(round_trip.master_session_ok(
+        {'version': 3, 'wsets': [{'workspaces': workspaces}]}, 5))
+    self.assertFalse(round_trip.master_session_ok(
+        {'version': 2, 'wsets': [{'workspaces': workspaces}]}, 4))
+    self.assertFalse(round_trip.master_session_ok({}, 5))
+
 if __name__ == '__main__':
   unittest.main()
