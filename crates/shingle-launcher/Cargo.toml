@@ -12,12 +12,15 @@ gloomy-core.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Gloomy's own wgpu and pollster, for the device handed to its renderer.
 pollster = "0.3"
+# Gloomy's versions, for decoding SVG icons.
+resvg = { version = "0.36", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 rustix.workspace = true
 shingle-config = { path = "../shingle-config" }
 shingle-session = { path = "../shingle-session" }
+tiny-skia = "0.11"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 wayland-protocols-wlr = { workspace = true, features = ["client"] }

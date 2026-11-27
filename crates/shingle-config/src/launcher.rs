@@ -75,6 +75,10 @@ pub struct LauncherConfig {
   /// COMMAND`; empty (the default) picks `$TERMINAL`, then the first of
   /// foot, kitty, alacritty and xterm installed.
   pub terminal: String,
+  /// The icon theme entries' icons are looked up in, falling back to
+  /// `hicolor`; empty (the default) uses the desktop's: KDE's
+  /// `kdeglobals`, else GTK's `settings.ini`.
+  pub icon_theme: String,
   /// Colours.
   pub colors: LauncherColors,
 }
@@ -87,6 +91,7 @@ impl Default for LauncherConfig {
       font_size: 16.0,
       renderer: LauncherRenderer::Auto,
       terminal: String::new(),
+      icon_theme: String::new(),
       colors: LauncherColors::default(),
     }
   }
@@ -134,14 +139,15 @@ mod tests {
   #[test]
   fn the_section_is_optional_and_partial() {
     let (config, _) = ShingleConfig::parse_with_warnings(
-      "launcher:\n  width: 900\n  renderer: hardware\n  colors:\n    \
-       accent: [1, 0, 1, 1]\n",
+      "launcher:\n  width: 900\n  renderer: hardware\n  icon_theme: \
+       breeze\n  colors:\n    accent: [1, 0, 1, 1]\n",
       ConfigFormat::Yaml,
     )
     .unwrap();
     assert_eq!(config.launcher.width, 900);
     assert_eq!(config.launcher.height, 480);
     assert_eq!(config.launcher.renderer, LauncherRenderer::Hardware);
+    assert_eq!(config.launcher.icon_theme, "breeze");
     assert_eq!(config.launcher.colors.accent, [1.0, 0.0, 1.0, 1.0]);
     assert_eq!(config.launcher.colors.panel, [0.11, 0.12, 0.15, 1.0]);
     let (config, _) =

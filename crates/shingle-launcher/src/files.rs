@@ -16,6 +16,8 @@ pub struct Paths {
   pub history: PathBuf,
   /// The scanned index: `$XDG_CACHE_HOME/shingle/launcher-index.json`.
   pub index_cache: PathBuf,
+  /// Decoded icons: `$XDG_CACHE_HOME/shingle/launcher-icons`.
+  pub icon_cache: PathBuf,
   /// The directory of the single-instance socket, `$XDG_RUNTIME_DIR`.
   pub runtime: Option<PathBuf>,
 }
@@ -36,6 +38,7 @@ impl Paths {
         .join("launcher-history.json"),
       index_cache: shingle("XDG_CACHE_HOME", ".cache")
         .join("launcher-index.json"),
+      icon_cache: shingle("XDG_CACHE_HOME", ".cache").join("launcher-icons"),
       runtime: absolute(var("XDG_RUNTIME_DIR")),
     }
   }
@@ -85,6 +88,10 @@ mod tests {
     assert_eq!(
       paths.index_cache,
       Path::new("/home/u/.cache/shingle/launcher-index.json")
+    );
+    assert_eq!(
+      paths.icon_cache,
+      Path::new("/home/u/.cache/shingle/launcher-icons")
     );
     assert_eq!(paths.runtime.as_deref(), Some(Path::new("/run/user/7")));
   }
