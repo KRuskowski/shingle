@@ -30,7 +30,8 @@ namespaces:
                nested-gpu|nodmabuf|weston|syncobj|nosyncobj|outputs|
                nested-outputs|nested-smoke|wayfire-plugins|wayfire-shell|
                vswipe|decoration|switcher|colours|minimize-focus|
-               drag-icon|resize|nested-scaled|nested-clipboard ...
+               drag-icon|resize|resize-nested|nested-scaled|
+               nested-clipboard ...
 
 For example, DB-1's import test:
 
@@ -72,7 +73,9 @@ to show the icon following the pointer and gone after the drop.
 `--checks resize` (resize_checks.py) drags the boundary between `kitty`
 and a `wl_probe` with STIPC's pointer, one motion and eight motions per
 frame, and reports kitty's configures, buffers and settle time from its
-`WAYLAND_DEBUG` log and the configures of a floating probe beside them.
+`WAYLAND_DEBUG` log and the configures of a floating probe beside them;
+`--checks resize-nested` does the same in nested Shingle on NVIDIA
+inside offscreen Shingle.
 `--checks nested-scaled` (nested_output_checks.py) runs nested Shingle
 in a headless Shingle whose output has scale 1.5 and then 2: nested's
 output must take the window's scale and logical size, the host pointer
@@ -133,11 +136,12 @@ CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'nested-smoke', 'nested-scaled', 'wayfire-plugins',
                 'wayfire-shell', 'vswipe', 'decoration', 'switcher',
                 'colours', 'minimize-focus', 'drag-icon', 'resize',
-                'nested-clipboard')
+                'resize-nested', 'nested-clipboard')
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
-# nvidia-modeset; `syncobj` runs no Vulkan client.
+# nvidia-modeset, and nested Shingle's on NVIDIA in `resize-nested`;
+# `syncobj` runs no Vulkan client.
 MODESET_GROUPS = ('dmabuf', 'browsers', 'xwayland', 'nested-gpu', 'nodmabuf',
-                  'weston', 'nosyncobj')
+                  'weston', 'nosyncobj', 'resize-nested')
 
 def allowed_devices(modeset):
   """The device nodes, relative to /dev, that the namespace exposes."""

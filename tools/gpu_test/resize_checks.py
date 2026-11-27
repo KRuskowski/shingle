@@ -1,8 +1,10 @@
 """Real-client check of interactive resizes, run inside run.py's
 namespace.
 
-Offscreen Shingle on the render node tiles `kitty` beside a `wl_probe`.
-Through STIPC the group `resize` holds Super, presses the right button
+Offscreen Shingle on the render node tiles `kitty` beside a `wl_probe`
+(the group `resize`), or nested Shingle on the render node does, in a
+window of offscreen Shingle (`resize-nested`). Through STIPC the group
+holds Super, presses the right button
 near kitty's right edge and drags the boundary, then releases, twice:
 once `paced`, one pointer motion per output frame, and once in `bursts`
 of eight motions per frame, as a 500 Hz mouse moves a host's pointer.
@@ -28,7 +30,7 @@ import time
 import checks
 
 xw = checks.xw
-GROUPS = ('resize',)
+GROUPS = ('resize', 'resize-nested')
 # How far each drag moves the boundary, over how many output frames, and
 # how many pointer motions one IPC write, one frame, carries.
 DISTANCE = 300
@@ -170,10 +172,10 @@ def drag(shingle, start, end, burst):
   shingle.call('stipc/feed_key', {'key': 'KEY_LEFTMETA', 'state': False})
   return press, release
 
-def one_drag(results, shingle, kitty, probe, name, burst, distance):
+def one_drag(results, group, shingle, kitty, probe, name, burst, distance):
   """One drag of kitty's right edge by `distance` with `burst` motions per
-  frame, its numbers and its checks; returns how many configures `probe`
-  got meanwhile."""
+  frame, its numbers and its checks, named after `group`; returns how
+  many configures `probe` got meanwhile."""
   geometry = shingle.view('kitty')['geometry']
   edge = geometry['x'] + geometry['width'] - 10
   middle = geometry['y'] + geometry['height'] // 2
@@ -183,7 +185,7 @@ def one_drag(results, shingle, kitty, probe, name, burst, distance):
   resized = xw.wait_for(
       lambda: abs(shingle.view('kitty')['geometry']['width']
                   - geometry['width']) > abs(distance) // 2, timeout=5)
-  results.check(f'resize: the {name} drag resizes kitty\'s tile',
+  results.check(f'{group}: the {name} drag resizes kitty\'s tile',
                 bool(resized),
                 f'{geometry} -> {shingle.view("kitty")["geometry"]}')
   # Give kitty time to catch up before reading its log.
@@ -192,7 +194,7 @@ def one_drag(results, shingle, kitty, probe, name, burst, distance):
   probe_configures = (len(checks.probe_events(probe.output(), 'configure'))
                       - probe_before)
   final = shingle.view('kitty')['geometry']
-  print(f'INFO resize: {name} drag, {FRAMES * burst} motions in '
+  print(f'INFO {group}: {name} drag, {FRAMES * burst} motions in '
         f'{release - press:.0f} ms, {burst} per frame: kitty got '
         f'{metrics["configures"]} configures and committed '
         f'{metrics["buffers"]} buffers of {metrics["sizes"]} sizes; final '
@@ -201,20 +203,56 @@ def one_drag(results, shingle, kitty, probe, name, burst, distance):
         f'release; the floating probe got {probe_configures} configures',
         flush=True)
   results.check(
-      f'resize: kitty draws at least {MINIMUM_DRAG_SIZES} sizes while the '
+      f'{group}: kitty draws at least {MINIMUM_DRAG_SIZES} sizes while the '
       f'{name} drag runs', metrics['sizes'] >= MINIMUM_DRAG_SIZES,
       str(metrics))
   results.check(
-      f'resize: kitty draws its final size within {MAXIMUM_SETTLE_MS} ms '
+      f'{group}: kitty draws its final size within {MAXIMUM_SETTLE_MS} ms '
       f'of the {name} drag\'s release',
       metrics['settle_ms'] is not None
       and metrics['settle_ms'] <= MAXIMUM_SETTLE_MS, str(metrics))
   return probe_configures
 
 def resize_checks(results, binary, wl_probe, captures):
-  """kitty keeps drawing while a tile resize runs and catches up after."""
+  """kitty keeps drawing while a tile resize runs in offscreen Shingle
+  and catches up after."""
   del captures
   shingle = checks.Shingle(binary, 'resize', config())
+  try:
+    drags(results, 'resize', shingle, wl_probe)
+  finally:
+    status = shingle.stop()
+    results.check('resize: SIGTERM exits offscreen Shingle with status 0',
+                  status == 0,
+                  f'status {status}, {checks.tail(shingle.log_text())}')
+
+def nested_resize_checks(results, binary, wl_probe, captures):
+  """The same in nested Shingle on NVIDIA inside offscreen Shingle, where
+  every new size kitty draws on `wl_shm` is uploaded in full
+  (docs/status.md#shm-upload-speed)."""
+  del captures
+  nvidia = {'VK_ICD_FILENAMES': checks.NVIDIA_ICD}
+  outer = checks.Shingle(binary, 'resize-outer', config(),
+                         extra_environment=nvidia)
+  nested = None
+  try:
+    nested = checks.Shingle(
+        binary, 'resize-nested', config(), backend=('--backend', 'nested'),
+        extra_environment=dict(nvidia,
+                               WAYLAND_DISPLAY=outer.wayland_display()))
+    drags(results, 'resize-nested', nested, wl_probe)
+  finally:
+    for label, shingle in (('nested', nested), ('offscreen', outer)):
+      if shingle is None:
+        continue
+      status = shingle.stop()
+      results.check(
+          f'resize-nested: SIGTERM exits {label} Shingle with status 0',
+          status == 0, f'status {status}, {checks.tail(shingle.log_text())}')
+
+def drags(results, group, shingle, wl_probe):
+  """Tiles kitty beside a probe and floats another on `shingle`, then
+  drags kitty's edge paced and in bursts; checks named after `group`."""
   clients = []
   try:
     kitty = checks.Client(
@@ -222,7 +260,7 @@ def resize_checks(results, binary, wl_probe, captures):
         'kitty', extra_environment={'WAYLAND_DEBUG': '1'})
     clients.append(kitty)
     if not xw.wait_for(lambda: shingle.view('kitty'), timeout=20):
-      results.check('resize: kitty maps', False,
+      results.check(f'{group}: kitty maps', False,
                     checks.tail(kitty.output()))
       return
     probe = checks.Client(shingle, [wl_probe, 'other'], 'other',
@@ -231,7 +269,7 @@ def resize_checks(results, binary, wl_probe, captures):
     tiled = xw.wait_for(
         lambda: shingle.view('other') and shingle.view('kitty')[
             'geometry']['width'] < checks.OUTPUT[0] - 100, timeout=15)
-    results.check('resize: kitty and a probe tile side by side',
+    results.check(f'{group}: kitty and a probe tile side by side',
                   bool(tiled), str(shingle.views()))
     if not tiled:
       return
@@ -247,7 +285,7 @@ def resize_checks(results, binary, wl_probe, captures):
       floated = xw.wait_for(
           lambda: not shingle.view('floater')['tiled-edges']
           and shingle.view('kitty')['geometry']['width'] < 1000, timeout=5)
-    results.check('resize: a third probe floats beside the two tiles',
+    results.check(f'{group}: a third probe floats beside the two tiles',
                   bool(floated), str(shingle.views()))
     if not floated:
       return
@@ -261,25 +299,21 @@ def resize_checks(results, binary, wl_probe, captures):
       shingle.call('stipc/feed_button', {'combo': 'BTN_LEFT', 'mode': mode})
     focused = xw.wait_for(lambda: shingle.view('kitty')['activated'],
                           timeout=5)
-    results.check('resize: a click focuses kitty', bool(focused),
+    results.check(f'{group}: a click focuses kitty', bool(focused),
                   str(shingle.view('kitty')))
     # Let kitty draw at its tiled size, and the floater settle.
     time.sleep(1.0)
     unchanged = 0
     for name, burst, distance in (('paced', PACED, DISTANCE),
                                   ('burst', BURST, -DISTANCE)):
-      unchanged += one_drag(results, shingle, kitty, floater, name, burst,
-                            distance)
+      unchanged += one_drag(results, group, shingle, kitty, floater, name,
+                            burst, distance)
     results.check(
-        'resize: the floating probe, whose state stays the same, gets no '
+        f'{group}: the floating probe, whose state stays the same, gets no '
         'configure during the drags', unchanged == 0,
         f'{unchanged} configures')
   finally:
     for client in clients:
       client.stop()
-    status = shingle.stop()
-    results.check('resize: SIGTERM exits offscreen Shingle with status 0',
-                  status == 0,
-                  f'status {status}, {checks.tail(shingle.log_text())}')
 
-CHECKS = {'resize': resize_checks}
+CHECKS = {'resize': resize_checks, 'resize-nested': nested_resize_checks}

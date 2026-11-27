@@ -222,9 +222,10 @@ class PatternTest(unittest.TestCase):
         + focus_checks.GROUPS + drag_icon_checks.GROUPS
         + resize_checks.GROUPS + nested_clipboard_checks.GROUPS,
         checks.run.CHECK_GROUPS)
-    # Every DB-4 and DB-5 group runs NVIDIA Vulkan clients but `syncobj`.
+    # Every DB-4 and DB-5 group runs NVIDIA Vulkan clients but `syncobj`,
+    # and `resize-nested` runs nested Shingle on NVIDIA.
     self.assertEqual(tuple(group for group in dmabuf_checks.GROUPS
-                           if group != 'syncobj'),
+                           if group != 'syncobj') + ('resize-nested',),
                      checks.run.MODESET_GROUPS)
     self.assertEqual(set(checks.all_checks()), set(checks.run.CHECK_GROUPS))
 
