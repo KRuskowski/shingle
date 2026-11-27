@@ -53,6 +53,7 @@ import threading
 import time
 
 import checks
+import nested_output_checks
 import run
 
 xw = checks.xw
@@ -501,6 +502,8 @@ def lock_checks(results, binary, wl_probe, captures):
     geometry = view['geometry'] if view else None
     run_sessions(results, shingle, reader, lock_binary, swaylock, geometry,
                  clients)
+    nested_lock_checks(results, binary, lock_binary, wl_probe,
+                       os.path.join(base, 'empty-config'))
   finally:
     for client in clients:
       client.stop()
@@ -529,6 +532,84 @@ def lock_checks(results, binary, wl_probe, captures):
                 reader.unreadable == 0, f'{reader.unreadable} unreadable')
   if not sharp:
     shutil.rmtree(base, ignore_errors=True)
+
+# How many times nested_lock_checks starts nested Shingle and locks it
+# at once; the duplicate lock surface showed in about half the starts.
+NESTED_ROUNDS = 6
+NESTED_SCALE = 1.5
+# Seconds from nested's start to the lock, round by round.
+NESTED_DELAYS = (0.0, 3.0, 1.0, 6.0, 0.5, 9.0)
+
+def nested_lock_checks(results, binary, lock_binary, wl_probe, empty):
+  """shingle-lock started right after nested Shingle, whose output takes
+  the scale of its host window (NESTED_SCALE) while it starts: each
+  round must lock without a protocol error and unlock with the test
+  password. A failing round keeps the client's WAYLAND_DEBUG log in the
+  evidence directory."""
+  evidence = os.path.join(os.environ.get('SHINGLE_LOCK_EVIDENCE',
+                                         '/tmp/lock-checks'), 'nested')
+  failures = []
+  errors = []
+  for index in range(NESTED_ROUNDS):
+    outer_config, nested_config = nested_output_checks.scaled_configs(
+        NESTED_SCALE)
+    outer, nested = nested_output_checks.start(
+        binary, f'lock-nested-{index}', outer_config=outer_config,
+        nested_config=nested_config)
+    clients = []
+    try:
+      # Two terminals and an X client as on the operator's desktop, then
+      # the lock a moment after the start.
+      for number in range(2):
+        clients.append(checks.Client(
+            nested, ['kitty', '--config', 'NONE', '-o',
+                     'confirm_os_window_close=0'], f'kitty-{number}',
+            extra_environment={'SHELL': '/bin/sh'}))
+      display = xw.wait_for(lambda: next(
+          (line.split('=', 1)[1] for line in nested.log_text().splitlines()
+           if line.startswith('DISPLAY=')), None), timeout=10)
+      if display:
+        clients.append(checks.Client(nested, ['xterm'], 'xterm',
+                                     extra_environment={'DISPLAY': display}))
+      time.sleep(NESTED_DELAYS[index % len(NESTED_DELAYS)])
+      config = os.path.join(nested.directory, 'shingle.yaml')
+      arguments = [lock_binary, '--shingle-config', config, '-C', empty]
+      if index % 2:
+        arguments.append('-f')
+      lock = checks.Client(nested, arguments, 'lock',
+                           extra_environment={'WAYLAND_DEBUG': '1'},
+                           program='shingle-lock')
+      clients.append(lock)
+      ready = xw.wait_for(lambda: 'shingle-lock: ready' in lock.output()
+                          or lock.process.poll() is not None, timeout=30)
+      output = lock.output()
+      if 'shingle-lock: ready' in output:
+        type_text(nested, ACCEPTED_PHRASE)
+        tap(nested, 'KEY_ENTER')
+      status = lock.exited(15)
+      output = lock.output()
+      protocol = [line for line in output.splitlines()
+                  if 'rotocol error' in line and 'WAYLAND' not in line]
+      if status != 0 or not ready:
+        failures.append((index, status, protocol[:2] or output[-300:]))
+      if status != 0 or not ready or os.environ.get('SHINGLE_LOCK_KEEP_LOGS'):
+        os.makedirs(evidence, exist_ok=True)
+        shutil.copy(lock.log_path,
+                    os.path.join(evidence, f'round-{index}.log'))
+      errors.append(len([line for line in output.splitlines()
+                         if 'shingle-lock: ' in line
+                         and 'error' in line.lower()]))
+    finally:
+      for client in clients:
+        client.stop()
+      nested.stop()
+      outer.stop()
+  results.check(f'lock: nested: shingle-lock started with nested Shingle at '
+                f'scale {NESTED_SCALE} locks and unlocks in each of '
+                f'{NESTED_ROUNDS} rounds, without a protocol error',
+                not failures, str(failures))
+  results.check('lock: nested: and never reports an error more than once',
+                all(count <= 1 for count in errors), str(errors))
 
 def locked_frames(reader, moment, output='HEADLESS-1'):
   """Frames of `output` with a lock surface read after `moment`."""
