@@ -305,6 +305,27 @@ keybindings:
 commands:
   - binding: super+enter
     command: foot
+  # The application launcher; pressing it again closes it.
+  - binding: super+space
+    command: shingle-launcher
+
+# How shingle-launcher looks; Shingle itself does not read this. Colours
+# are [r, g, b, a] in 0-1. renderer: auto draws on lavapipe when it is
+# installed, which starts faster than a GPU; hardware or software force one.
+launcher:
+  width: 760
+  height: 480
+  font_size: 16
+  renderer: auto
+  terminal: ""
+  colors:
+    backdrop: [0.0, 0.0, 0.0, 0.45]
+    panel: [0.11, 0.12, 0.15, 1.0]
+    field: [0.16, 0.18, 0.22, 1.0]
+    text: [0.92, 0.93, 0.95, 1.0]
+    dim_text: [0.58, 0.62, 0.68, 1.0]
+    accent: [0.33, 0.58, 0.93, 1.0]
+    selection: [0.2, 0.31, 0.48, 1.0]
 
 pointer:
   move_button: super+btn_left

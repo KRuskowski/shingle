@@ -27,6 +27,7 @@ mod i3;
 mod import;
 mod ini;
 mod input_devices;
+mod launcher;
 mod layout;
 mod multi_output;
 mod output;
@@ -41,6 +42,7 @@ pub use input_devices::{
   DEVICE_OPTIONS, InputDeviceConfig, UDEV_PROPERTIES, matching_device,
   parse_calibration,
 };
+pub use launcher::{LauncherColors, LauncherConfig, LauncherRenderer};
 pub use layout::{
   LayoutOutput, closest_point, disjoint, layout, layout_warnings, logical_size,
   output_in_direction, output_relative, overlapping,
@@ -236,6 +238,9 @@ pub struct ShingleConfig {
   pub pointer: PointerBindings,
   /// Keymap, key repeat, pointer and cursor settings (`[input]`).
   pub input: InputConfig,
+  /// How `shingle-launcher` looks and runs; Shingle itself does not read
+  /// it.
+  pub launcher: LauncherConfig,
   /// Wayfire's `[core] plugins`: when set, only the plugins of
   /// [`PLUGINS`] it names are on, and [`ShingleConfig::plugin_enabled`]
   /// says which. A Wayfire import always sets it; default unset, which
@@ -298,6 +303,7 @@ impl Default for ShingleConfig {
       commands: Vec::new(),
       pointer: PointerBindings::default(),
       input: InputConfig::default(),
+      launcher: LauncherConfig::default(),
       plugins: None,
       wayfire_values: WayfireValues::default(),
       format: ConfigFormat::Yaml,
@@ -558,6 +564,7 @@ impl ShingleConfig {
     }
     self.validate_outputs()?;
     self.wsets.validate()?;
+    self.launcher.validate()?;
     input_devices::validate(&self.input_devices)?;
     if self.behavior.max_buffer_size == 0 {
       return Err(ConfigError::Invalid(
