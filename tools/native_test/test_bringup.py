@@ -446,7 +446,7 @@ class InstructionsTest(unittest.TestCase):
     sections = bringup_steps.step_sections(self.plan())
     for number in list(bringup_steps.DRIVERS) + list(start_tty1.STEP_PRESETS):
       self.assertIn(number, sections)
-    self.assertEqual(sorted(sections), list(range(0, 54)))
+    self.assertEqual(sorted(sections), list(range(0, 55)))
 
   def test_instructions_quote_the_plan(self):
     text = bringup_steps.instructions(11, self.plan(), 'laptop')
