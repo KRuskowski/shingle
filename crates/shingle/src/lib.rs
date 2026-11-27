@@ -4181,6 +4181,7 @@ impl Compositor {
           }
         };
         let mut launch = launch::capture(&stream);
+        let pid = launch::peer_pid(&stream);
         if let Some(app_id) = metadata.app_id.clone() {
           launch.app_id = app_id;
         }
@@ -4198,6 +4199,9 @@ impl Compositor {
           }),
         )?;
         self.state.launch_templates.insert(client.id(), launch);
+        if let Some(pid) = pid {
+          self.state.client_pids.insert(client.id(), pid);
+        }
         self.state.dispatch_pending = true;
       }
     }
@@ -4239,6 +4243,7 @@ impl Compositor {
         break;
       };
       let launch = launch::capture(&stream);
+      let pid = launch::peer_pid(&stream);
       let client = self.display.handle().insert_client(
         stream,
         Arc::new(ClientDataImpl {
@@ -4253,6 +4258,9 @@ impl Compositor {
         }),
       )?;
       self.state.launch_templates.insert(client.id(), launch);
+      if let Some(pid) = pid {
+        self.state.client_pids.insert(client.id(), pid);
+      }
     }
     self.state.dispatch_pending = true;
     Ok(())

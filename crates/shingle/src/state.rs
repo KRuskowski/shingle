@@ -238,6 +238,9 @@ pub(crate) struct CompositorState {
   pub(crate) ext_workspaces: crate::ext_workspace::ExtWorkspaces,
   pub(crate) ext_toplevels: crate::ext_toplevel::ExtToplevels,
   pub(crate) launch_templates: HashMap<ClientId, LaunchIdentity>,
+  /// Each Wayland client's PID, from its socket's peer credentials, for
+  /// its toplevels' IPC `pid`.
+  pub(crate) client_pids: HashMap<ClientId, i32>,
   pub(crate) socket_name: std::ffi::OsString,
   /// Where Wayfire IPC is served, once [`crate::Compositor::enable_ipc`]
   /// ran; children find it as `WAYFIRE_SOCKET`.
@@ -460,6 +463,7 @@ impl CompositorState {
       ext_workspaces: Default::default(),
       ext_toplevels: Default::default(),
       launch_templates: HashMap::new(),
+      client_pids: HashMap::new(),
       socket_name: socket_name.to_owned(),
       ipc_socket: None,
       wayfire_config_file: None,
@@ -1632,6 +1636,9 @@ impl CompositorState {
     }
     self
       .launch_templates
+      .retain(|client, _| !clients.contains(client));
+    self
+      .client_pids
       .retain(|client, _| !clients.contains(client));
     crate::data_control::cleanup_clients(self, &clients);
     crate::capture::cleanup_clients(self, &clients);

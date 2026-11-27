@@ -233,8 +233,9 @@ pub(crate) struct ToplevelRole {
   /// buffer is a new initial commit, which xdg-shell answers with a
   /// configure.
   pub(crate) unmapped: bool,
-  /// The client's PID, for IPC's `pid`. Only X11 windows have one so far:
-  /// their X client's, from XRes or `_NET_WM_PID`.
+  /// The client's PID, for IPC's `pid`: an xdg toplevel's from its
+  /// connection's peer credentials, an X window's from XRes or
+  /// `_NET_WM_PID`.
   pub(crate) pid: Option<i32>,
   /// The client draws its own decorations: an xdg toplevel unless it
   /// acknowledged server-side mode, an X window whose `_MOTIF_WM_HINTS`
@@ -2614,6 +2615,11 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
           .cloned()
           .unwrap_or_default();
         let app_id = identity.app_id.clone();
+        let pid = state
+          .surfaces
+          .get(&object)
+          .and_then(|surface| state.client_pids.get(&surface.client))
+          .copied();
         if let Some(surface) = state.surfaces.get_mut(&object) {
           surface.role = Role::Xdg {
             resource: resource.clone(),
@@ -2633,7 +2639,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
               configure: ConfigureState::default(),
               created_rules_pending: None,
               unmapped: false,
-              pid: None,
+              pid,
               client_decorated: true,
               decorated: None,
             }))),
@@ -3306,6 +3312,20 @@ mod tests {
     state::{ClientDataImpl, CompositorState},
     test_client::TestClient,
   };
+
+  #[test]
+  fn an_xdg_toplevel_has_its_clients_pid_in_list_views() {
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let toplevel = client.toplevel(&mut compositor, "with-pid");
+    client.attach_buffer(&mut compositor, &toplevel.surface, 8, 8);
+    let request = serde_json::json!({"method": "window-rules/list-views"});
+    let views = crate::ipc::respond(&mut compositor.state, &request);
+    // The test client is this process, at the other end of the socket.
+    assert_eq!(views[0]["pid"], std::process::id());
+    drop(client);
+    let _ = std::fs::remove_file(path);
+  }
 
   #[test]
   fn a_lock_surface_buffer_covers_opaquely_by_format_or_alpha() {

@@ -13,10 +13,19 @@ const PROC_LIMIT: usize = 1024 * 1024;
 /// connection, found through its peer credentials. Without credentials the
 /// identity is empty.
 pub(crate) fn capture(stream: &UnixStream) -> LaunchIdentity {
-  let Ok(credentials) = socket_peercred(stream) else {
+  let Some(pid) = peer_pid(stream) else {
     return LaunchIdentity::default();
   };
-  capture_pid(credentials.pid.as_raw_nonzero().get())
+  capture_pid(pid)
+}
+
+/// The PID of the process at the other end of a Wayland connection, from
+/// its peer credentials, as Wayfire's `wl_client_get_credentials` gives a
+/// view's `pid`.
+pub(crate) fn peer_pid(stream: &UnixStream) -> Option<i32> {
+  socket_peercred(stream)
+    .ok()
+    .map(|credentials| credentials.pid.as_raw_nonzero().get())
 }
 
 /// The launch identity of process `pid`: its command line, working

@@ -43,7 +43,13 @@ struct Transcript {
 
 impl Transcript {
   fn record(&mut self, label: &str, text: impl AsRef<str>) {
-    self.lines.push(format!("{label}\t{}", text.as_ref()));
+    // The test clients' PID, from their sockets' peer credentials, is
+    // this process's, which differs from run to run.
+    let text = text.as_ref().replace(
+      &format!("\"pid\":{}", std::process::id()),
+      "\"pid\":\"<test process>\"",
+    );
+    self.lines.push(format!("{label}\t{text}"));
   }
 
   /// Records an IPC request and its reply as sent on the wire.
