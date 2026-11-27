@@ -312,6 +312,8 @@ pub(crate) struct CompositorState {
   pub(crate) max_buffer_size: u32,
   pub(crate) disable_primary_selection: bool,
   pub(crate) decorations: HashMap<ObjectId, crate::decoration::Decoration>,
+  /// `org_kde_kwin_server_decoration` objects.
+  pub(crate) server_decorations: crate::server_decoration::ServerDecorations,
   pub(crate) dialogs: crate::dialog::Dialogs,
   pub(crate) preferred_decoration_mode: zxdg_toplevel_decoration_v1::Mode,
   pub(crate) force_preferred_decoration_mode: bool,
@@ -506,6 +508,7 @@ impl CompositorState {
       max_buffer_size: config.max_buffer_size,
       disable_primary_selection: config.disable_primary_selection,
       decorations: HashMap::new(),
+      server_decorations: Default::default(),
       dialogs: Default::default(),
       preferred_decoration_mode: crate::decoration::preferred_mode(
         &config.preferred_decoration_mode,
@@ -771,6 +774,7 @@ impl CompositorState {
     crate::data_control::create_global(handle);
     crate::cursor_shape::create_global(handle);
     crate::decoration::create_global(handle);
+    crate::server_decoration::create_global(handle);
     crate::idle_notify::create_globals(handle);
     crate::pointer_protocols::create_globals(handle);
     crate::pointer_warp::create_global(handle);

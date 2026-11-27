@@ -55,6 +55,7 @@ pub(crate) fn reply(state: &CompositorState) -> Value {
     "presentation_feedbacks": state.presentation.pending(),
     "xdg_outputs": state.xdg_outputs.len(),
     "decorations": state.decorations.len(),
+    "server_decorations": state.server_decorations.len(),
     "data_sources": data_sources,
     "data_devices": data_devices,
     "data_offers": data_offers,

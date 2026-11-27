@@ -84,6 +84,12 @@ use wayland_protocols::{
   xwayland::shell::v1::client::{xwayland_shell_v1, xwayland_surface_v1},
 };
 use wayland_protocols_misc::{
+  server_decoration::client::{
+    org_kde_kwin_server_decoration::{self, OrgKdeKwinServerDecoration},
+    org_kde_kwin_server_decoration_manager::{
+      self, OrgKdeKwinServerDecorationManager,
+    },
+  },
   zwp_input_method_v2::client::{
     zwp_input_method_keyboard_grab_v2, zwp_input_method_manager_v2,
     zwp_input_method_v2,
@@ -252,6 +258,10 @@ pub(crate) struct Events {
   pub(crate) wayfire_shell: Vec<(ObjectId, String)>,
   /// `zxdg_toplevel_decoration_v1.configure` modes, with their object.
   pub(crate) decoration_modes: Vec<(ObjectId, u32)>,
+  /// `org_kde_kwin_server_decoration_manager.default_mode` and
+  /// `org_kde_kwin_server_decoration.mode` events, in order: the manager's
+  /// as `default N`, a decoration's as `mode N`.
+  pub(crate) kde_decoration: Vec<String>,
   /// `wl_data_device` drag events, in order: `enter`, `leave`, `motion`
   /// and `drop`.
   pub(crate) drag: Vec<&'static str>,
@@ -1414,6 +1424,42 @@ impl Dispatch<ZxdgToplevelDecorationV1, ()> for Events {
   ) {
     if let zxdg_toplevel_decoration_v1::Event::Configure { mode } = event {
       events.decoration_modes.push((decoration.id(), mode.into()));
+    }
+  }
+}
+
+impl Dispatch<OrgKdeKwinServerDecorationManager, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &OrgKdeKwinServerDecorationManager,
+    event: org_kde_kwin_server_decoration_manager::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let org_kde_kwin_server_decoration_manager::Event::DefaultMode { mode } =
+      event
+    {
+      events
+        .kde_decoration
+        .push(format!("default {}", u32::from(mode)));
+    }
+  }
+}
+
+impl Dispatch<OrgKdeKwinServerDecoration, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &OrgKdeKwinServerDecoration,
+    event: org_kde_kwin_server_decoration::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let org_kde_kwin_server_decoration::Event::Mode { mode } = event {
+      events
+        .kde_decoration
+        .push(format!("mode {}", u32::from(mode)));
     }
   }
 }

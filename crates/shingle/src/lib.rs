@@ -94,6 +94,7 @@ mod primary_selection;
 mod region;
 mod screencopy;
 mod security_context;
+mod server_decoration;
 mod shell;
 mod shortcuts;
 mod single_pixel_buffer;

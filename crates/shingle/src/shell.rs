@@ -2544,6 +2544,14 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
             initial_acked: false,
           };
         }
+        // A KDE server decoration made for the surface before its role.
+        if let Some(mode) = crate::server_decoration::mode_of(state, &object) {
+          crate::decorator::set_client_decorated(
+            state,
+            &object,
+            mode == crate::server_decoration::Mode::Client,
+          );
+        }
         reconfigure_all(state);
       }
       xdg_surface::Request::GetPopup {
