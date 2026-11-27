@@ -907,9 +907,10 @@ def auto_layout_checks(results, binary):
     methods = shingle.ipc.call('list-methods').get('methods', [])
     # 81 after MO-2, 83 with MO-4's wsets methods, 85 with MO-6's
     # stipc methods for nested windows, 86 with WG-4's
-    # wayfire-shell/toggle_menu and 87 with WG-5's stipc/feed_gesture.
-    results.check('MO-6: list-methods returns 87 methods',
-                  len(methods) == 87, str(len(methods)))
+    # wayfire-shell/toggle_menu, 87 with WG-5's stipc/feed_gesture and 88
+    # with the soak tests' stipc/object_counts.
+    results.check('MO-6: list-methods returns 88 methods',
+                  len(methods) == 88, str(len(methods)))
     positions = shingle.positions()
     results.check('MO-2: wlr-randr lists both outputs at auto positions',
                   positions == {'HEADLESS-1': (0, 0),

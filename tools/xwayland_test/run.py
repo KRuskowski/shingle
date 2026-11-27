@@ -751,7 +751,7 @@ def lazy_checks(results, binary, work):
   spawn = ['sh', '-c', f'echo "${{DISPLAY-unset}}" > {spawn_out}']
   shingle = Shingle(binary, work, 'lazy', config, spawn=spawn)
   methods = shingle.call('list-methods')['methods']
-  results.check('list-methods returns 87 methods', len(methods) == 87,
+  results.check('list-methods returns 88 methods', len(methods) == 88,
                 f'{len(methods)}')
   results.check(
       'list-methods has the XWayland methods',
