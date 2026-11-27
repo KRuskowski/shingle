@@ -154,11 +154,15 @@ BANDING_ROWS = (12, 24, 36)
 STEP_SIDE = 4
 CLEAN_SHARE = 0.25
 # How much the background at drift.intensity 1 changes in a second, in
-# mean levels: visible (the operator found 1.2 invisible) and calm (the
-# probe's pattern on dark changes less than a desktop: 3.5 against 6.7);
-# and
+# mean levels: calm, and visible over a few seconds (the probe's pattern
+# on dark changes less than a desktop); and
 # how much it may change from one frame to the next.
-MOTION = (2.5, 20.0)
+# At lock.drift.speed 1 it moves very slowly (under a level a second on
+# the probe's pattern over dark), so frames MOTION_SECONDS apart must
+# show it.
+MOTION = (0.2, 20.0)
+MOTION_SECONDS = 8.0
+MOVED = 2.0
 FRAME_STEP = 2.0
 # Shingle's lock.unlock_fade default, in seconds.
 UNLOCK_FADE = 0.35
@@ -849,25 +853,26 @@ def minimal_checks(results, shingle, reader, lock_binary, empty, clients):
                 'output\'s frame rate',
                 frame_rate(recent) >= TRANSITION_FPS and moved,
                 f'{describe_looks(recent)}, last frames differ {moved}')
-  # How much it moves: frames a second apart, and from one frame to the
-  # next, which must change little and evenly (no flicker, no jitter).
-  # The reader lets go of old frames' pixels; keep this one's.
+  # How much it moves: frames MOTION_SECONDS apart, and from one frame to
+  # the next, which must change little and evenly (no flicker, no
+  # jitter). The reader lets go of old frames' pixels; keep this one's.
   first = (kept[-1].frame, kept[-1].arrived) if kept else None
-  time.sleep(1.0)
+  time.sleep(MOTION_SECONDS)
   reader.drain()
   later = [(frame.frame, frame.arrived)
            for frame in locked_frames(reader, moment)[-4:]]
   later = [(pixels, arrived) for pixels, arrived in later if pixels]
   if first is not None and len(later) >= 4:
-    per_second = (mean_difference(first[0], later[-1][0])
-                  / max(later[-1][1] - first[1], 1e-3))
+    moved = mean_difference(first[0], later[-1][0])
+    per_second = moved / max(later[-1][1] - first[1], 1e-3)
     recent_frames = [pixels for pixels, _ in later]
     steps = [mean_difference(a, b)
              for a, b in zip(recent_frames, recent_frames[1:])]
     results.check('lock: minimal: the background flows visibly but calmly',
                   MOTION[0] <= per_second <= MOTION[1]
-                  and max(steps) <= FRAME_STEP,
-                  f'{per_second:.2f} levels a second apart, '
+                  and moved >= MOVED and max(steps) <= FRAME_STEP,
+                  f'{moved:.2f} levels {MOTION_SECONDS} s apart, '
+                  f'{per_second:.2f} a second, '
                   f'{[round(step, 2) for step in steps]} from frame to frame')
   else:
     results.check('lock: minimal: the background flows visibly but calmly',
