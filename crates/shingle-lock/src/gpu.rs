@@ -1,11 +1,18 @@
 //! The lock screen on the GPU: one device for every output, the
-//! screenshot of each blurred once, and per frame the drifting
-//! background with its vignette and the clock and input overlays, read
-//! back into the `wl_shm` buffer the lock surface shows.
+//! screenshot of each blurred once, and per frame the slowly moving
+//! background with its vignette and the clock and input overlays.
 //!
-//! Targets are `Bgra8Unorm`, so the bytes read back are already
-//! `XRGB8888`'s B, G, R, X, and colours are the raw bytes that
-//! swaylock-effects works on.
+//! Everything up to the last pass is linear light in 16-bit float
+//! (`Rgba16Float`): the capture is read through an sRGB view, blurred,
+//! dimmed, vignetted, lit and blended with the overlays there, so that
+//! no gradient is ever rounded to 8 bits on the way. The present pass
+//! encodes the scene as sRGB into the output's format (`Bgra8Unorm` for
+//! `XRGB8888`, `Rgb10a2Unorm` for `XBGR2101010`) with about half a step
+//! of interleaved-gradient-noise dither, shifted each frame while the
+//! background moves, which turns what would be bands into fine grain.
+//! The output is either a texture read back into a `wl_shm` buffer
+//! ([`Target::draw`]) or a DMA-BUF the compositor shows as it is
+//! ([`Target::draw_to`]).
 
 use std::f32::consts::TAU;
 
@@ -19,23 +26,35 @@ use crate::{
   ui::Raster,
 };
 
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+/// The 8-bit output format, whose bytes are `XRGB8888`'s B, G, R, X.
+pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+/// The 10-bit output format, whose words are `XBGR2101010`'s.
+pub const FORMAT_10: wgpu::TextureFormat = wgpu::TextureFormat::Rgb10a2Unorm;
+/// An sRGB view of an `XRGB8888` DMA-BUF, which the import may give.
+const FORMAT_SRGB: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+/// The scene's format: linear light in half floats.
+const SCENE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// The blur's radius in texels at most; larger ones blur a smaller copy.
 const MAX_BLUR_TAPS: u32 = 16;
-/// How bright the shimmer gets, as a fraction, while the drift moves.
-const SHIMMER: f32 = 0.025;
+/// How much the slowly drifting light brightens and darkens, as a
+/// fraction.
+const LIGHT: f32 = 0.03;
+/// How far the flow bends the image, in texture coordinates.
+const FLOW: f32 = 0.0022;
 
-/// Where the background is at one moment of its drift.
+/// Where the background is at one moment of its movement.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Drift {
   /// The offset of the image, in texture coordinates.
   pub offset: [f32; 2],
   /// The image's zoom, above 1 so its edges never show.
   pub zoom: f32,
-  /// The shimmer's phase in radians.
-  pub phase: f32,
-  /// The shimmer's strength.
-  pub shimmer: f32,
+  /// The time the flow and the light are at, in seconds.
+  pub time: f32,
+  /// The drifting light's strength.
+  pub light: f32,
+  /// The flow's strength, in texture coordinates.
+  pub flow: f32,
 }
 
 impl Drift {
@@ -43,14 +62,17 @@ impl Drift {
   pub const STILL: Self = Self {
     offset: [0.0, 0.0],
     zoom: 1.0,
-    phase: 0.0,
-    shimmer: 0.0,
+    time: 0.0,
+    light: 0.0,
+    flow: 0.0,
   };
 
-  /// The drift `seconds` after locking on an output of `size` logical
-  /// pixels: a slow Lissajous path of `config.amplitude` pixels, one
-  /// cycle per `config.period`, a breathing zoom of half a percent and
-  /// a faint moving shimmer.
+  /// The background `seconds` after locking on an output of `size`
+  /// logical pixels: a slow Lissajous path of `config.amplitude` pixels,
+  /// one cycle per `config.period`, a breathing zoom of half a percent,
+  /// a low, slow flow that bends the blurred image a few pixels, and a
+  /// broad light drifting across. Every part is smooth in time, so it
+  /// can be drawn at any frame rate.
   pub fn at(seconds: f64, config: &DriftConfig, size: (u32, u32)) -> Self {
     if !config.enabled || config.amplitude <= 0.0 {
       return Self::STILL;
@@ -59,15 +81,19 @@ impl Drift {
     let amplitude = config.amplitude as f32;
     let cycle = (seconds / config.period).fract() as f32 * TAU;
     let breathing = 0.0025 * (1.0 + (cycle * 0.5).sin());
-    let zoom = 1.0 + 2.0 * amplitude / width.min(height) + breathing;
+    // Room for the flow too, so that no edge ever shows.
+    let zoom =
+      1.0 + 2.0 * amplitude / width.min(height) + 2.0 * FLOW + breathing;
     Self {
       offset: [
         amplitude * cycle.sin() / width / zoom,
         amplitude * (cycle * 2.0 + 1.1).sin() / height / zoom,
       ],
       zoom,
-      phase: cycle,
-      shimmer: SHIMMER,
+      // Wrapped well before f32 loses the milliseconds.
+      time: (seconds % 100_000.0) as f32,
+      light: LIGHT,
+      flow: FLOW,
     }
   }
 }
@@ -87,6 +113,16 @@ fn blur_plan(radius: u32, size: (u32, u32)) -> (u32, (u32, u32), f32) {
   (divisor, scaled, radius as f32 / divisor as f32)
 }
 
+/// The linear value of an sRGB byte.
+fn linear(byte: u8) -> f32 {
+  let value = f32::from(byte) / 255.0;
+  if value <= 0.04045 {
+    value / 12.92
+  } else {
+    ((value + 0.055) / 1.055).powf(2.4)
+  }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct BlurUniform {
@@ -101,7 +137,7 @@ struct BackgroundUniform {
   transform: [f32; 4],
   vignette: [f32; 4],
   color: [f32; 4],
-  shimmer: [f32; 4],
+  motion: [f32; 4],
 }
 
 #[repr(C)]
@@ -111,6 +147,12 @@ struct OverlayUniform {
   alpha: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct PresentUniform {
+  levels: [f32; 4],
+}
+
 /// The device and the pipelines every output draws with.
 pub struct Gpu {
   context: GpuContext,
@@ -118,12 +160,15 @@ pub struct Gpu {
   blur: wgpu::RenderPipeline,
   background: wgpu::RenderPipeline,
   overlay: wgpu::RenderPipeline,
+  /// The present pass for [`FORMAT`], [`FORMAT_10`] and an sRGB view
+  /// of a DMA-BUF.
+  present: [wgpu::RenderPipeline; 3],
   sampler: wgpu::Sampler,
   /// A black pixel, for outputs without a screenshot.
   empty: (wgpu::Texture, wgpu::TextureView),
 }
 
-/// An output's screenshot on the GPU, blurred if asked.
+/// An output's screenshot on the GPU, linear, blurred if asked.
 pub struct Image {
   _texture: wgpu::Texture,
   view: wgpu::TextureView,
@@ -148,8 +193,14 @@ pub fn cover_scale(image: (u32, u32), target: (u32, u32)) -> [f32; 2] {
   }
 }
 
+/// The output formats' levels per channel less one.
+fn levels(format: wgpu::TextureFormat) -> f32 {
+  if format == FORMAT_10 { 1023.0 } else { 255.0 }
+}
+
 impl Gpu {
-  /// Opens the default adapter and builds the pipelines.
+  /// Opens the default adapter, for DMA-BUF import where it can, and
+  /// builds the pipelines.
   ///
   /// # Errors
   ///
@@ -157,7 +208,10 @@ impl Gpu {
   pub fn new() -> Result<Self, String> {
     let context = pollster::block_on(GpuContext::new(
       GpuContext::create_instance(),
-      GpuOptions::default(),
+      GpuOptions {
+        dmabuf: true,
+        ..GpuOptions::default()
+      },
     ))
     .map_err(|error| error.to_string())?;
     let device = context.device();
@@ -200,7 +254,7 @@ impl Gpu {
         bind_group_layouts: &[Some(&layout)],
         immediate_size: 0,
       });
-    let pipeline = |vertex: &str, fragment: &str, blend| {
+    let pipeline = |vertex: &str, fragment: &str, format, blend| {
       device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(fragment),
         layout: Some(&pipeline_layout),
@@ -218,7 +272,7 @@ impl Gpu {
           entry_point: Some(fragment),
           compilation_options: Default::default(),
           targets: &[Some(wgpu::ColorTargetState {
-            format: FORMAT,
+            format,
             blend,
             write_mask: wgpu::ColorWrites::ALL,
           })],
@@ -227,13 +281,19 @@ impl Gpu {
         cache: None,
       })
     };
-    let blur = pipeline("vs_full", "fs_blur", None);
-    let background = pipeline("vs_full", "fs_background", None);
+    let blur = pipeline("vs_full", "fs_blur", SCENE, None);
+    let background = pipeline("vs_full", "fs_background", SCENE, None);
     let overlay = pipeline(
       "vs_overlay",
       "fs_overlay",
+      SCENE,
       Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
     );
+    let present = [
+      pipeline("vs_full", "fs_present", FORMAT, None),
+      pipeline("vs_full", "fs_present", FORMAT_10, None),
+      pipeline("vs_full", "fs_present", FORMAT_SRGB, None),
+    ];
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
       label: Some("shingle-lock sampler"),
       address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -246,7 +306,7 @@ impl Gpu {
       empty: with_view(texture(
         device,
         (1, 1),
-        FORMAT,
+        SCENE,
         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
       )),
       context,
@@ -254,9 +314,15 @@ impl Gpu {
       blur,
       background,
       overlay,
+      present,
       sampler,
     };
     Ok(gpu)
+  }
+
+  /// The GPU context, for DMA-BUF import.
+  pub fn context(&self) -> &GpuContext {
+    &self.context
   }
 
   fn device(&self) -> &wgpu::Device {
@@ -339,29 +405,47 @@ impl Gpu {
   }
 
   /// Uploads `shot` and blurs it as `blur` (`effect-blur`'s radius and
-  /// passes) asks.
+  /// passes) asks, in linear light and half floats.
   pub fn image(&self, shot: &Screenshot, blur: Option<(u32, u32)>) -> Image {
     let size = (shot.width.max(1), shot.height.max(1));
-    let usage = wgpu::TextureUsages::TEXTURE_BINDING
-      | wgpu::TextureUsages::COPY_DST
-      | wgpu::TextureUsages::RENDER_ATTACHMENT;
-    let source = texture(self.device(), size, FORMAT, usage);
+    // Its bytes are sRGB; read through an sRGB view, it is linear, and
+    // filtered in linear light.
+    let source = self.device().create_texture(&wgpu::TextureDescriptor {
+      label: Some("shingle-lock capture"),
+      size: wgpu::Extent3d {
+        width: size.0,
+        height: size.1,
+        depth_or_array_layers: 1,
+      },
+      mip_level_count: 1,
+      sample_count: 1,
+      dimension: wgpu::TextureDimension::D2,
+      format: FORMAT,
+      usage: wgpu::TextureUsages::TEXTURE_BINDING
+        | wgpu::TextureUsages::COPY_DST,
+      view_formats: &[wgpu::TextureFormat::Bgra8UnormSrgb],
+    });
     write(self.queue(), &source, size, &shot.bgra);
-    let (source_texture, source) = with_view(source);
+    let source_view = source.create_view(&wgpu::TextureViewDescriptor {
+      format: Some(wgpu::TextureFormat::Bgra8UnormSrgb),
+      ..Default::default()
+    });
     let Some((radius, times)) =
       blur.filter(|(radius, times)| *radius > 0 && *times > 0)
     else {
       return Image {
-        _texture: source_texture,
-        view: source,
+        _texture: source,
+        view: source_view,
         size,
       };
     };
+    let usage = wgpu::TextureUsages::TEXTURE_BINDING
+      | wgpu::TextureUsages::RENDER_ATTACHMENT;
     let (divisor, scaled, radius) = blur_plan(radius, size);
     let (ping_texture, ping) =
-      with_view(texture(self.device(), scaled, FORMAT, usage));
+      with_view(texture(self.device(), scaled, SCENE, usage));
     let (_pong_texture, pong) =
-      with_view(texture(self.device(), scaled, FORMAT, usage));
+      with_view(texture(self.device(), scaled, SCENE, usage));
     let mut encoder = self
       .device()
       .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -376,7 +460,7 @@ impl Gpu {
       &mut encoder,
       &ping,
       &self.blur,
-      &self.bind(&source, &copy),
+      &self.bind(&source_view, &copy),
       3,
       true,
     );
@@ -469,6 +553,17 @@ fn write(
   );
 }
 
+/// A scene texture of `size`: drawn into, then read by the present pass.
+fn texture_for_scene(gpu: &Gpu, size: (u32, u32)) -> wgpu::Texture {
+  texture(
+    gpu.device(),
+    size,
+    SCENE,
+    wgpu::TextureUsages::RENDER_ATTACHMENT
+      | wgpu::TextureUsages::TEXTURE_BINDING,
+  )
+}
+
 /// An overlay's texture and where it goes.
 struct Overlay {
   texture: wgpu::Texture,
@@ -523,6 +618,10 @@ pub struct Frame {
   pub color: [u8; 4],
   /// How bright the screenshot is drawn, 1 as it was.
   pub dim: f32,
+  /// The dither's seed: changed each frame while the background
+  /// moves, so that its grain moves too, and kept while it stands, so
+  /// that frames which change only an overlay match elsewhere.
+  pub seed: u32,
   /// The clock, if it shows.
   pub clock: Option<Placement>,
   /// The input, if it shows.
@@ -536,6 +635,7 @@ impl Frame {
       && self.vignette == other.vignette
       && self.color == other.color
       && self.dim == other.dim
+      && self.seed == other.seed
   }
 }
 
@@ -543,8 +643,16 @@ impl Frame {
 /// frames are read back through.
 pub struct Target {
   size: (u32, u32),
+  /// The scene, linear light in half floats.
+  scene: wgpu::TextureView,
+  _scene_texture: wgpu::Texture,
+  /// The present pass's uniform and its binding of the scene.
+  present_uniform: wgpu::Buffer,
+  present: wgpu::BindGroup,
+  /// The output read back into `wl_shm` buffers, in `format`.
   view: wgpu::TextureView,
   texture: wgpu::Texture,
+  format: wgpu::TextureFormat,
   readback: wgpu::Buffer,
   background_uniform: wgpu::Buffer,
   background: wgpu::BindGroup,
@@ -574,15 +682,24 @@ pub struct Drawn {
 impl Target {
   /// A target of `size` logical pixels over `image`, scaled to cover it
   /// with its aspect ratio kept ([`cover_scale`]), or over the plain
-  /// background colour without one.
-  pub fn new(gpu: &Gpu, size: (u32, u32), image: Option<&Image>) -> Self {
+  /// background colour without one, whose frames read back in `format`
+  /// ([`FORMAT`] or [`FORMAT_10`]).
+  pub fn new(
+    gpu: &Gpu,
+    size: (u32, u32),
+    image: Option<&Image>,
+    format: wgpu::TextureFormat,
+  ) -> Self {
     let size = (size.0.max(1), size.1.max(1));
     let texture = texture(
       gpu.device(),
       size,
-      FORMAT,
+      format,
       wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
     );
+    let (scene_texture, scene) = with_view(texture_for_scene(gpu, size));
+    let present_uniform = gpu.uniform(&PresentUniform::zeroed());
+    let present = gpu.bind(&scene, &present_uniform);
     let padded_row = (size.0 * 4).div_ceil(256) * 256;
     let readback = gpu.device().create_buffer(&wgpu::BufferDescriptor {
       label: Some("shingle-lock readback"),
@@ -595,8 +712,13 @@ impl Target {
     let background = gpu.bind(view, &background_uniform);
     Self {
       size,
+      scene,
+      _scene_texture: scene_texture,
+      present_uniform,
+      present,
       view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
       texture,
+      format,
       readback,
       background_uniform,
       background,
@@ -613,6 +735,11 @@ impl Target {
   /// The target's size.
   pub fn size(&self) -> (u32, u32) {
     self.size
+  }
+
+  /// The format its frames are read back in.
+  pub fn format(&self) -> wgpu::TextureFormat {
+    self.format
   }
 
   /// Puts `raster` into `slot`, reusing its texture when the size is the
@@ -702,36 +829,16 @@ impl Target {
     }
   }
 
-  /// Draws `frame` and reads it back into `out`, rows `stride` bytes
-  /// apart, as `XRGB8888`. `holds` is the frame `out` holds from an
-  /// earlier draw, if any: only what changed since is read back.
-  ///
-  /// # Errors
-  ///
-  /// When the GPU fails or `out` is too small.
-  pub fn draw(
+  /// Records `frame` into `encoder`: the scene, then the present pass
+  /// into `output`, of `format`.
+  fn encode(
     &mut self,
     gpu: &Gpu,
     frame: &Frame,
-    out: &mut [u8],
-    stride: usize,
-    holds: Option<u64>,
-  ) -> Result<Drawn, String> {
-    let (width, height) = self.size;
-    let row = width as usize * 4;
-    if stride < row || out.len() < stride * (height as usize - 1) + row {
-      return Err("the buffer does not fit the frame".into());
-    }
-    let overlays = self.overlay_rect(frame);
-    let damage = self.damage(frame, overlays);
-    let serial = self.history.push(damage);
-    self.last = Some((*frame, overlays));
-    self.overlays_changed = Rect::default();
-    let copied = self
-      .history
-      .since(holds)
-      .unwrap_or_else(|| Rect::full(self.size));
-    let byte = |value: u8| f32::from(value) / 255.0;
+    encoder: &mut wgpu::CommandEncoder,
+    output: &wgpu::TextureView,
+    format: wgpu::TextureFormat,
+  ) {
     let (base, factor) = frame.vignette.unwrap_or((1.0, 0.0));
     let uniform = BackgroundUniform {
       transform: [
@@ -744,27 +851,29 @@ impl Target {
         base as f32,
         factor as f32,
         if frame.vignette.is_some() { 1.0 } else { 0.0 },
-        frame.drift.shimmer,
+        frame.drift.light,
       ],
       color: [
-        byte(frame.color[0]),
-        byte(frame.color[1]),
-        byte(frame.color[2]),
-        1.0,
+        linear(frame.color[0]),
+        linear(frame.color[1]),
+        linear(frame.color[2]),
+        frame.dim,
       ],
-      shimmer: [frame.drift.phase, self.cover[0], self.cover[1], frame.dim],
+      motion: [
+        frame.drift.time,
+        self.cover[0],
+        self.cover[1],
+        frame.drift.flow,
+      ],
     };
     gpu.queue().write_buffer(
       &self.background_uniform,
       0,
       bytemuck::bytes_of(&uniform),
     );
-    let mut encoder = gpu
-      .device()
-      .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
     gpu.pass(
-      &mut encoder,
-      &self.view,
+      encoder,
+      &self.scene,
       &gpu.background,
       &self.background,
       3,
@@ -788,15 +897,111 @@ impl Target {
         0,
         bytemuck::bytes_of(&uniform),
       );
-      gpu.pass(
-        &mut encoder,
-        &self.view,
-        &gpu.overlay,
-        &overlay.bind,
-        6,
-        false,
-      );
+      gpu.pass(encoder, &self.scene, &gpu.overlay, &overlay.bind, 6, false);
     }
+    let srgb = format == FORMAT_SRGB;
+    let present = PresentUniform {
+      levels: [
+        levels(format),
+        (frame.seed % 64) as f32,
+        1.0,
+        if srgb { 1.0 } else { 0.0 },
+      ],
+    };
+    gpu.queue().write_buffer(
+      &self.present_uniform,
+      0,
+      bytemuck::bytes_of(&present),
+    );
+    let pipeline = match format {
+      FORMAT_10 => &gpu.present[1],
+      FORMAT_SRGB => &gpu.present[2],
+      _ => &gpu.present[0],
+    };
+    gpu.pass(encoder, output, pipeline, &self.present, 3, true);
+  }
+
+  /// Notes `frame` as drawn and returns its serial and its damage.
+  fn record(&mut self, frame: &Frame) -> (u64, Rect) {
+    let overlays = self.overlay_rect(frame);
+    let damage = self.damage(frame, overlays);
+    let serial = self.history.push(damage);
+    self.last = Some((*frame, overlays));
+    self.overlays_changed = Rect::default();
+    (serial, damage)
+  }
+
+  /// Draws `frame` straight into `output`, a DMA-BUF of `format` the
+  /// compositor shows, and waits for the GPU to finish it, so that the
+  /// buffer is complete when it is committed. Returns the serial and the
+  /// damage, as [`Target::draw`] does.
+  ///
+  /// # Errors
+  ///
+  /// When the GPU fails or does not finish in 2 s.
+  pub fn draw_to(
+    &mut self,
+    gpu: &Gpu,
+    frame: &Frame,
+    output: &shingle_render::dmabuf::ImportedTexture,
+  ) -> Result<Drawn, String> {
+    let (serial, damage) = self.record(frame);
+    let texture = output.texture();
+    let format = texture.format();
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu
+      .device()
+      .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    self.encode(gpu, frame, &mut encoder, &view, format);
+    // The buffer is handed to the compositor's queue family after it.
+    let mut access = shingle_render::dmabuf::ForeignAccess::new();
+    access.add(output.foreign());
+    let index = access.submit(gpu.context(), encoder.finish());
+    gpu
+      .device()
+      .poll(wgpu::PollType::Wait {
+        submission_index: Some(index),
+        timeout: Some(std::time::Duration::from_secs(2)),
+      })
+      .map_err(|error| error.to_string())?;
+    Ok(Drawn {
+      serial,
+      damage,
+      copied: Rect::default(),
+    })
+  }
+
+  /// Draws `frame` and reads it back into `out`, rows `stride` bytes
+  /// apart, as `XRGB8888` (or `XBGR2101010` for [`FORMAT_10`]). `holds`
+  /// is the frame `out` holds from an earlier draw, if any: only what
+  /// changed since is read back.
+  ///
+  /// # Errors
+  ///
+  /// When the GPU fails or `out` is too small.
+  pub fn draw(
+    &mut self,
+    gpu: &Gpu,
+    frame: &Frame,
+    out: &mut [u8],
+    stride: usize,
+    holds: Option<u64>,
+  ) -> Result<Drawn, String> {
+    let (width, height) = self.size;
+    let row = width as usize * 4;
+    if stride < row || out.len() < stride * (height as usize - 1) + row {
+      return Err("the buffer does not fit the frame".into());
+    }
+    let (serial, damage) = self.record(frame);
+    let copied = self
+      .history
+      .since(holds)
+      .unwrap_or_else(|| Rect::full(self.size));
+    let mut encoder = gpu
+      .device()
+      .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    let view = self.view.clone();
+    self.encode(gpu, frame, &mut encoder, &view, self.format);
     if copied.is_empty() {
       gpu.queue().submit([encoder.finish()]);
       return Ok(Drawn {
@@ -997,15 +1202,16 @@ mod tests {
       vignette: None,
       color: [0, 0, 0, 255],
       dim: 1.0,
+      seed: 0,
       clock: None,
       input: None,
     };
-    let mut target = Target::new(&gpu, (64, 32), Some(&sharp));
+    let mut target = Target::new(&gpu, (64, 32), Some(&sharp), FORMAT);
     target.draw(&gpu, &plain, &mut frame, 256, None).unwrap();
     assert_eq!(at(&frame, 30, 16), [0, 0, 255]);
     assert_eq!(at(&frame, 33, 16), [0, 255, 0]);
     assert!(frame.chunks_exact(4).all(|pixel| pixel[3] == 255));
-    let mut target = Target::new(&gpu, (64, 32), Some(&blurred));
+    let mut target = Target::new(&gpu, (64, 32), Some(&blurred), FORMAT);
     target.draw(&gpu, &plain, &mut frame, 256, None).unwrap();
     let [_, green, red] = at(&frame, 31, 16);
     assert!(red > 60 && green > 60, "the edge is blurred: {red} {green}");
@@ -1031,25 +1237,29 @@ mod tests {
     // A screenshot of another shape covers the target, cut evenly: the
     // middle half of four stripes on a square target.
     let stripes = gpu.image(&stripes(), None);
-    let mut square = Target::new(&gpu, (32, 32), Some(&stripes));
+    let mut square = Target::new(&gpu, (32, 32), Some(&stripes), FORMAT);
     let mut small = vec![0; 256 * 32];
     square.draw(&gpu, &plain, &mut small, 256, None).unwrap();
     assert_eq!(at(&small, 4, 16), [0, 255, 0], "green, not red");
     assert_eq!(at(&small, 28, 16), [255, 0, 0], "blue, not white");
     // Without a screenshot the colour shows.
-    let mut target = Target::new(&gpu, (64, 32), None);
+    let mut target = Target::new(&gpu, (64, 32), None, FORMAT);
     let coloured = Frame {
       color: [0x10, 0x20, 0x30, 0xff],
       ..plain
     };
     target.draw(&gpu, &coloured, &mut frame, 256, None).unwrap();
-    assert_eq!(at(&frame, 5, 5), [0x30, 0x20, 0x10]);
+    // The colour, within the dither's step.
+    let [b, g, r] = at(&frame, 5, 5);
+    assert!(b.abs_diff(0x30) <= 1 && g.abs_diff(0x20) <= 1, "{b} {g}");
+    assert!(r.abs_diff(0x10) <= 1, "{r}");
     // Dimmed, the screenshot is darker; the colour is not.
-    let mut dimmed = Target::new(&gpu, (64, 32), Some(&sharp));
+    let mut dimmed = Target::new(&gpu, (64, 32), Some(&sharp), FORMAT);
     let dark = Frame { dim: 0.5, ..plain };
     dimmed.draw(&gpu, &dark, &mut frame, 256, None).unwrap();
+    // Half the light: 188 in sRGB.
     let red = at(&frame, 2, 16)[2];
-    assert!((120..=135).contains(&red), "{red}");
+    assert!((184..=192).contains(&red), "{red}");
   }
 
   /// A 4x4 white square in a transparent pixel's border, as the
@@ -1075,13 +1285,14 @@ mod tests {
       return;
     };
     let image = gpu.image(&halves(), None);
-    let mut target = Target::new(&gpu, (64, 32), Some(&image));
+    let mut target = Target::new(&gpu, (64, 32), Some(&image), FORMAT);
     target.set_input(&gpu, Some(&square()));
     let frame = Frame {
       drift: Drift::STILL,
       vignette: None,
       color: [0, 0, 0, 255],
       dim: 1.0,
+      seed: 0,
       clock: None,
       input: Some(Placement::at((4, 4), 1.0)),
     };
@@ -1129,8 +1340,9 @@ mod tests {
     // its edges.
     assert_eq!(at(&buffers[0], 6, 6), [0, 0, 255]);
     assert_eq!(at(&buffers[0], 17, 6), [255, 255, 255]);
+    // Half covered, blended in linear light: about 188.
     let edge = at(&buffers[0], 15, 6);
-    assert!(edge[0] > 100 && edge[0] < 160, "{edge:?}");
+    assert!(edge[0] > 170 && edge[0] < 205, "{edge:?}");
     // Outside the box the buffer kept what it had.
     assert_eq!(at(&buffers[0], 40, 20), [0, 255, 0]);
     // A drift step changes the background: all of it.
@@ -1139,6 +1351,7 @@ mod tests {
         offset: [0.01, 0.0],
         ..Drift::STILL
       },
+      seed: 1,
       ..moved
     };
     let fourth = target
@@ -1181,7 +1394,7 @@ mod tests {
         bgra: (0..size.0 * size.1 * 4).map(|i| (i % 251) as u8).collect(),
       };
       let image = gpu.image(&shot, Some((24, 3)));
-      let mut target = Target::new(&gpu, size, Some(&image));
+      let mut target = Target::new(&gpu, size, Some(&image), FORMAT);
       target.set_input(
         &gpu,
         Some(&Raster {
@@ -1196,10 +1409,11 @@ mod tests {
       let mut times = Vec::new();
       for index in 0..120 {
         let frame = Frame {
-          drift: Drift::at(f64::from(index) / 60.0, &config, size),
+          drift: Drift::at(index as f64 / 60.0, &config, size),
           vignette: Some((0.5, 0.5)),
           color: [0, 0, 0, 255],
           dim: 0.8,
+          seed: index as u32,
           clock: None,
           input: Some(Placement::at((800, 500 + index % 20), 0.5)),
         };
@@ -1219,6 +1433,7 @@ mod tests {
           vignette: Some((0.5, 0.5)),
           color: [0, 0, 0, 255],
           dim: 0.8,
+          seed: 0,
           clock: None,
           input: Some(Placement {
             at: (800.0 + index as f32 * 0.7, 500.0),
@@ -1254,6 +1469,140 @@ mod tests {
       times[times.len() - 1],
     );
     times.clear();
+  }
+
+  /// An IEEE half float's value.
+  fn half(bits: u16) -> f32 {
+    let sign = if bits >> 15 == 1 { -1.0 } else { 1.0 };
+    let exponent = i32::from((bits >> 10) & 0x1f);
+    let fraction = f32::from(bits & 0x3ff) / 1024.0;
+    sign
+      * match exponent {
+        0 => fraction * 2.0_f32.powi(-14),
+        _ => (1.0 + fraction) * 2.0_f32.powi(exponent - 15),
+      }
+  }
+
+  #[test]
+  fn frames_drawn_into_a_dmabuf_hold_the_frame() {
+    use shingle_render::dmabuf::{DmabufDescriptor, DmabufUse};
+    use std::os::fd::AsFd;
+    let Ok(gpu) = Gpu::new() else {
+      eprintln!("no GPU; skipped");
+      return;
+    };
+    let allocator = match crate::zero_copy::Allocator::for_gpu(&gpu) {
+      Ok(allocator) => allocator,
+      Err(reason) => {
+        eprintln!("no DMA-BUFs here ({reason}); skipped");
+        return;
+      }
+    };
+    let (allocation, mut target, frame) =
+      crate::zero_copy::tests::dmabuf_frame(&gpu, &allocator, (64, 32));
+    let drawn = target
+      .draw_to(&gpu, &frame, &allocation.texture)
+      .expect("the frame is drawn");
+    assert_eq!(drawn.copied, Rect::default(), "nothing is read back");
+    // The same buffer imported again to sample, as the compositor does,
+    // and copied into a texture this test can read.
+    let sampled = gpu
+      .context()
+      .import_dmabuf(
+        &DmabufDescriptor {
+          width: 64,
+          height: 32,
+          fourcc: crate::zero_copy::XRGB8888,
+          modifier: allocation.modifier,
+          fd: allocation.fd.as_fd(),
+          offset: allocation.offset,
+          stride: allocation.stride,
+        },
+        DmabufUse::Sample(shingle_render::TextureFilter::Linear),
+      )
+      .expect("the buffer imports to sample");
+    let srgb = sampled.texture().format().is_srgb();
+    let view = sampled
+      .texture()
+      .create_view(&wgpu::TextureViewDescriptor::default());
+    let (copy, copy_view) = with_view(texture(
+      gpu.device(),
+      (64, 32),
+      SCENE,
+      wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+    ));
+    let uniform = gpu.uniform(&BlurUniform::zeroed());
+    let mut encoder = gpu
+      .device()
+      .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    gpu.pass(
+      &mut encoder,
+      &copy_view,
+      &gpu.blur,
+      &gpu.bind(&view, &uniform),
+      3,
+      true,
+    );
+    let readback = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+      label: None,
+      size: 512 * 32,
+      usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+      mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+      copy.as_image_copy(),
+      wgpu::TexelCopyBufferInfo {
+        buffer: &readback,
+        layout: wgpu::TexelCopyBufferLayout {
+          offset: 0,
+          bytes_per_row: Some(512),
+          rows_per_image: Some(32),
+        },
+      },
+      wgpu::Extent3d {
+        width: 64,
+        height: 32,
+        depth_or_array_layers: 1,
+      },
+    );
+    let mut access = shingle_render::dmabuf::ForeignAccess::new();
+    access.add(sampled.foreign());
+    access.submit(gpu.context(), encoder.finish());
+    readback.map_async(wgpu::MapMode::Read, .., |_| {});
+    gpu
+      .device()
+      .poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: Some(std::time::Duration::from_secs(2)),
+      })
+      .unwrap();
+    let mapped = readback.get_mapped_range(..).unwrap();
+    // R, G, B as sRGB bytes, whichever way the import reads them.
+    let at = |x: usize, y: usize| -> [u8; 3] {
+      let offset = y * 512 + x * 8;
+      let channel = |index: usize| {
+        let value = half(u16::from_le_bytes([
+          mapped[offset + index * 2],
+          mapped[offset + index * 2 + 1],
+        ]));
+        let encoded = if srgb {
+          if value <= 0.0031308 {
+            value * 12.92
+          } else {
+            1.055 * value.powf(1.0 / 2.4) - 0.055
+          }
+        } else {
+          value
+        };
+        (encoded * 255.0).round() as u8
+      };
+      [channel(0), channel(1), channel(2)]
+    };
+    let colour = at(2, 2);
+    for (got, want) in colour.iter().zip([0x20_u8, 0x40, 0x80]) {
+      assert!(got.abs_diff(want) <= 1, "{colour:?}");
+    }
+    assert_eq!(at(9, 9), [255, 255, 255]);
   }
 
   #[test]

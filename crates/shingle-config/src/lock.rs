@@ -909,7 +909,9 @@ pub struct DriftConfig {
   /// Whether the background moves at all; default true. It only moves
   /// with a screenshot.
   pub enabled: bool,
-  /// Frames per second while it moves; default 8, at most 30.
+  /// 0, the default, moves it smoothly at the output's refresh rate,
+  /// a frame per frame callback; a number moves it in that many steps
+  /// a second instead, at most 240, which costs less on battery.
   pub fps: f64,
   /// How far it moves from its rest position, in logical pixels;
   /// default 12.
@@ -922,7 +924,7 @@ impl Default for DriftConfig {
   fn default() -> Self {
     Self {
       enabled: true,
-      fps: 8.0,
+      fps: 0.0,
       amplitude: 12.0,
       period: 30.0,
     }
@@ -1015,9 +1017,9 @@ impl LockConfig {
     }
     self.apply_to(&mut LockOptions::default())?;
     let drift = &self.drift;
-    if !(drift.fps.is_finite() && drift.fps > 0.0 && drift.fps <= 30.0) {
+    if !(drift.fps.is_finite() && (0.0..=240.0).contains(&drift.fps)) {
       return Err(ConfigError::Invalid(
-        "lock.drift.fps must be above 0 and at most 30".into(),
+        "lock.drift.fps must be 0 (every frame) or up to 240".into(),
       ));
     }
     if !(drift.amplitude.is_finite()
@@ -1522,7 +1524,7 @@ mod tests {
       "options:\n  no-such: 1\n",
       "options:\n  image: x\n",
       "options:\n  effect-blur: big\n",
-      "drift:\n  fps: 0\n",
+      "drift:\n  fps: -1\n",
       "command: ''\n",
     ] {
       let config: LockConfig = serde_yaml::from_str(bad).unwrap();

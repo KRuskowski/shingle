@@ -12,6 +12,7 @@ calloop = { workspace = true, features = ["signals"] }
 # "log" sends its own error lines to `log`, which nothing prints; the
 # loop reports a lost connection once itself.
 calloop-wayland-source = { version = "0.4.1", features = ["log"] }
+gbm = { version = "0.18.0", default-features = false }
 libc = "0.2"
 pollster.workspace = true
 rustix.workspace = true

@@ -3284,6 +3284,7 @@ dependencies = [
  "bytemuck",
  "calloop 0.14.5",
  "calloop-wayland-source 0.4.1",
+ "gbm",
  "libc",
  "pollster 0.4.0",
  "rustix 1.1.6",

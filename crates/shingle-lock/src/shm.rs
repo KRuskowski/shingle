@@ -19,7 +19,8 @@ pub struct BufferData {
   pub id: u64,
 }
 
-/// An XRGB8888 `wl_shm` buffer mapped into this process.
+/// An `XRGB8888` or `XBGR2101010` `wl_shm` buffer mapped into this
+/// process.
 pub struct ShmBuffer {
   pub id: u64,
   pub buffer: wl_buffer::WlBuffer,
@@ -34,14 +35,15 @@ pub struct ShmBuffer {
 }
 
 impl ShmBuffer {
-  /// A `width` by `height` buffer of output `output`.
+  /// A buffer of `size`, `width` by `height`, in `format` (four bytes a
+  /// pixel), of output `output`.
   pub fn new<State>(
     shm: &wl_shm::WlShm,
     qh: &QueueHandle<State>,
     output: u32,
     id: u64,
-    width: u32,
-    height: u32,
+    (width, height): (u32, u32),
+    format: wl_shm::Format,
   ) -> io::Result<Self>
   where
     State: Dispatch<wl_buffer::WlBuffer, BufferData>
@@ -93,7 +95,7 @@ impl ShmBuffer {
       protocol_width,
       protocol_height,
       protocol_stride,
-      wl_shm::Format::Xrgb8888,
+      format,
       qh,
       BufferData { output, id },
     );

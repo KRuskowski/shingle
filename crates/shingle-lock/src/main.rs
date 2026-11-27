@@ -25,6 +25,7 @@ mod options;
 mod shm;
 mod ui;
 mod username;
+mod zero_copy;
 
 use std::{
   collections::HashMap,
@@ -59,6 +60,10 @@ use wayland_protocols::ext::session_lock::v1::client::{
   ext_session_lock_manager_v1::ExtSessionLockManagerV1,
   ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
   ext_session_lock_v1::{self, ExtSessionLockV1},
+};
+use wayland_protocols::wp::linux_dmabuf::zv1::client::{
+  zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
+  zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
 };
 use xkbcommon::xkb;
 use zeroize::{Zeroize, Zeroizing};
@@ -126,6 +131,18 @@ struct Seat {
 struct Keyboard {
   proxy: wl_keyboard::WlKeyboard,
   xkb: Option<xkb::State>,
+}
+
+/// Ids of DMA-BUFs, apart from those of `wl_shm` buffers.
+const DMABUF_ID: u64 = 1 << 63;
+
+/// The buffer a frame is drawn into.
+#[derive(Clone, Copy, Debug)]
+enum Chosen {
+  /// `LockOutput::buffers`' at this index.
+  Shm(usize),
+  /// `LockOutput::slots`' at this index.
+  Dmabuf(usize),
 }
 
 /// What the input shows of a keyboard: Caps Lock and its layout.
@@ -226,6 +243,9 @@ struct LockOutput {
   /// The minimal style's layout, made with the target.
   minimal_layout: Option<minimal::Layout>,
   buffers: Vec<ShmBuffer>,
+  /// Its DMA-BUFs, when the compositor shows them ([`zero_copy`]);
+  /// then `buffers` stays empty.
+  slots: Vec<zero_copy::Slot>,
   next_buffer_id: u64,
   /// A full frame was committed since the last configure.
   committed: bool,
@@ -274,6 +294,11 @@ struct State {
   xkb_context: xkb::Context,
   settings: Settings,
   gpu: Gpu,
+  /// The DMA-BUF allocator and the compositor's `zwp_linux_dmabuf_v1`,
+  /// when frames go to the compositor without a copy.
+  zero_copy: Option<(zero_copy::Allocator, ZwpLinuxDmabufV1)>,
+  /// The `wl_shm` formats the compositor takes.
+  shm_formats: Vec<wl_shm::Format>,
   /// Every screenshot, in the order of the outputs' globals.
   captures: Vec<Capture>,
   /// The status of the keyboard that last reported one.
@@ -340,6 +365,7 @@ impl State {
         layout: None,
         minimal_layout: None,
         buffers: Vec::new(),
+        slots: Vec::new(),
         next_buffer_id: 0,
         committed: false,
         frame_pending: false,
@@ -553,7 +579,25 @@ impl State {
     if self.leaving.is_some() && self.scene.left(now) && !output.faded {
       return true;
     }
-    self.drifts(name) && output.drawn_step != Some(self.drift_step(now))
+    self.drifts(name)
+      && (self.continuous() || output.drawn_step != Some(self.drift_step(now)))
+  }
+
+  /// Whether the drift moves at every frame callback (`drift.fps` 0)
+  /// rather than in steps.
+  fn continuous(&self) -> bool {
+    self.settings.drift.fps <= 0.0
+  }
+
+  /// Where the drift is at `now`, in seconds since the lock: smooth, or
+  /// at the start of its step with `drift.fps` steps.
+  fn drift_seconds(&self, now: Instant) -> f64 {
+    let elapsed = now.saturating_duration_since(self.started).as_secs_f64();
+    if self.continuous() {
+      elapsed
+    } else {
+      self.drift_step(now) as f64 / self.settings.drift.fps
+    }
   }
 
   /// Whether the input or the scene moves at `now`, which wants a frame
@@ -565,10 +609,14 @@ impl State {
     }
   }
 
-  /// The drift's step at `now`: it moves in steps of `drift.fps`, so
-  /// that between two steps the background stays and a frame that only
-  /// moves the clock or the input reads back only their part.
+  /// The drift's step at `now` with `drift.fps` steps a second: between
+  /// two steps the background stays, and a frame that only moves the
+  /// clock or the input reads back only their part. 0 when it moves at
+  /// every frame.
   fn drift_step(&self, now: Instant) -> u64 {
+    if self.continuous() {
+      return 0;
+    }
     let elapsed = now.saturating_duration_since(self.started).as_secs_f64();
     (elapsed * self.settings.drift.fps).floor() as u64
   }
@@ -598,7 +646,12 @@ impl State {
     if let Some(leaving) = self.leaving {
       consider((leaving + minimal::LEAVE).max(now + FADE_FRAME));
     }
-    let next_step = self.drift_step_at(self.drift_step(now) + 1);
+    let next_step = if self.continuous() {
+      // Frame callbacks pace it; this only wakes the loop.
+      now + FADE_FRAME
+    } else {
+      self.drift_step_at(self.drift_step(now) + 1)
+    };
     for (name, output) in &self.outputs {
       if self.drifts(*name) && !output.frame_pending {
         consider(next_step);
@@ -694,6 +747,19 @@ impl State {
     self.lock.unlock_and_destroy();
   }
 
+  /// The format frames read back into `wl_shm` are drawn in: 10 bits a
+  /// channel where the compositor takes `XBGR2101010`, else 8. Frames
+  /// drawn as DMA-BUFs take the buffer's format.
+  fn texture_format(&self) -> wgpu::TextureFormat {
+    if self.zero_copy.is_none()
+      && self.shm_formats.contains(&wl_shm::Format::Xbgr2101010)
+    {
+      gpu::FORMAT_10
+    } else {
+      gpu::FORMAT
+    }
+  }
+
   fn clock_text(&self) -> (String, String) {
     let now = SystemTime::now();
     let options = &self.settings.options;
@@ -745,7 +811,8 @@ impl State {
     let left = self.leaving.is_some() && self.scene.left(now);
     let labels = self.minimal_labels();
     let step = self.drift_step(now);
-    let drift_seconds = step as f64 / self.settings.drift.fps;
+    let drift_seconds = self.drift_seconds(now);
+    let continuous = self.continuous();
     let qh = self.qh.clone();
     let Some((width, height)) =
       self.outputs.get(&name).and_then(|output| output.size)
@@ -753,6 +820,7 @@ impl State {
       return Ok(());
     };
     let capture = self.capture_for(name, (width, height));
+    let texture_format = self.texture_format();
     let Some(output) = self.outputs.get_mut(&name) else {
       return Ok(());
     };
@@ -767,7 +835,12 @@ impl State {
     {
       output.capture = capture;
       let image = capture.map(|index| &self.captures[index].image);
-      output.target = Some(Target::new(&self.gpu, (width, height), image));
+      output.target = Some(Target::new(
+        &self.gpu,
+        (width, height),
+        image,
+        texture_format,
+      ));
       if self.trace {
         let shown = capture.map(|index| &self.captures[index]);
         eprintln!(
@@ -790,19 +863,60 @@ impl State {
         buffer.holds = None;
       }
     }
-    if output.buffers.is_empty() {
-      for _ in 0..2 {
-        let id = output.next_buffer_id;
-        output.next_buffer_id = output.next_buffer_id.wrapping_add(1);
-        output.buffers.push(
-          ShmBuffer::new(&self.shm, &qh, name, id, width, height).map_err(
-            |error| format!("shared-memory allocation failed: {error}"),
-          )?,
-        );
+    // DMA-BUFs when the compositor and this GPU share them, else wl_shm.
+    if output.buffers.is_empty() && output.slots.is_empty() {
+      if let Some((allocator, dmabuf)) = &self.zero_copy {
+        let mut slots = Vec::new();
+        for _ in 0..zero_copy::BUFFERS {
+          let id = DMABUF_ID | output.next_buffer_id;
+          output.next_buffer_id = output.next_buffer_id.wrapping_add(1);
+          let data = BufferData { output: name, id };
+          match allocator.buffer(&self.gpu, dmabuf, &qh, (width, height), data)
+          {
+            Ok(slot) => slots.push(slot),
+            Err(error) => {
+              eprintln!(
+                "shingle-lock: warning: DMA-BUF frames failed on output \
+                 {name}: {error}; drawing through wl_shm"
+              );
+              slots.clear();
+              break;
+            }
+          }
+        }
+        output.slots = slots;
+      }
+      if output.slots.is_empty() {
+        let format = match output.target.as_ref().map(Target::format) {
+          Some(gpu::FORMAT_10) => wl_shm::Format::Xbgr2101010,
+          _ => wl_shm::Format::Xrgb8888,
+        };
+        for _ in 0..2 {
+          let id = output.next_buffer_id;
+          output.next_buffer_id = output.next_buffer_id.wrapping_add(1);
+          output.buffers.push(
+            ShmBuffer::new(&self.shm, &qh, name, id, (width, height), format)
+              .map_err(|error| {
+              format!("shared-memory allocation failed: {error}")
+            })?,
+          );
+        }
       }
     }
-    let Some(index) = output.buffers.iter().position(|buffer| !buffer.busy)
-    else {
+    let chosen = if output.slots.is_empty() {
+      output
+        .buffers
+        .iter()
+        .position(|buffer| !buffer.busy)
+        .map(Chosen::Shm)
+    } else {
+      output
+        .slots
+        .iter()
+        .position(|slot| !slot.busy)
+        .map(Chosen::Dmabuf)
+    };
+    let Some(chosen) = chosen else {
       return Ok(());
     };
     let layout = output.layout.expect("made with the target");
@@ -901,21 +1015,42 @@ impl State {
         LockStyle::Minimal => MINIMAL_DIM,
         LockStyle::Swaylock => 1.0,
       },
+      // The grain moves with the background, and stands with it.
+      seed: match (drifts, continuous) {
+        (false, _) => 0,
+        (true, true) => (output.frames as u32).wrapping_add(1),
+        (true, false) => step as u32,
+      },
       clock: clock_placement,
       input: input_placement,
     };
-    let buffer = &mut output.buffers[index];
-    let stride = buffer.stride();
-    let holds = buffer.holds;
-    let bytes = buffer
-      .bytes_mut()
-      .map_err(|error| format!("the frame's buffer: {error}"))?;
-    let drawn = target
-      .draw(&self.gpu, &frame, bytes, stride, holds)
-      .map_err(|error| {
-        format!("GPU rendering failed on output {name}: {error}")
-      })?;
-    output.buffers[index].holds = Some(drawn.serial);
+    let failed =
+      |error: String| format!("GPU rendering failed on output {name}: {error}");
+    let (drawn, wl_buffer) = match chosen {
+      Chosen::Shm(index) => {
+        let buffer = &mut output.buffers[index];
+        let stride = buffer.stride();
+        let holds = buffer.holds;
+        let bytes = buffer
+          .bytes_mut()
+          .map_err(|error| format!("the frame's buffer: {error}"))?;
+        let drawn = target
+          .draw(&self.gpu, &frame, bytes, stride, holds)
+          .map_err(failed)?;
+        buffer.holds = Some(drawn.serial);
+        buffer.busy = true;
+        (drawn, buffer.buffer.clone())
+      }
+      Chosen::Dmabuf(index) => {
+        let slot = &mut output.slots[index];
+        let drawn = target
+          .draw_to(&self.gpu, &frame, &slot.texture)
+          .map_err(failed)?;
+        slot.holds = Some(drawn.serial);
+        slot.busy = true;
+        (drawn, slot.buffer.clone())
+      }
+    };
     let (w, h) = (
       i32::try_from(width).map_err(|_| "the output is too wide".to_owned())?,
       i32::try_from(height).map_err(|_| "the output is too tall".to_owned())?,
@@ -929,8 +1064,7 @@ impl State {
       region.destroy();
       Rect::full((width, height))
     };
-    output.buffers[index].busy = true;
-    surface.attach(Some(&output.buffers[index].buffer), 0, 0);
+    surface.attach(Some(&wl_buffer), 0, 0);
     if !damage.is_empty() {
       surface.damage_buffer(
         damage.x as i32,
@@ -1417,6 +1551,30 @@ fn run(
     },
     fonts.description
   );
+  // DMA-BUF frames unless SHINGLE_LOCK_SHM asks for wl_shm, which the
+  // frame-cost measurements compare.
+  let zero_copy = if std::env::var_os("SHINGLE_LOCK_SHM").is_some() {
+    Err("SHINGLE_LOCK_SHM is set".to_owned())
+  } else {
+    zero_copy::query(&connection, &globals, Duration::from_millis(500))
+      .and_then(|feedback| zero_copy::Allocator::new(&gpu, &feedback))
+      .and_then(|allocator| {
+        globals
+          .bind::<ZwpLinuxDmabufV1, _, _>(&qh, 4..=4, ())
+          .map(|dmabuf| (allocator, dmabuf))
+          .map_err(|error| error.to_string())
+      })
+  };
+  let zero_copy = match zero_copy {
+    Ok(zero_copy) => {
+      eprintln!("shingle-lock: frames go to the compositor as DMA-BUFs");
+      Some(zero_copy)
+    }
+    Err(reason) => {
+      eprintln!("shingle-lock: frames are read back into wl_shm: {reason}");
+      None
+    }
+  };
   let lock = manager.lock(&qh, ());
   eprintln!("shingle-lock: timing: {}", timing.report());
 
@@ -1452,6 +1610,8 @@ fn run(
     xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
     settings,
     gpu,
+    zero_copy,
+    shm_formats: Vec::new(),
     captures,
     keyboard: KeyboardStatus::default(),
     fonts,
@@ -1681,12 +1841,14 @@ impl Dispatch<ExtSessionLockSurfaceV1, u32> for State {
         output.size = None;
         output.target = None;
         output.buffers.clear();
+        output.slots.clear();
         output.committed = false;
         return;
       }
       if output.size != Some((width, height)) {
         output.size = Some((width, height));
         output.buffers.clear();
+        output.slots.clear();
       }
       // A configure is answered at once, whatever frame is pending.
       output.committed = false;
@@ -1888,13 +2050,20 @@ impl Dispatch<wl_buffer::WlBuffer, BufferData> for State {
     if !state.active() || !matches!(event, wl_buffer::Event::Release) {
       return;
     }
-    if let Some(output) = state.outputs.get_mut(&data.output)
-      && let Some(buffer) = output
-        .buffers
-        .iter_mut()
-        .find(|buffer| buffer.id == data.id)
+    let Some(output) = state.outputs.get_mut(&data.output) else {
+      return;
+    };
+    if let Some(buffer) = output
+      .buffers
+      .iter_mut()
+      .find(|buffer| buffer.id == data.id)
     {
       buffer.busy = false;
+    }
+    if let Some(slot) = output.slots.iter_mut().find(|slot| {
+      slot.buffer.data::<BufferData>().map(|d| d.id) == Some(data.id)
+    }) {
+      slot.busy = false;
     }
   }
 }
@@ -1939,10 +2108,29 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
   }
 }
 
+impl Dispatch<wl_shm::WlShm, ()> for State {
+  fn event(
+    state: &mut Self,
+    _proxy: &wl_shm::WlShm,
+    event: wl_shm::Event,
+    _data: &(),
+    _conn: &Connection,
+    _qh: &QueueHandle<Self>,
+  ) {
+    if let wl_shm::Event::Format {
+      format: WEnum::Value(format),
+    } = event
+    {
+      state.shm_formats.push(format);
+    }
+  }
+}
+
 noop_dispatch!(
   wl_compositor::WlCompositor,
+  ZwpLinuxDmabufV1,
+  ZwpLinuxBufferParamsV1,
   wl_region::WlRegion,
-  wl_shm::WlShm,
   wl_shm_pool::WlShmPool,
   wl_surface::WlSurface,
   ExtSessionLockManagerV1,
@@ -2090,7 +2278,7 @@ mod tests {
     let clock =
       minimal::rasterize_clock("21:47", "", &layout, &fonts.clock, &fonts.text);
     for (name, scene, now, labels) in states {
-      let mut target = Target::new(&gpu, size, Some(&image));
+      let mut target = Target::new(&gpu, size, Some(&image), gpu::FORMAT);
       target.set_clock(&gpu, clock.as_ref());
       let look = scene.look(now);
       let mut shown = None;
@@ -2109,6 +2297,7 @@ mod tests {
         vignette: options.vignette,
         color: options.color,
         dim: MINIMAL_DIM,
+        seed: 1,
         clock: clock_at,
         input: input_at,
       };
