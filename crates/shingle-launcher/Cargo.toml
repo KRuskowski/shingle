@@ -6,13 +6,23 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+calloop = { workspace = true, features = ["signals"] }
+calloop-wayland-source = "0.4.1"
 gloomy-core.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Gloomy's own wgpu and pollster, for the device handed to its renderer.
 pollster = "0.3"
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+rustix.workspace = true
+shingle-config = { path = "../shingle-config" }
+shingle-session = { path = "../shingle-session" }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { workspace = true, features = ["client"] }
 wgpu = "0.20"
+xkbcommon.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

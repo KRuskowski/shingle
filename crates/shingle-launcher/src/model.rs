@@ -329,6 +329,11 @@ impl Model {
     }
   }
 
+  /// The index shown.
+  pub fn index(&self) -> &Index {
+    &self.index
+  }
+
   /// The layout as edited so far.
   pub fn layout(&self) -> &Layout {
     &self.layout

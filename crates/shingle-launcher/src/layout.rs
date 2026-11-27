@@ -29,14 +29,19 @@ pub struct Layout {
   /// [`LAYOUT_VERSION`].
   pub version: u32,
   /// Favourite entry IDs, in the order shown.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
   pub favourites: Vec<String>,
   /// Categories in the order shown, each with the entries placed in it.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
   pub categories: Vec<CategoryLayout>,
   /// Shown names by entry ID.
+  #[serde(skip_serializing_if = "BTreeMap::is_empty")]
   pub renamed: BTreeMap<String, String>,
   /// Entries shown only in the Hidden category.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
   pub hidden: Vec<String>,
   /// The user's own entries.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
   pub shortcuts: Vec<Shortcut>,
 }
 
@@ -48,7 +53,7 @@ pub struct CategoryLayout {
   pub name: String,
   /// Entries placed in it, in the order shown, ahead of its default
   /// members.
-  #[serde(default)]
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub entries: Vec<String>,
 }
 
@@ -63,8 +68,12 @@ pub struct Shortcut {
   /// The `/bin/sh` command it runs.
   pub command: String,
   /// Whether it runs in a terminal.
-  #[serde(default)]
+  #[serde(default, skip_serializing_if = "is_false")]
   pub terminal: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+  !value
 }
 
 impl Layout {
@@ -543,6 +552,7 @@ mod tests {
     let text = fs::read_to_string(store.path()).unwrap();
     assert!(text.starts_with("# shingle-launcher layout"), "{text}");
     assert!(text.contains("firefox.desktop: Web"), "{text}");
+    assert!(!text.contains("hidden"), "empty lists are left out: {text}");
     let (loaded, warning) = store.load();
     assert_eq!(warning, None);
     assert_eq!(loaded.favourites, layout.favourites);
