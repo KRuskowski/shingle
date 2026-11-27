@@ -1704,6 +1704,9 @@ impl Compositor {
   /// output gets its feedback from its primary output's frame, as
   /// wlroots' scene gives it. A dark output presents nothing.
   ///
+  /// The events are flushed to the clients at once, so that a backend that
+  /// draws another output before its next turn does not hold them back.
+  ///
   /// Does nothing while the session is inactive
   /// ([`Compositor::set_session_active`]).
   pub fn frame_presented(&mut self, output: &OutputHandle, info: PresentInfo) {
@@ -1735,6 +1738,9 @@ impl Compositor {
     }
     self.state.frame_callbacks = hidden;
     presentation::frame(&mut self.state, &id, &info);
+    // Flushing every client skips the ones that fail; their next dispatch
+    // drops them.
+    let _ = self.display.flush_clients();
   }
 
   /// Whether a constrained surface update needs a future frame.
@@ -4904,6 +4910,31 @@ pub(crate) mod tests {
     // Dispatching consumes the expiration, so the descriptor does not stay
     // readable and spin a backend's loop.
     assert!(!readable(compositor.as_fd(), Duration::ZERO));
+  }
+
+  // The offscreen backend draws each output that is due in turn, waiting
+  // for the GPU each time. The first output's clients must not wait for
+  // the frames of the others.
+  #[test]
+  fn frame_presented_sends_its_events_at_once() {
+    let (mut compositor, path) = test_compositor();
+    let client = client_waiting_for_a_frame(&mut compositor, &path);
+    let socket = client.socket();
+    assert!(!readable(socket.as_fd(), Duration::ZERO));
+    let output = compositor.primary_output();
+    compositor.frame_presented(
+      &output,
+      PresentInfo {
+        time: monotonic_time(),
+        refresh_ns: 16_666_667,
+        seq: 1,
+        flags: PresentationFlags::empty(),
+      },
+    );
+    assert!(
+      readable(socket.as_fd(), Duration::ZERO),
+      "the frame callback was sent before the next turn"
+    );
   }
 
   // A backend changes the compositor between turns, as when it reports
