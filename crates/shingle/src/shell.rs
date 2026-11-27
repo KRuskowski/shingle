@@ -1060,7 +1060,9 @@ fn remove_window(state: &mut CompositorState, surface: SurfaceId, role: &Role) {
     state.pending_maps.remove(&window);
     state.delayed_maps.remove(&window);
     state.focus_recency.remove(&window);
-    state.view_properties.remove(&window);
+    if let Some(properties) = state.view_properties.remove(&window) {
+      state.departing_view_properties.insert(window, properties);
+    }
     if mapped {
       state
         .events

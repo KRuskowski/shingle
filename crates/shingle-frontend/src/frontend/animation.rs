@@ -55,9 +55,9 @@ impl Which {
   }
 }
 
-/// What the `[animate]` matchers and a view's properties said of a
-/// surface when it was last drawn, for choosing its animation after it
-/// went.
+/// What the `[animate]` matchers said of a surface when it was last
+/// drawn, for choosing its animation after it went, and its window's view
+/// properties, read when the animation is chosen.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct ViewMatches {
   /// `enabled_for`.
@@ -75,9 +75,9 @@ pub(super) struct ViewMatches {
 }
 
 impl ViewMatches {
-  /// Whether nothing would animate the view, so it need not be kept.
+  /// Whether no matcher matched, so the surface need not be kept.
   pub(super) fn is_empty(&self) -> bool {
-    *self == Self::default()
+    !(self.enabled || self.fade || self.zoom || self.fire)
   }
 }
 
@@ -124,8 +124,7 @@ impl Frontend {
     })
   }
 
-  /// What the four `[animate]` matchers and the window's view properties
-  /// say of `snapshot`.
+  /// What the four `[animate]` matchers say of `snapshot`.
   pub(super) fn view_matches(&self, snapshot: &SurfaceSnapshot) -> ViewMatches {
     let Some(view_type) = Self::view_type(snapshot) else {
       return ViewMatches::default();
@@ -151,27 +150,35 @@ impl Frontend {
       view.tiled_top = !view.floating;
       view.tiled_bottom = !view.floating;
     }
-    let mut matches = ViewMatches {
+    ViewMatches {
       enabled: self.animate.enabled_for.matches_view(&view),
       fade: self.animate.fade_enabled_for.matches_view(&view),
       zoom: self.animate.zoom_enabled_for.matches_view(&view),
       fire: self.animate.fire_enabled_for.matches_view(&view),
       ..ViewMatches::default()
+    }
+  }
+
+  /// `matches` with `window`'s `*-animation-type` and
+  /// `*-animation-duration` view properties as they are now.
+  pub(super) fn with_properties(
+    &self,
+    mut matches: ViewMatches,
+    window: Option<TileWindowId>,
+  ) -> ViewMatches {
+    let Some(window) = window else {
+      return matches;
     };
-    if let Some(window) = snapshot.window
-      && self.compositor.has_view_properties(window)
-    {
-      for which in [Which::Open, Which::Close, Which::Minimize] {
-        let name = which.name();
-        matches.types[which.index()] = self
+    for which in [Which::Open, Which::Close, Which::Minimize] {
+      let name = which.name();
+      let property = |kind: &str| {
+        self
           .compositor
-          .view_string_property(window, &format!("{name}-animation-type"))
-          .map(str::to_owned);
-        matches.durations[which.index()] = self
-          .compositor
-          .view_string_property(window, &format!("{name}-animation-duration"))
-          .map(str::to_owned);
-      }
+          .view_string_property(window, &format!("{name}-animation-{kind}"))
+          .map(str::to_owned)
+      };
+      matches.types[which.index()] = property("type");
+      matches.durations[which.index()] = property("duration");
     }
     matches
   }
@@ -294,7 +301,8 @@ impl Frontend {
     {
       return;
     }
-    let matches = self.view_matches(snapshot);
+    let matches =
+      self.with_properties(self.view_matches(snapshot), snapshot.window);
     let (name, duration) = self.choose_animation(Which::Open, &matches);
     let Some(effect) = Effect::from_name(&name) else {
       return;
@@ -320,7 +328,7 @@ impl Frontend {
     window: Option<TileWindowId>,
     geometry: RenderRect,
   ) -> Option<Animation> {
-    let matches = self.view_matches_of(surface)?;
+    let matches = self.with_properties(self.view_matches_of(surface), window);
     let (name, duration) = self.choose_animation(Which::Close, &matches);
     let effect = Effect::from_name(&name)?;
     let now = Instant::now();
@@ -341,15 +349,14 @@ impl Frontend {
     ))
   }
 
-  /// What the matchers said of `surface` when it was last drawn.
-  pub(super) fn view_matches_of(
-    &self,
-    surface: SurfaceId,
-  ) -> Option<ViewMatches> {
+  /// What the matchers said of `surface` when it was last drawn; none
+  /// matched if it was not.
+  pub(super) fn view_matches_of(&self, surface: SurfaceId) -> ViewMatches {
     self
       .scenes
       .values()
       .find_map(|scene| scene.animation_enabled.get(&surface).cloned())
+      .unwrap_or_default()
   }
 
   /// The minimize animation's effect and length for a view `matches`
@@ -392,9 +399,8 @@ impl Frontend {
     let Some(surface) = self.window_surface(window) else {
       return;
     };
-    let Some(matches) = self.view_matches_of(surface) else {
-      return;
-    };
+    let matches =
+      self.with_properties(self.view_matches_of(surface), Some(window));
     let Some((effect, timing)) = self.minimize_choice(&matches) else {
       return;
     };
@@ -449,7 +455,8 @@ impl Frontend {
       }
       return;
     };
-    let matches = self.view_matches(&snapshot);
+    let matches =
+      self.with_properties(self.view_matches(&snapshot), Some(window));
     let choice = self.minimize_choice(&matches);
     let taken = minimizing.and_then(|surface| {
       let closing = self.minimize_animations.remove(&surface)?;

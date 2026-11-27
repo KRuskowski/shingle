@@ -1777,6 +1777,8 @@ impl Compositor {
   /// events among them are also queued for IPC `events/watch` clients at this
   /// point, so a frontend must drain regularly for IPC events to flow.
   pub fn drain_events(&mut self) -> Vec<Event> {
+    self.state.departed_view_properties =
+      std::mem::take(&mut self.state.departing_view_properties);
     let events = self.state.drain_events();
     ipc::record_events(&mut self.state, &events);
     events
@@ -2679,28 +2681,24 @@ impl Compositor {
 
   /// The string view property `name` of `window`, as a client set it with
   /// `window-rules/set-view-property`; `None` when it has none of that name
-  /// or the property is not a string. Wayfire's animate reads
-  /// `open-animation-type` and its kin this way
-  /// (wayfire:plugins/animate/animate.cpp:347-367).
+  /// or the property is not a string. A window whose `WindowDestroyed` the
+  /// last [`Compositor::drain_events`] returned still has its properties
+  /// until the next one. Wayfire's animate reads `open-animation-type` and
+  /// its kin this way (wayfire:plugins/animate/animate.cpp:347-367).
   pub fn view_string_property(
     &self,
     window: WindowId,
     name: &str,
   ) -> Option<&str> {
-    match self.state.view_properties.get(&window)?.get(name)? {
-      crate::ipc::ViewProperty::String(value) => Some(value),
-      _ => None,
-    }
-  }
-
-  /// Whether `window` has any view property, so that a caller can skip
-  /// looking for each.
-  pub fn has_view_properties(&self, window: WindowId) -> bool {
-    self
+    let properties = self
       .state
       .view_properties
       .get(&window)
-      .is_some_and(|properties| !properties.is_empty())
+      .or_else(|| self.state.departed_view_properties.get(&window))?;
+    match properties.get(name)? {
+      crate::ipc::ViewProperty::String(value) => Some(value),
+      _ => None,
+    }
   }
 
   /// Where `window` minimizes to, in layout coordinates, if a taskbar told

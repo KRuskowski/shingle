@@ -289,6 +289,16 @@ pub(crate) struct CompositorState {
   pub(crate) focus_recency: HashMap<shingle_core::WindowId, u64>,
   pub(crate) view_properties:
     HashMap<shingle_core::WindowId, HashMap<String, crate::ipc::ViewProperty>>,
+  /// The view properties of windows that went since events were last
+  /// drained, which become `departed_view_properties` when they are.
+  pub(crate) departing_view_properties:
+    HashMap<shingle_core::WindowId, HashMap<String, crate::ipc::ViewProperty>>,
+  /// The view properties of the windows whose `WindowDestroyed` the last
+  /// drained events hold, so that the frontend can read them while it
+  /// handles them, as Wayfire's animate reads a view's properties before
+  /// it unmaps.
+  pub(crate) departed_view_properties:
+    HashMap<shingle_core::WindowId, HashMap<String, crate::ipc::ViewProperty>>,
   pub(crate) runtime_bindings:
     std::collections::BTreeMap<u64, crate::RuntimeBinding>,
   /// Whether `stipc/feed_key` hands keys to the frontend as
@@ -494,6 +504,8 @@ impl CompositorState {
       wayfire_values: config.wayfire_values,
       focus_recency: HashMap::new(),
       view_properties: HashMap::new(),
+      departing_view_properties: HashMap::new(),
+      departed_view_properties: HashMap::new(),
       runtime_bindings: Default::default(),
       stipc_key_events: false,
       stipc_pointer_events: false,

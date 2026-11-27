@@ -1130,6 +1130,42 @@ fn a_taskbar_rectangle_is_the_minimize_hint() {
 }
 
 #[test]
+fn a_gone_windows_view_properties_last_one_drain() {
+  let (mut compositor, path) = two_outputs();
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let (toplevel, window) = mapped(&mut compositor, &mut client, "going");
+  compositor
+    .state
+    .view_properties
+    .entry(window)
+    .or_default()
+    .insert(
+      "close-animation-type".into(),
+      crate::ipc::ViewProperty::String("spin".into()),
+    );
+  compositor.drain_events();
+  toplevel.toplevel.destroy();
+  client.roundtrip(&mut compositor);
+  let events = compositor.drain_events();
+  assert!(events.iter().any(|event| matches!(
+    event,
+    crate::Event::WindowDestroyed { window: gone, .. } if *gone == window
+  )));
+  // While the events that say it went are handled, as Wayfire's animate
+  // reads them before the view unmaps.
+  assert_eq!(
+    compositor.view_string_property(window, "close-animation-type"),
+    Some("spin")
+  );
+  compositor.drain_events();
+  assert_eq!(
+    compositor.view_string_property(window, "close-animation-type"),
+    None
+  );
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn outputs_at_negative_positions_are_warned_about_for_x() {
   let (mut compositor, _path) = two_outputs();
   assert!(
