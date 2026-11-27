@@ -519,8 +519,8 @@ class ParserTest(unittest.TestCase):
         '                      sym: a (97), utf8: \'a\'',
         '[14:     wl_keyboard] key: serial: 3; time: 1010; key: 30; '
         'state: 0 (released)',
-        '[12:        wl_touch] down: serial: 4; time: 5; surface: 3; id: 0; '
-        'x, y: 640.000000, 360.000000',
+        '\x1b[1;34m[12:        wl_touch]\x1b[0m down: serial: 4; time: 5; '
+        'surface: 3; id: 0; x, y: 640.000000, 360.000000',
     ])
     self.assertEqual(len(events), 3)
     self.assertEqual((events[2]['x'], events[2]['y']), (640.0, 360.0))

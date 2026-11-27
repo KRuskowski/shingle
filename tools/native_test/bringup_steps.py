@@ -167,6 +167,7 @@ def signal_script(pid, start, name):
 
 UINPUT_LINE = re.compile(r'^(.*) at ([\d.]+) ms$')
 WEV_LINE = re.compile(r'^\[\s*\d+:\s*(wl_\w+)\]\s*(\w+):(.*)$')
+ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
 def parse_uinput(text):
   """[(what, CLOCK_MONOTONIC ms)] from uinput.py's output."""
@@ -182,7 +183,7 @@ def parse_wev(lines):
   key, button, state, x and y."""
   events = []
   for line in lines:
-    match = WEV_LINE.match(line.strip())
+    match = WEV_LINE.match(ANSI.sub('', line).strip())
     if not match:
       continue
     interface, event, rest = match.groups()
