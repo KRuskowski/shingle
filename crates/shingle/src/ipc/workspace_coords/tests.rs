@@ -122,6 +122,15 @@ fn moved_events(events: &[Value]) -> bool {
     .any(|event| event["event"] == "view-workspace-changed")
 }
 
+fn set_sticky(compositor: &mut Compositor, window: WindowId, sticky: bool) {
+  let reply = ipc(
+    compositor,
+    "wm-actions/set-sticky",
+    json!({"view_id": window.0, "state": sticky}),
+  );
+  assert_eq!(reply, json!({"result": "ok"}));
+}
+
 fn floating(compositor: &Compositor, window: WindowId) -> Option<Rect> {
   compositor
     .core()
@@ -492,5 +501,62 @@ fn each_output_offsets_by_its_own_size() {
     floating(&compositor, window),
     Some(Rect::new(1310, 20, 200, 100))
   );
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn unsticking_a_floating_view_leaves_it_on_the_current_workspace() {
+  let (mut compositor, path) = test_compositor_with(Config::default());
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let window = mapped(&mut compositor, &mut client, "pinned");
+  let target = json!({"x": 40, "y": 30, "width": 300, "height": 200});
+  configure(&mut compositor, window, target.clone());
+  set_sticky(&mut compositor, window, true);
+  switch(&mut compositor, 1, 2, 0);
+  client.roundtrip(&mut compositor);
+  ipc_events(&mut compositor);
+  // Wayfire leaves its geometry, which is on the current workspace
+  // (wayfire:src/view/toplevel-view.cpp:258-276).
+  set_sticky(&mut compositor, window, false);
+  assert_eq!(workspace_of(&compositor, window), WorkspaceId::new(2, 0));
+  assert_eq!(
+    floating(&compositor, window),
+    Some(Rect::new(40, 30, 300, 200))
+  );
+  assert_eq!(view(&mut compositor, window)["geometry"], target);
+  let events = ipc_events(&mut compositor);
+  assert_eq!(
+    names(&events),
+    vec![("view-sticky".to_owned(), Some(window.0))],
+    "{events:?}"
+  );
+  // It is an ordinary view of that workspace now.
+  switch(&mut compositor, 1, 0, 0);
+  assert_eq!(
+    geometry_of(&mut compositor, window),
+    Rect::new(2600, 30, 300, 200)
+  );
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn unsticking_a_tiled_view_keeps_its_tile_on_its_workspace() {
+  let (mut compositor, path) = test_compositor_with(Config::default());
+  let mut client = TestClient::connect(&mut compositor, &path);
+  let window = mapped(&mut compositor, &mut client, "tiled");
+  let tile = geometry_of(&mut compositor, window);
+  set_sticky(&mut compositor, window, true);
+  switch(&mut compositor, 1, 1, 0);
+  ipc_events(&mut compositor);
+  // simple-tile keeps the view in its workspace's tree
+  // (wayfire:plugins/tile/tree.cpp:433-437).
+  set_sticky(&mut compositor, window, false);
+  assert_eq!(workspace_of(&compositor, window), WorkspaceId::ORIGIN);
+  assert_eq!(
+    geometry_of(&mut compositor, window),
+    shifted(tile, -1280, 0)
+  );
+  let events = ipc_events(&mut compositor);
+  assert!(!moved_events(&events), "{events:?}");
   let _ = std::fs::remove_file(path);
 }

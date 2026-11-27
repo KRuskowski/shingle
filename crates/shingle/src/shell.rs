@@ -1838,18 +1838,55 @@ pub(crate) fn set_stacking(
   Ok(())
 }
 
+/// Sets `window`'s sticky state. A floating or snapped window that stops
+/// being sticky stays where it is drawn, on its set's current workspace:
+/// Wayfire never moves a sticky view on a switch
+/// (wayfire:src/output/workspace-impl.cpp:612), so it is in the current
+/// workspace's part of the plane, and `set_sticky` leaves its geometry
+/// alone (wayfire:src/view/toplevel-view.cpp:258-276) and sends no
+/// `view-workspace-changed`. A tiled window keeps its tile on its own
+/// workspace, as simple-tile keeps the view in that workspace's tree
+/// (wayfire:plugins/tile/tree.cpp:433-437 only draws it on the current
+/// one while it is sticky).
 pub(crate) fn set_sticky(
   state: &mut CompositorState,
   window: WindowId,
   sticky: bool,
 ) -> Result<(), crate::Error> {
-  let changed = state.core.window_info(window)?.state.sticky != sticky;
+  let info = state.core.window_info(window)?;
+  let changed = info.state.sticky != sticky;
   state.core.set_sticky(window, sticky)?;
+  if changed && !sticky {
+    unstick_to_current(state, window, &info)?;
+  }
   reconfigure_all(state);
   if changed {
     state.events.push(Event::StickyChanged { window, sticky });
   }
   Ok(())
+}
+
+/// Moves a floating or snapped `window` that has just stopped being sticky
+/// to its set's current workspace, unreported ([`set_sticky`]).
+fn unstick_to_current(
+  state: &mut CompositorState,
+  window: WindowId,
+  info: &shingle_core::WindowInfo,
+) -> Result<(), crate::Error> {
+  if info.state.floating.is_none() && info.state.snapped.is_none() {
+    return Ok(());
+  }
+  let wset = state.core.wset(info.wset)?;
+  if wset.output.is_none() {
+    return Ok(());
+  }
+  let current = wset.current_workspace;
+  if current == info.location.workspace {
+    return Ok(());
+  }
+  let index =
+    current.y as usize * state.workspace_width as usize + current.x as usize;
+  state.move_window_to_workspace_as(window, index, false)
 }
 
 pub(crate) fn window_alpha(
