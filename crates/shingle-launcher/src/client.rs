@@ -677,11 +677,15 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
         height,
       } => {
         proxy.ack_configure(serial);
-        if width == 0 || height == 0 {
-          return state.fail("the compositor configured an empty surface");
+        state.trace(json!({
+          "event": "configure", "width": width, "height": height,
+        }));
+        // A compositor may configure before it knows the output; the
+        // surface is drawn once a configure has a size.
+        if width > 0 && height > 0 {
+          state.size = Some((width, height));
+          state.dirty = true;
         }
-        state.size = Some((width, height));
-        state.dirty = true;
       }
       zwlr_layer_surface_v1::Event::Closed => {
         state.exit.get_or_insert(Exit::Closed);
