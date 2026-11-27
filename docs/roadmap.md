@@ -117,6 +117,8 @@ Since `shingle-workspace-followups` the differences that change left are closed:
 
 Since `shingle-animate` Wayfire's animate is complete: `fire`, `zap`, `spin` and `squeezimize` beside `fade` and `zoom`, the `*_enabled_for` matchers and durations, the animation view properties, `startup_duration`, the fire options and `spin_rotations`, the taskbar's minimize rectangle, and the easing curve of every wf-config duration in every animation Shingle has ([animate as built](design/wayfire-gaps.md#animate-as-built)).
 
+Since `shingle-lock-screen` the lock screen is Shingle's own: `shingle-lock` reads swaylock's config and options, draws a blurred, slowly drifting capture of every output with the clock and an outlined password input that fades in on typing, and from a lock request until the unlock no output shows a client, checked on every presented frame by `tools/gpu_test/run.py --checks lock`. A Wayfire import runs it where the config runs a bare `swaylock`. Open: the native black-buffer rule, step 54 of [native-testing.md](native-testing.md), and the operator's review of its [Decisions](design/lock-screen.md#decisions) ([status.md](status.md#idle-and-locking)).
+
 Since `shingle-colour-and-focus-fixes` every configured colour shows the bytes Wayfire writes for it, and the gamma LUT no longer darkens dark tones; WG-7's belief that Wayfire records the view refocused after a minimize as recently focused turned out wrong, and Shingle already matched Wayfire there ([Colour and focus fixes as built](design/wayfire-gaps.md#colour-and-focus-fixes-as-built)).
 
 ## 7. Soak tests and measurements
