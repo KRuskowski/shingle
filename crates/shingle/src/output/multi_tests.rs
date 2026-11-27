@@ -663,3 +663,45 @@ fn a_returning_output_reports_its_new_set() {
   assert_eq!(changed["output"], json!(3));
   assert_eq!(changed["new-wset-data"]["output-name"], json!("HEADLESS-2"));
 }
+
+#[test]
+fn floating_windows_keep_their_place_on_a_moving_output() {
+  let (mut compositor, _path) = two_outputs(Config::default());
+  let carried = placeholder(&mut compositor, "HEADLESS-2");
+  let stays = placeholder(&mut compositor, "HEADLESS-1");
+  let core = &mut compositor.state.core;
+  core
+    .set_floating(carried, Some(Rect::new(1320, 30, 200, 100)))
+    .unwrap();
+  core
+    .set_floating(stays, Some(Rect::new(40, 30, 200, 100)))
+    .unwrap();
+  // The first output narrows, so the second moves 280 to the left, and
+  // its window with it, as a Wayfire view keeps its output-relative
+  // geometry.
+  let first = compositor.outputs()[0].handle.clone();
+  compositor.set_output_size(&first, (1000, 720)).unwrap();
+  assert_eq!(rects(&compositor)[1].1, Rect::new(1000, 0, 800, 600));
+  let floating = |compositor: &Compositor, window: WindowId| -> Option<Rect> {
+    compositor
+      .core()
+      .window_info(window)
+      .unwrap()
+      .state
+      .floating
+  };
+  assert_eq!(
+    floating(&compositor, carried),
+    Some(Rect::new(1040, 30, 200, 100))
+  );
+  assert_eq!(
+    floating(&compositor, stays),
+    Some(Rect::new(40, 30, 200, 100))
+  );
+  // An output given a new position carries its own windows.
+  compositor.set_output(Rect::new(0, 100, 1000, 720)).unwrap();
+  assert_eq!(
+    floating(&compositor, stays),
+    Some(Rect::new(40, 130, 200, 100))
+  );
+}

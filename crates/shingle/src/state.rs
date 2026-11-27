@@ -1500,11 +1500,14 @@ impl CompositorState {
         y: rect.y,
       };
     }
+    let from = output.rect;
     output.rect = rect;
     let moved = crate::output::relayout(self);
     let output = self.outputs.get(id).expect("the output exists");
     output.send_all();
     let rect = output.rect;
+    // Its windows keep their place on it.
+    crate::output::carry_windows(self, id, from, rect);
     crate::layer_shell::update_workarea(self);
     shell::reconfigure_lock_surfaces(self);
     crate::xdg_output::update(self);

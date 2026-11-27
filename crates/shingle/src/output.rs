@@ -46,7 +46,9 @@ pub(crate) use hotplug::{
   add, add_disabled, disable, park_restored, remove, restore,
 };
 pub use moving::MoveGeometry;
-pub(crate) use moving::{move_window_to_output, moved_events, topmost_parent};
+pub(crate) use moving::{
+  carry_windows, move_window_to_output, moved_events, topmost_parent,
+};
 pub use registry::OutputKind;
 pub(crate) use registry::{DisabledOutput, OutputState, Outputs};
 use shingle_config::OutputPosition;
@@ -547,11 +549,16 @@ pub(crate) fn relayout(state: &mut CompositorState) -> Vec<OutputId> {
     eprintln!("shingle: output layout: {warning}");
   }
   let mut moved = Vec::new();
+  let mut carried = Vec::new();
   for (output, rect) in state.outputs.iter_mut().zip(rects) {
     if output.rect != rect {
+      carried.push((output.id.clone(), output.rect, rect));
       output.rect = rect;
       moved.push(output.id.clone());
     }
+  }
+  for (id, from, to) in carried {
+    moving::carry_windows(state, &id, from, to);
   }
   if !moved.is_empty() && state.xwayland.display.is_some() {
     for warning in negative_positions(state.outputs.iter()) {

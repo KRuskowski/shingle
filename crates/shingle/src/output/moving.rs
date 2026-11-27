@@ -252,6 +252,56 @@ fn floating_rect(state: &CompositorState, window: WindowId) -> Option<Rect> {
     .and_then(|info| info.state.floating)
 }
 
+/// Moves the floating and snapped windows on output `id`, on every
+/// workspace of its set, by as much as the output's corner moved from
+/// `from` to `to`, so that they keep their place on it. Wayfire keeps a
+/// view's geometry relative to its output
+/// (wayfire:src/output/workspace-impl.cpp:198-202), so a view stays where
+/// it is on an output that moves in the layout. Tiled, maximized and
+/// fullscreen windows follow the output by themselves.
+pub(crate) fn carry_windows(
+  state: &mut CompositorState,
+  id: &OutputId,
+  from: Rect,
+  to: Rect,
+) {
+  let (dx, dy) = (to.x.saturating_sub(from.x), to.y.saturating_sub(from.y));
+  if (dx, dy) == (0, 0) {
+    return;
+  }
+  let shift = |rect: Rect| {
+    Rect::new(
+      rect.x.saturating_add(dx),
+      rect.y.saturating_add(dy),
+      rect.width,
+      rect.height,
+    )
+  };
+  let windows = state
+    .core
+    .window_ids()
+    .filter_map(|window| {
+      let info = state.core.window_info(window).ok()?;
+      (info.location.output == *id).then_some((window, info.state))
+    })
+    .collect::<Vec<_>>();
+  let mut changed = false;
+  for (window, leaf) in windows {
+    if let Some(rect) = leaf.floating {
+      set_floating(state, window, shift(rect));
+      changed = true;
+    } else if let Some(rect) = leaf.snapped
+      && state.core.set_snapped(window, Some(shift(rect))).is_ok()
+    {
+      changed = true;
+    }
+  }
+  if changed {
+    crate::shell::reconfigure_all(state);
+    state.events.push(crate::Event::LayoutChanged);
+  }
+}
+
 /// Gives a floating window `rect`.
 fn set_floating(state: &mut CompositorState, window: WindowId, rect: Rect) {
   if state.core.set_floating(window, Some(rect)).is_ok() {
