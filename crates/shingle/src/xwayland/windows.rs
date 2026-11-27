@@ -36,6 +36,11 @@ pub(crate) struct XWindowState {
   /// The geometry it asked for before it became a Shingle window, which
   /// is its start position, as in Wayfire's `handle_client_configure`.
   pub(crate) start: Option<Geometry>,
+  /// The active output when the window manager first reported it mapped,
+  /// which it opens on: Wayfire gives an X view the focused output when
+  /// it creates the view for a new X surface
+  /// (wayfire:src/view/xwayland/xwayland-toplevel-view.hpp, `create`).
+  pub(crate) created_output: Option<shingle_core::OutputId>,
 }
 
 impl XWindowState {
@@ -46,6 +51,7 @@ impl XWindowState {
       mapped: false,
       surface: None,
       start: None,
+      created_output: None,
     }
   }
 }
@@ -92,14 +98,25 @@ pub(crate) fn apply(state: &mut CompositorState, event: XwmEvent) {
         .or_insert_with(XWindowState::unmapped);
       entry.info = *info;
       entry.mapped = true;
+      if entry.created_output.is_none() {
+        entry.created_output = Some(state.active_output.clone());
+      }
       try_map(state, window, false);
     }
     XwmEvent::Changed { window, info } => changed(state, window, *info),
     XwmEvent::Unmapped { window } => {
+      // Mapped again, it opens where it was, as a Wayfire view keeps its
+      // output while it is unmapped.
+      let output = shingle_window(state, window)
+        .and_then(|shingle| state.core.window_location(shingle).ok())
+        .map(|location| location.output);
       dissociate(state, window);
       if let Some(entry) = state.xwayland.windows.get_mut(&window) {
         entry.mapped = false;
         entry.start = None;
+        if output.is_some() {
+          entry.created_output = output;
+        }
       }
     }
     XwmEvent::Destroyed { window } => {
@@ -314,6 +331,10 @@ fn new_toplevel(
     pid,
     client_decorated: info.draws_own_frame(),
     decorated: None,
+    created_output: entry
+      .created_output
+      .clone()
+      .unwrap_or_else(|| state.active_output.clone()),
   }
 }
 

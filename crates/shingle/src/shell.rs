@@ -249,6 +249,12 @@ pub(crate) struct ToplevelRole {
   /// Whether the window has a server-side frame (`decorator.rs`), once
   /// that is decided.
   pub(crate) decorated: Option<bool>,
+  /// The active output when the toplevel was created, which its window
+  /// opens on unless it has a parent: Wayfire sets a view's output to the
+  /// focused one when it creates the view, and `adjust_view_output_on_map`
+  /// keeps it (wayfire:src/view/xdg-shell/xdg-toplevel-view.cpp,
+  /// `xdg_toplevel_view_t::create`; src/view/view-impl.cpp).
+  pub(crate) created_output: OutputId,
 }
 
 impl ToplevelRole {
@@ -1035,6 +1041,13 @@ fn unmap_toplevel(state: &mut CompositorState, object: &ObjectId) -> bool {
   if !mapped && !state.pending_maps.contains_key(&window) {
     return false;
   }
+  // Mapped again, it opens where it was, as a Wayfire view keeps its
+  // output while it is unmapped.
+  let output = state
+    .core
+    .window_location(window)
+    .ok()
+    .map(|location| location.output);
   if let Some(surface) = state.surfaces.get_mut(object) {
     match &mut surface.role {
       Role::Xdg {
@@ -1049,6 +1062,9 @@ fn unmap_toplevel(state: &mut CompositorState, object: &ObjectId) -> bool {
         toplevel.configure = ConfigureState::default();
         toplevel.created_rules_pending = None;
         toplevel.unmapped = true;
+        if let Some(output) = output {
+          toplevel.created_output = output;
+        }
         serials.clear();
         *initial_acked = false;
       }
@@ -1600,7 +1616,7 @@ pub(crate) fn materialize_toplevel(
   state: &mut CompositorState,
   object: &ObjectId,
 ) -> Option<WindowId> {
-  let (existing, identity, parent) = state
+  let (existing, identity, parent, created_output) = state
     .surfaces
     .get(object)
     .and_then(|surface| surface.role.toplevel())
@@ -1609,6 +1625,7 @@ pub(crate) fn materialize_toplevel(
         toplevel.window(),
         toplevel.identity.clone(),
         toplevel.parent,
+        toplevel.created_output.clone(),
       )
     })?;
   if let Some(window) = existing {
@@ -1618,16 +1635,23 @@ pub(crate) fn materialize_toplevel(
     Some(window) => (window, false),
     None => {
       // A dialog maps in its parent's set and workspace, anything else on
-      // the active output's current workspace, as Wayfire's
-      // adjust_view_output_on_map chooses (src/view/view-impl.cpp).
+      // the current workspace of the output that was active when its
+      // toplevel was created, as Wayfire's adjust_view_output_on_map
+      // chooses (src/view/view-impl.cpp); the active one if that output
+      // has gone since.
       let parent_place = parent
         .and_then(|parent| state.core.window_info(parent).ok())
         .map(|info| (info.wset, info.location.workspace));
+      let output = if state.core.wset_of(&created_output).is_some() {
+        created_output
+      } else {
+        state.active_output.clone()
+      };
       let (wset, workspace) = match parent_place {
         Some(place) => place,
         None => (
-          state.core.wset_of(&state.active_output)?,
-          state.core.current_workspace(&state.active_output).ok()?,
+          state.core.wset_of(&output)?,
+          state.core.current_workspace(&output).ok()?,
         ),
       };
       let window = state
@@ -2722,6 +2746,7 @@ impl Dispatch<XdgSurface, XdgSurfaceData> for CompositorState {
               pid,
               client_decorated: true,
               decorated: None,
+              created_output: state.active_output.clone(),
             }))),
             serials: BTreeSet::new(),
             initial_acked: false,
@@ -3942,6 +3967,54 @@ mod tests {
       configured_sizes(&client, &second.toplevel),
       [(0, 0), (width as i32 / 2, height)]
     );
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn a_new_window_opens_on_the_output_active_when_its_toplevel_was_made() {
+    use wayland_client::protocol::wl_compositor::WlCompositor;
+    use wayland_protocols::xdg::shell::client::xdg_wm_base::XdgWmBase;
+    let (mut compositor, path) = crate::tests::test_compositor();
+    compositor
+      .add_output(
+        crate::OutputInfo {
+          name: "HEADLESS-2".into(),
+          ..crate::OutputInfo::default()
+        },
+        (800, 600),
+      )
+      .expect("a second output");
+    let first = compositor.state.active_output.clone();
+    let second = shingle_core::OutputId::new("HEADLESS-2");
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let wl_compositor = client.bind::<WlCompositor>(4);
+    let wm_base = client.bind::<XdgWmBase>(1);
+    // A toplevel made while the first output is active, without an app ID
+    // yet, and another made after the focus moved to the second.
+    let early_surface = wl_compositor.create_surface(&client.handle, ());
+    let early_xdg = wm_base.get_xdg_surface(&early_surface, &client.handle, ());
+    let early = early_xdg.get_toplevel(&client.handle, ());
+    early_surface.commit();
+    client.roundtrip(&mut compositor);
+    assert!(crate::output::focus_output(&mut compositor.state, &second));
+    let late = client.toplevel(&mut compositor, "late");
+    early.set_app_id("early".into());
+    client.roundtrip(&mut compositor);
+    client.attach_buffer(&mut compositor, &early_surface, 64, 64);
+    client.attach_buffer(&mut compositor, &late.surface, 64, 64);
+    let output_of = |compositor: &crate::Compositor, app_id| {
+      let window = windows_with(&compositor.state, app_id)[0];
+      compositor
+        .state
+        .core
+        .window_location(window)
+        .unwrap()
+        .output
+    };
+    // As in Wayfire, where a view takes the focused output when it is
+    // made, not when it maps.
+    assert_eq!(output_of(&compositor, "early"), first);
+    assert_eq!(output_of(&compositor, "late"), second);
     let _ = std::fs::remove_file(path);
   }
 
