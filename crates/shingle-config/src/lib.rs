@@ -28,6 +28,7 @@ mod i3;
 mod import;
 mod ini;
 mod input_devices;
+pub mod key_names;
 mod launcher;
 mod layout;
 mod lock;

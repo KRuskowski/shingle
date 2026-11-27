@@ -8,7 +8,6 @@
 //! for `Compositor::keyboard_modifiers`. Nothing here depends on the host's
 //! keyboard layout.
 
-mod names;
 mod repeat;
 
 use std::{collections::BTreeSet, fmt};
@@ -17,8 +16,8 @@ use shingle::Modifiers;
 use shingle_config::Modifiers as ConfigModifiers;
 use xkbcommon::xkb;
 
-pub use names::key_name;
 pub use repeat::KeyRepeat;
+pub use shingle_config::key_names::key_name;
 
 /// Offset between evdev key codes and XKB keycodes.
 const EVDEV_OFFSET: u32 = 8;

@@ -1,4 +1,4 @@
-//! Wayfire key names for evdev key codes.
+//! Wayfire key names for evdev key codes, and the codes of evdev names.
 //!
 //! Wayfire names keys after the `KEY_*` constants of
 //! `linux/input-event-codes.h`, and Shingle's config importers normalise them
@@ -523,4 +523,46 @@ pub fn key_name(code: u32) -> Option<&'static str> {
     700 => "kbd_lcd_menu5",
     _ => return None,
   })
+}
+
+/// Returns the evdev code of the `KEY_*` constant `name` of
+/// `linux/input-event-codes.h`, such as `KEY_KP2` or `KEY_ESC`, as
+/// Wayfire's STIPC finds it with `libevdev_event_code_from_name`; `None`
+/// for any other name.
+pub fn key_code(name: &str) -> Option<u32> {
+  let rest = name.strip_prefix("KEY_")?;
+  let wanted = rest.to_ascii_lowercase();
+  let wanted = if wanted == "esc" { "escape" } else { &wanted };
+  (1..0x300).find(|&code| key_name(code) == Some(wanted))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{key_code, key_name};
+
+  #[test]
+  fn every_named_code_is_found_by_its_constant() {
+    for code in 0..0x300 {
+      let Some(name) = key_name(code) else {
+        continue;
+      };
+      let constant = if name == "escape" {
+        "KEY_ESC".to_owned()
+      } else {
+        format!("KEY_{}", name.to_ascii_uppercase())
+      };
+      assert_eq!(key_code(&constant), Some(code), "{constant}");
+    }
+  }
+
+  #[test]
+  fn keypad_and_function_keys_have_codes() {
+    assert_eq!(key_code("KEY_KP2"), Some(80));
+    assert_eq!(key_code("KEY_KP0"), Some(82));
+    assert_eq!(key_code("KEY_F13"), Some(183));
+    assert_eq!(key_code("KEY_ESC"), Some(1));
+    assert_eq!(key_code("KEY_NOT_A_KEY"), None);
+    assert_eq!(key_code("BTN_LEFT"), None);
+    assert_eq!(key_code("kp2"), None);
+  }
 }

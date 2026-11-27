@@ -1853,7 +1853,7 @@ fn evdev_code(name: &str) -> Option<u32> {
         1..=10 => Some(58 + number),
         11 => Some(87),
         12 => Some(88),
-        _ => None,
+        _ => shingle_config::key_names::key_code(name),
       };
     }
   }
@@ -1902,7 +1902,9 @@ fn evdev_code(name: &str) -> Option<u32> {
     "BTN_EXTRA" => 0x114,
     "BTN_FORWARD" => 0x115,
     "BTN_BACK" => 0x116,
-    _ => return None,
+    // Every other `KEY_*` constant, as Wayfire's STIPC takes any name
+    // libevdev knows.
+    _ => return shingle_config::key_names::key_code(name),
   })
 }
 
@@ -3351,6 +3353,10 @@ mod tests {
     assert_eq!(super::evdev_code("KEY_F10"), Some(68));
     assert_eq!(super::evdev_code("KEY_COMPOSE"), Some(127));
     assert_eq!(super::evdev_code("KEY_NOPE"), None);
+    // Keys outside the short table, as Wayfire's STIPC takes them.
+    assert_eq!(super::evdev_code("KEY_KP2"), Some(80));
+    assert_eq!(super::evdev_code("KEY_F13"), Some(183));
+    assert_eq!(super::evdev_code("KEY_MUTE"), Some(113));
   }
 
   use super::{SUPPORTED_METHODS, respond};
