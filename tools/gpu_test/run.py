@@ -32,7 +32,7 @@ namespaces:
                vswipe|decoration|switcher|colours|minimize-focus|
                drag-icon|resize|resize-nested|nested-scaled|
                nested-clipboard|screencast|image-copy-capture|
-               ext-data-control|launcher|animate|apps|app-NAME ...
+               ext-data-control|launcher|animate|lock|apps|app-NAME ...
 
 For example, DB-1's import test:
 
@@ -104,7 +104,13 @@ drives shingle-launcher (`--launcher`, the release build by default)
 through STIPC keys and pointer: type-to-launch, the in-place edits,
 persistence and its startup time. `--checks animate` (animate_checks.py)
 captures every animation of Wayfire's animate, slowed to seconds, half
-way through, and the output's fade-in at start. `--checks apps`
+way through, and the output's fade-in at start. `--checks lock`
+(lock_checks.py) locks with shingle-lock (`--lock`, the debug build by
+default) and checks every presented frame, recorded with
+`SHINGLE_RECORD_FRAMES`: no client unblurred from the lock request to
+the unlock, black until the lock surface, across DPMS, an output turned
+off and on and a killed lock client, the drift, the input's states and
+the grace period. `--checks apps`
 (app_checks.py) is the
 application compatibility sweep: every installed application, one at a
 time, through a scripted scenario against offscreen Shingle, and
@@ -122,7 +128,7 @@ test_vswipe_checks.py, test_decoration_checks.py,
 test_switcher_checks.py, test_colour_checks.py, test_focus_checks.py,
 test_drag_icon_checks.py, test_resize_checks.py,
 test_nested_clipboard_checks.py, test_screencast_checks.py,
-test_app_checks.py, test_animate_checks.py).
+test_app_checks.py, test_animate_checks.py, test_lock_checks.py).
 The work directory under `target/` is removed afterwards unless `--keep`
 is given.
 """
@@ -157,7 +163,8 @@ APP_GROUPS = ('apps', 'app-kitty', 'app-konsole', 'app-kate', 'app-dolphin',
 # switcher_checks.GROUPS, colour_checks.GROUPS, focus_checks.GROUPS and
 # drag_icon_checks.GROUPS, resize_checks.GROUPS,
 # nested_clipboard_checks.GROUPS, screencast_checks.GROUPS,
-# launcher_checks.GROUPS and animate_checks.GROUPS, kept here so
+# launcher_checks.GROUPS, animate_checks.GROUPS and lock_checks.GROUPS,
+# kept here so
 # that
 # `--help` works without importing them.
 CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
@@ -168,7 +175,7 @@ CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'colours', 'minimize-focus', 'drag-icon', 'resize',
                 'resize-nested', 'nested-clipboard', 'screencast',
                 'image-copy-capture', 'ext-data-control',
-                'launcher', 'animate') + APP_GROUPS
+                'launcher', 'animate', 'lock') + APP_GROUPS
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset, and nested Shingle's on NVIDIA in `resize-nested`;
 # `syncobj` runs no Vulkan client.
@@ -411,6 +418,8 @@ def main():
   parser.add_argument('--wl-probe', default='target/debug/examples/wl_probe')
   parser.add_argument('--launcher', default='target/release/shingle-launcher',
                       help='the shingle-launcher the launcher group runs')
+  parser.add_argument('--lock', default='target/debug/shingle-lock',
+                      help='the shingle-lock the lock group runs')
   parser.add_argument('--captures', metavar='DIR',
                       help='save settled captures here')
   parser.add_argument(INNER_FLAG, metavar='WORK')
@@ -456,6 +465,7 @@ def main():
     environment = dict(os.environ)
     environment['SHINGLE_GPU_TEST_UID'] = str(os.getuid())
     environment['SHINGLE_LAUNCHER_BINARY'] = os.path.abspath(options.launcher)
+    environment['SHINGLE_LOCK_BINARY'] = os.path.abspath(options.lock)
     return subprocess.run(namespace + arguments + ['--'] + command,
                           env=environment).returncode
   finally:

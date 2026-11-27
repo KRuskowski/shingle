@@ -760,10 +760,10 @@ def all_checks():
   (vswipe_checks.py), WG-6's (decoration_checks.py), WG-7's
   (switcher_checks.py), WG-10's (drag_icon_checks.py), interactive
   resizes with kitty (resize_checks.py), shingle-launcher
-  (launcher_checks.py), the animate effects (animate_checks.py), and the
-  Wayfire
-  comparisons of configured colours (colour_checks.py) and of focus
-  after a minimize (focus_checks.py)."""
+  (launcher_checks.py), the lock screen (lock_checks.py), the animate
+  effects (animate_checks.py), and the Wayfire comparisons of configured
+  colours (colour_checks.py) and of focus after a minimize
+  (focus_checks.py)."""
   import animate_checks
   import app_checks
   import colour_checks
@@ -772,6 +772,7 @@ def all_checks():
   import dmabuf_checks
   import focus_checks
   import launcher_checks
+  import lock_checks
   import nested_clipboard_checks
   import nested_output_checks
   import output_checks
@@ -787,6 +788,7 @@ def all_checks():
           **focus_checks.CHECKS, **drag_icon_checks.CHECKS,
           **resize_checks.CHECKS, **nested_clipboard_checks.CHECKS,
           **screencast_checks.CHECKS, **launcher_checks.CHECKS,
+          **lock_checks.CHECKS,
           **animate_checks.CHECKS, **app_checks.CHECKS}
 
 def run_checks(groups, binary, wl_probe, captures_directory=None):
