@@ -80,9 +80,18 @@ class LauncherChecksTest(unittest.TestCase):
     shot = Capture(3, 2, bytes([0, 0, 0, 255, 255, 0, 255, 255, 0,
                                 0, 0, 0, 255, 255, 0, 10, 10, 10]))
     image = Capture(2, 1, bytes([255, 255, 0, 255, 255, 0]))
-    self.assertEqual(launcher_checks.mismatches(shot, image, (1, 0, 2, 1)), 0)
-    self.assertEqual(launcher_checks.mismatches(shot, image, (0, 0, 2, 1)), 1)
-    self.assertEqual(launcher_checks.mismatches(shot, image, (0, 0, 3, 1)), 3)
+    self.assertEqual(launcher_checks.mismatches(shot, image, (1, 0, 2, 1)),
+                     (0, 0))
+    self.assertEqual(launcher_checks.mismatches(shot, image, (0, 0, 2, 1)),
+                     (1, 1))
+    self.assertEqual(launcher_checks.mismatches(shot, image, (0, 0, 3, 1)),
+                     (3, 3))
+    near = Capture(1, 1, bytes([255, 255, 20]))
+    self.assertEqual(launcher_checks.mismatches(near, Capture(
+        1, 1, bytes([255, 255, 0])), (0, 0, 1, 1)), (1, 0))
+    self.assertTrue(launcher_checks.same_drawing((2, 0), 1000))
+    self.assertFalse(launcher_checks.same_drawing((3, 0), 1000))
+    self.assertFalse(launcher_checks.same_drawing((1, 1), 1000))
     self.assertEqual(launcher_checks.colour_box(shot, (0, 0, 3, 2), 'yellow'),
                      (2, 2))
     self.assertIsNone(launcher_checks.colour_box(shot, (0, 0, 3, 2), 'red'))

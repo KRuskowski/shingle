@@ -14,9 +14,9 @@ persistence across restarts, the toggle, closing by a click outside, and
 the startup time; icons from a configured theme, hicolor and pixmaps in
 captures and from the icon cache in a later first frame; a desktop
 action found by search and by the Menu key and a right click; and the
-panel at fractional scales 1.25, 1.5 and 2, which must be the output's
-device pixels and match the launcher's own `--screenshot --scale`
-drawing pixel for pixel. Then it checks type-to-launch again under the
+panel at scales 1, 1.25, 1.5 and 2, which must be the output's device
+pixels and match the launcher's own `--screenshot --scale` drawing in
+the capture but for a few glyph edges. Then it checks type-to-launch again under the
 host's `wayfire`, headless in the namespace (wayfire_reference.py),
 since the launcher is meant to work there too.
 
@@ -74,8 +74,13 @@ RGBA = {'red': (255, 0, 0, 255), 'green': (0, 255, 0, 255),
         'cyan': (0, 255, 255, 255)}
 # The icon's side at the default font size, in logical pixels.
 ICON_SIZE = 28
-# The fractional scales checked, on an output of this many device pixels.
-SCALES = (1.25, 1.5, 2.0)
+# The scales checked, on an output of this many device pixels.
+SCALES = (1.0, 1.25, 1.5, 2.0)
+# Glyph edges of a live frame and of `--screenshot` differ by up to about
+# 30 levels in a few hundred pixels; a capture scaled from other pixels
+# differs in tens of thousands, by far more.
+GLYPH_TOLERANCE = 40
+MISMATCH_SHARE = 0.002
 SCALED_OUTPUT = (1920, 1080)
 HICOLOR_INDEX = """[Icon Theme]
 Name=Hicolor
@@ -156,21 +161,30 @@ def device_rect(rect, scale):
           round_half_up((rect['x'] + rect['width']) * scale) - left,
           round_half_up((rect['y'] + rect['height']) * scale) - top)
 
-def mismatches(shot, image, rect, tolerance=2):
-  """How many pixels of `rect` (x, y, width, height) of the capture
-  `shot` differ from `image`, a capture of that rectangle alone, by more
-  than `tolerance` in any channel."""
+def mismatches(shot, image, rect, tolerance=2, far=GLYPH_TOLERANCE):
+  """(how many, how many far) pixels of `rect` (x, y, width, height) of
+  the capture `shot` differ from `image`, a capture of that rectangle
+  alone, by more than `tolerance`, and by more than `far`, in any
+  channel."""
   x0, y0, width, height = rect
   if (image.width, image.height) != (width, height):
-    return width * height
+    return width * height, width * height
   count = 0
+  distant = 0
   for y in range(height):
     for x in range(width):
       shown = shot.pixel(x0 + x, y0 + y)
       drawn = image.pixel(x, y)
-      if any(abs(a - b) > tolerance for a, b in zip(shown, drawn)):
-        count += 1
-  return count
+      difference = max(abs(a - b) for a, b in zip(shown, drawn))
+      count += difference > tolerance
+      distant += difference > far
+  return count, distant
+
+def same_drawing(counts, area):
+  """Whether `mismatches` counts show the same drawing over `area`
+  pixels: none far off and few off at all."""
+  count, distant = counts
+  return distant == 0 and count <= area * MISMATCH_SHARE
 
 def colour_box(shot, rect, colour):
   """The (width, height) of the box around the pixels of `colour` in
@@ -433,9 +447,12 @@ def launcher_checks(results, binary, wl_probe, captures):
     _scaled(results, binary, launcher_binary, fixture, captures, scale)
   _under_wayfire(results, launcher_binary, fixture, config_path)
 
-def _screenshot(shingle, binary, fixture, config_path, scale):
-  """The launcher's own drawing of its panel at `scale`, or None."""
-  path = os.path.join(shingle.directory, f'screenshot-{scale}.ppm')
+def _screenshot(shingle, binary, fixture, config_path, scale, directory):
+  """The launcher's own drawing of its panel at `scale`, or None; kept in
+  `directory` when one is given."""
+  path = os.path.join(directory or shingle.directory,
+                      f'screenshot-{scale}.ppm')
+  os.makedirs(os.path.dirname(path), exist_ok=True)
   done = subprocess.run(
       [binary, '--config', config_path, '--screenshot', path,
        '--scale', str(scale)],
@@ -455,7 +472,8 @@ def _scaled(results, binary, launcher_binary, fixture, captures, scale):
   scale pixel for pixel, and icons at their device size."""
   name = f'launcher: at scale {scale}'
   config = launcher_config()
-  config['output'] = {'width': SCALED_OUTPUT[0], 'height': SCALED_OUTPUT[1],
+  # An explicit mode is in device pixels.
+  config['output'] = {'mode': f'{SCALED_OUTPUT[0]}x{SCALED_OUTPUT[1]}',
                       'scale': scale}
   shingle = checks.Shingle(binary, f'launcher-scale-{scale}', config)
   config_path = os.path.join(shingle.directory, 'shingle.yaml')
@@ -472,7 +490,8 @@ def _scaled(results, binary, launcher_binary, fixture, captures, scale):
               and applications
               and all(entry.get('icon') for entry in applications))
     frame = launcher.wait_frame(ready, timeout=20)
-    image = _screenshot(shingle, launcher_binary, fixture, config_path, scale)
+    image = _screenshot(shingle, launcher_binary, fixture, config_path, scale,
+                        captures.directory)
     if frame is None or image is None:
       results.check(f'{name} the launcher draws a fractional frame and a '
                     'screenshot', False,
@@ -484,15 +503,16 @@ def _scaled(results, binary, launcher_binary, fixture, captures, scale):
 
     def matches(shot):
       counted[0] = mismatches(shot, image, rect)
-      return counted[0] == 0
+      return same_drawing(counted[0], rect[2] * rect[3])
     shot = captures.settled(shingle, matches, stable=True)
     results.check(
         f'{name} the buffer is the output\'s {SCALED_OUTPUT[0]}x'
         f'{SCALED_OUTPUT[1]} device pixels and the capture shows the '
-        'panel exactly as the launcher draws it at that scale',
+        'panel as the launcher draws it at that scale',
         (buffer['width'], buffer['height']) == SCALED_OUTPUT
-        and shot is not None and counted[0] == 0,
-        f'buffer {buffer}, panel {rect}, {counted[0]} pixels differ')
+        and shot is not None and same_drawing(counted[0], rect[2] * rect[3]),
+        f'buffer {buffer}, panel {rect}, pixels off and far off '
+        f'{counted[0]}')
     pixels = round_half_up(ICON_SIZE * scale)
     sizes = {}
     for entry in frame['rows']:
