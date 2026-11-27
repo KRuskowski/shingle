@@ -400,6 +400,15 @@ impl Frontend {
           dev_minor(device)
         );
         self.enable_syncobj();
+        let capture =
+          gpu.dmabuf().ok().and_then(crate::dmabuf::capture_formats);
+        if let Some(capture) = &capture {
+          eprintln!(
+            "shingle: captures into DMA-BUFs of {} formats",
+            capture.formats.len()
+          );
+        }
+        self.compositor.set_capture_dmabuf(capture);
         true
       }
       Err(error) => {

@@ -25,7 +25,10 @@
 //! changed something damages every source
 //! (docs/design/screen-sharing.md).
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+  collections::{BTreeMap, HashMap},
+  sync::Arc,
+};
 
 use shingle_core::{OutputId, Rect, WindowId};
 use wayland_protocols::ext::image_copy_capture::v1::server::{
@@ -41,8 +44,8 @@ use wayland_server::{
 };
 
 use crate::{
-  OutputHandle, SurfaceRole, buffer::Attachment, output::OutputState,
-  state::CompositorState, surface_outputs::intersection,
+  DmabufBuffer, OutputHandle, SurfaceRole, buffer::Attachment,
+  output::OutputState, state::CompositorState, surface_outputs::intersection,
 };
 
 /// Identifies a frame capture between [`crate::Event::CaptureRequested`]
@@ -74,7 +77,7 @@ pub enum CaptureSource {
 
 /// A capture for the frontend to draw and answer with
 /// [`crate::Compositor::finish_capture`].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct CaptureRequest {
   /// The capture to answer.
   pub id: CaptureId,
@@ -85,6 +88,33 @@ pub struct CaptureRequest {
   /// Whether the cursor is drawn into it. Without, the frontend leaves
   /// the cursor out.
   pub cursor: bool,
+  /// The client's DMA-BUF, for a capture into one: the frontend draws
+  /// into it, in the source's physical pixels as its output is drawn, and
+  /// answers with [`crate::Compositor::finish_capture_into`]. `None` for
+  /// a shared-memory buffer, which the compositor fills.
+  pub dmabuf: Option<Arc<DmabufBuffer>>,
+}
+
+/// The DMA-BUFs captures may be copied into: what the renderer can draw
+/// into, given by the frontend with
+/// [`crate::Compositor::set_capture_dmabuf`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CaptureDmabuf {
+  /// The render node, as a `dev_t`.
+  pub device: u64,
+  /// DRM fourccs with the modifiers each can be rendered to with, the
+  /// preferred first.
+  pub formats: Vec<(u32, Vec<u64>)>,
+}
+
+impl CaptureDmabuf {
+  /// Whether `buffer` has one of the formats and modifiers.
+  pub(crate) fn accepts(&self, buffer: &DmabufBuffer) -> bool {
+    buffer.planes.len() == 1
+      && self.formats.iter().any(|(fourcc, modifiers)| {
+        *fourcc == buffer.format && modifiers.contains(&buffer.modifier)
+      })
+  }
 }
 
 impl CaptureRequest {
@@ -477,6 +507,8 @@ struct Pending {
 pub(crate) struct Captures {
   /// Whether copies go to the frontend instead of the CPU composite.
   pub(crate) frame_capture: bool,
+  /// The DMA-BUFs copies may go into, with frame capture.
+  pub(crate) dmabuf: Option<CaptureDmabuf>,
   next: u64,
   /// Captures waiting for damage, oldest first.
   waiting: BTreeMap<CaptureId, Pending>,
@@ -558,6 +590,12 @@ fn issue(
     geometry,
     ..pending
   };
+  let dmabuf = pending.attachment.dmabuf_buffer().cloned();
+  if dmabuf.is_some() && !state.captures.frame_capture {
+    // Only a renderer writes DMA-BUFs.
+    pending.frame.fail(Failure::BufferConstraints);
+    return None;
+  }
   if !state.captures.frame_capture {
     let rgba = composite(state, &pending);
     answer(state, pending, Ok(rgba));
@@ -582,6 +620,7 @@ fn issue(
     id,
     source,
     cursor: pending.cursor,
+    dmabuf,
   };
   state.captures.requested.insert(id, pending);
   Some(request)
@@ -701,6 +740,42 @@ pub(crate) fn finish(
   answer(state, pending, result);
 }
 
+/// Answers the capture `id` into a DMA-BUF with what the frontend did:
+/// drew into it, or why it could not.
+pub(crate) fn finish_into(
+  state: &mut CompositorState,
+  id: CaptureId,
+  result: Result<(), String>,
+) {
+  let Some(pending) = state.captures.requested.remove(&id) else {
+    return;
+  };
+  if !pending.frame.is_alive() {
+    return;
+  }
+  match result {
+    Ok(()) if pending.buffer.is_alive() => ready(state, pending),
+    Ok(()) => pending.frame.fail(Failure::Unknown),
+    Err(error) => {
+      eprintln!("shingle: capture into a DMA-BUF failed: {error}");
+      pending.frame.fail(Failure::Unknown);
+    }
+  }
+}
+
+/// Sends `ready` for a capture whose buffer holds its pixels, and marks
+/// its damage tracker clean.
+fn ready(state: &mut CompositorState, pending: Pending) {
+  if let Some(key) = pending.key {
+    state.captures.clean.insert(key, pending.target.damaged());
+  }
+  let size = (
+    pending.geometry.buffer.width,
+    pending.geometry.buffer.height,
+  );
+  pending.frame.ready(state.now(), size);
+}
+
 /// Writes `rgba` into the capture's buffer and sends `ready`, or `failed`
 /// when there are no pixels or they do not fit.
 fn answer(
@@ -716,16 +791,7 @@ fn answer(
     return;
   }
   match rgba.and_then(|rgba| pending.attachment.write_capture(&rgba)) {
-    Ok(()) => {
-      if let Some(key) = pending.key {
-        state.captures.clean.insert(key, pending.target.damaged());
-      }
-      let size = (
-        pending.geometry.buffer.width,
-        pending.geometry.buffer.height,
-      );
-      pending.frame.ready(state.now(), size);
-    }
+    Ok(()) => ready(state, pending),
     Err(error) => {
       eprintln!("shingle: capture failed: {error}");
       pending.frame.fail(Failure::Unknown);

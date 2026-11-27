@@ -6,8 +6,8 @@
 //! an [`OffscreenRenderer`]; the native backend will pass its KMS target.
 
 use shingle_render::{
-  GpuTexture, OffscreenRenderer, RenderError, RenderTile, Renderer,
-  TextureTransform,
+  DmabufDescriptor, GpuTexture, OffscreenRenderer, RenderError, RenderTile,
+  Renderer, TextureTransform,
 };
 
 /// A renderer the frontend can build its scene for and draw into.
@@ -67,6 +67,16 @@ pub trait RenderTarget {
     clear: [f64; 4],
     size: (u32, u32),
   ) -> Result<Vec<u8>, RenderError>;
+
+  /// Draws the frame just rendered again, into a capture client's
+  /// DMA-BUF, with the target's scale and output transform as they are,
+  /// and waits for the GPU ([`shingle_render::capture_into_dmabuf`]).
+  fn capture_into(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    buffer: &DmabufDescriptor<'_>,
+  ) -> Result<(), RenderError>;
 }
 
 impl RenderTarget for Renderer {
@@ -131,6 +141,15 @@ impl RenderTarget for Renderer {
   ) -> Result<Vec<u8>, RenderError> {
     Renderer::capture(self, tiles, clear, size)
   }
+
+  fn capture_into(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    buffer: &DmabufDescriptor<'_>,
+  ) -> Result<(), RenderError> {
+    Renderer::capture_into(self, tiles, clear, buffer)
+  }
 }
 
 /// Offscreen rendering reads every frame back and drops it; tearing does
@@ -194,5 +213,14 @@ impl RenderTarget for OffscreenRenderer {
     size: (u32, u32),
   ) -> Result<Vec<u8>, RenderError> {
     OffscreenRenderer::capture(self, tiles, clear, size)
+  }
+
+  fn capture_into(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    buffer: &DmabufDescriptor<'_>,
+  ) -> Result<(), RenderError> {
+    OffscreenRenderer::capture_into(self, tiles, clear, buffer)
   }
 }

@@ -24,8 +24,8 @@ use std::{
 };
 
 use shingle::{
-  BufferLock, DmabufBuffer, DmabufFeedback, DmabufFormat, DmabufImporter,
-  fourcc_name,
+  BufferLock, CaptureDmabuf, DmabufBuffer, DmabufFeedback, DmabufFormat,
+  DmabufImporter, fourcc_name,
 };
 use shingle_render::{
   DmabufCaps, DmabufDescriptor, DmabufUnavailable, DmabufUse, GpuTexture,
@@ -55,18 +55,7 @@ impl Import for TextureImporter {
     buffer: &DmabufBuffer,
     filter: TextureFilter,
   ) -> Result<GpuTexture, String> {
-    let [plane] = buffer.planes.as_slice() else {
-      return Err(format!("{} planes, not one", buffer.planes.len()));
-    };
-    let descriptor = DmabufDescriptor {
-      width: buffer.width,
-      height: buffer.height,
-      fourcc: buffer.format,
-      modifier: buffer.modifier,
-      fd: plane.fd.as_fd(),
-      offset: plane.offset,
-      stride: plane.stride,
-    };
+    let descriptor = descriptor(buffer)?;
     let imported =
       TextureImporter::import(self, &descriptor, DmabufUse::Sample(filter))
         .map_err(|error| error.to_string())?;
@@ -279,6 +268,49 @@ pub(crate) fn feedback(
     main_device,
     formats,
   })
+}
+
+/// The import descriptor of single-plane `buffer`.
+pub(crate) fn descriptor(
+  buffer: &DmabufBuffer,
+) -> Result<DmabufDescriptor<'_>, String> {
+  let [plane] = buffer.planes.as_slice() else {
+    return Err(format!("{} planes, not one", buffer.planes.len()));
+  };
+  Ok(DmabufDescriptor {
+    width: buffer.width,
+    height: buffer.height,
+    fourcc: buffer.format,
+    modifier: buffer.modifier,
+    fd: plane.fd.as_fd(),
+    offset: plane.offset,
+    stride: plane.stride,
+  })
+}
+
+/// The DRM fourccs captures are drawn into, preferred first: XRGB8888,
+/// which wlroots' screencopy announces for opaque outputs, and ARGB8888.
+const CAPTURE_FOURCCS: [u32; 2] =
+  [u32::from_le_bytes(*b"XR24"), u32::from_le_bytes(*b"AR24")];
+
+/// The DMA-BUFs captures can be drawn into on a device with `caps`: its
+/// render node and the modifiers of [`CAPTURE_FOURCCS`] it renders to, or
+/// `None` without a render node or any of them.
+pub(crate) fn capture_formats(caps: &DmabufCaps) -> Option<CaptureDmabuf> {
+  let device = caps.render_node_dev()?;
+  let formats = CAPTURE_FOURCCS
+    .iter()
+    .filter_map(|fourcc| {
+      let modifiers = caps
+        .format(*fourcc)?
+        .render
+        .iter()
+        .map(|caps| caps.modifier)
+        .collect::<Vec<_>>();
+      (!modifiers.is_empty()).then_some((*fourcc, modifiers))
+    })
+    .collect::<Vec<_>>();
+  (!formats.is_empty()).then_some(CaptureDmabuf { device, formats })
 }
 
 /// Whether to try `linux-drm-syncobj-v1`: not with `SHINGLE_SYNCOBJ=0`

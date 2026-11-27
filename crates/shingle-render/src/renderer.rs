@@ -130,6 +130,17 @@ impl Renderer {
   ) -> Result<Vec<u8>, RenderError> {
     capture_frame(&self.gpu, &self.state, size, tiles, clear)
   }
+
+  /// Draws the frame into a capture client's DMA-BUF; see
+  /// [`crate::capture_into_dmabuf`].
+  pub fn capture_into(
+    &self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    buffer: &crate::DmabufDescriptor<'_>,
+  ) -> Result<(), RenderError> {
+    crate::capture_into_dmabuf(&self.gpu, &self.state, buffer, tiles, clear)
+  }
 }
 
 /// Renders to one offscreen texture and reads every frame back, for
@@ -222,5 +233,16 @@ impl OffscreenRenderer {
     size: (u32, u32),
   ) -> Result<Vec<u8>, RenderError> {
     capture_frame(&self.gpu, &self.state, size, tiles, clear)
+  }
+
+  /// Draws the frame into a capture client's DMA-BUF; see
+  /// [`crate::capture_into_dmabuf`].
+  pub fn capture_into(
+    &self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    buffer: &crate::DmabufDescriptor<'_>,
+  ) -> Result<(), RenderError> {
+    crate::capture_into_dmabuf(&self.gpu, &self.state, buffer, tiles, clear)
   }
 }

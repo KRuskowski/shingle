@@ -441,6 +441,7 @@ fn with_frame_capture_a_window_capture_goes_to_the_frontend() {
       id,
       source: CaptureSource::Window { rect, .. },
       cursor: false,
+      dmabuf: None,
     },
   ] = requests.as_slice()
   else {

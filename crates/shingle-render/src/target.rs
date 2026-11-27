@@ -317,6 +317,45 @@ pub fn capture_frame(
   target.read_rgba_within(gpu, Some(CAPTURE_TIMEOUT))
 }
 
+/// Draws `tiles` over `clear` into the DMA-BUF `buffer`, a capture
+/// client's, with `state` as it is: its scale and output transform, so
+/// that the buffer holds the output's physical pixels as a scanout buffer
+/// would. Imports the buffer for rendering and waits at most
+/// [`CAPTURE_TIMEOUT`] for the GPU, so that the client may read it as soon
+/// as this returns.
+pub fn capture_into_dmabuf(
+  gpu: &GpuContext,
+  state: &RenderState,
+  buffer: &crate::DmabufDescriptor<'_>,
+  tiles: &[RenderTile<'_>],
+  clear: [f64; 4],
+) -> Result<(), RenderError> {
+  let texture = gpu.import_dmabuf(buffer, crate::DmabufUse::Render)?;
+  let view = texture.texture().create_view(&Default::default());
+  let mut access = crate::ForeignAccess::new();
+  access.add(texture.foreign());
+  let index = crate::draw_with_access(
+    gpu,
+    state,
+    &view,
+    (buffer.width, buffer.height),
+    tiles,
+    clear,
+    access,
+  );
+  gpu
+    .device()
+    .poll(wgpu::PollType::Wait {
+      submission_index: Some(index),
+      timeout: Some(CAPTURE_TIMEOUT),
+    })
+    .map(|_| ())
+    .map_err(|error| match error {
+      wgpu::PollError::Timeout => RenderError::Timeout(CAPTURE_TIMEOUT),
+      error => RenderError::Readback(error.to_string()),
+    })
+}
+
 /// `state` with scale 1 and no output transform, keeping its zoom and
 /// filter.
 fn capture_state(state: &RenderState) -> RenderState {

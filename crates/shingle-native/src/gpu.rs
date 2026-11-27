@@ -575,6 +575,17 @@ impl RenderTarget for NativeTarget<'_> {
   ) -> Result<Vec<u8>, RenderError> {
     shingle_render::capture_frame(self.gpu, self.state, size, tiles, clear)
   }
+
+  fn capture_into(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    buffer: &shingle_render::DmabufDescriptor<'_>,
+  ) -> Result<(), RenderError> {
+    shingle_render::capture_into_dmabuf(
+      self.gpu, self.state, buffer, tiles, clear,
+    )
+  }
 }
 
 impl ScanoutImporter for GpuRenderer {

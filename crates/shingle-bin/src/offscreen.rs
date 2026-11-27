@@ -531,6 +531,20 @@ impl RenderTarget for OffscreenOutput<'_> {
       clear,
     )
   }
+  fn capture_into(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    buffer: &shingle_render::DmabufDescriptor<'_>,
+  ) -> Result<(), RenderError> {
+    shingle_render::capture_into_dmabuf(
+      self.gpu,
+      &self.output.state,
+      buffer,
+      tiles,
+      clear,
+    )
+  }
 }
 
 #[cfg(test)]

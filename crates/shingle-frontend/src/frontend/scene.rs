@@ -1103,7 +1103,7 @@ impl Frontend {
       &mut self.compositor,
       &mut self.captures,
       output,
-      (rect.width, rect.height),
+      ((rect.width, rect.height), view.transform),
       renderer,
       (&tiles, &cursors),
       background,
@@ -1113,17 +1113,44 @@ impl Frontend {
 
   /// Answers the window captures with each window's surfaces drawn alone
   /// over transparent black, at the toplevel's logical size, without zoom
-  /// and without the cursor or anything else of the outputs.
+  /// and without the cursor or anything else of the outputs; into a
+  /// DMA-BUF at the scale of the window's output.
   fn answer_window_captures(&mut self, target: &mut dyn RenderTarget) {
     for request in std::mem::take(&mut self.window_captures) {
       let CaptureSource::Window { window, rect } = request.source else {
         continue;
       };
+      if let Some(buffer) = &request.dmabuf {
+        let scale = self
+          .compositor
+          .output_view(&self.compositor.output_of_window(window))
+          .map_or(1.0, |view| view.scale);
+        let result = self
+          .draw_window_into(window, rect, target, (buffer, scale))
+          .map_err(|error| error.to_string());
+        self.compositor.finish_capture_into(request.id, result);
+        continue;
+      }
       let result = self
         .draw_window(window, rect, target)
         .map_err(|error| error.to_string());
       self.compositor.finish_capture(request.id, result);
     }
+  }
+
+  /// [`Frontend::draw_window`] into the DMA-BUF `buffer`, at `scale`.
+  fn draw_window_into(
+    &mut self,
+    window: TileWindowId,
+    rect: shingle_core::Rect,
+    target: &mut dyn RenderTarget,
+    (buffer, scale): (&shingle::DmabufBuffer, f64),
+  ) -> Result<(), Box<dyn Error>> {
+    let tiles = self.window_tiles(window, rect, &*target)?;
+    target.set_zoom(1.0, 0.0, 0.0);
+    target.set_scale_factor(scale);
+    target.set_output_transform(TextureTransform::Normal);
+    Ok(draw_into(target, &tiles, [0.0; 4], buffer, (0, 0))?)
   }
 
   /// RGBA rows of window `window`'s surfaces, drawn with the toplevel
@@ -1134,12 +1161,25 @@ impl Frontend {
     rect: shingle_core::Rect,
     target: &mut dyn RenderTarget,
   ) -> Result<Vec<u8>, Box<dyn Error>> {
+    let tiles = self.window_tiles(window, rect, &*target)?;
+    target.set_zoom(1.0, 0.0, 0.0);
+    Ok(target.capture(&tiles, [0.0; 4], (rect.width, rect.height))?)
+  }
+
+  /// The tiles of window `window`'s surfaces, with its toplevel surface's
+  /// rectangle `rect` at the origin.
+  fn window_tiles(
+    &mut self,
+    window: TileWindowId,
+    rect: shingle_core::Rect,
+    target: &dyn RenderTarget,
+  ) -> Result<Vec<RenderTile<'_>>, Box<dyn Error>> {
     let snapshots = self.compositor.window_surfaces(window);
     if snapshots.is_empty() {
       return Err("the window has no surfaces".into());
     }
     for snapshot in &snapshots {
-      self.prepare_texture(snapshot, &*target)?;
+      self.prepare_texture(snapshot, target)?;
     }
     let tiles = snapshots
       .iter()
@@ -1162,8 +1202,7 @@ impl Frontend {
         Some(tile)
       })
       .collect::<Vec<_>>();
-    target.set_zoom(1.0, 0.0, 0.0);
-    Ok(target.capture(&tiles, [0.0; 4], (rect.width, rect.height))?)
+    Ok(tiles)
   }
 
   /// Makes sure `snapshot`'s buffer has a texture, as drawing an output
@@ -1371,7 +1410,10 @@ fn answer_captures(
   compositor: &mut shingle::Compositor,
   captures: &mut Vec<CaptureRequest>,
   output: &OutputHandle,
-  size: (u32, u32),
+  (size, transform): (
+    (u32, u32),
+    wayland_server::protocol::wl_output::Transform,
+  ),
   target: &mut dyn RenderTarget,
   (tiles, cursors): (&[RenderTile<'_>], &[*const GpuTexture]),
   background: [f64; 4],
@@ -1392,6 +1434,23 @@ fn answer_captures(
     let CaptureSource::Output { region, .. } = request.source else {
       continue;
     };
+    if let Some(buffer) = &request.dmabuf {
+      let tiles = if request.cursor {
+        tiles.to_vec()
+      } else {
+        without_cursor(tiles, cursors)
+      };
+      let whole = region == shingle_core::Rect::new(0, 0, size.0, size.1);
+      let result = if whole
+        || transform == wayland_server::protocol::wl_output::Transform::Normal
+      {
+        draw_into(target, &tiles, background, buffer, (region.x, region.y))
+      } else {
+        Err("a region of a turned output is copied into shm only".into())
+      };
+      compositor.finish_capture_into(request.id, result);
+      continue;
+    }
     let frame = if request.cursor || cursors.is_empty() {
       with.get_or_insert_with(|| {
         target
@@ -1417,6 +1476,33 @@ fn answer_captures(
     });
     compositor.finish_capture(request.id, result);
   }
+}
+
+/// Draws `tiles`, shifted by minus `origin` in logical pixels, over
+/// `background` into the capture client's DMA-BUF `buffer` with
+/// `target`'s scale and output transform.
+fn draw_into(
+  target: &mut dyn RenderTarget,
+  tiles: &[RenderTile<'_>],
+  background: [f64; 4],
+  buffer: &shingle::DmabufBuffer,
+  origin: (i32, i32),
+) -> Result<(), String> {
+  let descriptor = crate::dmabuf::descriptor(buffer)?;
+  let mut tiles = tiles.to_vec();
+  if origin != (0, 0) {
+    for tile in &mut tiles {
+      tile.geometry =
+        super::outputs::translate(tile.geometry, -origin.0, -origin.1);
+      if let Some(projection) = &mut tile.projection {
+        projection.origin[0] -= origin.0 as f32;
+        projection.origin[1] -= origin.1 as f32;
+      }
+    }
+  }
+  target
+    .capture_into(&tiles, background, &descriptor)
+    .map_err(|error| error.to_string())
 }
 
 /// `tiles` without those that draw one of the `cursors` textures.

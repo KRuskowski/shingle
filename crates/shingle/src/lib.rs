@@ -152,7 +152,7 @@ use wayland_server::{
 
 pub use buffer::ShmContent;
 pub use buffer_lock::BufferLock;
-pub use capture::{CaptureId, CaptureRequest, CaptureSource};
+pub use capture::{CaptureDmabuf, CaptureId, CaptureRequest, CaptureSource};
 pub use host_selection::{
   HostSelectionRequest, SelectionKind, SelectionOwner, SelectionSourceId,
 };
@@ -2484,6 +2484,29 @@ impl Compositor {
   /// [`Compositor::output_damaged`].
   pub fn set_frame_capture(&mut self, enabled: bool) {
     self.state.captures.frame_capture = enabled;
+  }
+
+  /// Lets captures go into DMA-BUFs of `dmabuf`'s formats and modifiers,
+  /// which the frontend's renderer draws into ([`CaptureRequest::dmabuf`]),
+  /// or only into shared memory for `None`, the default. With it,
+  /// wlr-screencopy version 3 frames announce the first format with
+  /// `linux_dmabuf`, which xdg-desktop-portal-wlr 0.7 requires, and
+  /// ext-image-copy-capture sessions announce the device and every format.
+  /// It applies to frames and sessions created after the call.
+  pub fn set_capture_dmabuf(&mut self, dmabuf: Option<CaptureDmabuf>) {
+    self.state.captures.dmabuf = dmabuf;
+  }
+
+  /// Answers [`Event::CaptureRequested`] `id` of a capture into a DMA-BUF
+  /// ([`CaptureRequest::dmabuf`]): the frontend drew into it and the GPU
+  /// has finished, which sends `ready`, or why it could not, which sends
+  /// `failed`. An unknown `id` is ignored.
+  pub fn finish_capture_into(
+    &mut self,
+    id: CaptureId,
+    result: Result<(), String>,
+  ) {
+    capture::finish_into(&mut self.state, id, result);
   }
 
   /// Tells captures that `output`, and the windows on it, changed: the

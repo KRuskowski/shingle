@@ -1246,6 +1246,22 @@ impl RenderTarget for RecordingTarget {
     self.captures.push(size);
     shingle_render::capture_frame(&self.gpu, &self.state, size, tiles, clear)
   }
+
+  fn capture_into(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    buffer: &shingle_render::DmabufDescriptor<'_>,
+  ) -> Result<(), RenderError> {
+    self.captures.push((buffer.width, buffer.height));
+    shingle_render::capture_into_dmabuf(
+      &self.gpu,
+      &self.state,
+      buffer,
+      tiles,
+      clear,
+    )
+  }
 }
 
 /// A recording target, or `None` without a GPU adapter. It waits while

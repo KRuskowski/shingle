@@ -49,7 +49,9 @@ use wayland_server::{
 
 use crate::{
   buffer::CAPTURE_SHM_FORMATS,
-  capture::{self, CaptureFrame, Copy, DamageKey, Failure, Target},
+  capture::{
+    self, CaptureDmabuf, CaptureFrame, Copy, DamageKey, Failure, Target,
+  },
   state::CompositorState,
 };
 
@@ -72,6 +74,8 @@ struct Session {
   content: Option<Content>,
   /// The buffer size last advertised.
   size: Option<(u32, u32)>,
+  /// The DMA-BUFs advertised, if any.
+  dmabuf: Option<CaptureDmabuf>,
   /// The frame that exists, at most one.
   frame: Option<ObjectId>,
   stopped: bool,
@@ -229,10 +233,25 @@ fn content_size(
 }
 
 /// Sends the buffer constraints for a `size` buffer: the shared-memory
-/// formats and the size, then `done`.
-fn send_constraints(session: &ExtImageCopyCaptureSessionV1, size: (u32, u32)) {
+/// formats, the device and formats of `dmabuf` if given, and the size,
+/// then `done`.
+fn send_constraints(
+  session: &ExtImageCopyCaptureSessionV1,
+  size: (u32, u32),
+  dmabuf: Option<&CaptureDmabuf>,
+) {
   for format in CAPTURE_SHM_FORMATS {
     session.shm_format(format);
+  }
+  if let Some(dmabuf) = dmabuf {
+    session.dmabuf_device(dmabuf.device.to_ne_bytes().to_vec());
+    for (fourcc, modifiers) in &dmabuf.formats {
+      let modifiers = modifiers
+        .iter()
+        .flat_map(|modifier| modifier.to_ne_bytes())
+        .collect();
+      session.dmabuf_format(*fourcc, modifiers);
+    }
   }
   session.buffer_size(size.0, size.1);
   session.done();
@@ -268,7 +287,7 @@ pub(crate) fn sync(state: &mut CompositorState) {
       None => stop(session),
       Some(size) if session.size != Some(size) => {
         session.size = Some(size);
-        send_constraints(&session.resource, size);
+        send_constraints(&session.resource, size, session.dmabuf.as_ref());
       }
       Some(_) => {}
     }
@@ -378,6 +397,9 @@ fn image_of(state: &CompositorState, cursor: &ObjectId) -> Option<Arc<[u8]>> {
   if !cursor_seen(state, target).inside {
     return None;
   }
+  // A cursor buffer committed before its surface became the cursor was
+  // uploaded and given back, so the compositor has no pixels of it until
+  // the next commit, as for a cursor plane.
   cursor_over(state, target)?.0.rgba()
 }
 
@@ -430,15 +452,22 @@ fn create_session(
   let size = content
     .as_ref()
     .and_then(|content| content_size(state, content));
+  // Only images of the source are drawn, and so copied into DMA-BUFs.
+  let dmabuf = matches!(content, Some(Content::Image { .. }))
+    .then(|| state.captures.dmabuf.clone())
+    .flatten();
   let mut session = Session {
     resource,
     content,
     size,
+    dmabuf,
     frame: None,
     stopped: false,
   };
   match size {
-    Some(size) => send_constraints(&session.resource, size),
+    Some(size) => {
+      send_constraints(&session.resource, size, session.dmabuf.as_ref())
+    }
     None => stop(&mut session),
   }
   state
@@ -498,7 +527,13 @@ fn capture_frame(
   let shm = attachment
     .shm_format()
     .is_some_and(|format| CAPTURE_SHM_FORMATS.contains(&format));
-  if (attachment.width, attachment.height) != size || !shm {
+  let dmabuf = attachment.dmabuf_buffer().is_some_and(|buffer| {
+    session
+      .dmabuf
+      .as_ref()
+      .is_some_and(|dmabuf| dmabuf.accepts(buffer))
+  });
+  if (attachment.width, attachment.height) != size || !(shm || dmabuf) {
     fail(Failure::BufferConstraints);
     return;
   }

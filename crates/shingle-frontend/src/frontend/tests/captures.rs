@@ -125,3 +125,31 @@ fn a_window_capture_shows_that_window_alone() {
     &bytes[..8]
   );
 }
+
+#[test]
+fn a_capture_into_a_dmabuf_is_drawn_into_it_by_the_target() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let (mut fixture, _fake, _toplevel) = dmabuf_fixture(&target);
+  fixture.frontend.compositor_mut().set_capture_dmabuf(Some(
+    shingle::CaptureDmabuf {
+      device: (226 << 8) | 128,
+      formats: vec![(u32::from_le_bytes(*b"XR24"), vec![0])],
+    },
+  ));
+  let compositor = fixture.frontend.compositor_mut();
+  let buffer = fixture.client.dmabuf_buffer(compositor, 1000, 800);
+  let compositor = fixture.frontend.compositor_mut();
+  let _frame = fixture.client.capture_into(compositor, &buffer);
+  target.captures.clear();
+  draw(&mut fixture, &mut target);
+  assert_eq!(
+    target.captures,
+    [(1000, 800)],
+    "drawn into the client's buffer at the output's size"
+  );
+  // The test's DMA-BUF is a memfd, which the GPU cannot import, so the
+  // capture fails; the real import is checked in the GPU harness.
+  assert_eq!(fixture.client.captures(), ["failed"]);
+}

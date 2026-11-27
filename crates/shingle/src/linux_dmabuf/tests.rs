@@ -711,3 +711,187 @@ fn a_destroyed_wl_buffer_keeps_the_shown_dmabuf() {
   // surface's snapshot does, with the importer's record.
   assert_eq!(Arc::strong_count(&imports[0]), 2);
 }
+
+/// What captures may draw into: XR24 linear, as the tests' frontend.
+fn capture_dmabuf() -> crate::CaptureDmabuf {
+  crate::CaptureDmabuf {
+    device: RENDER_NODE,
+    formats: vec![(XR24, vec![LINEAR])],
+  }
+}
+
+/// The capture requests among the compositor's events.
+fn capture_requests(compositor: &mut Compositor) -> Vec<crate::CaptureRequest> {
+  compositor
+    .drain_events()
+    .into_iter()
+    .filter_map(|event| match event {
+      Event::CaptureRequested(request) => Some(request),
+      _ => None,
+    })
+    .collect()
+}
+
+#[test]
+fn screencopy_announces_a_dmabuf_format_and_the_frontend_draws_into_it() {
+  use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::Event as FrameEvent,
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+  };
+  let mut fixture = setup();
+  fixture.compositor.set_frame_capture(true);
+  fixture
+    .compositor
+    .set_capture_dmabuf(Some(capture_dmabuf()));
+  let manager = fixture.client.bind::<ZwlrScreencopyManagerV1>(3);
+  let output = fixture
+    .client
+    .bind::<wayland_client::protocol::wl_output::WlOutput>(1);
+  let frame = manager.capture_output(0, &output, &fixture.client.handle, ());
+  fixture.client.roundtrip(&mut fixture.compositor);
+  assert!(
+    fixture
+      .client
+      .events
+      .screencopy
+      .iter()
+      .any(|event| matches!(
+        event,
+        FrameEvent::LinuxDmabuf {
+          format: XR24,
+          width: 1280,
+          height: 720,
+        }
+      ))
+  );
+  let buffer = fixture.buffer(1280, 720);
+  frame.copy(&buffer);
+  fixture.client.roundtrip(&mut fixture.compositor);
+  let requests = capture_requests(&mut fixture.compositor);
+  let [request] = requests.as_slice() else {
+    panic!("one capture: {requests:?}");
+  };
+  let drawn = request.dmabuf.as_ref().expect("a capture into the DMA-BUF");
+  assert_eq!((drawn.width, drawn.height, drawn.format), (1280, 720, XR24));
+  fixture.compositor.finish_capture_into(request.id, Ok(()));
+  fixture.client.roundtrip(&mut fixture.compositor);
+  assert!(
+    fixture
+      .client
+      .events
+      .screencopy
+      .iter()
+      .any(|event| matches!(event, FrameEvent::Ready { .. }))
+  );
+}
+
+#[test]
+fn without_frame_capture_a_dmabuf_capture_fails() {
+  use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::Event as FrameEvent,
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+  };
+  let mut fixture = setup();
+  fixture
+    .compositor
+    .set_capture_dmabuf(Some(capture_dmabuf()));
+  let manager = fixture.client.bind::<ZwlrScreencopyManagerV1>(3);
+  let output = fixture
+    .client
+    .bind::<wayland_client::protocol::wl_output::WlOutput>(1);
+  let frame = manager.capture_output(0, &output, &fixture.client.handle, ());
+  fixture.client.roundtrip(&mut fixture.compositor);
+  let buffer = fixture.buffer(1280, 720);
+  frame.copy(&buffer);
+  fixture.client.roundtrip(&mut fixture.compositor);
+  assert!(matches!(
+    fixture.client.events.screencopy.last(),
+    Some(FrameEvent::Failed)
+  ));
+}
+
+#[test]
+fn an_ext_session_announces_the_device_and_takes_only_its_modifiers() {
+  use wayland_protocols::ext::{
+    image_capture_source::v1::client::{
+      ext_image_capture_source_v1::ExtImageCaptureSourceV1,
+      ext_output_image_capture_source_manager_v1 as sources,
+    },
+    image_copy_capture::v1::client::{
+      ext_image_copy_capture_frame_v1::Event as FrameEvent,
+      ext_image_copy_capture_manager_v1::{
+        ExtImageCopyCaptureManagerV1, Options,
+      },
+      ext_image_copy_capture_session_v1::Event as SessionEvent,
+    },
+  };
+  let mut fixture = setup();
+  fixture.compositor.set_frame_capture(true);
+  fixture
+    .compositor
+    .set_capture_dmabuf(Some(capture_dmabuf()));
+  let output = fixture
+    .client
+    .bind::<wayland_client::protocol::wl_output::WlOutput>(4);
+  type Sources = sources::ExtOutputImageCaptureSourceManagerV1;
+  let source: ExtImageCaptureSourceV1 = fixture
+    .client
+    .bind::<Sources>(1)
+    .create_source(&output, &fixture.client.handle, ());
+  let manager = fixture.client.bind::<ExtImageCopyCaptureManagerV1>(1);
+  let session = manager.create_session(
+    &source,
+    Options::empty(),
+    &fixture.client.handle,
+    (),
+  );
+  fixture.client.roundtrip(&mut fixture.compositor);
+  let events = &fixture.client.events.capture_sessions;
+  assert!(events.iter().any(|(_, event)| matches!(
+    event,
+    SessionEvent::DmabufDevice { device }
+      if *device == RENDER_NODE.to_ne_bytes()
+  )));
+  assert!(events.iter().any(|(_, event)| matches!(
+    event,
+    SessionEvent::DmabufFormat { format: XR24, modifiers }
+      if *modifiers == LINEAR.to_ne_bytes()
+  )));
+  // A buffer of a modifier the session did not announce.
+  let fd = memfd(1280 * 720 * 4);
+  let params = fixture.params(&fd, 1280 * 4, TILED);
+  let tiled = params.create_immed(
+    1280,
+    720,
+    XR24,
+    zwp_linux_buffer_params_v1::Flags::empty(),
+    &fixture.client.handle,
+    (),
+  );
+  params.destroy();
+  let frame = session.create_frame(&fixture.client.handle, ());
+  frame.attach_buffer(&tiled);
+  frame.capture();
+  fixture.client.roundtrip(&mut fixture.compositor);
+  assert!(matches!(
+    fixture.client.events.capture_frames.last(),
+    Some((_, FrameEvent::Failed { .. }))
+  ));
+  frame.destroy();
+  let linear = fixture.buffer(1280, 720);
+  let frame = session.create_frame(&fixture.client.handle, ());
+  frame.attach_buffer(&linear);
+  frame.capture();
+  fixture.client.roundtrip(&mut fixture.compositor);
+  let requests = capture_requests(&mut fixture.compositor);
+  let [request] = requests.as_slice() else {
+    panic!("one capture: {requests:?}");
+  };
+  assert!(request.dmabuf.is_some());
+  fixture.compositor.finish_capture_into(request.id, Ok(()));
+  fixture.client.roundtrip(&mut fixture.compositor);
+  assert!(matches!(
+    fixture.client.events.capture_frames.last(),
+    Some((_, FrameEvent::Ready))
+  ));
+}

@@ -376,6 +376,14 @@ impl Attachment {
     view.write_rgba(self.width, self.height, rgba)
   }
 
+  /// The DMA-BUF of a linux-dmabuf buffer.
+  pub(crate) fn dmabuf_buffer(&self) -> Option<&Arc<DmabufBuffer>> {
+    match &self.content {
+      BufferContent::Dmabuf(buffer) => Some(buffer),
+      _ => None,
+    }
+  }
+
   /// The `wl_shm` format of a shared-memory buffer.
   pub(crate) fn shm_format(&self) -> Option<Format> {
     match &self.content {

@@ -274,6 +274,21 @@ impl RenderTarget for WindowOutput<'_> {
   ) -> Result<Vec<u8>, RenderError> {
     capture_frame(self.gpu, &self.window.state, size, tiles, clear)
   }
+
+  fn capture_into(
+    &mut self,
+    tiles: &[RenderTile<'_>],
+    clear: [f64; 4],
+    buffer: &shingle_render::DmabufDescriptor<'_>,
+  ) -> Result<(), RenderError> {
+    shingle_render::capture_into_dmabuf(
+      self.gpu,
+      &self.window.state,
+      buffer,
+      tiles,
+      clear,
+    )
+  }
 }
 
 /// The [`Host`] side of the nested windows: what the frontend asks of

@@ -57,6 +57,7 @@ pub use renderer::{OffscreenRenderer, Renderer};
 pub use state::RenderState;
 pub use target::{
   CAPTURE_TIMEOUT, OffscreenTarget, WindowTarget, capture_frame,
+  capture_into_dmabuf,
 };
 pub use upload::{ShmImage, TextureUploader, UploadError, UploadRect};
 
@@ -117,6 +118,9 @@ pub enum RenderError {
   /// The surface reports no supported texture format for this adapter.
   #[error("the GPU surface offers no texture format")]
   NoSurfaceFormat,
+  /// A DMA-BUF to draw into could not be imported.
+  #[error("{0}")]
+  Import(#[from] ImportError),
 }
 
 /// A rectangle in logical output pixels: origin at the top left of the

@@ -387,6 +387,21 @@ impl TestClient {
     }
   }
 
+  /// Asks wlr-screencopy for the whole first output, copied into `buffer`.
+  pub(crate) fn capture_into(
+    &mut self,
+    compositor: &mut Compositor,
+    buffer: &wl_buffer::WlBuffer,
+  ) -> ZwlrScreencopyFrameV1 {
+    let manager = self.bind::<ZwlrScreencopyManagerV1>(3);
+    let output = self.bind::<wl_output::WlOutput>(1);
+    let frame = manager.capture_output(0, &output, &self.handle, ());
+    self.roundtrip(compositor);
+    frame.copy(buffer);
+    self.roundtrip(compositor);
+    frame
+  }
+
   /// A `width` by `height` ARGB8888 buffer for a capture, its memory and
   /// size.
   fn capture_buffer(

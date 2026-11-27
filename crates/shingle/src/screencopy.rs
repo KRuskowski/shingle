@@ -86,6 +86,16 @@ fn create_frame(
     width.saturating_mul(4),
   );
   if frame.version() >= 3 {
+    // xdg-desktop-portal-wlr 0.7 fails a version 3 frame without a
+    // DMA-BUF format.
+    if let Some((fourcc, _)) = state
+      .captures
+      .dmabuf
+      .as_ref()
+      .and_then(|dmabuf| dmabuf.formats.first())
+    {
+      frame.linux_dmabuf(*fourcc, width, height);
+    }
     frame.buffer_done();
   }
   state.screencopy.frames.insert(
@@ -140,12 +150,23 @@ fn copy_frame(
       return;
     }
     None => {
-      CaptureFrame::Screencopy {
-        frame: resource.clone(),
-        with_damage,
+      // Only the format `linux_dmabuf` named, with a modifier the
+      // renderer draws into.
+      let announced = state.captures.dmabuf.as_ref().is_some_and(|dmabuf| {
+        attachment.dmabuf_buffer().is_some_and(|buffer| {
+          dmabuf.accepts(buffer)
+            && dmabuf.formats.first().map(|(fourcc, _)| *fourcc)
+              == Some(buffer.format)
+        })
+      });
+      if !announced {
+        CaptureFrame::Screencopy {
+          frame: resource.clone(),
+          with_damage,
+        }
+        .fail(Failure::BufferConstraints);
+        return;
       }
-      .fail(Failure::BufferConstraints);
-      return;
     }
   }
   let (target, geometry, cursor) =

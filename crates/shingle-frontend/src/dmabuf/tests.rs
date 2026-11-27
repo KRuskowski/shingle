@@ -14,7 +14,7 @@ use shingle_render::{
   dmabuf::{FormatCaps, ModifierCaps},
 };
 
-use super::{DmabufTextures, Import, feedback};
+use super::{DmabufTextures, Import, capture_formats, feedback};
 
 const XR24: u32 = u32::from_le_bytes(*b"XR24");
 const AR24: u32 = u32::from_le_bytes(*b"AR24");
@@ -248,4 +248,21 @@ fn frames_hold_nothing_without_locks_and_retire_once_done() {
   fake.finish_work();
   cache.retire();
   assert_eq!(cache.frames_in_flight(), 0);
+}
+
+#[test]
+fn captures_go_into_the_formats_and_modifiers_the_device_renders_to() {
+  let mut caps = caps(Some((226, 128)));
+  assert_eq!(capture_formats(&caps), None, "nothing renders yet");
+  caps.formats[0].render = caps.formats[0].sample.clone();
+  caps.formats[1].render = caps.formats[1].sample.clone();
+  let capture = capture_formats(&caps).expect("both formats render");
+  assert_eq!(capture.device, (226 << 8) | 128);
+  // XR24 first, as wlroots announces it.
+  assert_eq!(
+    capture.formats,
+    [(XR24, vec![0]), (AR24, vec![0, 0x0300_0000_0060_6015])]
+  );
+  caps.render_node = None;
+  assert_eq!(capture_formats(&caps), None, "no device to name");
 }
