@@ -47,6 +47,8 @@ use crate::{
 
 #[cfg(test)]
 mod icon_tests;
+#[cfg(test)]
+mod selection_tests;
 
 pub(crate) struct SourceData;
 struct DeviceData;
@@ -1232,15 +1234,11 @@ impl Dispatch<WlDataDevice, DeviceData> for CompositorState {
         let Some(found) = state.data_devices.sources.get_mut(source_id) else {
           return;
         };
-        if found.used {
-          if let Some(source) = &source {
-            source.post_error(
-              wl_data_device::Error::UsedSource,
-              "data source has already been used",
-            );
-          }
-          return;
-        }
+        // GTK sets the same source again after offering SAVE_TARGETS, as
+        // Firefox does on every copy. wlroots accepts a used source here
+        // (its set_selection only marks the source finalized) and keeps
+        // the selection when it is already that source, so Shingle does
+        // too rather than raising `used_source`, which ended Firefox.
         found.used = true;
       }
       state.data_devices.replace_selection(source_id);
