@@ -3250,6 +3250,18 @@ name = "shingle-idle"
 version = "0.1.0"
 
 [[package]]
+name = "shingle-launcher"
+version = "0.1.0"
+dependencies = [
+ "gloomy-core",
+ "pollster 0.3.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "wgpu 0.20.1",
+]
+
+[[package]]
 name = "shingle-lock"
 version = "0.1.0"
 dependencies = [

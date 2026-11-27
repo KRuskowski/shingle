@@ -1,0 +1,20 @@
+[package]
+name = "shingle-launcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gloomy-core.workspace = true
+# Gloomy's own wgpu and pollster, for the device handed to its renderer.
+pollster = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+wgpu = "0.20"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
