@@ -167,6 +167,7 @@ pub(super) fn record_frame(
     output: view.handle.name(),
     lock: format!("{lock:?}").to_lowercase(),
     lock_surface,
+    time: shingle::monotonic_time(),
   };
   let result = target
     .capture(tiles, background, size)

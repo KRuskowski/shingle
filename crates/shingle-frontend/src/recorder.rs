@@ -29,6 +29,8 @@ pub struct FrameInfo<'a> {
   pub lock: String,
   /// Whether a lock surface was among what was drawn.
   pub lock_surface: bool,
+  /// When it was presented, on `CLOCK_MONOTONIC`.
+  pub time: std::time::Duration,
 }
 
 /// Writes presented frames as PPM files.
@@ -109,11 +111,13 @@ fn encode(
   let mut out = Vec::with_capacity(pixels * 3 + 128);
   write!(
     out,
-    "P6\n# shingle-frame output={} frame={number} lock={} lock_surface={}\n\
-     {width} {height}\n255\n",
+    "P6\n# shingle-frame output={} frame={number} lock={} lock_surface={} \
+     time={}.{:09}\n{width} {height}\n255\n",
     info.output,
     info.lock,
-    u8::from(info.lock_surface)
+    u8::from(info.lock_surface),
+    info.time.as_secs(),
+    info.time.subsec_nanos()
   )?;
   for pixel in rgba.chunks_exact(4) {
     out.extend_from_slice(&pixel[..3]);
@@ -133,6 +137,7 @@ mod tests {
       output: "HEADLESS-1",
       lock: "pending".into(),
       lock_surface: false,
+      time: std::time::Duration::from_millis(1500),
     };
     let rgba = [1, 2, 3, 255, 4, 5, 6, 255];
     let first = recorder.record(&info, (2, 1), &rgba).unwrap();
@@ -141,7 +146,7 @@ mod tests {
     assert!(second.ends_with("HEADLESS-1-000001.ppm"));
     let bytes = fs::read(&first).unwrap();
     let header = b"P6\n# shingle-frame output=HEADLESS-1 frame=0 \
-                   lock=pending lock_surface=0\n2 1\n255\n";
+                   lock=pending lock_surface=0 time=1.500000000\n2 1\n255\n";
     assert_eq!(&bytes[..header.len()], header);
     assert_eq!(&bytes[header.len()..], [1, 2, 3, 4, 5, 6]);
     // Nothing is left under a temporary name.
