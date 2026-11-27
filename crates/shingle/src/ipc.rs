@@ -1893,6 +1893,8 @@ fn evdev_code(name: &str) -> Option<u32> {
     "KEY_DELETE" => 111,
     "KEY_LEFTMETA" => 125,
     "KEY_RIGHTMETA" => 126,
+    // The Menu key, which opens context menus.
+    "KEY_COMPOSE" => 127,
     "BTN_LEFT" => 0x110,
     "BTN_RIGHT" => 0x111,
     "BTN_MIDDLE" => 0x112,
@@ -3342,6 +3344,14 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
 #[cfg(test)]
 mod tests {
   use serde_json::{Value, json};
+
+  #[test]
+  fn stipc_key_names_are_evdev_codes() {
+    assert_eq!(super::evdev_code("KEY_A"), Some(30));
+    assert_eq!(super::evdev_code("KEY_F10"), Some(68));
+    assert_eq!(super::evdev_code("KEY_COMPOSE"), Some(127));
+    assert_eq!(super::evdev_code("KEY_NOPE"), None);
+  }
 
   use super::{SUPPORTED_METHODS, respond};
   use crate::{
