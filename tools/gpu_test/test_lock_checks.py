@@ -65,6 +65,21 @@ class FrameTest(unittest.TestCase):
     self.assertTrue(lock_checks.reddish((180, 60, 70)))
     self.assertFalse(lock_checks.reddish((128, 128, 128)))
 
+  def test_the_caps_lock_and_layout_colours_have_their_own_classes(self):
+    self.assertEqual(lock_checks.classify(128, 0, 255), lock_checks.VIOLET)
+    self.assertEqual(lock_checks.classify(0, 255, 128), lock_checks.MINT)
+    self.assertEqual(lock_checks.classify(0, 255, 255), 'cyan')
+    self.assertIsNone(lock_checks.classify(128, 128, 128))
+    violet = lock_checks.parse_frame(frame(16, 8, lambda x, y: (128, 0, 255)))
+    self.assertEqual(lock_checks.Frame(violet[0], violet, False).violet, 16)
+
+  def test_a_covering_capture_is_scaled_about_the_centre(self):
+    # 640x400 on 800x400: scaled by 1.25, 50 rows cut at top and bottom.
+    self.assertEqual(lock_checks.covered_point((320, 200), (640, 400),
+                                               (800, 400)), (400, 200))
+    self.assertEqual(lock_checks.covered_point((160, 100), (640, 400),
+                                               (800, 400)), (200, 75))
+
   def test_letters_become_evdev_keys(self):
     self.assertEqual(lock_checks.key_names('ab'), ['KEY_A', 'KEY_B'])
 

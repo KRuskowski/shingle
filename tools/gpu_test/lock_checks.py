@@ -14,15 +14,19 @@ The group `lock` locks with shingle-lock (`--lock`, the debug build by
 default) and an invented swaylock config: screenshot, effect-blur,
 effect-vignette, clock and test colours for the input's states. It
 checks the blurred screenshot and its drift, the input appearing on
-typing, the verify and wrong states and the failed-attempt count, the
-fade-out after lock.input_timeout, the drift stopping while DPMS is off
-and the first frames after the wake, HEADLESS-2 turned off and on with
-wlr-randr while locked, the unlock with the test password, a SIGKILLed
+typing, the verify and wrong states and the failed-attempt count, Caps
+Lock in its own colours with its label, the keyboard layout's label
+(the keymap is `us,de`) following a group change, the fade-out after
+lock.input_timeout, the drift stopping while DPMS is off and the first
+frames after the wake, HEADLESS-2 turned off and on with wlr-randr while
+locked, an output created over IPC while locked showing the blurred
+capture of HEADLESS-1, the unlock with the test password, a SIGKILLed
 lock client leaving the outputs black, the lock binding starting a new
 client after that, a grace-period unlock by a client that takes over
 another crashed lock, and the lock binding while unlocked, which starts
 shingle-lock through lock.command while the clients still show, so that
-it captures them.
+it captures them, and every output shows the lock within
+LOCK_UP_SECONDS of the binding.
 
 PAM is a private /etc/pam.d, bind-mounted in this namespace only, whose
 `shingle` service runs a script that accepts only the invented password
@@ -32,6 +36,7 @@ namespace.
 """
 
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -67,6 +72,7 @@ clock
 show-failed-attempts
 indicator-radius=40
 indicator-thickness=12
+font-size=20
 ring-color=00ffff
 ring-ver-color=ffff00
 ring-wrong-color=ff00ff
@@ -77,7 +83,22 @@ text-color=c0c0c0
 key-hl-color=ff8000
 bs-hl-color=ff8000
 separator-color=804000
+indicator-caps-lock
+ring-caps-lock-color=8000ff
+inside-caps-lock-color=202020ff
+caps-lock-key-hl-color=ff8000
+caps-lock-bs-hl-color=ff8000
+layout-bg-color=202020ff
+layout-text-color=00ff80
 """
+# The Caps Lock ring and the layout label's text, which classify as none
+# of checks.classify's colours.
+VIOLET = 'violet'
+MINT = 'mint'
+LAYOUTS = ('English (US)', 'German')
+# An output created over IPC while locked, of another shape than the
+# captures.
+ADDED_SIZE = (800, 400)
 # The PAM check: the token arrives on stdin, NUL-terminated; it sleeps
 # so that the verify state is drawn.
 PAM_CHECK = f"""#!{sys.executable}
@@ -122,12 +143,23 @@ def pixel(frame, x, y):
   offset = (y * width + x) * 3
   return tuple(pixels[offset:offset + 3])
 
+def classify(r, g, b):
+  """checks.classify, and VIOLET (the Caps Lock ring) and MINT (the
+  layout label's text), which it leaves out."""
+  name = checks.classify(r, g, b)
+  if name is not None:
+    return name
+  if 90 < r < 170 and g < 60 and b > 200:
+    return VIOLET
+  if r < 60 and g > 200 and 90 < b < 170:
+    return MINT
+  return None
+
 def row_classes(frame, y, step=2):
-  """checks.classify of every `step`th pixel of row `y`."""
+  """classify of every `step`th pixel of row `y`."""
   _, width, _, pixels = frame
   start = y * width * 3
   row = pixels[start:start + width * 3]
-  classify = checks.classify
   return [classify(row[x * 3], row[x * 3 + 1], row[x * 3 + 2])
           for x in range(0, width, step)]
 
@@ -201,6 +233,8 @@ class Frame:
     self.cyan = colour_count(frame, 'cyan', rows)
     self.yellow = colour_count(frame, 'yellow', rows)
     self.magenta = colour_count(frame, 'magenta', rows)
+    self.violet = colour_count(frame, VIOLET, rows)
+    self.mint = colour_count(frame, MINT, rows)
     self.frame = frame if keep else None
 
 class FrameReader:
@@ -341,6 +375,7 @@ def lock_config(lock_binary, swaylock):
   """The YAML config, as JSON."""
   config = dict(checks.BASE_CONFIG)
   config.update({
+      'input': {'layout': 'us,de'},
       'outputs': [dict(output) for output in OUTPUTS],
       'animate': {'open_animation': 'none', 'close_animation': 'none'},
       'idle': {'dpms_seconds': DPMS_SECONDS},
@@ -503,6 +538,7 @@ def run_sessions(results, shingle, reader, lock_binary, swaylock, geometry,
                 xw.wait_for(lambda: '1 failed attempt'
                             in first.client.output(), timeout=5),
                 checks.tail(first.client.output()))
+  keyboard_checks(results, shingle, reader, first)
   last_key = time.monotonic()
   time.sleep(INPUT_TIMEOUT + 2)
   reader.drain()
@@ -551,6 +587,13 @@ def run_sessions(results, shingle, reader, lock_binary, swaylock, geometry,
                     frame.black for frame in reader.since(back, 'HEADLESS-2')
                     if frame.arrived < again.arrived),
                 describe(reader.since(back, 'HEADLESS-2')))
+  own = re.compile(r'\(HEADLESS-2\) shows the capture of output \d+ '
+                   r'\(HEADLESS-2\)')
+  results.check('lock: and shows its own capture again, found by name',
+                xw.wait_for(lambda: len(own.findall(first.client.output()))
+                            >= 2, timeout=5),
+                checks.tail(first.client.output()))
+  added_output_checks(results, shingle, first, geometry)
   # The test password unlocks.
   type_text(shingle, ACCEPTED_PHRASE)
   moment = time.monotonic()
@@ -665,6 +708,106 @@ def run_sessions(results, shingle, reader, lock_binary, swaylock, geometry,
                       moment=moment, timeout=15)
   results.check('lock: and the test password unlocks it', shown is not None,
                 describe(reader.since(moment)))
+
+def keyboard_checks(results, shingle, reader, lock):
+  """Caps Lock and the layout label, while the input shows; ends with
+  Caps Lock off, the first layout and the input cleared."""
+  # A letter shows the typing state, which the labels belong to.
+  moment = time.monotonic()
+  type_text(shingle, 'a')
+  results.check('lock: typing shows the keyboard layout\'s label, the '
+                'keymap having two layouts',
+                xw.wait_for(lambda: f'layout label Some("{LAYOUTS[0]}")'
+                            in lock.client.output(), timeout=5)
+                and reader.wait(lambda frame: frame.lock == 'locked'
+                                and frame.mint > 0, moment=moment),
+                checks.tail(lock.client.output()))
+  moment = time.monotonic()
+  tap(shingle, 'KEY_CAPSLOCK')
+  caps = reader.wait(lambda frame: frame.lock == 'locked'
+                     and frame.violet > 20, moment=moment)
+  results.check('lock: Caps Lock turns the input into its Caps Lock '
+                'colours (indicator-caps-lock)', caps is not None,
+                describe(reader.since(moment)))
+  results.check('lock: and shows the Caps Lock label',
+                xw.wait_for(lambda: 'caps lock on, layout label '
+                            f'Some("{LAYOUTS[0]}"), caps lock label '
+                            'Some("Caps Lock")' in lock.client.output(),
+                            timeout=5),
+                checks.tail(lock.client.output()))
+  moment = time.monotonic()
+  tap(shingle, 'KEY_CAPSLOCK')
+  off = reader.wait(lambda frame: frame.lock == 'locked' and frame.cyan > 20
+                    and frame.violet == 0, moment=moment)
+  results.check('lock: Caps Lock off again restores the input\'s colours',
+                off is not None, describe(reader.since(moment)))
+  moment = time.monotonic()
+  reply = shingle.call('wayfire/set-keyboard-state', {'layout-index': 1})
+  results.check('lock: a group change shows the other layout\'s name',
+                reply.get('result') == 'ok' and xw.wait_for(
+                    lambda: f'layout label Some("{LAYOUTS[1]}")'
+                    in lock.client.output(), timeout=5)
+                and reader.wait(lambda frame: frame.lock == 'locked'
+                                and frame.mint > 0, moment=moment),
+                f'{reply}; {checks.tail(lock.client.output())}')
+  shingle.call('wayfire/set-keyboard-state', {'layout-index': 0})
+  xw.wait_for(lambda: lock.client.output().count(
+      f'layout label Some("{LAYOUTS[0]}")') >= 3, timeout=5)
+  tap(shingle, 'KEY_ESC')
+
+def grim_output(shingle, name):
+  """A grim capture of output `name` as (info, width, height, RGB
+  bytes), or None."""
+  try:
+    done = subprocess.run(['grim', '-o', name, '-t', 'ppm', '-'],
+                          env=shingle.client_environment(),
+                          capture_output=True, timeout=20,
+                          stdin=subprocess.DEVNULL)
+  except subprocess.TimeoutExpired:
+    return None
+  parsed = xw.parse_ppm(done.stdout) if done.returncode == 0 else None
+  return ({}, *parsed) if parsed else None
+
+def covered_point(point, image, target):
+  """Where `point` of a capture of `image` size shows on an output of
+  `target` size that it covers with its aspect ratio kept, ignoring the
+  drift."""
+  scale = max(target[0] / image[0], target[1] / image[1])
+  return tuple(int((p - i / 2) * scale + t / 2)
+               for p, i, t in zip(point, image, target))
+
+def added_output_checks(results, shingle, lock, geometry):
+  """An output created while locked shows HEADLESS-1's blurred capture,
+  scaled to cover it, and never a client; it is removed again."""
+  reply = shingle.call('wayfire/create-headless-output',
+                       {'width': ADDED_SIZE[0], 'height': ADDED_SIZE[1]})
+  name = (reply.get('output') or {}).get('name')
+  results.check('lock: an output created over IPC while locked',
+                reply.get('result') == 'ok' and name, str(reply))
+  if not name:
+    return
+  shown = xw.wait_for(lambda: f'({name}) shows the capture of'
+                      in lock.client.output(), timeout=10)
+  of_first = re.compile(rf'\({re.escape(name)}\) shows the capture of '
+                        r'output \d+ \(HEADLESS-1\)')
+  results.check(f'lock: {name} shows the capture of HEADLESS-1',
+                shown and of_first.search(lock.client.output()),
+                checks.tail(lock.client.output()))
+  shot = xw.wait_for(lambda: (lambda shot: shot if shot and not all_black(
+      shot) else None)(grim_output(shingle, name)), timeout=10)
+  if shot is not None and geometry:
+    red = (geometry['x'] + geometry['width'] // 4,
+           geometry['y'] + geometry['height'] // 4)
+    x, y = covered_point(red, (WIDTH, HEIGHT), ADDED_SIZE)
+    blurred = reddish(pixel(shot, x, y)) and not sharp_pattern(shot)
+    detail = f'{pixel(shot, x, y)} at {(x, y)}'
+  else:
+    blurred, detail = False, 'no capture'
+  results.check(f'lock: {name} shows it blurred, scaled to cover, not '
+                'the clients', blurred, detail)
+  reply = shingle.call('wayfire/destroy-headless-output', {'output': name})
+  results.check(f'lock: {name} removed again', reply.get('result') == 'ok',
+                str(reply))
 
 def lock_up_time(reader, moment):
   """Seconds from `moment` until every output has presented a locked
