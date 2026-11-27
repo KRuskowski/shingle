@@ -5,10 +5,11 @@
 //! With `screenshot` it captures every output before it asks for the
 //! lock, while the GPU opens, blurs the captures once on the GPU and
 //! shows them, slowly drifting, under a vignette and the clock; an output
-//! added later shows the capture of another. Typing fades in an outlined password input,
-//! with the keyboard layout and Caps Lock as small labels in it. Frames
-//! follow the compositor's frame callbacks, so nothing is drawn while an
-//! output is off.
+//! added later shows the capture of another. Typing fades in an outlined
+//! password input, with the keyboard layout and Caps Lock as small labels
+//! in it. Frames follow the compositor's frame callbacks, so nothing is
+//! drawn while an output is off.
+
 mod capture;
 mod clock;
 mod daemon;
