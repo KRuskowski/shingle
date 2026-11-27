@@ -3,10 +3,11 @@
 //! (docs/design/launcher.md, sections 2 and 10).
 
 use std::{
+  collections::HashSet,
   io::{BufRead, BufReader, Write},
   os::unix::net::{UnixListener, UnixStream},
   path::{Path, PathBuf},
-  time::{Duration, Instant},
+  time::{Duration, Instant, SystemTime},
 };
 
 use calloop::{
@@ -19,6 +20,8 @@ use calloop::{
 use calloop_wayland_source::WaylandSource;
 use serde_json::{Value, json};
 use shingle_launcher::{
+  icon_cache::{CachedIcon, IconStore, cache_path, modified, resolve},
+  icons::{IconLookup, IconPaths},
   index::{Index, SearchPaths, save_cache, scan},
   launch::{client_environment, command_line, spawn},
   model::{Button, Effect, Key, Model, Modifiers, Row, Target},
@@ -35,9 +38,16 @@ use wayland_client::{
     wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
   },
 };
-use wayland_protocols::wp::cursor_shape::v1::client::{
-  wp_cursor_shape_device_v1::{self, WpCursorShapeDeviceV1},
-  wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
+use wayland_protocols::wp::{
+  cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1::{self, WpCursorShapeDeviceV1},
+    wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
+  },
+  fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+    wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+  },
+  viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
   zwlr_layer_shell_v1::{self, ZwlrLayerShellV1},
@@ -50,6 +60,10 @@ const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 /// Pixels of a wheel step, and how many rows a step scrolls.
 const AXIS_STEP: f64 = 15.0;
+/// How old an icon cache may be before every icon is looked up again,
+/// which finds icons installed into a theme since; a younger cache only
+/// has its files' times checked.
+const ICON_RECHECK: Duration = Duration::from_secs(24 * 3600);
 
 /// A size or position in logical pixels.
 type Point = (f32, f32);
@@ -68,6 +82,12 @@ pub struct Options {
   pub search_paths: SearchPaths,
   /// The terminal for terminal entries.
   pub terminal: Option<String>,
+  /// Where icons are looked up.
+  pub icon_paths: IconPaths,
+  /// The icon theme.
+  pub icon_theme: String,
+  /// The directory of the icon caches.
+  pub icon_cache: PathBuf,
 }
 
 /// What ended the run.
@@ -106,6 +126,11 @@ struct State {
   pointer: Option<Pointer>,
   size: Option<(u32, u32)>,
   scale: i32,
+  viewport: Option<WpViewport>,
+  _fractional: Option<WpFractionalScaleV1>,
+  scale120: u32,
+  icons: IconStore,
+  icon_passes: HashSet<u32>,
   buffers: Vec<ShmBuffer>,
   frame_pending: bool,
   dirty: bool,
@@ -144,6 +169,18 @@ pub fn run(
   let seat: Option<wl_seat::WlSeat> = globals.bind(&qh, 1..=7, ()).ok();
   let cursor_shapes = globals.bind(&qh, 1..=1, ()).ok();
   let surface = compositor.create_surface(&qh, ());
+  // Fractional scales need both: the scale, and a viewport to draw a
+  // buffer of device pixels at the surface's logical size.
+  let fractional: Option<WpFractionalScaleManagerV1> =
+    globals.bind(&qh, 1..=1, ()).ok();
+  let viewporter: Option<WpViewporter> = globals.bind(&qh, 1..=1, ()).ok();
+  let (viewport, fractional) = match (&fractional, &viewporter) {
+    (Some(fractional), Some(viewporter)) => (
+      Some(viewporter.get_viewport(&surface, &qh, ())),
+      Some(fractional.get_fractional_scale(&surface, &qh, ())),
+    ),
+    _ => (None, None),
+  };
   let layer = layer_shell.get_layer_surface(
     &surface,
     None,
@@ -208,6 +245,11 @@ pub fn run(
     pointer: None,
     size: None,
     scale: 1,
+    viewport,
+    _fractional: fractional,
+    scale120: 120,
+    icons: IconStore::default(),
+    icon_passes: HashSet::new(),
     buffers: Vec::new(),
     frame_pending: false,
     dirty: true,
@@ -279,6 +321,42 @@ impl State {
     ))
   }
 
+  /// The scale the panel is drawn at: the fractional scale when the
+  /// compositor has `wp_fractional_scale_v1` and `wp_viewporter`, else the
+  /// integer buffer scale.
+  fn scale(&self) -> f64 {
+    match self.viewport {
+      Some(_) => f64::from(self.scale120) / 120.0,
+      None => f64::from(self.scale.max(1)),
+    }
+  }
+
+  /// The icon size in logical and in device pixels.
+  fn icon_pixels(&self) -> (u32, u32) {
+    let size = view::icon_size(&self.theme);
+    let pixels = (f64::from(size) * self.scale()).round().max(1.0) as u32;
+    (size as u32, pixels)
+  }
+
+  /// The cache file of the icons drawn now.
+  fn icon_cache_path(&self) -> PathBuf {
+    let (size, pixels) = self.icon_pixels();
+    cache_path(
+      &self.options.icon_cache,
+      &self.options.icon_theme,
+      size,
+      pixels,
+    )
+  }
+
+  /// Loads the icon cache of the size drawn now, unless it is loaded.
+  fn load_icons(&mut self) {
+    let (_, pixels) = self.icon_pixels();
+    if self.icons.pixels != pixels {
+      self.icons = IconStore::load(&self.icon_cache_path(), pixels);
+    }
+  }
+
   fn draw(&mut self, qh: &QueueHandle<Self>) {
     if self.frame_pending {
       return;
@@ -286,9 +364,10 @@ impl State {
     let Some((output, panel, origin)) = self.geometry() else {
       return;
     };
-    let scale = self.scale.max(1) as u32;
-    let width = output.0 as u32 * scale;
-    let height = output.1 as u32 * scale;
+    let scale = self.scale();
+    let device = |value: f32| (f64::from(value) * scale).round() as u32;
+    let width = device(output.0);
+    let height = device(output.1);
     if self
       .buffers
       .first()
@@ -307,36 +386,48 @@ impl State {
     else {
       return;
     };
+    self.load_icons();
     self.model.page = view::page_size(&self.theme, panel);
     let mut frame = {
+      let icons = &self.icons;
       let measure = self.renderer.measurer();
-      view::build(&self.model, &self.theme, panel, &measure, &|_| false)
+      view::build(&self.model, &self.theme, panel, &measure, &|icon| {
+        icons.get(icon).is_some()
+      })
     };
-    self.renderer.resize(
-      panel.0 as u32 * scale,
-      panel.1 as u32 * scale,
-      scale as f32,
-    );
+    // The panel's device rectangle, from its rounded edges, so that it
+    // meets the backdrop without a gap at any scale.
+    let left = device(origin.0);
+    let top = device(origin.1);
+    let panel_width = device(origin.0 + panel.0) - left;
+    let panel_height = device(origin.1 + panel.1) - top;
+    self
+      .renderer
+      .resize(panel_width, panel_height, scale as f32);
     let buffer = &mut self.buffers[index];
     let fresh = buffer.fresh;
     if fresh {
       buffer.fill(premultiplied(self.theme.backdrop));
       buffer.fresh = false;
     }
-    let left = origin.0 as u32 * scale;
-    let top = origin.1 as u32 * scale;
-    let drawn =
-      self
-        .renderer
-        .draw(&mut frame, self.theme.panel, |row, bytes| {
-          buffer.write_row(left, top + row as u32, bytes)
-        });
+    let drawn = self.renderer.draw(
+      &mut frame,
+      self.theme.panel,
+      &self.icons,
+      |row, bytes| buffer.write_row(left, top + row as u32, bytes),
+    );
     if let Err(error) = drawn {
       return self.fail(format!("drawing: {error}"));
     }
     let buffer = &mut self.buffers[index];
     buffer.busy = true;
-    self.surface.set_buffer_scale(self.scale.max(1));
+    match &self.viewport {
+      Some(viewport) => {
+        self.surface.set_buffer_scale(1);
+        viewport.set_destination(output.0 as i32, output.1 as i32);
+      }
+      None => self.surface.set_buffer_scale(self.scale.max(1)),
+    }
     self.surface.attach(Some(&buffer.buffer), 0, 0);
     if fresh {
       self
@@ -346,8 +437,8 @@ impl State {
       self.surface.damage_buffer(
         left as i32,
         top as i32,
-        (panel.0 as u32 * scale) as i32,
-        (panel.1 as u32 * scale) as i32,
+        panel_width as i32,
+        panel_height as i32,
       );
     }
     self.surface.frame(qh, ());
@@ -367,13 +458,113 @@ impl State {
       }
       self.start_rescan();
     }
+    self.start_icons();
     if self.options.trace {
-      self.trace(self.describe(origin));
+      self.trace(self.describe(origin, (width, height)));
     }
   }
 
+  /// Looks up and decodes, in a thread, the icons of the size drawn now
+  /// that the cache lacks or whose files changed, once per size; each
+  /// arrives in the main loop as it is ready, and the cache is written at
+  /// the end.
+  fn start_icons(&mut self) {
+    let (size, pixels) = self.icon_pixels();
+    if !self.icon_passes.insert(pixels) {
+      return;
+    }
+    let (sender, receiver) = channel::channel::<(u32, String, CachedIcon)>();
+    let inserted = self.handle.insert_source(receiver, |event, _, state| {
+      if let ChannelEvent::Msg((pixels, name, icon)) = event
+        && pixels == state.icons.pixels
+      {
+        state.icons.icons.insert(name, icon);
+        state.dirty = true;
+      }
+    });
+    if inserted.is_err() {
+      return;
+    }
+    let names = self.icon_names();
+    let cache = self.icon_cache_path();
+    // A cache that is old, or missing, is looked up in full.
+    let full = std::fs::metadata(&cache)
+      .and_then(|metadata| metadata.modified())
+      .ok()
+      .and_then(|time| SystemTime::now().duration_since(time).ok())
+      .is_none_or(|age| age > ICON_RECHECK);
+    let mut store = self.icons.clone();
+    let mut lookup = IconLookup::new(
+      self.options.icon_paths.clone(),
+      &self.options.icon_theme,
+    );
+    let scale = self.scale().ceil().max(1.0) as u32;
+    let spawned =
+      std::thread::Builder::new()
+        .name("icons".to_owned())
+        .spawn(move || {
+          let mut changed = false;
+          for name in names {
+            let known = store.icons.get(&name);
+            let fresh = known.is_some_and(|known| {
+              !full
+                && (known.source.as_os_str().is_empty()
+                  || modified(&known.source) == known.modified)
+            });
+            if fresh {
+              continue;
+            }
+            let icon = resolve(&mut lookup, &name, size, scale, pixels, known);
+            if known == Some(&icon) {
+              continue;
+            }
+            changed = true;
+            store.icons.insert(name.clone(), icon.clone());
+            if sender.send((pixels, name, icon)).is_err() {
+              return;
+            }
+          }
+          if (changed || full)
+            && let Err(error) = store.save(&cache)
+          {
+            eprintln!(
+              "shingle-launcher: cannot write {}: {error}",
+              cache.display()
+            );
+          }
+        });
+    if let Err(error) = spawned {
+      eprintln!("shingle-launcher: cannot load icons: {error}");
+    }
+  }
+
+  /// Every icon name of the index, those of the rows shown first.
+  fn icon_names(&self) -> Vec<String> {
+    let model = &self.model;
+    let mut seen = HashSet::new();
+    let shown = model
+      .rows()
+      .into_iter()
+      .skip(model.scroll)
+      .take(model.page)
+      .filter_map(|row| match row {
+        Row::Entry(position) | Row::Action(position, _) => Some(position),
+        Row::Run => None,
+      });
+    let all = 0..model.catalog.entries.len();
+    shown
+      .chain(all)
+      .flat_map(|position| {
+        let entry = &model.catalog.entries[position];
+        std::iter::once(entry.icon.clone())
+          .chain(entry.actions.iter().map(|action| action.icon.clone()))
+      })
+      .filter(|name| !name.is_empty() && seen.insert(name.clone()))
+      .collect()
+  }
+
   /// The frame as JSON, in output coordinates, for the harness.
-  fn describe(&self, origin: (f32, f32)) -> Value {
+  fn describe(&self, origin: (f32, f32), buffer: (u32, u32)) -> Value {
     let model = &self.model;
     let shift = |rect: &Rect| {
       json!({
@@ -398,6 +589,16 @@ impl State {
       })
       .collect::<Vec<_>>();
     let all_rows = model.rows();
+    // The icon drawn on a row, or null when it shows a letter.
+    let icon = |row: usize| {
+      self.frame.as_ref().and_then(|frame| {
+        frame
+          .icons
+          .iter()
+          .find(|slot| slot.row == row)
+          .map(|slot| json!({"name": slot.icon, "rect": shift(&slot.rect)}))
+      })
+    };
     let rows = regions
       .iter()
       .filter_map(|(rect, target)| match target {
@@ -408,6 +609,7 @@ impl State {
             "favourite": model.catalog.is_favourite(position),
             "selected": *row == model.selected,
             "rect": shift(rect),
+            "icon": icon(*row),
           }),
           Row::Action(position, action) => json!({
             "id": model.catalog.entries[position].id,
@@ -416,6 +618,7 @@ impl State {
             "parent": model.catalog.names[position],
             "selected": *row == model.selected,
             "rect": shift(rect),
+            "icon": icon(*row),
           }),
           Row::Run => json!({
             "id": null, "name": format!("Run: {}", model.query.trim()),
@@ -453,6 +656,11 @@ impl State {
       "panel": {
         "x": origin.0, "y": origin.1, "width": panel.0, "height": panel.1,
       },
+      "scale": self.scale(),
+      "fractional": self.viewport.is_some(),
+      "buffer": {"width": buffer.0, "height": buffer.1},
+      "icons": self.icons.icons.values().filter(|icon| icon.pixels.is_some())
+        .count(),
     })
   }
 
@@ -714,9 +922,11 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
     _: &Connection,
     _: &QueueHandle<Self>,
   ) {
+    // With a viewport the fractional scale is used instead.
     if let wl_surface::Event::PreferredBufferScale { factor } = event
       && factor != state.scale
       && factor > 0
+      && state.viewport.is_none()
     {
       state.scale = factor;
       state.buffers.clear();
@@ -1004,6 +1214,27 @@ macro_rules! ignore_events {
   };
 }
 
+impl Dispatch<WpFractionalScaleV1, ()> for State {
+  fn event(
+    state: &mut Self,
+    _: &WpFractionalScaleV1,
+    event: wp_fractional_scale_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event
+      && scale != state.scale120
+      && scale > 0
+    {
+      state.trace(json!({"event": "scale", "scale120": scale}));
+      state.scale120 = scale;
+      state.buffers.clear();
+      state.dirty = true;
+    }
+  }
+}
+
 ignore_events!(
   wl_compositor::WlCompositor,
   wl_shm::WlShm,
@@ -1011,6 +1242,9 @@ ignore_events!(
   ZwlrLayerShellV1,
   WpCursorShapeManagerV1,
   WpCursorShapeDeviceV1,
+  WpFractionalScaleManagerV1,
+  WpViewporter,
+  WpViewport,
 );
 
 #[cfg(test)]

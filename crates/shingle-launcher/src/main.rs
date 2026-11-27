@@ -15,10 +15,12 @@ use shingle_config::{LauncherConfig, ShingleConfig, default_path};
 use shingle_launcher::{
   files::Paths,
   history::History,
+  icon_cache::{IconStore, resolve},
+  icons::{IconLookup, IconPaths, theme_name},
   index::{SearchPaths, load_cache, save_cache, scan},
   launch::pick_terminal,
   layout::LayoutStore,
-  model::{Key, Model, Modifiers, Storage},
+  model::{Key, Model, Modifiers, Row, Storage},
   render::{Renderer, RendererChoice},
   theme::Theme,
   view,
@@ -39,12 +41,14 @@ again while it is open closes it.
   --timing            Print how long the first frame took
   --screenshot PATH   Draw the panel to a PNG without Wayland and exit
   --query TEXT        With --screenshot, type TEXT first
+  --scale FACTOR      With --screenshot, draw at this scale (default 1)
   --help              Show this help
   --version           Show the version
 
 Files: $XDG_DATA_HOME/shingle/launcher.yaml (the layout),
-$XDG_STATE_HOME/shingle/launcher-history.json and
-$XDG_CACHE_HOME/shingle/launcher-index.json.";
+$XDG_STATE_HOME/shingle/launcher-history.json,
+$XDG_CACHE_HOME/shingle/launcher-index.json and the decoded icons in
+$XDG_CACHE_HOME/shingle/launcher-icons.";
 
 #[derive(Debug, Default, PartialEq)]
 struct Arguments {
@@ -53,6 +57,7 @@ struct Arguments {
   timing: bool,
   screenshot: Option<PathBuf>,
   query: String,
+  scale: Option<f32>,
 }
 
 enum Action {
@@ -83,6 +88,15 @@ fn parse(
       }
       Some("--query") => {
         parsed.query = value("--query")?.to_string_lossy().into_owned()
+      }
+      Some("--scale") => {
+        let text = value("--scale")?.to_string_lossy().into_owned();
+        let scale = text
+          .parse::<f32>()
+          .ok()
+          .filter(|scale| (0.5..=8.0).contains(scale))
+          .ok_or_else(|| format!("--scale {text}: not between 0.5 and 8"))?;
+        parsed.scale = Some(scale);
       }
       Some("--help" | "-h") => return Ok(Action::Help),
       Some("--version" | "-V") => return Ok(Action::Version),
@@ -170,6 +184,10 @@ fn run(arguments: Arguments, started: Instant) -> Result<(), String> {
   let choice = RendererChoice::from(config.renderer);
   let terminal =
     pick_terminal(&config.terminal, var("TERMINAL"), &search_paths.path_dirs);
+  let icon_paths = IconPaths::from_env(var);
+  let icon_theme = theme_name(&config.icon_theme, var, |path| {
+    std::fs::read_to_string(path).ok()
+  });
 
   let socket = paths
     .runtime
@@ -228,7 +246,9 @@ fn run(arguments: Arguments, started: Instant) -> Result<(), String> {
     for character in arguments.query.chars() {
       model.key(Key::Text(character.to_string()), Modifiers::NONE);
     }
-    return screenshot(&path, &mut model, renderer, &theme);
+    let icons = IconLookup::new(icon_paths, &icon_theme);
+    let scale = arguments.scale.unwrap_or(1.0);
+    return screenshot(&path, &mut model, renderer, &theme, icons, scale);
   }
   let options = client::Options {
     trace: arguments.trace,
@@ -237,6 +257,9 @@ fn run(arguments: Arguments, started: Instant) -> Result<(), String> {
     index_cache: paths.index_cache.clone(),
     search_paths,
     terminal,
+    icon_paths,
+    icon_theme,
+    icon_cache: paths.icon_cache.clone(),
   };
   let result = client::run(
     connection.expect("connected"),
@@ -252,23 +275,58 @@ fn run(arguments: Arguments, started: Instant) -> Result<(), String> {
   result
 }
 
-/// Draws the panel of `model` alone to a PNG at `path`.
+/// Draws the panel of `model` alone at `scale` to a PNG at `path`, with
+/// the icons of the rows shown looked up and decoded first.
 fn screenshot(
   path: &Path,
   model: &mut Model,
   mut renderer: Renderer,
   theme: &Theme,
+  mut lookup: IconLookup,
+  scale: f32,
 ) -> Result<(), String> {
   let size = (theme.width, theme.height);
-  renderer.resize(size.0 as u32, size.1 as u32, 1.0);
+  let width = (size.0 * scale).round() as u32;
+  let height = (size.1 * scale).round() as u32;
+  renderer.resize(width, height, scale);
   model.page = view::page_size(theme, size);
+  let icon_size = view::icon_size(theme);
+  let pixels = (icon_size * scale).round().max(1.0) as u32;
+  let mut icons = IconStore::new(pixels);
+  let shown = model.rows().into_iter().skip(model.scroll).take(model.page);
+  for row in shown {
+    let (position, action) = match row {
+      Row::Entry(position) => (position, None),
+      Row::Action(position, action) => (position, Some(action)),
+      Row::Run => continue,
+    };
+    let entry = &model.catalog.entries[position];
+    let name = action
+      .map(|action| entry.actions[action].icon.clone())
+      .filter(|icon| !icon.is_empty())
+      .unwrap_or_else(|| entry.icon.clone());
+    if name.is_empty() || icons.knows(&name) {
+      continue;
+    }
+    let icon = resolve(
+      &mut lookup,
+      &name,
+      icon_size as u32,
+      scale.ceil().max(1.0) as u32,
+      pixels,
+      None,
+    );
+    icons.icons.insert(name, icon);
+  }
   let mut frame = {
     let measure = renderer.measurer();
-    view::build(model, theme, size, &measure, &|_| false)
+    view::build(model, theme, size, &measure, &|icon| {
+      icons.get(icon).is_some()
+    })
   };
-  let mut pixels = vec![0_u8; size.0 as usize * size.1 as usize * 4];
-  let stride = size.0 as usize * 4;
-  renderer.draw(&mut frame, theme.panel, |row, bytes| {
+  let mut pixels = vec![0_u8; width as usize * height as usize * 4];
+  let stride = width as usize * 4;
+  renderer.draw(&mut frame, theme.panel, &icons, |row, bytes| {
     let start = row * stride;
     for (target, source) in pixels[start..start + stride]
       .chunks_exact_mut(4)
@@ -277,7 +335,7 @@ fn screenshot(
       target.copy_from_slice(&[source[2], source[1], source[0], 255]);
     }
   })?;
-  image::RgbaImage::from_raw(size.0 as u32, size.1 as u32, pixels)
+  image::RgbaImage::from_raw(width, height, pixels)
     .ok_or("bad image size")?
     .save(path)
     .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
@@ -302,6 +360,8 @@ mod tests {
       "a.png",
       "--query",
       "x",
+      "--scale",
+      "1.5",
     ]) else {
       panic!("not parsed");
     };
@@ -313,11 +373,14 @@ mod tests {
         timing: true,
         screenshot: Some("a.png".into()),
         query: "x".into(),
+        scale: Some(1.5),
       }
     );
     assert!(matches!(arguments(&["--help"]), Ok(Action::Help)));
     assert!(arguments(&["--bogus"]).is_err());
     assert!(arguments(&["--screenshot"]).is_err());
+    assert!(arguments(&["--scale", "0"]).is_err());
+    assert!(arguments(&["--scale", "x"]).is_err());
   }
 
   #[test]

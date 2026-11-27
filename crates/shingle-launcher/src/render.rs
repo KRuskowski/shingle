@@ -7,16 +7,19 @@ use std::{
   ffi::OsString,
   fs,
   path::{Path, PathBuf},
+  sync::Arc,
 };
 
 use gloomy_core::{
-  GloomyRenderer, InteractionState, Vec2, compute_layout,
+  GloomyRenderer, InteractionState, Vec2, Vec4, compute_layout,
   image_renderer::ImageRenderer,
   render_ui,
+  texture::Texture,
   ui::{RenderContext, render_widget},
 };
 
 use crate::{
+  icon_cache::{IconPixels, IconStore},
   theme::Color,
   view::{FIELD_ID, Frame},
 };
@@ -156,7 +159,8 @@ pub struct Renderer {
   queue: wgpu::Queue,
   gloomy: GloomyRenderer,
   spare_images: ImageRenderer,
-  spare_textures: HashMap<String, gloomy_core::texture::Texture>,
+  spare_textures: HashMap<String, Texture>,
+  icons: HashMap<String, (Arc<IconPixels>, Texture)>,
   target: Option<Target>,
   scale: f32,
   adapter: String,
@@ -213,6 +217,7 @@ impl Renderer {
       gloomy,
       spare_images,
       spare_textures: HashMap::new(),
+      icons: HashMap::new(),
       target: None,
       scale: 1.0,
       adapter,
@@ -280,12 +285,14 @@ impl Renderer {
     });
   }
 
-  /// Draws `frame` over `clear` and hands each row of pixels, `ARGB8888`
-  /// with alpha forced opaque, to `row` with its index.
+  /// Draws `frame` over `clear`, with the icons of `icons`, and hands each
+  /// row of pixels, `ARGB8888` with alpha forced opaque, to `row` with its
+  /// index.
   pub fn draw(
     &mut self,
     frame: &mut Frame,
     clear: Color,
+    icons: &IconStore,
     mut row: impl FnMut(usize, &[u8]),
   ) -> Result<(), String> {
     let target = self.target.as_ref().ok_or("no target")?;
@@ -315,6 +322,37 @@ impl Renderer {
       Some(&interaction),
       None,
     );
+    // Gloomy's image pass runs after its boxes and before its text, but
+    // places images in logical pixels on a target of device pixels, so
+    // the icons are drawn here at device pixels, one texel per pixel.
+    let scale = self.scale;
+    for slot in &frame.icons {
+      let Some(pixels) = icons.get(&slot.icon).cloned() else {
+        continue;
+      };
+      let size = Vec2::new(pixels.width as f32, pixels.height as f32);
+      let corner =
+        Vec2::new((slot.rect.x * scale).round(), (slot.rect.y * scale).round());
+      // Uploaded once per decoded icon.
+      let current = self
+        .icons
+        .get(&slot.icon)
+        .is_some_and(|(uploaded, _)| Arc::ptr_eq(uploaded, &pixels));
+      if !current {
+        let texture = icon_texture(&self.device, &self.queue, &pixels);
+        self
+          .icons
+          .insert(slot.icon.clone(), (pixels.clone(), texture));
+      }
+      let texture = &self.icons[&slot.icon].1;
+      self.gloomy.images().draw(
+        &self.device,
+        texture,
+        corner + size * 0.5,
+        size,
+        Vec4::ONE,
+      );
+    }
     {
       let (primitives, text) = self.gloomy.split_overlay_mut();
       let mut context = RenderContext::new(
@@ -397,6 +435,72 @@ impl Renderer {
   }
 }
 
+/// A texture of `pixels` that is sampled as the bytes it holds: not an
+/// sRGB format, so that an icon shows as its file's bytes, as the panel's
+/// colours do.
+fn icon_texture(
+  device: &wgpu::Device,
+  queue: &wgpu::Queue,
+  pixels: &IconPixels,
+) -> Texture {
+  let size = wgpu::Extent3d {
+    width: pixels.width.max(1),
+    height: pixels.height.max(1),
+    depth_or_array_layers: 1,
+  };
+  let texture = device.create_texture(&wgpu::TextureDescriptor {
+    label: Some("icon"),
+    size,
+    mip_level_count: 1,
+    sample_count: 1,
+    dimension: wgpu::TextureDimension::D2,
+    format: wgpu::TextureFormat::Rgba8Unorm,
+    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+    view_formats: &[],
+  });
+  // Gloomy's image shader maps the texture's last row to the top of the
+  // quad, so the rows go in bottom first.
+  let stride = pixels.width as usize * 4;
+  let flipped = pixels
+    .rgba
+    .chunks_exact(stride.max(1))
+    .rev()
+    .flatten()
+    .copied()
+    .collect::<Vec<_>>();
+  queue.write_texture(
+    wgpu::ImageCopyTexture {
+      texture: &texture,
+      mip_level: 0,
+      origin: wgpu::Origin3d::ZERO,
+      aspect: wgpu::TextureAspect::All,
+    },
+    &flipped,
+    wgpu::ImageDataLayout {
+      offset: 0,
+      bytes_per_row: Some(4 * pixels.width),
+      rows_per_image: Some(pixels.height),
+    },
+    size,
+  );
+  let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+  // Drawn one texel per pixel, so nearest sampling changes nothing but
+  // keeps half-pixel rounding from blurring the icon.
+  let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+    label: Some("icon"),
+    mag_filter: wgpu::FilterMode::Nearest,
+    min_filter: wgpu::FilterMode::Nearest,
+    ..Default::default()
+  });
+  Texture {
+    texture,
+    view,
+    sampler,
+    width: pixels.width,
+    height: pixels.height,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -461,5 +565,87 @@ mod tests {
       with_environment(&[(name, "inside".into())], || std::env::var_os(name));
     assert_eq!(seen, Some("inside".into()));
     assert_eq!(std::env::var_os(name), None);
+  }
+
+  /// Draws a panel with one icon slot at `scale` and returns the pixels,
+  /// BGRA, and the width; `None` without a Vulkan adapter.
+  fn draw_icon(scale: f32) -> Option<(Vec<u8>, usize)> {
+    let mut renderer = match Renderer::new(RendererChoice::Auto) {
+      Ok(renderer) => renderer,
+      Err(error) => {
+        eprintln!("skipped, no renderer: {error}");
+        return None;
+      }
+    };
+    let side = (20.0 * scale).round() as u32;
+    let mut store = IconStore::new(side);
+    let mut rgba = Vec::new();
+    for y in 0..side {
+      for _ in 0..side {
+        // Top half opaque red, bottom half half transparent white.
+        rgba.extend_from_slice(if y < side / 2 {
+          &[255, 0, 0, 255]
+        } else {
+          &[255, 255, 255, 128]
+        });
+      }
+    }
+    store.icons.insert(
+      "test".into(),
+      crate::icon_cache::CachedIcon {
+        source: PathBuf::from("/test.png"),
+        modified: 0,
+        pixels: Some(Arc::new(IconPixels {
+          width: side,
+          height: side,
+          rgba,
+        })),
+      },
+    );
+    let width = (100.0 * scale).round() as u32;
+    let height = (60.0 * scale).round() as u32;
+    renderer.resize(width, height, scale);
+    let mut frame = Frame {
+      main: gloomy_core::Widget::container(),
+      overlay: gloomy_core::Widget::container(),
+      icons: vec![crate::view::IconSlot {
+        rect: crate::view::Rect::new(40.0, 20.0, 20.0, 20.0),
+        icon: "test".into(),
+        row: 0,
+      }],
+      regions: Vec::new(),
+    };
+    let mut pixels = Vec::new();
+    renderer
+      .draw(&mut frame, (0.0, 0.0, 0.0, 1.0), &store, |_, bytes| {
+        pixels.extend_from_slice(bytes)
+      })
+      .unwrap();
+    Some((pixels, width as usize))
+  }
+
+  #[test]
+  fn icons_are_drawn_at_device_pixels_as_their_bytes() {
+    for scale in [1.0, 1.5, 2.0] {
+      let Some((pixels, width)) = draw_icon(scale) else {
+        return;
+      };
+      let at = |x: f32, y: f32| {
+        let index = ((y * scale) as usize * width + (x * scale) as usize) * 4;
+        pixels[index..index + 4].to_vec()
+      };
+      // BGRA: red on top, white at half alpha over black below, black
+      // around it.
+      assert_eq!(at(41.0, 21.0), [0, 0, 255, 255], "scale {scale}");
+      assert_eq!(at(59.5, 29.5), [0, 0, 255, 255], "scale {scale}");
+      let below = at(50.0, 35.0);
+      assert!(
+        below[..3].iter().all(|value| (127..=129).contains(value)),
+        "scale {scale}: {below:?}"
+      );
+      assert_eq!(at(39.0, 30.0), [0, 0, 0, 255], "scale {scale}");
+      assert_eq!(at(61.0, 30.0), [0, 0, 0, 255], "scale {scale}");
+      assert_eq!(at(50.0, 41.0), [0, 0, 0, 255], "scale {scale}");
+    }
   }
 }
