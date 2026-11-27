@@ -352,6 +352,17 @@ def main_view(views):
   parentless = [view for view in views if view.get('parent', -1) == -1]
   return max(parentless or views, key=area)
 
+def shifted(geometry, dx=0, dy=0):
+  """`geometry` moved by `dx` and `dy`."""
+  return dict(geometry, x=geometry['x'] + dx, y=geometry['y'] + dy)
+
+def workspace_column(geometry, area):
+  """How many workspaces right of the current one IPC `geometry` is, by
+  its centre: Wayfire reports a view on another workspace one output
+  width (`area`'s) per workspace from the current one."""
+  centre = geometry['x'] + geometry['width'] / 2
+  return int((centre - area['x']) // area['width'])
+
 def new_pids(before, current, keep):
   """PIDs in `current` but not `before`, without `keep`, 1 or below."""
   return sorted(pid for pid in set(current) - set(before) - set(keep)
@@ -1254,24 +1265,40 @@ class Scenario:
 
   def step_workspace(self):
     """Sent to the second workspace it leaves the first; switching there
-    shows it drawn; it comes back with the switch."""
+    shows it drawn; it comes back with the switch. Its IPC geometry is
+    relative to the current workspace, as in Wayfire: one output width
+    to the right while it is away, the same rectangle less that width
+    once its workspace is current, and on the first again back home."""
     output = self.sweep.outputs['HEADLESS-1']['id']
+    area = self.output_rect()
+    width = area['width']
     self.sweep.shingle.call('vswitch/send-view',
                             {'view-id': self.main['id'], 'x': 1, 'y': 0})
-    area = self.output_rect()
+
+    def one_right():
+      geometry = self.main_view()['geometry']
+      return geometry if workspace_column(geometry, area) == 1 else None
+    away = xw.wait_for(one_right, timeout=10)
     empty = self.sweep.settled('workspace-empty', lambda shot: background_share(
         shot, sample_points(area, 32)) > 0.98, timeout=10)
     cleared = empty is not None and background_share(
         empty, sample_points(area, 32)) > 0.98
     self.sweep.shingle.call('vswitch/set-workspace',
                             {'output-id': output, 'x': 1, 'y': 0})
+    current = away is not None and xw.wait_for(
+        lambda: self.main_view()['geometry'] == shifted(away, dx=-width),
+        timeout=10)
     there = self.redrawn('workspace-2')
     self.sweep.shingle.call('vswitch/set-workspace', {
         'output-id': output, 'x': 0, 'y': 0, 'view-id': self.main['id']})
     home = self.redrawn('workspace-1')
-    self.record('workspace', cleared and there[0] and home[0],
+    back = workspace_column(self.main_view()['geometry'], area) == 0
+    self.record('workspace', bool(cleared and there[0] and home[0] and away
+                                  and current and back),
                 f'first workspace cleared {cleared}, '
-                f'second: {there[1]}, back: {home[1]}')
+                f'second: {there[1]}, back: {home[1]}; IPC geometry away '
+                f'{json.dumps(away)}, on its workspace {bool(current)}, '
+                f'home {back}')
 
   def step_output(self):
     """Moved to the second output it is drawn there at that output's

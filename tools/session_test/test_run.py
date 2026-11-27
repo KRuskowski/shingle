@@ -95,6 +95,21 @@ class LayoutTest(unittest.TestCase):
 class RoundTripTest(unittest.TestCase):
   """The pure helpers of round_trip.py."""
 
+  def test_geometries_are_compared_in_their_own_workspace(self):
+    tile = {'x': 2560, 'y': 0, 'width': 1280, 'height': 720}
+    self.assertEqual(round_trip.workspace_column(tile, 1280), 2)
+    self.assertEqual(round_trip.shifted(tile, -2560)['x'], 0)
+    snapshot = {'views': [{'id': 5, 'geometry': {
+        'x': 2660, 'y': 80, 'width': 400, 'height': 300}}],
+                'layouts': [{'layout': {'geometry': tile,
+                                        'vertical-split': []}}]}
+    own = round_trip.own_workspace(snapshot, 1280)
+    self.assertEqual(own['views'][0]['geometry']['x'], 100)
+    self.assertEqual(own['layouts'][0]['layout']['geometry']['x'], 0)
+    # Already in their own workspace, as master reported them.
+    self.assertEqual(round_trip.own_workspace(own, 1280), own)
+    self.assertEqual(snapshot['views'][0]['geometry']['x'], 2660)
+
   def test_the_tile_layout_nests_bravo_over_charlie(self):
     views = dict(zip(round_trip.APPS, range(1, 6)))
     layout = round_trip.tile_layout(views)['layout']['vertical-split']

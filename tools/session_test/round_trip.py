@@ -32,6 +32,11 @@ VIEW_FIELDS = ('id', 'app-id', 'title', 'geometry', 'tiled-edges',
                'fullscreen', 'minimized', 'sticky', 'mapped',
                'always-on-top', 'always-on-bottom', 'parent')
 
+def output_width(nested):
+  """The width of the nested Shingle's active output."""
+  reply = nested.ipc.call('window-rules/get-focused-output')
+  return reply['info']['geometry']['width']
+
 def nested_config():
   """The nested Shingle's YAML config, as JSON: sessions restored, three
   workspaces, Xwayland and config reloading off."""
@@ -57,6 +62,32 @@ def tile_layout(views):
           {'view-id': views['delta'], 'weight': 1},
       ]},
   }
+
+def workspace_column(geometry, width):
+  """How many workspaces right of the current one IPC `geometry` is, by
+  its centre: Wayfire's IPC, and Shingle's since it follows it, reports
+  a view on another workspace one output `width` per workspace from the
+  current one, where Shingle before reported it in its own workspace."""
+  return int((geometry['x'] + geometry['width'] / 2) // width)
+
+def shifted(geometry, dx):
+  """`geometry` moved right by `dx`."""
+  return dict(geometry, x=geometry['x'] + dx)
+
+def own_workspace(value, width):
+  """`value` (an IPC reply, view list or snapshot) with every geometry
+  in it moved into its own workspace, so that what a Shingle reporting
+  either way showed can be compared."""
+  if isinstance(value, list):
+    return [own_workspace(item, width) for item in value]
+  if not isinstance(value, dict):
+    return value
+  result = {key: own_workspace(item, width) for key, item in value.items()}
+  geometry = value.get('geometry')
+  if isinstance(geometry, dict) and {'x', 'width'} <= geometry.keys():
+    result['geometry'] = shifted(
+        geometry, -workspace_column(geometry, width) * width)
+  return result
 
 def view_state(views):
   """The fields of `list-views` replies that a session keeps, by id."""
@@ -141,20 +172,28 @@ class RoundTrip:
         lambda: self.harness.nested_views(nested, len(APPS)), timeout=30)
 
   def arrange(self, nested, views):
-    """Builds the layout; returns the IPC errors."""
+    """Builds the layout; returns the IPC errors. Echo's rectangle is
+    given relative to the current workspace when the Shingle reports
+    views on other workspaces that way, so that it stays on the third."""
     calls = [
         ('simple-tile/set-layout', tile_layout(views)),
         ('window-rules/configure-view',
          {'id': views['delta'], 'geometry': DELTA_FLOATING}),
         ('vswitch/send-view', {'view-id': views['echo'], 'x': 2, 'y': 0}),
-        ('window-rules/configure-view',
-         {'id': views['echo'], 'geometry': ECHO_FLOATING}),
     ]
     errors = []
     for method, data in calls:
       reply = nested.ipc.call(method, data)
       if reply.get('result') != 'ok':
         errors.append((method, reply))
+    width = output_width(nested)
+    echo = nested.ipc.call('window-rules/view-info', {'id': views['echo']})
+    column = workspace_column(echo['info']['geometry'], width)
+    data = {'id': views['echo'],
+            'geometry': shifted(ECHO_FLOATING, column * width)}
+    reply = nested.ipc.call('window-rules/configure-view', data)
+    if reply.get('result') != 'ok':
+      errors.append(('window-rules/configure-view', reply))
     return errors
 
   def observe(self, nested):
@@ -312,7 +351,11 @@ def version_1_checks(harness, results, binary, master_binary, wl_probe):
         lambda: harness.nested_views(nested, len(APPS)), timeout=30)
     results.check('version 1: the clients are relaunched and claim their '
                   'windows', restored == views, f'{restored} {views}')
-    after = trip.observe(nested)
+    # Master may report views on other workspaces in their own
+    # workspace's coordinates, so both are compared there.
+    width = output_width(nested)
+    after = own_workspace(trip.observe(nested), width)
+    before = own_workspace(before, width)
     results.check('version 1: every layout is as master showed it',
                   after['layouts'] == before['layouts'],
                   f'{after["layouts"]} != {before["layouts"]}')

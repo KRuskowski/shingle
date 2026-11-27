@@ -201,6 +201,26 @@ class MainViewTest(unittest.TestCase):
     self.assertEqual(app_checks.main_view(views)['id'], 3)
     self.assertEqual(app_checks.main_view([view(2, 9, parent=1)])['id'], 2)
 
+class WorkspaceTest(unittest.TestCase):
+
+  def test_shifted_moves_only_the_corner(self):
+    geometry = {'x': 24, 'y': 24, 'width': 600, 'height': 400}
+    self.assertEqual(app_checks.shifted(geometry, dx=1280),
+                     {'x': 1304, 'y': 24, 'width': 600, 'height': 400})
+    self.assertEqual(geometry['x'], 24)
+
+  def test_workspace_column_follows_the_centre(self):
+    area = {'x': 0, 'y': 0, 'width': 1280, 'height': 720}
+    view = {'x': 24, 'y': 24, 'width': 600, 'height': 400}
+    self.assertEqual(app_checks.workspace_column(view, area), 0)
+    self.assertEqual(app_checks.workspace_column(
+        app_checks.shifted(view, dx=1280), area), 1)
+    self.assertEqual(app_checks.workspace_column(
+        app_checks.shifted(view, dx=-1280), area), -1)
+    # A centre just past the edge is the next workspace's.
+    self.assertEqual(app_checks.workspace_column(
+        {'x': 1000, 'y': 0, 'width': 600, 'height': 10}, area), 1)
+
 class TableTest(unittest.TestCase):
   """The per-app table."""
 
