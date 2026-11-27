@@ -2385,8 +2385,10 @@ mod tests {
         break failure;
       }
     };
+    // The error's code and object; the backend adds the message only
+    // when it read it with the event.
     assert!(failure.contains("protocol error"), "{failure}");
-    assert!(failure.contains("invented refusal"), "{failure}");
+    assert!(failure.contains("error 3 on object wl_registry@2"), "{failure}");
     // Nothing wrong, nothing to stop for.
     let (fine, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
     let fine = Connection::from_socket(fine).unwrap();
