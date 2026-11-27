@@ -484,7 +484,10 @@ impl Frontend {
       return;
     }
     if locked {
-      self.compositor.keyboard_key(device, event.code, pressed);
+      // Clients repeat keys themselves (`wl_keyboard.repeat_info`).
+      if !repeat {
+        self.compositor.keyboard_key(device, event.code, pressed);
+      }
       return;
     }
     if pressed && self.keybindings.break_grab.matches(modifiers, key) {
@@ -911,7 +914,11 @@ impl Frontend {
         return;
       }
     }
-    self.compositor.keyboard_key(device, event.code, pressed);
+    // Clients repeat keys themselves (`wl_keyboard.repeat_info`); only the
+    // press and the release reach them, as in wlroots.
+    if !repeat {
+      self.compositor.keyboard_key(device, event.code, pressed);
+    }
   }
 }
 

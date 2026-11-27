@@ -184,6 +184,9 @@ pub(crate) struct Events {
   pub(crate) feedback: Vec<wp_presentation_feedback::Event>,
   /// Keymaps received by `wl_keyboard` objects, as text.
   pub(crate) keymaps: Vec<String>,
+  /// `wl_keyboard` focus and key events: `enter KEYS`, `leave`, and
+  /// `key CODE pressed` or `key CODE released`.
+  pub(crate) keyboard: Vec<String>,
   /// Keymaps received by input-method keyboard grabs, as text.
   pub(crate) grab_keymaps: Vec<String>,
   /// `xdg_toplevel.configure` sizes, with the toplevel they were sent to.
@@ -793,8 +796,27 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Events {
     _: &Connection,
     _: &QueueHandle<Self>,
   ) {
-    if let wl_keyboard::Event::Keymap { fd, size, .. } = event {
-      events.keymaps.push(read_keymap(&fd, size));
+    match event {
+      wl_keyboard::Event::Keymap { fd, size, .. } => {
+        events.keymaps.push(read_keymap(&fd, size));
+      }
+      wl_keyboard::Event::Enter { keys, .. } => {
+        let codes = keys
+          .chunks_exact(4)
+          .map(|code| u32::from_ne_bytes(code.try_into().unwrap()))
+          .collect::<Vec<_>>();
+        events.keyboard.push(format!("enter {codes:?}"));
+      }
+      wl_keyboard::Event::Leave { .. } => {
+        events.keyboard.push("leave".into());
+      }
+      wl_keyboard::Event::Key { key, state, .. } => {
+        let pressed =
+          matches!(state, WEnum::Value(wl_keyboard::KeyState::Pressed));
+        let state = if pressed { "pressed" } else { "released" };
+        events.keyboard.push(format!("key {key} {state}"));
+      }
+      _ => {}
     }
   }
 }

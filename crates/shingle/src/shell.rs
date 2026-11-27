@@ -3314,6 +3314,72 @@ mod tests {
   };
 
   #[test]
+  fn a_refocus_of_the_same_window_keeps_its_held_keys() {
+    use wayland_client::protocol::wl_seat::WlSeat;
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let seat = client.bind::<WlSeat>(5);
+    let _keyboard = seat.get_keyboard(&client.handle, ());
+    let toplevel = client.toplevel(&mut compositor, "held");
+    client.attach_buffer(&mut compositor, &toplevel.surface, 8, 8);
+    let device = compositor.add_input_device(crate::InputDeviceInfo {
+      name: "test keyboard".into(),
+      vendor: None,
+      product: None,
+      kind: crate::InputDeviceKind::Keyboard,
+    });
+    // KEY_LEFTALT, held while a binding moves the window and the focus is
+    // chosen again, as a vswitch `with_win` binding does.
+    compositor.keyboard_key(device, 56, true);
+    client.roundtrip(&mut compositor);
+    client.events.keyboard.clear();
+    compositor.state.input.keyboard_focus = None;
+    crate::input::sync_focus(&mut compositor.state);
+    compositor.keyboard_key(device, 56, false);
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.keyboard, ["key 56 released"]);
+    drop(client);
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn keys_held_across_a_focus_change_go_to_the_new_window() {
+    use wayland_client::protocol::wl_seat::WlSeat;
+    let (mut compositor, path) = crate::tests::test_compositor();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let seat = client.bind::<WlSeat>(5);
+    let _keyboard = seat.get_keyboard(&client.handle, ());
+    let first = client.toplevel(&mut compositor, "first");
+    client.attach_buffer(&mut compositor, &first.surface, 8, 8);
+    let device = compositor.add_input_device(crate::InputDeviceInfo {
+      name: "test keyboard".into(),
+      vendor: None,
+      product: None,
+      kind: crate::InputDeviceKind::Keyboard,
+    });
+    compositor.keyboard_key(device, 56, true);
+    client.roundtrip(&mut compositor);
+    client.events.keyboard.clear();
+    // A new window takes the focus while the key is held.
+    let second = client.toplevel(&mut compositor, "second");
+    client.attach_buffer(&mut compositor, &second.surface, 8, 8);
+    compositor.keyboard_key(device, 56, false);
+    client.roundtrip(&mut compositor);
+    assert_eq!(
+      client.events.keyboard,
+      ["leave", "enter [56]", "key 56 released"]
+    );
+    // A press whose release a grab took is pressed again, as in wlroots.
+    client.events.keyboard.clear();
+    compositor.keyboard_key(device, 56, true);
+    compositor.keyboard_key(device, 56, true);
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.keyboard, ["key 56 pressed", "key 56 pressed"]);
+    drop(client);
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
   fn an_xdg_toplevel_has_its_clients_pid_in_list_views() {
     let (mut compositor, path) = crate::tests::test_compositor();
     let mut client = TestClient::connect(&mut compositor, &path);

@@ -129,6 +129,10 @@ pub(crate) struct InputState {
   keyboard_event_time: Option<u32>,
   event_time: Option<Duration>,
   pub(crate) pressed_keys: BTreeSet<u32>,
+  /// The surface the keyboards last entered and did not leave. Code that
+  /// wants the focus chosen again clears `keyboard_focus` alone, so a
+  /// surface chosen again keeps the keyboard without a second `enter`.
+  keyboard_entered: Option<ObjectId>,
   /// The pointer buttons held down.
   pub(crate) pressed_buttons: BTreeSet<u32>,
   /// The surface with the pointer focus when the first of them was
@@ -172,6 +176,7 @@ impl InputState {
       keyboard_event_time: None,
       event_time: None,
       pressed_keys: BTreeSet::new(),
+      keyboard_entered: None,
       pressed_buttons: BTreeSet::new(),
       button_surface: None,
       modifiers: Modifiers {
@@ -389,6 +394,8 @@ impl Dispatch<WlSeat, SeatData> for CompositorState {
         send_repeat(&state.input, &keyboard);
         state.input.keyboards.insert(keyboard.id(), keyboard);
         sync_focus(state);
+        // The new keyboard gets an `enter` for the focused surface.
+        state.input.keyboard_entered = None;
         let focus = state.input.keyboard_focus.take();
         set_keyboard_focus(state, focus);
       }
@@ -1483,20 +1490,21 @@ fn keyboard_key_inner(
     state.input.keyboard_event_time = None;
     return;
   }
+  // The keys held are the seat's, whoever has the focus: the next
+  // `enter` lists them and a key released without a focus is not held.
+  // A press always goes out, also of a key whose release a grab took, as
+  // wlroots' seat sends it.
+  let changed = if pressed {
+    state.input.pressed_keys.insert(key);
+    true
+  } else {
+    state.input.pressed_keys.remove(&key)
+  };
   let Some(target) = state.input.keyboard_focus.clone() else {
     state.input.keyboard_event_time = None;
     return;
   };
-  if !input_allowed(state, &target) {
-    state.input.keyboard_event_time = None;
-    return;
-  }
-  let changed = if pressed {
-    state.input.pressed_keys.insert(key)
-  } else {
-    state.input.pressed_keys.remove(&key)
-  };
-  if !changed {
+  if !changed || !input_allowed(state, &target) {
     state.input.keyboard_event_time = None;
     return;
   }
@@ -1548,7 +1556,15 @@ fn set_keyboard_focus(state: &mut CompositorState, target: Option<ObjectId>) {
   if state.input.keyboard_focus == target {
     return;
   }
-  let old = state.input.keyboard_focus.take();
+  state.input.keyboard_focus = None;
+  let old = state.input.keyboard_entered.take();
+  if target.is_some() && old == target {
+    // Chosen again after a refocus: it never lost the keyboard, and its
+    // held keys' releases still reach it, as in Wayfire.
+    state.input.keyboard_focus = target.clone();
+    state.input.keyboard_entered = target;
+    return;
+  }
   if let Some(old) = old
     && let Some(resource) = state
       .surfaces
@@ -1560,7 +1576,8 @@ fn set_keyboard_focus(state: &mut CompositorState, target: Option<ObjectId>) {
       keyboard.leave(serial, &resource);
     }
   }
-  state.input.pressed_keys.clear();
+  // The keys stay held: the next surface's `enter` lists them, and their
+  // releases reach it, as wlroots' seat sends them.
   let Some(target) = target else {
     return;
   };
@@ -1569,6 +1586,7 @@ fn set_keyboard_focus(state: &mut CompositorState, target: Option<ObjectId>) {
   };
   let resource = surface.resource.clone();
   state.input.keyboard_focus = Some(target.clone());
+  state.input.keyboard_entered = Some(target.clone());
   let serial = state.serial();
   let keys = state
     .input
