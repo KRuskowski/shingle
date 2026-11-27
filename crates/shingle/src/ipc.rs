@@ -5,6 +5,9 @@ use std::{
   path::{Path, PathBuf},
 };
 
+use calloop::{
+  Interest, LoopHandle, Mode, PostAction, RegistrationToken, generic::Generic,
+};
 use serde_json::{Value, json};
 use shingle_core::{
   Direction, OutputId, Rect, StackingMode, WindowId, WindowPresence,
@@ -27,6 +30,12 @@ const MAX_MESSAGE: usize = 1 << 20;
 pub(crate) struct IpcServer {
   listener: UnixListener,
   path: PathBuf,
+  /// The event loop the listener and every client socket wake, so that
+  /// a request is served in the turn it arrives rather than at the next
+  /// housekeeping tick; see [`IpcServer::watch`].
+  handle: Option<LoopHandle<'static, CompositorState>>,
+  /// The listener's source in `handle`.
+  listener_token: Option<RegistrationToken>,
   clients: Vec<IpcClient>,
   next_client: u64,
   next_binding: u64,
@@ -40,6 +49,8 @@ struct IpcClient {
   subscriptions: Option<HashSet<String>>,
   bindings: HashSet<u64>,
   closed: bool,
+  /// The socket's source in the server's event loop.
+  token: Option<RegistrationToken>,
 }
 
 impl IpcServer {
@@ -49,6 +60,8 @@ impl IpcServer {
     Ok(Self {
       listener,
       path: path.into(),
+      handle: None,
+      listener_token: None,
       clients: Vec::new(),
       next_client: 1,
       next_binding: 1,
@@ -56,6 +69,28 @@ impl IpcServer {
   }
 
   /// Accepts and serves pending clients without blocking the compositor.
+  /// Makes a new connection and every client's request wake `handle`'s
+  /// loop, which serves IPC each turn in [`IpcServer::poll`]. Without it
+  /// IPC is served only when something else wakes the loop, such as the
+  /// 50 ms housekeeping tick.
+  ///
+  /// The sources are level-triggered and do nothing themselves: `poll`
+  /// reads each socket until it would block and drops closed clients
+  /// with their sources, so none stays readable and spins the loop.
+  pub(crate) fn watch(
+    &mut self,
+    handle: LoopHandle<'static, CompositorState>,
+  ) -> std::io::Result<()> {
+    let listener = self.listener.try_clone()?;
+    self.listener_token = Some(insert_wake_source(&handle, listener)?);
+    for client in &mut self.clients {
+      let stream = client.stream.try_clone()?;
+      client.token = Some(insert_wake_source(&handle, stream)?);
+    }
+    self.handle = Some(handle);
+    Ok(())
+  }
+
   pub(crate) fn poll(&mut self, state: &mut CompositorState) {
     loop {
       match self.listener.accept() {
@@ -63,6 +98,11 @@ impl IpcServer {
           let _ = stream.set_nonblocking(true);
           let id = self.next_client;
           self.next_client = id + 1;
+          // Without a source the client is still served, at the turns
+          // something else causes.
+          let token = self.handle.as_ref().and_then(|handle| {
+            insert_wake_source(handle, stream.try_clone().ok()?).ok()
+          });
           self.clients.push(IpcClient {
             id,
             stream,
@@ -71,6 +111,7 @@ impl IpcServer {
             subscriptions: None,
             bindings: HashSet::new(),
             closed: false,
+            token,
           });
         }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -86,7 +127,15 @@ impl IpcServer {
     }
     self.publish(state);
     self.cleanup_clients(state);
-    self.clients.retain(|client| !client.closed);
+    let handle = self.handle.as_ref();
+    self.clients.retain_mut(|client| {
+      if client.closed
+        && let (Some(handle), Some(token)) = (handle, client.token.take())
+      {
+        handle.remove(token);
+      }
+      !client.closed
+    });
     state.ipc_clients = self.clients.len();
   }
 
@@ -145,8 +194,30 @@ impl IpcServer {
 
 impl Drop for IpcServer {
   fn drop(&mut self) {
+    if let Some(handle) = &self.handle {
+      let tokens = self
+        .clients
+        .iter_mut()
+        .filter_map(|client| client.token.take())
+        .chain(self.listener_token.take());
+      for token in tokens {
+        handle.remove(token);
+      }
+    }
     let _ = std::fs::remove_file(&self.path);
   }
+}
+
+/// Registers a level-triggered source for `socket`, a duplicate of an IPC
+/// socket's descriptor, that only wakes `handle`'s loop.
+fn insert_wake_source<F: std::os::fd::AsFd + 'static>(
+  handle: &LoopHandle<'static, CompositorState>,
+  socket: F,
+) -> std::io::Result<RegistrationToken> {
+  let source = Generic::new(socket, Interest::READ, Mode::Level);
+  handle
+    .insert_source(source, |_, _, _| Ok(PostAction::Continue))
+    .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 impl IpcClient {

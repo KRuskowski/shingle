@@ -1502,7 +1502,10 @@ impl Compositor {
   /// From then on [`Compositor::client_environment`] exports `path` as
   /// `WAYFIRE_SOCKET`, so enable IPC before starting any client.
   pub fn enable_ipc(&mut self, path: &std::path::Path) -> Result<(), Error> {
-    let server = ipc::IpcServer::new(path)
+    let mut server = ipc::IpcServer::new(path)
+      .map_err(|error| Error::Ipc(error.to_string()))?;
+    server
+      .watch(self.event_loop.handle())
       .map_err(|error| Error::Ipc(error.to_string()))?;
     self.ipc = Some(server);
     self.state.ipc_socket = Some(path.to_owned());
@@ -4993,6 +4996,51 @@ pub(crate) mod tests {
     let _client = std::os::unix::net::UnixStream::connect(&path)
       .expect("the test socket accepts clients");
     assert!(readable(compositor.as_fd(), Duration::ZERO));
+  }
+
+  // An IPC request is served in the turn it arrives in, not at the next
+  // housekeeping tick 50 ms later, so the descriptor a backend polls
+  // wakes for connections and requests, and stops waking once they are
+  // served or the client is gone.
+  #[test]
+  fn event_loop_fd_is_readable_for_ipc_connections_and_requests() {
+    use std::io::{Read, Write};
+    let (mut compositor, path) = test_compositor();
+    let ipc = path.with_extension("ipc");
+    compositor.enable_ipc(&ipc).unwrap();
+    // Right after a tick the next one is 50 ms away.
+    assert!(readable(compositor.as_fd(), Duration::from_millis(500)));
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    let soon = Duration::from_millis(20);
+    let mut stream =
+      std::os::unix::net::UnixStream::connect(&ipc).expect("IPC accepts");
+    assert!(readable(compositor.as_fd(), soon), "a connection wakes it");
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    assert!(!readable(compositor.as_fd(), Duration::ZERO));
+    let request = br#"{"method": "list-methods"}"#;
+    let length = u32::try_from(request.len()).unwrap().to_le_bytes();
+    stream.write_all(&length).unwrap();
+    stream.write_all(request).unwrap();
+    assert!(readable(compositor.as_fd(), soon), "a request wakes it");
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    assert!(!readable(compositor.as_fd(), Duration::ZERO));
+    stream
+      .set_read_timeout(Some(Duration::from_secs(1)))
+      .unwrap();
+    let mut header = [0; 4];
+    stream
+      .read_exact(&mut header)
+      .expect("the reply came in that turn");
+    let mut reply = vec![0; u32::from_le_bytes(header) as usize];
+    stream.read_exact(&mut reply).unwrap();
+    let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+    assert!(reply["methods"].is_array(), "{reply}");
+    drop(stream);
+    assert!(readable(compositor.as_fd(), soon), "a hang-up wakes it");
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    // The closed client's source is gone, so it does not spin the loop.
+    assert!(!readable(compositor.as_fd(), Duration::ZERO));
+    assert_eq!(compositor.state.ipc_clients, 0);
   }
 
   #[test]
