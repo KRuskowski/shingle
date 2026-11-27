@@ -1,13 +1,12 @@
 //! Scale's layout and filter: pure geometry and matching, no GPU state.
 
-use std::{
-  collections::HashMap,
-  time::{Duration, Instant},
-};
+use std::{collections::HashMap, time::Instant};
 
 use shingle::SurfaceSnapshot;
 use shingle_core::{Rect, WindowId as TileWindowId};
-use shingle_render::{RenderRect, animation_progress};
+use shingle_render::RenderRect;
+
+use crate::animate::Timing;
 
 /// Transient overview state.
 /// Original layouts and compositor opacity stay intact.
@@ -151,9 +150,9 @@ pub fn interpolate_scale_rect(
 pub fn scale_geometry_at(
   state: &ScaleState,
   now: Instant,
-  duration: Duration,
+  timing: Timing,
 ) -> HashMap<TileWindowId, RenderRect> {
-  let progress = animation_progress(state.animation_started, now, duration);
+  let progress = timing.progress(state.animation_started, now);
   state
     .windows
     .iter()

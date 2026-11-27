@@ -28,6 +28,7 @@ use super::{
   scale::ScaleTitle,
 };
 use crate::{
+  animate::Timing,
   host::Host,
   icon_theme,
   render_target::RenderTarget,
@@ -109,7 +110,7 @@ impl Frontend {
     cache: &'a mut HashMap<TileWindowId, GpuTexture>,
     state: &ScaleState,
     now: Instant,
-    duration: Duration,
+    duration: Timing,
     icons: &HashMap<TileWindowId, shingle::ToplevelIcon>,
     tiles: &mut Vec<RenderTile<'a>>,
   ) -> Result<(), Box<dyn Error>> {
@@ -174,8 +175,11 @@ impl Frontend {
     if config.title_overlay == "never" {
       return Ok(());
     }
-    let geometry =
-      scale_geometry_at(state, now, Duration::from_millis(config.duration_ms));
+    let geometry = scale_geometry_at(
+      state,
+      now,
+      Timing::new(config.duration_ms, config.easing),
+    );
     for window in &state.windows {
       let (Some(title), Some(target), Some(current)) = (
         titles.get(window),
@@ -393,14 +397,20 @@ impl Frontend {
   ) -> Result<(), Box<dyn Error>> {
     let output = &view.handle;
     let rect = view.rect;
+    let (scale_timing, expo_timing, vswitch_timing) = (
+      self.scale_timing(),
+      self.expo_timing(),
+      self.vswitch_timing(),
+    );
     if let Some((started, start)) = scene.zoom_animation {
-      let progress = animation_progress(
-        started,
-        now,
-        Duration::from_millis(self.zoom.smoothing_ms),
+      let timing =
+        Timing::new(self.zoom.smoothing_ms, self.zoom.smoothing_easing);
+      let progress = timing.linear_progress(started, now);
+      scene.zoom_factor = shingle_render::interpolate_zoom(
+        start,
+        scene.zoom_target,
+        timing.progress(started, now),
       );
-      scene.zoom_factor =
-        shingle_render::interpolate_zoom(start, scene.zoom_target, progress);
       if progress >= 1.0 {
         scene.zoom_factor = scene.zoom_target;
         scene.zoom_animation = None;
@@ -730,6 +740,10 @@ impl Frontend {
                 apply_buffer(&mut old_tile, old_buffer);
                 tiles.push(old_tile);
               }
+              let progress = crate::animate::ease(
+                self.animation_easing,
+                f64::from(progress),
+              ) as f32;
               tile.color = [snapshot.opacity * progress; 4];
             }
             if let Some(started) = self.open_animations.get(&snapshot.id) {
@@ -764,11 +778,8 @@ impl Frontend {
               } else {
                 self.scale_config.inactive_alpha
               };
-              let progress = animation_progress(
-                state.animation_started,
-                now,
-                Duration::from_millis(self.scale_config.duration_ms),
-              );
+              let progress =
+                scale_timing.progress(state.animation_started, now);
               let opacity = if self.scale.is_none() {
                 let origin =
                   state.opacity_origin.get(&window).copied().unwrap_or(1.0);
@@ -807,10 +818,7 @@ impl Frontend {
               let workspace = info.location.workspace.y as usize
                 * width as usize
                 + info.location.workspace.x as usize;
-              let duration =
-                Duration::from_millis(self.expo_config.duration_ms);
-              let progress =
-                animation_progress(state.animation_started, now, duration);
+              let progress = expo_timing.progress(state.animation_started, now);
               let origin = state
                 .geometry_origin
                 .get(&window)
@@ -819,7 +827,9 @@ impl Frontend {
               let brightness = state.brightness(
                 workspace,
                 now,
-                Duration::from_millis(self.expo_config.transition_length_ms),
+                Timing::circle(Duration::from_millis(
+                  self.expo_config.transition_length_ms,
+                )),
                 self.expo_config.inactive_brightness,
               );
               let dragged = state
@@ -860,7 +870,7 @@ impl Frontend {
                 workspace,
                 layout,
                 now,
-                Duration::from_millis(self.vswitch.duration_ms),
+                vswitch_timing,
               );
               for tile in &mut tiles {
                 tile.geometry = geometry;
@@ -953,9 +963,10 @@ impl Frontend {
     if expo_here
       && let Some(state) = self.expo.as_ref().or(self.expo_exit.as_ref())
     {
-      let duration = Duration::from_millis(self.expo_config.duration_ms);
-      let transition =
-        Duration::from_millis(self.expo_config.transition_length_ms);
+      let duration = expo_timing;
+      let transition = Timing::circle(Duration::from_millis(
+        self.expo_config.transition_length_ms,
+      ));
       let mut cells = Vec::new();
       for (index, cell) in state.cells_at(now, duration).iter().enumerate() {
         let brightness = state.brightness(
@@ -995,7 +1006,7 @@ impl Frontend {
         &mut self.scale_icons,
         state,
         now,
-        Duration::from_millis(self.scale_config.duration_ms),
+        scale_timing,
         &icons,
         &mut tiles,
       )?;
@@ -1275,12 +1286,12 @@ impl Frontend {
     scene.animations.retain(|_, animation| {
       animation_progress(animation.started, now, self.animation_duration) < 1.0
     });
-    let vswitch = Duration::from_millis(self.vswitch.duration_ms);
+    let vswitch = self.vswitch_timing();
     if scene
       .workspace_transition
       .as_ref()
       .is_some_and(|transition| {
-        animation_progress(transition.started, now, vswitch) >= 1.0
+        vswitch.linear_progress(transition.started, now) >= 1.0
       })
     {
       scene.workspace_transition = None;
@@ -1349,23 +1360,23 @@ impl Frontend {
     self.expire_minimize_animations(now);
     let overview = self.overview_output();
     let drawn = self.scenes.contains_key(&overview);
-    let scale = Duration::from_millis(self.scale_config.duration_ms);
-    let expo = Duration::from_millis(self.expo_config.duration_ms);
-    let expo_transition =
-      Duration::from_millis(self.expo_config.transition_length_ms);
+    let scale = self.scale_timing();
+    let expo = self.expo_timing();
+    let expo_transition = Timing::circle(Duration::from_millis(
+      self.expo_config.transition_length_ms,
+    ));
     let overview_running = self.scale.as_ref().is_some_and(|state| {
-      animation_progress(state.animation_started, now, scale) < 1.0
+      scale.linear_progress(state.animation_started, now) < 1.0
     }) || self.scale_exit.is_some()
       || self.expo.as_ref().is_some_and(|state| {
-        animation_progress(state.animation_started, now, expo) < 1.0
-          || animation_progress(state.selection_started, now, expo_transition)
-            < 1.0
+        expo.linear_progress(state.animation_started, now) < 1.0
+          || expo_transition.linear_progress(state.selection_started, now) < 1.0
       })
       || self.expo_exit.is_some();
     if drawn {
       self.expire_scale_exit(now);
       if self.expo_exit.as_ref().is_some_and(|state| {
-        animation_progress(state.animation_started, now, expo) >= 1.0
+        expo.linear_progress(state.animation_started, now) >= 1.0
       }) {
         self.expo_exit = None;
       }

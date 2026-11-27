@@ -7,6 +7,7 @@
 
 #![warn(missing_docs)]
 
+pub mod animate;
 pub mod bindings;
 mod dmabuf;
 pub mod expo;

@@ -1,10 +1,7 @@
 //! Expo: the workspace grid overview. The layout lives in
 //! [`crate::expo`]; this is its state machine and input.
 
-use std::{
-  collections::HashMap,
-  time::{Duration, Instant},
-};
+use std::{collections::HashMap, time::Instant};
 
 use shingle::Direction;
 use shingle_config::Modifiers as ConfigModifiers;
@@ -76,7 +73,7 @@ impl Frontend {
     state.cancel_pointer();
     self.expo_touch = None;
     let now = Instant::now();
-    let duration = Duration::from_millis(self.expo_config.duration_ms);
+    let duration = self.expo_timing();
     state.cell_origin = state.cells_at(now, duration);
     state.geometry_origin = state.geometry_at(now, duration);
     let (width, height) = self.compositor.workspace_grid_dimensions();
@@ -90,7 +87,7 @@ impl Frontend {
     state.animation_started = now;
     state.previous_selected = state.selected;
     state.selection_started = now;
-    if duration.is_zero() {
+    if duration.duration.is_zero() {
       self.expo_exit = None;
     } else {
       self.expo_exit = Some(state);
@@ -198,7 +195,7 @@ impl Frontend {
       return;
     }
     let now = Instant::now();
-    let duration = Duration::from_millis(self.expo_config.duration_ms);
+    let duration = self.expo_timing();
     let previous = self.expo.as_ref().map(|state| {
       (
         state.cells_at(now, duration),
@@ -270,7 +267,7 @@ impl Frontend {
 
   /// Updates the hovered cell and any pending or active thumbnail drag.
   pub(super) fn move_expo_pointer(&mut self, x: f64, y: f64) {
-    let duration = Duration::from_millis(self.expo_config.duration_ms);
+    let duration = self.expo_timing();
     let changed = if let Some(state) = &mut self.expo {
       let previous = state.selected;
       state.pointer_move(x, y, Instant::now(), duration);
@@ -294,7 +291,7 @@ impl Frontend {
     }
     if button == BTN_LEFT {
       if pressed {
-        let duration = Duration::from_millis(self.expo_config.duration_ms);
+        let duration = self.expo_timing();
         if let Some(state) = &mut self.expo {
           state.pointer_down(
             self.pointer_x,

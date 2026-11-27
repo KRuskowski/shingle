@@ -235,6 +235,8 @@ pub(crate) enum FrameState {
 #[derive(Clone, Debug)]
 pub(crate) struct SwitcherView {
   duration: Duration,
+  /// The curve of `speed`, which every transition follows.
+  easing: shingle_config::Easing,
   thumbnail_scale: f64,
   rotation_degrees: f64,
   /// If a thumbnail comes before another, it is above it in its slot.
@@ -252,6 +254,7 @@ impl SwitcherView {
   pub(crate) fn new(config: &shingle_config::SwitcherConfig) -> Self {
     Self {
       duration: Duration::from_millis(config.duration_ms),
+      easing: config.easing,
       thumbnail_scale: config.view_thumbnail_scale,
       rotation_degrees: f64::from(config.view_thumbnail_rotation),
       views: Vec::new(),
@@ -344,15 +347,16 @@ impl SwitcherView {
     self
       .views
       .iter()
-      .any(|view| self.progress(&view.attribs, now) < 1.0)
+      .any(|view| progress(view.attribs.started, now, self.duration) < 1.0)
   }
 
   /// The brightness of the background and bottom layers at `now`, from 1
   /// down to [`BACKGROUND_DIM_FACTOR`] while held and back after.
   pub(crate) fn background_dim(&self, now: Instant) -> f64 {
-    self
-      .dim
-      .value(progress(self.dim_started, now, self.duration))
+    self.dim.value(crate::animate::ease(
+      self.easing,
+      progress(self.dim_started, now, self.duration),
+    ))
   }
 
   /// The thumbnails at `now` in the order they are drawn, bottom first,
@@ -406,8 +410,13 @@ impl SwitcherView {
       .collect()
   }
 
+  /// How far `attribs`' transitions have come at `now`, on `speed`'s
+  /// curve.
   fn progress(&self, attribs: &Attribs, now: Instant) -> f64 {
-    progress(attribs.started, now, self.duration)
+    crate::animate::ease(
+      self.easing,
+      progress(attribs.started, now, self.duration),
+    )
   }
 
   /// `get_center_offset`: the distance between neighbouring slots.
@@ -625,7 +634,10 @@ impl SwitcherView {
       attribs.alpha.restart_with_end(progress, alpha);
       attribs.started = Some(now);
     }
-    let dim = progress(self.dim_started, now, self.duration);
+    let dim = crate::animate::ease(
+      self.easing,
+      progress(self.dim_started, now, self.duration),
+    );
     self.dim.restart_with_end(dim, 1.0);
     self.dim_started = Some(now);
     self.active = false;
@@ -954,10 +966,12 @@ mod tests {
       assert!(close(side.rotation, -sign * 30f64.to_radians()));
       assert!(close(side.alpha, 0.7));
     }
-    // Half way there, everything is half way from the view's own place.
+    // Half the time in, everything is as far from the view's own place
+    // as `speed`'s default circle curve says, 0.866.
+    let eased = 0.75f64.sqrt();
     let half = paints(&switcher, now + DURATION / 2, 2)[0];
-    assert!(close(half.off_x, 350.0), "{half:?}");
-    assert!(close(half.scale_x, (1.0 + 0.9 * 0.66) / 2.0));
+    assert!(close(half.off_x, 700.0 * eased), "{half:?}");
+    assert!(close(half.scale_x, 1.0 + (0.9 * 0.66 - 1.0) * eased));
     // The background dims to 60 % with them.
     assert!(close(switcher.background_dim(now), 1.0));
     assert!(close(

@@ -94,6 +94,8 @@ pub struct Frontend {
   minimize_animations: HashMap<SurfaceId, ClosingAnimation>,
   animate: shingle_config::AnimateConfig,
   animation_duration: Duration,
+  /// The curve of `animation_duration`.
+  animation_easing: shingle_config::Easing,
   /// What is drawn, zoomed and animated on each output.
   scenes: HashMap<OutputHandle, OutputScene>,
   /// The output Scale and Expo run on, from when they start until their
@@ -502,6 +504,7 @@ impl Frontend {
       animation_duration: Duration::from_millis(
         config.tiling.animation_duration,
       ),
+      animation_easing: config.tiling.animation_easing,
       scenes: HashMap::new(),
       overview_output: None,
       virtual_frame: None,

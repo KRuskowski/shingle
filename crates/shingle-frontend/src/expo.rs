@@ -1,13 +1,12 @@
 //! Expo, Wayfire's workspace overview: selection, zoom and drags.
 
-use std::{
-  collections::HashMap,
-  time::{Duration, Instant},
-};
+use std::{collections::HashMap, time::Instant};
 
 use shingle::Direction;
 use shingle_core::{Rect, WindowId};
-use shingle_render::{RenderRect, animation_progress};
+use shingle_render::RenderRect;
+
+use crate::animate::Timing;
 
 /// Renderer-only state for Wayfire's workspace overview.
 ///
@@ -81,9 +80,9 @@ impl ExpoState {
     x: f64,
     y: f64,
     now: Instant,
-    duration: Duration,
+    timing: Timing,
   ) -> bool {
-    let cells = self.cells_at(now, duration);
+    let cells = self.cells_at(now, timing);
     let Some(selected) = cells.iter().position(|cell| {
       x >= f64::from(cell.x)
         && y >= f64::from(cell.y)
@@ -140,10 +139,10 @@ impl ExpoState {
     &self,
     workspace: usize,
     now: Instant,
-    transition: Duration,
+    transition: Timing,
     inactive: f32,
   ) -> f32 {
-    let progress = animation_progress(self.selection_started, now, transition);
+    let progress = transition.progress(self.selection_started, now);
     let from = if workspace == self.previous_selected {
       1.0
     } else {
@@ -158,8 +157,8 @@ impl ExpoState {
   }
 
   /// Captures workspace-cell rectangles at a point in the zoom animation.
-  pub fn cells_at(&self, now: Instant, duration: Duration) -> Vec<RenderRect> {
-    let progress = animation_progress(self.animation_started, now, duration);
+  pub fn cells_at(&self, now: Instant, timing: Timing) -> Vec<RenderRect> {
+    let progress = timing.progress(self.animation_started, now);
     self
       .cells
       .iter()
@@ -178,9 +177,9 @@ impl ExpoState {
   pub fn geometry_at(
     &self,
     now: Instant,
-    duration: Duration,
+    timing: Timing,
   ) -> HashMap<WindowId, RenderRect> {
-    let progress = animation_progress(self.animation_started, now, duration);
+    let progress = timing.progress(self.animation_started, now);
     self
       .geometry
       .iter()
@@ -193,18 +192,12 @@ impl ExpoState {
   }
 
   /// Starts a possible drag when a press lands on a visible thumbnail.
-  pub fn pointer_down(
-    &mut self,
-    x: f64,
-    y: f64,
-    now: Instant,
-    duration: Duration,
-  ) {
-    if !self.select_at(x, y, now, duration) {
+  pub fn pointer_down(&mut self, x: f64, y: f64, now: Instant, timing: Timing) {
+    if !self.select_at(x, y, now, timing) {
       self.pointer = None;
       return;
     }
-    let geometry = self.geometry_at(now, duration);
+    let geometry = self.geometry_at(now, timing);
     let window = self.windows.iter().copied().find(|window| {
       geometry
         .get(window)
@@ -221,14 +214,8 @@ impl ExpoState {
   }
 
   /// Moves the selection and promotes a press after five logical pixels.
-  pub fn pointer_move(
-    &mut self,
-    x: f64,
-    y: f64,
-    now: Instant,
-    duration: Duration,
-  ) {
-    self.select_at(x, y, now, duration);
+  pub fn pointer_move(&mut self, x: f64, y: f64, now: Instant, timing: Timing) {
+    self.select_at(x, y, now, timing);
     if let Some(pointer) = &mut self.pointer {
       pointer.x = x;
       pointer.y = y;
@@ -372,6 +359,8 @@ pub fn expo_cells(
 
 #[cfg(test)]
 mod tests {
+  use std::time::Duration;
+
   use super::*;
 
   #[test]
@@ -433,9 +422,9 @@ mod tests {
     assert_eq!(state.selected, 5);
     state.move_selection(Direction::Right, 3, 2, now);
     assert_eq!(state.selected, 5);
-    assert!(state.select_at(15.0, 15.0, now, Duration::ZERO));
+    assert!(state.select_at(15.0, 15.0, now, Timing::linear(Duration::ZERO)));
     assert_eq!(state.selected, 0);
-    assert!(!state.select_at(5.0, 5.0, now, Duration::ZERO));
+    assert!(!state.select_at(5.0, 5.0, now, Timing::linear(Duration::ZERO)));
     assert_eq!(state.selected, 0);
   }
 
@@ -445,12 +434,12 @@ mod tests {
     let mut state = ExpoState::new(0, Rect::new(0, 0, 200, 100), 2, 1, 10);
     state.animation_started = started;
     assert_eq!(
-      state.cells_at(started, Duration::from_millis(300)),
+      state.cells_at(started, Timing::linear(Duration::from_millis(300))),
       expo_wall_cells(Rect::new(0, 0, 200, 100), 2, 1, 0)
     );
     let cells = state.cells_at(
       started + Duration::from_millis(150),
-      Duration::from_millis(300),
+      Timing::linear(Duration::from_millis(300)),
     );
     assert_eq!(cells[0].width, 143);
     assert_eq!(cells[1].x, 153);
@@ -476,7 +465,7 @@ mod tests {
     );
     let geometry = state.geometry_at(
       started + Duration::from_millis(150),
-      Duration::from_millis(300),
+      Timing::linear(Duration::from_millis(300)),
     );
     assert_eq!(geometry[&window].width, 145);
     assert_eq!(geometry[&window].height, 90);
@@ -487,7 +476,7 @@ mod tests {
     let started = Instant::now();
     let mut state = ExpoState::new(0, Rect::new(0, 0, 200, 100), 2, 1, 10);
     state.set_selected(1, started);
-    let transition = Duration::from_millis(200);
+    let transition = Timing::linear(Duration::from_millis(200));
     assert_eq!(state.brightness(0, started, transition, 0.7), 1.0);
     assert_eq!(state.brightness(1, started, transition, 0.7), 0.7);
     let middle = started + Duration::from_millis(100);
@@ -497,7 +486,7 @@ mod tests {
     assert!(
       (state.brightness(1, middle, transition, 0.7) - 0.85).abs() < 0.001
     );
-    let end = started + transition;
+    let end = started + transition.duration;
     assert_eq!(state.brightness(0, end, transition, 0.7), 0.7);
     assert_eq!(state.brightness(1, end, transition, 0.7), 1.0);
   }
@@ -517,18 +506,18 @@ mod tests {
         height: 30,
       },
     );
-    state.pointer_down(30.0, 30.0, now, Duration::ZERO);
-    state.pointer_move(32.0, 31.0, now, Duration::ZERO);
+    state.pointer_down(30.0, 30.0, now, Timing::linear(Duration::ZERO));
+    state.pointer_move(32.0, 31.0, now, Timing::linear(Duration::ZERO));
     assert_eq!(state.pointer_up(), None);
 
-    state.pointer_down(30.0, 30.0, now, Duration::ZERO);
-    state.pointer_move(150.0, 50.0, now, Duration::ZERO);
+    state.pointer_down(30.0, 30.0, now, Timing::linear(Duration::ZERO));
+    state.pointer_move(150.0, 50.0, now, Timing::linear(Duration::ZERO));
     assert_eq!(state.selected, 1);
     assert_eq!(state.dragged_window(), Some((window, 150.0, 50.0)));
     assert_eq!(state.pointer_up(), Some(window));
     assert!(!state.pointer_pressed());
 
-    state.pointer_down(30.0, 30.0, now, Duration::ZERO);
+    state.pointer_down(30.0, 30.0, now, Timing::linear(Duration::ZERO));
     state.cancel_pointer();
     assert_eq!(state.pointer_up(), None);
   }

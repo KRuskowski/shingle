@@ -1,15 +1,12 @@
 //! Scale: the window overview. The layout lives in
 //! [`crate::scale`]; this is its state machine, input and title filter.
 
-use std::{
-  collections::HashMap,
-  time::{Duration, Instant},
-};
+use std::{collections::HashMap, time::Instant};
 
 use shingle::{Direction, SurfaceRole, SurfaceSnapshot};
 use shingle_config::Modifiers as ConfigModifiers;
 use shingle_core::WindowId as TileWindowId;
-use shingle_render::{GpuTexture, RenderRect, animation_progress};
+use shingle_render::{GpuTexture, RenderRect};
 
 use super::{BTN_LEFT, BTN_MIDDLE, Frontend};
 use crate::scale::{
@@ -161,13 +158,10 @@ impl Frontend {
   /// therefore used as the aspect-ratio fallback until they are restored.
   pub(super) fn update_scale_layout(&mut self) {
     let now = Instant::now();
-    let previous = self.scale.as_ref().map(|state| {
-      scale_geometry_at(
-        state,
-        now,
-        Duration::from_millis(self.scale_config.duration_ms),
-      )
-    });
+    let previous = self
+      .scale
+      .as_ref()
+      .map(|state| scale_geometry_at(state, now, self.scale_timing()));
     let Some(state) = &self.scale else {
       return;
     };
@@ -225,9 +219,9 @@ impl Frontend {
   /// Starts a noninteractive return from overview geometry to normal windows.
   pub(super) fn begin_scale_exit(&mut self, mut state: ScaleState) {
     let now = Instant::now();
-    let duration = Duration::from_millis(self.scale_config.duration_ms);
+    let duration = self.scale_timing();
     state.animation_origin = scale_geometry_at(&state, now, duration);
-    let progress = animation_progress(state.animation_started, now, duration);
+    let progress = duration.progress(state.animation_started, now);
     state.opacity_origin = state
       .windows
       .iter()

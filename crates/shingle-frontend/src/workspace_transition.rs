@@ -1,10 +1,12 @@
 //! Vswitch's animated slide between workspaces, and the wall vswipe
 //! drags.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use shingle_core::Rect;
-use shingle_render::{RenderRect, animation_progress};
+use shingle_render::RenderRect;
+
+use crate::animate::Timing;
 
 use crate::expo::interpolate_rect;
 
@@ -47,7 +49,7 @@ impl WorkspaceTransition {
     workspace: usize,
     layout: TransitionLayout,
     now: Instant,
-    duration: Duration,
+    timing: Timing,
   ) -> RenderRect {
     let window = RenderRect {
       x: original.x,
@@ -60,7 +62,7 @@ impl WorkspaceTransition {
     let (to_x, to_y) = wall_origin(self.to, layout);
     let origin = offset_rect(window, window_x - from_x, window_y - from_y);
     let target = offset_rect(window, window_x - to_x, window_y - to_y);
-    let progress = animation_progress(self.started, now, duration);
+    let progress = timing.progress(self.started, now);
     interpolate_rect(origin, target, progress)
   }
 }
@@ -111,6 +113,8 @@ fn offset_rect(rect: RenderRect, dx: f64, dy: f64) -> RenderRect {
 
 #[cfg(test)]
 mod tests {
+  use std::time::Duration;
+
   use super::*;
 
   #[test]
@@ -133,7 +137,7 @@ mod tests {
         0,
         layout,
         started,
-        Duration::from_millis(300),
+        Timing::linear(Duration::from_millis(300)),
       ),
       RenderRect {
         x: 0,
@@ -147,7 +151,7 @@ mod tests {
       0,
       layout,
       started + Duration::from_millis(150),
-      Duration::from_millis(300),
+      Timing::linear(Duration::from_millis(300)),
     );
     assert_eq!(middle.x, -105);
     let old = transition.geometry(
@@ -155,14 +159,14 @@ mod tests {
       0,
       layout,
       started + Duration::from_millis(300),
-      Duration::from_millis(300),
+      Timing::linear(Duration::from_millis(300)),
     );
     let new = transition.geometry(
       original,
       1,
       layout,
       started + Duration::from_millis(300),
-      Duration::from_millis(300),
+      Timing::linear(Duration::from_millis(300)),
     );
     assert_eq!(old.x, -210);
     assert_eq!(new.x, 0);
@@ -218,7 +222,7 @@ mod tests {
       0,
       layout,
       started,
-      Duration::from_millis(180),
+      Timing::linear(Duration::from_millis(180)),
     );
     assert_eq!(
       geometry,

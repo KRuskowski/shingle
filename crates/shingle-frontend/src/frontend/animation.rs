@@ -8,6 +8,7 @@ use shingle_core::WindowId as TileWindowId;
 use shingle_render::{GpuTexture, RenderRect, RenderTile, animation_progress};
 
 use super::Frontend;
+use crate::animate::Timing;
 
 pub(super) struct GeometryAnimation {
   pub(super) started: Instant,
@@ -25,6 +26,21 @@ pub(super) struct ClosingAnimation {
 }
 
 impl Frontend {
+  /// Expo's zoom: `[expo] duration`.
+  pub(super) fn expo_timing(&self) -> Timing {
+    Timing::new(self.expo_config.duration_ms, self.expo_config.easing)
+  }
+
+  /// Scale's transitions: `[scale] duration`.
+  pub(super) fn scale_timing(&self) -> Timing {
+    Timing::new(self.scale_config.duration_ms, self.scale_config.easing)
+  }
+
+  /// Vswitch's slide: `[vswitch] duration`.
+  pub(super) fn vswitch_timing(&self) -> Timing {
+    Timing::new(self.vswitch.duration_ms, self.vswitch.easing)
+  }
+
   pub(super) fn animation_matches(&self, snapshot: &SurfaceSnapshot) -> bool {
     // A Wayland client's drag icon, which has no X class, is no view in
     // Wayfire and never animates.
@@ -146,11 +162,10 @@ impl Frontend {
   /// Releases the retained exit snapshots after the final transition frame.
   pub(super) fn expire_scale_exit(&mut self, now: Instant) {
     if self.scale_exit.as_ref().is_some_and(|state| {
-      animation_progress(
-        state.animation_started,
-        now,
-        Duration::from_millis(self.scale_config.duration_ms),
-      ) >= 1.0
+      self
+        .scale_timing()
+        .linear_progress(state.animation_started, now)
+        >= 1.0
     }) {
       self.scale_exit = None;
     }

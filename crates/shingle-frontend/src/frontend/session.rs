@@ -135,6 +135,7 @@ impl Frontend {
         self.background_color = config.background_color;
         self.animation_duration =
           Duration::from_millis(config.tiling.animation_duration);
+        self.animation_easing = config.tiling.animation_easing;
         self.preview_base_color = config.tiling.preview_base_color;
         self.preview_border_color = config.tiling.preview_border_color;
         self.preview_border_width = config.tiling.preview_border_width;

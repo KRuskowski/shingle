@@ -110,6 +110,8 @@ pub struct Swipe {
   /// the first update that moved them.
   started: Option<Instant>,
   duration: Duration,
+  /// The curve of `duration`.
+  easing: shingle_config::Easing,
 }
 
 impl Swipe {
@@ -129,6 +131,7 @@ impl Swipe {
       dy: Transition::default(),
       started: None,
       duration: Duration::ZERO,
+      easing: shingle_config::Easing::Circle,
     }
   }
 
@@ -147,8 +150,7 @@ impl Swipe {
     self.swiping
   }
 
-  /// How far the offsets have come, from 0 to 1, linearly: Shingle's
-  /// animations ignore Wayfire's easing curves.
+  /// How far the offsets have come, from 0 to 1, linearly.
   fn progress(&self, now: Instant) -> f64 {
     match self.started {
       Some(started) if !self.duration.is_zero() => {
@@ -176,11 +178,12 @@ impl Swipe {
   fn restart(&mut self, now: Instant, config: &VswipeConfig) {
     self.started = Some(now);
     self.duration = Duration::from_millis(config.duration_ms);
+    self.easing = config.easing;
   }
 
   /// The wall's offsets now, in workspaces.
   pub fn offset(&self, now: Instant) -> (f64, f64) {
-    let progress = self.progress(now);
+    let progress = crate::animate::ease(self.easing, self.progress(now));
     (self.dx.at(progress), self.dy.at(progress))
   }
 
@@ -238,7 +241,7 @@ impl Swipe {
       }
     }
     self.delta_prev = self.delta_last;
-    let progress = self.progress(now);
+    let progress = crate::animate::ease(self.easing, self.progress(now));
     let step = |delta: f64, total: Transition, workspace: i32, count: i32| {
       let processed = process_delta(
         delta / factor,
@@ -436,8 +439,13 @@ pub fn finish_target(
 mod tests {
   use super::*;
 
+  /// The default options on a linear curve, which keeps the arithmetic
+  /// of the tests plain.
   fn config() -> VswipeConfig {
-    VswipeConfig::default()
+    VswipeConfig {
+      easing: shingle_config::Easing::Linear,
+      ..VswipeConfig::default()
+    }
   }
 
   fn close(a: f64, b: f64) -> bool {
@@ -632,6 +640,25 @@ mod tests {
     let end = start + Duration::from_millis(180);
     assert_eq!(swipe_state.viewport(end), (2.0, 0.0));
     assert!(swipe_state.finished(end));
+  }
+
+  #[test]
+  fn the_slide_follows_the_duration_curve() {
+    // Wayfire's default `180ms` is on the circle curve, which is 0.866 of
+    // the way at half the time.
+    let config = VswipeConfig::default();
+    let start = Instant::now();
+    let mut swipe_state = Swipe::begin((1, 0), (3, 1));
+    swipe(&mut swipe_state, 20, (-12.8, 0.0), &config, start);
+    let before = swipe_state.offset(start).0;
+    swipe_state.end(&config, start);
+    let middle = start + Duration::from_millis(90);
+    let eased = 0.75f64.sqrt();
+    assert!(close(
+      swipe_state.offset(middle).0,
+      before + (-1.0 - before) * eased
+    ));
+    assert!(swipe_state.running(middle));
   }
 
   #[test]
