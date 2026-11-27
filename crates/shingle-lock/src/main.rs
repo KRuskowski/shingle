@@ -5,8 +5,9 @@
 //! With `screenshot` it captures every output before it asks for the
 //! lock, blurs the captures once on the GPU and shows them, slowly
 //! drifting, under a vignette and the clock; typing fades in an outlined
-//! password input. Frames follow the compositor's frame callbacks, so
-//! nothing is drawn while an output is off.
+//! password input, with the keyboard layout and Caps Lock as small labels
+//! in it. Frames follow the compositor's frame callbacks, so nothing is
+//! drawn while an output is off.
 
 mod capture;
 mod clock;
@@ -58,7 +59,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
   gpu::{Drift, Frame, Gpu, Image, Target},
   options::{Action, Settings},
-  ui::{Content, Highlight, Indicator, Layout},
+  ui::{Indicator, InputLook, Labels, Layout},
 };
 
 // Zeroes every freed heap block, including the password copy that nonstick
@@ -106,13 +107,34 @@ struct Keyboard {
   xkb: Option<xkb::State>,
 }
 
-/// What an output's input image shows, to draw it again only on a
-/// change.
-#[derive(Clone, Debug, PartialEq)]
-struct InputLook {
-  state: shingle_config::InputState,
-  content: Content,
-  highlight: Option<Highlight>,
+/// What the input shows of a keyboard: Caps Lock and its layout.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct KeyboardStatus {
+  /// Caps Lock is locked on.
+  caps_lock: bool,
+  /// How many layouts the keymap has.
+  layouts: usize,
+  /// The active layout's name, such as `English (US)`.
+  layout: Option<String>,
+}
+
+impl KeyboardStatus {
+  /// The status of `state`, as swaylock reads it: Caps Lock from the
+  /// locked `Lock` modifier, the layout the first effective one
+  /// (swaylock's `seat.c` and `render.c`).
+  fn of(state: &xkb::State) -> Self {
+    let keymap = state.get_keymap();
+    let layouts = keymap.num_layouts();
+    let active = (0..layouts).find(|index| {
+      state.layout_index_is_active(*index, xkb::STATE_LAYOUT_EFFECTIVE)
+    });
+    Self {
+      caps_lock: state
+        .mod_name_is_active(xkb::MOD_NAME_CAPS, xkb::STATE_MODS_LOCKED),
+      layouts: layouts as usize,
+      layout: active.map(|index| keymap.layout_get_name(index).to_owned()),
+    }
+  }
 }
 
 struct LockOutput {
@@ -165,6 +187,8 @@ struct State {
   settings: Settings,
   gpu: Gpu,
   images: HashMap<u32, Image>,
+  /// The status of the keyboard that last reported one.
+  keyboard: KeyboardStatus,
   font: FontArc,
   indicator: Indicator,
   started: Instant,
@@ -307,6 +331,34 @@ impl State {
       && self.images.contains_key(&global)
   }
 
+  /// Takes `status` from a keyboard; redraws on a change.
+  fn set_keyboard_status(&mut self, status: KeyboardStatus) {
+    if status != self.keyboard {
+      self.keyboard = status;
+      self.mark_dirty();
+    }
+  }
+
+  /// The input as it looks at `now`.
+  fn input_look(&self, now: Instant) -> InputLook {
+    let options = &self.settings.options;
+    let state = self.indicator.state();
+    let layout = self
+      .keyboard
+      .layout
+      .as_deref()
+      .filter(|_| options.shows_keyboard_layout(self.keyboard.layouts));
+    InputLook {
+      state,
+      caps_lock: self.keyboard.caps_lock,
+      content: self
+        .indicator
+        .content(options.show_failed_attempts, &options.texts),
+      highlight: self.indicator.highlight(now),
+      labels: Labels::new(options, state, self.keyboard.caps_lock, layout),
+    }
+  }
+
   /// Whether output `name` wants a frame at `now`.
   fn wants_frame(&self, name: u32, now: Instant) -> bool {
     let Some(output) = self.outputs.get(&name) else {
@@ -417,13 +469,7 @@ impl State {
 
   fn render_output(&mut self, name: u32, now: Instant) -> Result<(), String> {
     let clock = self.settings.options.clock.then(|| self.clock_text());
-    let look = InputLook {
-      state: self.indicator.state(),
-      content: self
-        .indicator
-        .content(self.settings.options.show_failed_attempts),
-      highlight: self.indicator.highlight(now),
-    };
+    let look = self.input_look(now);
     let opacity = if self.settings.options.show_indicator {
       self.indicator.opacity(now)
     } else {
@@ -482,15 +528,18 @@ impl State {
       output.clock = clock;
     }
     if opacity > 0.0 && output.input.as_ref() != Some(&look) {
-      let raster = ui::rasterize_input(
-        &layout,
-        options,
-        options.state_colors(look.state),
-        &look.content,
-        look.highlight,
-        &self.font,
-      );
+      let raster = ui::rasterize_input(&layout, options, &look, &self.font);
       target.set_input(&self.gpu, Some(&raster));
+      if self.trace {
+        eprintln!(
+          "shingle-lock: input of output {name}: {:?}, caps lock {}, \
+           layout label {:?}, caps lock label {:?}",
+          look.state,
+          if look.caps_lock { "on" } else { "off" },
+          look.labels.layout,
+          look.labels.caps_lock,
+        );
+      }
       output.input = Some(look);
     }
     // Centred; the image is as wide as its widest line.
@@ -875,6 +924,7 @@ fn run(
     settings,
     gpu,
     images,
+    keyboard: KeyboardStatus::default(),
     font,
     indicator,
     started,
@@ -1200,9 +1250,14 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
             return;
           }
         };
+        let xkb = xkb::State::new(&keymap);
+        let status = KeyboardStatus::of(&xkb);
         if let Some(keyboard) = state.keyboard_mut(*seat_name) {
-          keyboard.xkb = Some(xkb::State::new(&keymap));
+          keyboard.xkb = Some(xkb);
+        } else {
+          return;
         }
+        state.set_keyboard_status(status);
       }
       wl_keyboard::Event::Modifiers {
         mods_depressed,
@@ -1211,18 +1266,15 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
         group,
         ..
       } => {
-        if let Some(keyboard) = state.keyboard_mut(*seat_name)
-          && let Some(xkb) = &mut keyboard.xkb
-        {
-          xkb.update_mask(
-            mods_depressed,
-            mods_latched,
-            mods_locked,
-            0,
-            0,
-            group,
-          );
-        }
+        let Some(keyboard) = state.keyboard_mut(*seat_name) else {
+          return;
+        };
+        let Some(xkb) = &mut keyboard.xkb else {
+          return;
+        };
+        xkb.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+        let status = KeyboardStatus::of(xkb);
+        state.set_keyboard_status(status);
       }
       wl_keyboard::Event::Key {
         key,
@@ -1341,6 +1393,33 @@ noop_dispatch!(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn the_keyboard_status_follows_caps_lock_and_the_group() {
+    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    let Some(keymap) = xkb::Keymap::new_from_names(
+      &context,
+      "evdev",
+      "pc105",
+      "us,de",
+      "",
+      None,
+      xkb::KEYMAP_COMPILE_NO_FLAGS,
+    ) else {
+      eprintln!("no xkeyboard-config; skipped");
+      return;
+    };
+    let mut state = xkb::State::new(&keymap);
+    let status = KeyboardStatus::of(&state);
+    assert_eq!(status.layouts, 2);
+    assert!(!status.caps_lock);
+    let first = status.layout.clone().unwrap();
+    let lock = keymap.mod_get_index(xkb::MOD_NAME_CAPS);
+    state.update_mask(0, 0, 1 << lock, 0, 0, 1);
+    let status = KeyboardStatus::of(&state);
+    assert!(status.caps_lock);
+    assert_ne!(status.layout.unwrap(), first);
+  }
 
   #[test]
   fn the_clock_wakes_at_the_next_whole_second() {

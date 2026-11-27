@@ -5,12 +5,14 @@
 //! At rest only the clock shows. Typing fades in an outlined input with
 //! one dot per character; it shows the clear, verify and wrong states in
 //! swaylock's per-state colours (docs/design/lock-screen.md) and fades
-//! out again after `lock.input_timeout` without a key.
+//! out again after `lock.input_timeout` without a key. While typing, a
+//! small label on its left names the keyboard layout and one on its
+//! right says Caps Lock is on, each only when it is relevant.
 
 use std::time::{Duration, Instant};
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
-use shingle_config::{InputState, LockColor, LockOptions, StateColors};
+use shingle_config::{InputState, InputTexts, LockColor, LockOptions};
 
 /// How long the input takes to fade in or out.
 pub const FADE: Duration = Duration::from_millis(180);
@@ -285,8 +287,8 @@ impl Indicator {
     next
   }
 
-  /// What the input shows inside: dots, or a message.
-  pub fn content(&self, show_attempts: bool) -> Content {
+  /// What the input shows inside: dots, or a message from `texts`.
+  pub fn content(&self, show_attempts: bool, texts: &InputTexts) -> Content {
     let attempts = |text: &str| {
       if show_attempts && self.attempts > 0 {
         format!("{text} ({})", self.attempts)
@@ -295,9 +297,9 @@ impl Indicator {
       }
     };
     match self.state {
-      InputState::Verify => Content::Message("Verifying…".into()),
-      InputState::Wrong => Content::Message(attempts("Wrong password")),
-      InputState::Clear => Content::Message("Cleared".into()),
+      InputState::Verify => Content::Message(texts.verifying.clone()),
+      InputState::Wrong => Content::Message(attempts(&texts.wrong)),
+      InputState::Clear => Content::Message(texts.cleared.clone()),
       InputState::Input if self.chars == 0 => {
         if show_attempts && self.attempts > 0 {
           let plural = if self.attempts == 1 { "" } else { "s" };
@@ -320,6 +322,39 @@ pub enum Content {
   Message(String),
 }
 
+/// The small labels the input shows while typing: the keyboard layout on
+/// its left and Caps Lock on its right.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Labels {
+  /// The active layout's name, when it shows.
+  pub layout: Option<String>,
+  /// The Caps Lock text, while Caps Lock is on and the text shows.
+  pub caps_lock: Option<String>,
+}
+
+impl Labels {
+  /// The labels in `state` with Caps Lock on or off and `layout` the
+  /// active layout's name when it shows
+  /// ([`LockOptions::shows_keyboard_layout`]). As in swaylock, neither
+  /// shows while the input is cleared, verifying or wrong.
+  pub fn new(
+    options: &LockOptions,
+    state: InputState,
+    caps_lock: bool,
+    layout: Option<&str>,
+  ) -> Self {
+    if state != InputState::Input {
+      return Self::default();
+    }
+    Self {
+      layout: layout.filter(|name| !name.is_empty()).map(str::to_owned),
+      caps_lock: (caps_lock && options.caps_lock_text)
+        .then(|| options.texts.caps_lock.clone())
+        .filter(|text| !text.is_empty()),
+    }
+  }
+}
+
 fn fraction(elapsed: Duration, of: Duration) -> f32 {
   (elapsed.as_secs_f32() / of.as_secs_f32()).clamp(0.0, 1.0)
 }
@@ -339,20 +374,36 @@ fn rounded_rect_distance(
   outside + qx.max(qy).min(0.0) - radius
 }
 
-/// Rasterizes the input of `layout` in `colors` with `content` and the
-/// highlight `highlight`, at its own size: the inside colour filling a
-/// rounded rectangle, the ring colour as its border, the line colour as
-/// the border's inner edge, the text colour for the dots and the
-/// message, and a highlight segment on the bottom border with separator
-/// coloured ends.
+/// What the input image shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputLook {
+  /// The state, which picks the colours.
+  pub state: InputState,
+  /// Whether Caps Lock is on, for `indicator-caps-lock`'s colours.
+  pub caps_lock: bool,
+  /// The dots or the message.
+  pub content: Content,
+  /// The highlight on the border.
+  pub highlight: Option<Highlight>,
+  /// The layout and Caps Lock labels.
+  pub labels: Labels,
+}
+
+/// Rasterizes the input of `layout` showing `look`, at its own size: the
+/// inside colour filling a rounded rectangle, the ring colour as its
+/// border, the line colour as the border's inner edge, the text colour
+/// for the dots and the message, a highlight segment on the bottom
+/// border with separator coloured ends, and the labels. The colours are
+/// the state's, or the Caps Lock ones ([`LockOptions::input_colors`]).
 pub fn rasterize_input(
   layout: &Layout,
   options: &LockOptions,
-  colors: StateColors,
-  content: &Content,
-  highlight: Option<Highlight>,
+  look: &InputLook,
   font: &FontArc,
 ) -> Raster {
+  let colors = options.input_colors(look.state, look.caps_lock);
+  let (key_highlight, backspace_highlight) =
+    options.highlight_colors(look.state, look.caps_lock);
   let (_, _, width, height) = layout.input;
   let mut raster = Raster::new(width, height);
   let border = layout.border(options);
@@ -379,22 +430,24 @@ pub fn rasterize_input(
       raster.blend(x as i32, y as i32, color, coverage);
     }
   }
-  let inner = w - 2.0 * (border + h * 0.2);
-  match content {
+  let (left, right) = draw_labels(&mut raster, layout, options, look, font);
+  let inner = right - left;
+  let middle = (left + right) / 2.0;
+  match &look.content {
     Content::Dots(count) => {
       let diameter = (h * 0.22).max(3.0);
       let spacing = diameter * 1.9;
       let fitting = ((inner / spacing).floor() as usize).max(1);
       let shown = (*count).min(fitting);
-      let start = centre.0 - spacing * (shown as f32 - 1.0) / 2.0;
+      let start = middle - spacing * (shown as f32 - 1.0) / 2.0;
       for index in 0..shown {
         let cx = start + spacing * index as f32;
         fill_circle(&mut raster, (cx, centre.1), diameter / 2.0, colors.text);
       }
-      if let Some(highlight) = highlight {
+      if let Some(highlight) = look.highlight {
         let color = match highlight {
-          Highlight::Key => options.colors.key_highlight,
-          Highlight::Backspace => options.colors.backspace_highlight,
+          Highlight::Key => key_highlight,
+          Highlight::Backspace => backspace_highlight,
         };
         // Under the newest dot, or where the deleted one was.
         let index = match highlight {
@@ -415,12 +468,103 @@ pub fn rasterize_input(
     Content::Message(text) => {
       let text_raster =
         rasterize_text(text, layout.text_sizes.2, colors.text, font);
-      let x = ((w - text_raster.width as f32) / 2.0).round() as i32;
+      let x = (middle - text_raster.width as f32 / 2.0).round() as i32;
       let y = ((h - text_raster.height as f32) / 2.0).round() as i32;
       composite(&mut raster, &text_raster, (x, y));
     }
   }
   raster
+}
+
+/// Draws `look`'s labels into the input `raster`: the layout's name on a
+/// rounded `layout-bg-color` plate with a `layout-border-color` outline
+/// at the left, the Caps Lock text in `text-caps-lock-color` at the
+/// right, each at most a third of the input wide. Returns the free part
+/// between them, from left to right, where the dots or the message go.
+fn draw_labels(
+  raster: &mut Raster,
+  layout: &Layout,
+  options: &LockOptions,
+  look: &InputLook,
+  font: &FontArc,
+) -> (f32, f32) {
+  let (w, h) = (raster.width as f32, raster.height as f32);
+  let border = layout.border(options);
+  let pad = h * 0.2;
+  let (mut left, mut right) = (border + pad, w - border - pad);
+  let size = (layout.text_sizes.2 * 0.7).max(7.0);
+  let widest = w / 3.0;
+  let colors = &options.colors;
+  if let Some(name) = &look.labels.layout {
+    let inset = (size * 0.35).round();
+    let text =
+      fitted_text(name, size, colors.layout_text, font, widest - 2.0 * inset);
+    let plate = (
+      border + pad * 0.5,
+      ((h - text.height as f32) / 2.0).round(),
+      text.width as f32 + 2.0 * inset,
+      text.height as f32,
+    );
+    fill_plate(
+      raster,
+      plate,
+      colors.layout_background,
+      colors.layout_border,
+    );
+    let at = ((plate.0 + inset).round() as i32, plate.1 as i32);
+    composite(raster, &text, at);
+    left = plate.0 + plate.2 + pad * 0.5;
+  }
+  if let Some(caps) = &look.labels.caps_lock {
+    let text = fitted_text(caps, size, colors.caps_lock.text, font, widest);
+    let x = (w - border - pad * 0.5 - text.width as f32).round();
+    let y = ((h - text.height as f32) / 2.0).round();
+    composite(raster, &text, (x as i32, y as i32));
+    right = x - pad * 0.5;
+  }
+  (left, right.max(left))
+}
+
+/// `text` at `size` pixels, or smaller so that it is at most `widest`
+/// pixels wide.
+fn fitted_text(
+  text: &str,
+  size: f32,
+  color: LockColor,
+  font: &FontArc,
+  widest: f32,
+) -> Raster {
+  let raster = rasterize_text(text, size, color, font);
+  if raster.width as f32 <= widest || widest <= 0.0 {
+    return raster;
+  }
+  let smaller = (size * widest / raster.width as f32).floor().max(6.0);
+  rasterize_text(text, smaller, color, font)
+}
+
+/// A rounded plate `(x, y, width, height)` filled with `fill` and
+/// outlined one pixel wide in `outline`.
+fn fill_plate(
+  raster: &mut Raster,
+  (x, y, width, height): (f32, f32, f32, f32),
+  fill: LockColor,
+  outline: LockColor,
+) {
+  let centre = (x + width / 2.0, y + height / 2.0);
+  let half = (width / 2.0, height / 2.0);
+  let corner = height * 0.3;
+  for py in y.floor() as i32..(y + height).ceil() as i32 {
+    for px in x.floor() as i32..(x + width).ceil() as i32 {
+      let point = (px as f32 + 0.5, py as f32 + 0.5);
+      let distance = rounded_rect_distance(point, centre, half, corner);
+      let coverage = (0.5 - distance).clamp(0.0, 1.0);
+      if coverage <= 0.0 {
+        continue;
+      }
+      let color = if -distance < 1.0 { outline } else { fill };
+      raster.blend(px, py, color, coverage);
+    }
+  }
 }
 
 /// A highlight on the bottom border from `x0` to `x1`, with separator
@@ -580,6 +724,8 @@ pub fn rasterize_clock(
 
 #[cfg(test)]
 mod tests {
+  use shingle_config::StateColors;
+
   use super::*;
 
   fn font() -> FontArc {
@@ -617,17 +763,21 @@ mod tests {
 
   #[test]
   fn states_follow_keys_and_pam() {
+    let texts = InputTexts::default();
     let start = Instant::now();
     let mut indicator = Indicator::new(Duration::from_secs(5), false, start);
     indicator.typed(1, start);
     indicator.typed(2, start);
-    assert_eq!(indicator.content(true), Content::Dots(2));
+    assert_eq!(indicator.content(true, &texts), Content::Dots(2));
     indicator.deleted(1, start);
     assert_eq!(indicator.state(), InputState::Input);
     assert_eq!(indicator.highlight(start), Some(Highlight::Backspace));
     indicator.deleted(0, start);
     assert_eq!(indicator.state(), InputState::Clear);
-    assert_eq!(indicator.content(true), Content::Message("Cleared".into()));
+    assert_eq!(
+      indicator.content(true, &texts),
+      Content::Message("Cleared".into())
+    );
     indicator.typed(1, start);
     indicator.verifying(start);
     assert_eq!(indicator.state(), InputState::Verify);
@@ -636,18 +786,18 @@ mod tests {
     indicator.denied(start);
     assert_eq!(indicator.state(), InputState::Wrong);
     assert_eq!(
-      indicator.content(true),
+      indicator.content(true, &texts),
       Content::Message("Wrong password (1)".into())
     );
     assert_eq!(
-      indicator.content(false),
+      indicator.content(false, &texts),
       Content::Message("Wrong password".into())
     );
     indicator.typed(1, start);
     indicator.cleared(start);
     indicator.typed(0, start);
     assert_eq!(
-      indicator.content(true),
+      indicator.content(true, &texts),
       Content::Message("1 failed attempt".into())
     );
   }
@@ -678,22 +828,33 @@ mod tests {
     assert_eq!(Layout::new((200, 400), &options).input.2, 168);
   }
 
+  fn look(content: Content) -> InputLook {
+    InputLook {
+      state: InputState::Input,
+      caps_lock: false,
+      content,
+      highlight: None,
+      labels: Labels::default(),
+    }
+  }
+
   #[test]
   fn the_input_uses_its_state_colours() {
-    let options = LockOptions::default();
-    let layout = Layout::new((1000, 800), &options);
-    let colors = StateColors {
+    let mut options = LockOptions::default();
+    options.colors.input = StateColors {
       ring: [255, 0, 0, 255],
       inside: [0, 0, 255, 255],
       line: [0, 255, 0, 255],
       text: [255, 255, 255, 255],
     };
+    let layout = Layout::new((1000, 800), &options);
     let raster = rasterize_input(
       &layout,
       &options,
-      colors,
-      &Content::Dots(1),
-      Some(Highlight::Key),
+      &InputLook {
+        highlight: Some(Highlight::Key),
+        ..look(Content::Dots(1))
+      },
       &font(),
     );
     let (_, _, width, height) = layout.input;
@@ -708,6 +869,104 @@ mod tests {
     assert_eq!(raster.pixel(width / 2, height - 2)[..3], hl[..3]);
     // A corner stays transparent.
     assert_eq!(raster.pixel(0, 0), [0, 0, 0, 0]);
+  }
+
+  /// How many pixels of `raster`'s columns `columns` are opaque and
+  /// mostly `color`: at least a third of its strength where it is
+  /// bright, little where it is dark.
+  fn count(
+    raster: &Raster,
+    columns: std::ops::Range<u32>,
+    color: [u8; 3],
+  ) -> usize {
+    (0..raster.height)
+      .flat_map(|y| columns.clone().map(move |x| (x, y)))
+      .filter(|(x, y)| {
+        let pixel = raster.pixel(*x, *y);
+        pixel[3] == 255
+          && (0..3).all(|c| {
+            if color[c] > 128 {
+              pixel[c] >= color[c] / 3
+            } else {
+              pixel[c] <= 40
+            }
+          })
+      })
+      .count()
+  }
+
+  #[test]
+  fn caps_lock_and_the_layout_are_small_labels_in_the_input() {
+    let mut options = LockOptions::default();
+    options.colors.input.inside = [0, 0, 0, 255];
+    options.colors.caps_lock.text = [255, 0, 0, 255];
+    options.colors.layout_text = [0, 255, 0, 255];
+    options.colors.layout_background = [0, 0, 255, 255];
+    let layout = Layout::new((1000, 800), &options);
+    let (_, _, width, _) = layout.input;
+    let labels = Labels::new(&options, InputState::Input, true, Some("us"));
+    assert_eq!(labels.caps_lock.as_deref(), Some("Caps Lock"));
+    let raster = rasterize_input(
+      &layout,
+      &options,
+      &InputLook {
+        caps_lock: true,
+        labels,
+        ..look(Content::Dots(3))
+      },
+      &font(),
+    );
+    let third = width / 3;
+    let red = [255, 0, 0];
+    let green = [0, 255, 0];
+    let blue = [0, 0, 255];
+    assert!(
+      count(&raster, 2 * third..width, red) > 20,
+      "Caps Lock right"
+    );
+    assert_eq!(count(&raster, 0..2 * third, red), 0);
+    assert!(count(&raster, 0..third, green) > 5, "the layout left");
+    assert!(count(&raster, 0..third, blue) > 50, "on its plate");
+    assert_eq!(count(&raster, third..width, green), 0);
+    // The default text colour's dots stay in the middle.
+    let dots = options.colors.input.text;
+    assert!(count(&raster, third..2 * third, [dots[0], dots[1], dots[2]]) > 20);
+    // Neither label while the input is wrong, nor Caps Lock without its
+    // text.
+    assert_eq!(
+      Labels::new(&options, InputState::Wrong, true, Some("us")),
+      Labels::default()
+    );
+    options.caps_lock_text = false;
+    assert_eq!(
+      Labels::new(&options, InputState::Input, true, None),
+      Labels::default()
+    );
+  }
+
+  #[test]
+  fn indicator_caps_lock_recolours_the_input() {
+    let mut options = LockOptions {
+      caps_lock_indicator: true,
+      ..LockOptions::default()
+    };
+    options.colors.caps_lock.ring = [255, 0, 255, 255];
+    let layout = Layout::new((1000, 800), &options);
+    let (_, _, _, height) = layout.input;
+    let draw = |caps_lock| {
+      rasterize_input(
+        &layout,
+        &options,
+        &InputLook {
+          caps_lock,
+          ..look(Content::Dots(1))
+        },
+        &font(),
+      )
+    };
+    assert_eq!(draw(true).pixel(2, height / 2), [255, 0, 255, 255]);
+    let ring = options.colors.input.ring;
+    assert_eq!(draw(false).pixel(2, height / 2)[..3], ring[..3]);
   }
 
   #[test]
