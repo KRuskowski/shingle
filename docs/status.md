@@ -261,6 +261,8 @@ The desk-check of the native path against i915 for the Latitude 5400 (UHD 620, d
 
 Open: a monitor without a preferred mode gets Wayfire's last, smallest mode (720x400 for the 5400 dump's DP-2), where wlroots takes the first; the operator decides. Lid handling, switch devices in `input/list-devices` and `IN_FORMATS_ASYNC` are not built. Only the laptops can show their own panels, firmware and kernel: steps 55 to 62 of [native-testing.md](native-testing.md#intel-laptops-i915), the first of which turns the laptop's drm_info into a fixture.
 
+Real clients, on this host and unchanged by the branch, since no harness runs the native backend: after its last code change `tools/output_test/run.py` passed 121 of 121 checks, `tools/gpu_test/run.py --checks offscreen nested baseline` 17 of 17 (no device opened outside the allowed set), `tools/xwayland_test/run.py` 287 of 287 and `tools/session_test/run.py` 14 of 14 (2026-11-28).
+
 ### Native test machine bring-up
 
 tools/native_test/bringup.py and tools/native_test/start_tty1.py, described in [laptop-bringup.md](laptop-bringup.md#the-bring-up-driver). Unit-tested through a fake SSH machine only; the laptop had not arrived when they were written.
