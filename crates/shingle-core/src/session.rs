@@ -319,9 +319,35 @@ impl SessionSnapshot {
   /// Validates the snapshot and writes it atomically; see
   /// [`Shingle::save_atomic`].
   pub fn save_atomic(&self, path: impl AsRef<Path>) -> Result<()> {
+    self.save_atomic_with(path, &mut sync_in_place)
+  }
+
+  /// Validates the snapshot and writes it to a temporary file next to
+  /// `path`, which is renamed over `path`, as
+  /// [`SessionSnapshot::save_atomic`] does, but with `sync` making it
+  /// durable: it is called for the temporary file before the rename and
+  /// for the directory after it. A `sync` that does nothing leaves the
+  /// write atomic for the processes reading it, and a crash of the writer
+  /// cannot lose it, but a crash of the system can until the kernel has
+  /// written it back.
+  ///
+  /// # Errors
+  ///
+  /// As [`SessionSnapshot::save_atomic`]; an error from `sync` for the
+  /// temporary file leaves `path` as it was and removes the temporary
+  /// file, unless the error is of kind
+  /// [`std::io::ErrorKind::Interrupted`]: a sync given up may still be in
+  /// progress in another process, and removing the file would wait for it
+  /// on some file systems, such as FUSE. Such a file is named
+  /// `.NAME.tmp.PID.SERIAL` next to `path`, NAME being its file name.
+  pub fn save_atomic_with(
+    &self,
+    path: impl AsRef<Path>,
+    sync: &mut dyn FnMut(SyncTarget<'_>) -> std::io::Result<()>,
+  ) -> Result<()> {
     self.validate()?;
     let json = serialize_snapshot(self)?;
-    atomic_write(path.as_ref(), json.as_bytes())
+    atomic_write(path.as_ref(), json.as_bytes(), sync)
   }
 
   /// Converts version 1's records: each output becomes a set shown on it,
@@ -819,7 +845,38 @@ fn collect_leaf_ids(node: &Node, windows: &mut BTreeSet<WindowId>) {
   }
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+/// What [`SessionSnapshot::save_atomic_with`] asks to be synced to disk.
+#[derive(Clone, Copy, Debug)]
+pub enum SyncTarget<'a> {
+  /// The temporary file with the snapshot, written and closed, before it
+  /// is renamed into place.
+  File(&'a Path),
+  /// The directory, after the rename, so that the rename is durable.
+  Directory(&'a Path),
+}
+
+impl SyncTarget<'_> {
+  /// The path to sync.
+  pub fn path(&self) -> &Path {
+    match self {
+      Self::File(path) | Self::Directory(path) => path,
+    }
+  }
+}
+
+/// Syncs `target` with fsync on the calling thread, which can block for
+/// many seconds on a busy disk. Linux writes back an inode's dirty pages
+/// for an fsync through any descriptor, so the closed file is opened
+/// again for it.
+pub fn sync_in_place(target: SyncTarget<'_>) -> std::io::Result<()> {
+  File::open(target.path())?.sync_all()
+}
+
+fn atomic_write(
+  path: &Path,
+  contents: &[u8],
+  sync: &mut dyn FnMut(SyncTarget<'_>) -> std::io::Result<()>,
+) -> Result<()> {
   let file_name = path
     .file_name()
     .ok_or(ShingleError::InvalidPersistencePath)?;
@@ -861,15 +918,22 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
       }))
     })?;
 
+  // Whether the temporary file is left to a sync given up.
+  let mut given_up = false;
   let result = (|| -> Result<()> {
     file.write_all(contents)?;
-    file.sync_all()?;
+    // Closed before the sync: on FUSE, closing waits for an fsync of the
+    // same file in another process.
     drop(file);
+    if let Err(error) = sync(SyncTarget::File(&temporary_path)) {
+      given_up = error.kind() == std::io::ErrorKind::Interrupted;
+      return Err(error.into());
+    }
     std::fs::rename(&temporary_path, path)?;
-    File::open(parent)?.sync_all()?;
+    sync(SyncTarget::Directory(parent))?;
     Ok(())
   })();
-  if result.is_err() {
+  if result.is_err() && !given_up {
     let _ = std::fs::remove_file(&temporary_path);
   }
   result
@@ -1165,6 +1229,71 @@ mod tests {
     assert_eq!(entries, vec![OsString::from("session.json")]);
     let contents = std::fs::read_to_string(&path).unwrap();
     assert!(contents.ends_with("}\n"));
+    std::fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[test]
+  fn save_atomic_with_syncs_the_file_before_the_rename_and_then_the_directory()
+  {
+    let directory = temp_dir("sync");
+    let path = directory.join("session.json");
+    let mut calls = Vec::new();
+    sample()
+      .snapshot()
+      .save_atomic_with(&path, &mut |target| {
+        calls.push(match target {
+          SyncTarget::File(temporary) => {
+            assert!(!path.exists(), "the file is synced before the rename");
+            format!("file {}", temporary.parent() == Some(&directory))
+          }
+          SyncTarget::Directory(parent) => {
+            assert!(path.exists(), "the directory after the rename");
+            format!("directory {}", parent == directory)
+          }
+        });
+        Ok(())
+      })
+      .unwrap();
+    assert_eq!(calls, ["file true", "directory true"]);
+    assert_same_layout(&sample(), &Shingle::load(&path).unwrap());
+    std::fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[test]
+  fn a_failed_file_sync_keeps_the_old_file_and_no_temporary() {
+    let directory = temp_dir("sync-failure");
+    let path = directory.join("session.json");
+    Shingle::new().save_atomic(&path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let result =
+      sample()
+        .snapshot()
+        .save_atomic_with(&path, &mut |target| match target {
+          SyncTarget::File(_) => Err(std::io::ErrorKind::StorageFull.into()),
+          SyncTarget::Directory(_) => Ok(()),
+        });
+    assert!(matches!(result, Err(ShingleError::Io(_))));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+    // A sync given up leaves its file, which another process may still
+    // be syncing, and `path` as it was.
+    let mut given_up = None;
+    let result =
+      sample()
+        .snapshot()
+        .save_atomic_with(&path, &mut |target| match target {
+          SyncTarget::File(temporary) => {
+            given_up = Some(temporary.to_owned());
+            Err(std::io::ErrorKind::Interrupted.into())
+          }
+          SyncTarget::Directory(_) => Ok(()),
+        });
+    assert!(matches!(result, Err(ShingleError::Io(_))));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let given_up = given_up.unwrap();
+    let name = given_up.file_name().unwrap().to_str().unwrap();
+    assert!(name.starts_with(".session.json.tmp."), "{name}");
+    assert!(given_up.exists());
     std::fs::remove_dir_all(directory).unwrap();
   }
 

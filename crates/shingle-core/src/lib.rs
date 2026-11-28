@@ -36,8 +36,8 @@ pub use error::ShingleError;
 pub use geometry::{Direction, Gaps, Rect, SplitDirection};
 pub use session::{
   ChildSnapshot, NodeSnapshot, OutputSnapshot, SNAPSHOT_VERSION,
-  SessionSnapshot, SplitSnapshot, WindowSnapshot, WorkspaceSnapshot,
-  WsetSnapshot,
+  SessionSnapshot, SplitSnapshot, SyncTarget, WindowSnapshot,
+  WorkspaceSnapshot, WsetSnapshot, sync_in_place,
 };
 pub use tree::{LeafState, StackingMode, TileTree, WindowId, WindowLayout};
 pub use wset::{OutputIdentity, WsetId, WsetInfo};
