@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import tempfile
 import unittest
 
 def _load(name):
@@ -38,6 +39,15 @@ class FsyncLogTest(unittest.TestCase):
     self.assertEqual(run.overlapping(intervals, 1.0, 3.0),
                      [(0.0, 1.0), (1.5, 2.0), (2.5, None)])
     self.assertEqual(run.overlapping(intervals, 7.0, 8.0), [(2.5, None)])
+
+  def test_stuck_fsyncs_are_those_in_progress_at_a_time(self):
+    with tempfile.NamedTemporaryFile('w', suffix='.log') as log:
+      log.write('begin 1.0 /a\nend 2.0 /a\nbegin 3.0 /b\n')
+      log.flush()
+      self.assertEqual(run.stuck_fsyncs(log.name, 1.5), [(1.0, 2.0)])
+      self.assertEqual(run.stuck_fsyncs(log.name, 2.5), [])
+      self.assertEqual(run.stuck_fsyncs(log.name, 9.0), [(3.0, None)])
+    self.assertEqual(run.stuck_fsyncs('/nonexistent/slowfs.log', 1.0), [])
 
 class LayoutTest(unittest.TestCase):
   """Building set-layout requests and reading the saved layout."""

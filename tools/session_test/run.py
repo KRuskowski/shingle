@@ -83,6 +83,10 @@ REPLY_LIMIT = 0.05
 # How long the layout keeps changing, and how often.
 CHANGE_PERIOD = 3.0
 CHANGE_INTERVAL = 0.1
+# How long each fsync takes in the exit group, and how soon SIGTERM must
+# end nested meanwhile.
+EXIT_FSYNC_DELAY = 20.0
+EXIT_LIMIT = 5.0
 # How long nested is watched while idle, and the share of it its main
 # thread may spend on a CPU: a debug build's turns every 16 ms and at the
 # 50 ms tick cost about 5 %, a loop woken over and over by a descriptor
@@ -382,13 +386,15 @@ def stop_shingle(shingle, timeout):
     shingle.log.close()
   return status, time.monotonic() - started, states
 
-def mount_slowfs(backing, mountpoint, delay, log_path):
-  """Starts slowfs at `mountpoint`; returns its process once mounted."""
+def mount_slowfs(backing, mountpoint, delay, log_path, threads=False):
+  """Starts slowfs at `mountpoint`, with a thread per request if
+  `threads`; returns its process once mounted."""
   os.makedirs(backing)
   os.makedirs(mountpoint)
   process = subprocess.Popen(
       [sys.executable, SLOWFS, backing, mountpoint, '--delay', str(delay),
-       '--log', log_path], stdin=subprocess.DEVNULL)
+       '--log', log_path, *(['--threads'] if threads else [])],
+      stdin=subprocess.DEVNULL)
   mounted = wait_for(lambda: is_mounted(mountpoint))
   if not mounted:
     process.kill()
@@ -578,6 +584,112 @@ def slow_write_checks(results, binary, wl_probe, delay, latency_log=None):
       signal_checked(slowfs.pid, signal.SIGKILL, 'python3')
       slowfs.wait()
 
+def stuck_fsyncs(log_path, at):
+  """The fsyncs in the slowfs log at `log_path` that were in progress at
+  `at` (`time.monotonic`)."""
+  return [(begin, end) for begin, end in fsync_intervals(read_log(log_path))
+          if begin <= at and (end is None or end > at)]
+
+def exit_checks(results, binary, wl_probe):
+  """SIGTERM ends nested Shingle within EXIT_LIMIT seconds while every
+  fsync takes EXIT_FSYNC_DELAY seconds and one is in progress, and the
+  session on disk afterwards holds the layout set just before."""
+  backing = '/tmp/exit-backing'
+  state = '/tmp/exit-state'
+  log_path = '/tmp/exit-slowfs.log'
+  # A thread per request, so that only the fsync is slow and the exit's
+  # unsynced write is not queued behind it.
+  slowfs = mount_slowfs(backing, state, EXIT_FSYNC_DELAY, log_path,
+                        threads=True)
+  outer = Headless(binary, 'exit-outer', json.dumps({
+      'output': {'mode': '640x480@60'},
+      'xwayland': {'mode': False},
+      'session': {'restore': False},
+      'workspaces': {'width': 1, 'height': 1},
+  }), 'yaml')
+  nested = None
+  probes = []
+  try:
+    nested = Headless(binary, 'exit-nested', json.dumps({
+        'xwayland': {'mode': False},
+        'session': {'restore': False},
+        'workspaces': {'width': 1, 'height': 1},
+    }), 'yaml', backend=('--backend', 'nested'), extra_environment={
+        'WAYLAND_DISPLAY': outer.wayland_display(),
+        'VK_ICD_FILENAMES': LAVAPIPE,
+        'XDG_STATE_HOME': state,
+    })
+    probes = [Probe(wl_probe, nested, app_id) for app_id in ('left', 'right')]
+    views = wait_for(lambda: nested_views(nested, 2), timeout=30)
+    results.check('exit: two clients map in nested Shingle', views,
+                  str(views))
+    if not views:
+      return nested.log_text()
+    first, second = views['left'], views['right']
+    stuck = wait_for(lambda: stuck_fsyncs(log_path, time.monotonic()),
+                     timeout=10, interval=0.005)
+    results.check('exit: a session write is stuck in fsync', stuck,
+                  str(read_log(log_path)))
+    direction = root_direction(nested.ipc.call(
+        'simple-tile/get-layout',
+        {'wset-index': 1, 'workspace': {'x': 0, 'y': 0}}))
+    # The layout the exit must save, behind the stuck write.
+    reply = nested.ipc.call('simple-tile/set-layout',
+                            layout_request(direction, first, second, 23))
+    results.check('exit: set-layout succeeds', reply.get('result') == 'ok',
+                  str(reply))
+    time.sleep(0.5)
+    status, exit_time, states = stop_shingle(nested, 4 * EXIT_FSYNC_DELAY)
+    ended = time.monotonic()
+    nested_log = nested.log_text()
+    nested = None
+    during = stuck_fsyncs(log_path, ended)
+    results.check(
+        f'exit: SIGTERM exits nested with status 0 within {EXIT_LIMIT:.0f} s '
+        f'while fsync takes {EXIT_FSYNC_DELAY:.0f} s',
+        status == 0 and exit_time < EXIT_LIMIT and during,
+        f'{status} after {exit_time:.1f} s, fsyncs in progress at the '
+        f'exit: {len(during)}, threads after 1 s: {states}')
+    session_path = os.path.join(backing, 'shingle', 'session.json')
+    try:
+      with open(session_path) as file:
+        session = json.load(file)
+    except (OSError, ValueError) as error:
+      session = {}
+      results.check('exit: the session file is valid JSON', False,
+                    repr(error))
+    shares = saved_shares(session, first, second)
+    results.check(
+        'exit: the session on disk holds the layout set before SIGTERM',
+        shares is not None
+        and all(abs(a - b) < 1e-6 for a, b in zip(shares, (0.23, 0.77))),
+        f'saved {shares}')
+    # The given-up fsync ends in its own process. Its file stays until
+    # the next start, since removing it would wait for that fsync here.
+    settled = wait_for(lambda: not stuck_fsyncs(log_path, time.monotonic()),
+                       timeout=EXIT_FSYNC_DELAY + 10)
+    names = os.listdir(os.path.join(backing, 'shingle'))
+    others = [name for name in names if name != 'session.json'
+              and not name.startswith('.session.json.tmp.')]
+    results.check('exit: the given-up fsync ends in its own process and '
+                  'leaves at most its temporary file', settled and not others
+                  and len(names) <= 2, str(names))
+    return nested_log
+  finally:
+    for probe in probes:
+      probe.stop()
+    if nested:
+      nested.stop()
+    outer_status = outer.stop()
+    results.check('exit: SIGTERM exits headless with status 0',
+                  outer_status == 0, str(outer_status))
+    subprocess.run(['umount', state], check=False)
+    try:
+      slowfs.wait(10)
+    except subprocess.TimeoutExpired:
+      signal_checked(slowfs.pid, signal.SIGKILL, 'python3')
+      slowfs.wait()
+
 def _load_round_trip():
   """tools/session_test/round_trip.py."""
   path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -598,6 +710,7 @@ def check_groups(names, binary, wl_probe, delay, master_binary,
                                                 delay, latency_log),
       'round-trip': lambda results: round_trip.round_trip_checks(
           harness, results, binary, wl_probe),
+      'exit': lambda results: exit_checks(results, binary, wl_probe),
   }
   selected = [(name, groups[name]) for name in names]
   if master_binary and 'round-trip' in names:
@@ -643,7 +756,7 @@ def main():
   parser.add_argument('--wl-probe', default='target/debug/examples/wl_probe')
   parser.add_argument('--delay', type=float, default=1.5)
   parser.add_argument('--checks', nargs='+', default=['slow'],
-                      choices=['slow', 'round-trip'])
+                      choices=['slow', 'round-trip', 'exit'])
   parser.add_argument('--master-binary')
   parser.add_argument('--keep', action='store_true')
   parser.add_argument('--latency-log',
@@ -660,7 +773,7 @@ def main():
   if options.inner:
     return inner(binary, wl_probe, options.delay, options.checks,
                  master_binary, latency_log)
-  if 'slow' in options.checks:
+  if {'slow', 'exit'} & set(options.checks):
     if importlib.util.find_spec('fuse') is None:
       print('python3-fuse is not installed', file=sys.stderr)
       return 2

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """A FUSE passthrough file system whose fsync is slow.
 
-  slowfs.py BACKING MOUNTPOINT --delay SECONDS --log FILE
+  slowfs.py BACKING MOUNTPOINT --delay SECONDS --log FILE [--threads]
 
 Mirrors the directory BACKING at MOUNTPOINT and holds every fsync of a
 file for SECONDS before syncing it, as a busy disk does. Directory
 fsyncs are not implemented, which the kernel treats as success. Each fsync
 appends `begin TIME PATH` and `end TIME PATH` (CLOCK_MONOTONIC seconds)
 to FILE, which must lie outside the mount. It runs in the foreground
-and single-threaded until it is unmounted.
+until it is unmounted, single-threaded, so that everything else waits
+behind a slow fsync, or with `--threads` one thread per request, so
+that only the fsync itself is slow.
 
 It needs python3-fuse (libfuse 2) and is only run by
 tools/session_test/run.py inside its user and mount namespace, where
@@ -148,11 +150,12 @@ def main():
   parser.add_argument('mountpoint')
   parser.add_argument('--delay', type=float, required=True)
   parser.add_argument('--log', required=True)
+  parser.add_argument('--threads', action='store_true')
   options = parser.parse_args()
   backing = os.path.abspath(options.backing)
   server = SlowFs(backing, options.delay, os.path.abspath(options.log),
                   usage='slowfs')
-  server.multithreaded = False
+  server.multithreaded = options.threads
   server.parse([options.mountpoint, '-f'], errex=1)
   server.main()
   return 0
