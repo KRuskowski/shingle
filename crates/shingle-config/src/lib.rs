@@ -1254,6 +1254,14 @@ pub struct XwaylandConfig {
   /// becomes ready, for example `xrdb -merge ~/.Xresources`. Empty runs
   /// nothing. `[core] xwayland_startup_script`; default empty.
   pub startup_script: String,
+  /// X clients draw in physical pixels and Shingle scales their windows
+  /// down, so they are sharp above scale 1, as with KWin's
+  /// `XwaylandClientsScale`. X sees the layout at the largest output
+  /// scale and gets `Xft.dpi` to match; X windows on outputs of a lower
+  /// scale are scaled down to it. Off, X clients are scaled up and blurry
+  /// above scale 1, as in Wayfire, which has no such option. Shingle only;
+  /// default off.
+  pub zero_scaling: bool,
 }
 
 /// Controls protocol visibility for clients created by a sandbox engine.
@@ -3790,10 +3798,23 @@ mod tests {
     let config = ShingleConfig::default();
     assert_eq!(config.xwayland.mode, XwaylandMode::Lazy);
     assert_eq!(config.xwayland.startup_script, "");
+    assert!(!config.xwayland.zero_scaling);
     let yaml =
       ShingleConfig::parse("output:\n  width: 800\n", ConfigFormat::Yaml)
         .unwrap();
     assert_eq!(yaml.xwayland.mode, XwaylandMode::Lazy);
+    assert!(!yaml.xwayland.zero_scaling);
+  }
+
+  #[test]
+  fn xwayland_zero_scaling_is_a_yaml_switch() {
+    let config = ShingleConfig::parse(
+      "xwayland:\n  zero_scaling: true\n",
+      ConfigFormat::Yaml,
+    )
+    .unwrap();
+    assert!(config.xwayland.zero_scaling);
+    assert_eq!(config.xwayland.mode, XwaylandMode::Lazy);
   }
 
   #[test]

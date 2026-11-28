@@ -1503,7 +1503,7 @@ impl CompositorState {
     }
     let moved = crate::output::relayout(self);
     let output = self.outputs.get(id).expect("the output exists");
-    output.send_all();
+    output.send_all(self.xwayland.scale);
     let rect = output.rect;
     crate::layer_shell::update_workarea(self);
     shell::reconfigure_lock_surfaces(self);
@@ -1525,7 +1525,7 @@ impl CompositorState {
       return;
     };
     output.info = info;
-    output.send_all();
+    output.send_all(self.xwayland.scale);
     crate::xdg_output::update(self);
     crate::output_management::sync(self);
   }
@@ -1543,7 +1543,7 @@ impl CompositorState {
       return Ok(());
     };
     output.scale = scale;
-    output.send_all();
+    output.send_all(self.xwayland.scale);
     let rect = output.rect;
     crate::output_management::sync(self);
     self.events.push(Event::OutputChanged {
@@ -1576,7 +1576,7 @@ impl CompositorState {
     output.rect = rect;
     let moved = crate::output::relayout(self);
     let output = self.outputs.get(id).expect("the output exists");
-    output.send_all();
+    output.send_all(self.xwayland.scale);
     let rect = output.rect;
     // Its windows keep their place on it.
     crate::output::carry_windows(self, id, from, rect);
@@ -2558,12 +2558,12 @@ impl GlobalDispatch<WlOutput, crate::output::OutputGlobal> for CompositorState {
     let Some(output) = state.outputs.by_generation(generation) else {
       // An output that is gone: described as the first output once, and
       // never kept.
-      state.primary().send(&resource, true);
+      state.primary().send(&resource, true, state.xwayland.scale);
       return;
     };
     // Surfaces, toplevel handles and workspace groups on it hear so at
     // the end of the turn.
-    output.send(&resource, true);
+    output.send(&resource, true, state.xwayland.scale);
     if let Some(output) = state.outputs.by_generation_mut(generation) {
       output.bound.insert(resource.id(), resource);
     }

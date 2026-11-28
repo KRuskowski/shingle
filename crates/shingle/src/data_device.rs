@@ -610,13 +610,17 @@ fn enter(
   let geometry = crate::straddle::drawn_rect(state, target).unwrap_or_default();
   let surface_resource = surface.resource.clone();
   let serial = state.serial();
-  device.resource.enter(
-    serial,
-    &surface_resource,
-    state.input.pointer_x - f64::from(geometry.x),
-    state.input.pointer_y - f64::from(geometry.y),
-    Some(&offer),
+  let (x, y) = crate::xwayland::scale::point_for(
+    state,
+    target,
+    (
+      state.input.pointer_x - f64::from(geometry.x),
+      state.input.pointer_y - f64::from(geometry.y),
+    ),
   );
+  device
+    .resource
+    .enter(serial, &surface_resource, x, y, Some(&offer));
   state
     .data_devices
     .offers
@@ -631,13 +635,17 @@ fn motion(state: &CompositorState, target: &ObjectId) {
   };
   let geometry = crate::straddle::drawn_rect(state, target).unwrap_or_default();
   let time = crate::input::timestamp(state);
+  let (x, y) = crate::xwayland::scale::point_for(
+    state,
+    target,
+    (
+      state.input.pointer_x - f64::from(geometry.x),
+      state.input.pointer_y - f64::from(geometry.y),
+    ),
+  );
   for device in state.data_devices.devices.values() {
     if device.client.id() == surface.client {
-      device.resource.motion(
-        time,
-        state.input.pointer_x - f64::from(geometry.x),
-        state.input.pointer_y - f64::from(geometry.y),
-      );
+      device.resource.motion(time, x, y);
     }
   }
 }

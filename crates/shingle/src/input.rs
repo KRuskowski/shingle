@@ -1345,8 +1345,11 @@ pub(crate) fn touch_down(state: &mut CompositorState, id: i32, x: f64, y: f64) {
   let Some(geometry) = crate::straddle::drawn_rect(state, &object) else {
     return;
   };
-  let local_x = x - f64::from(geometry.x);
-  let local_y = y - f64::from(geometry.y);
+  let (local_x, local_y) = crate::xwayland::scale::point_for(
+    state,
+    &object,
+    (x - f64::from(geometry.x), y - f64::from(geometry.y)),
+  );
   state
     .input
     .active_touches
@@ -1379,8 +1382,11 @@ pub(crate) fn touch_motion(
   let Some(geometry) = crate::straddle::drawn_rect(state, &object) else {
     return;
   };
-  let local_x = x - f64::from(geometry.x);
-  let local_y = y - f64::from(geometry.y);
+  let (local_x, local_y) = crate::xwayland::scale::point_for(
+    state,
+    &object,
+    (x - f64::from(geometry.x), y - f64::from(geometry.y)),
+  );
   let time = timestamp(state);
   for touch in touches_for(state, id) {
     touch.motion(time, id, local_x, local_y);
@@ -1806,14 +1812,21 @@ fn contains(rect: Rect, x: f64, y: f64) -> bool {
     && y < f64::from(rect.y) + f64::from(rect.height)
 }
 
+/// The pointer's position on `object`'s surface, from the top left of
+/// where it is drawn, in its client's units: logical pixels, or X pixels
+/// for an X window (crate::xwayland::scale).
 pub(crate) fn local_position(
   state: &CompositorState,
   object: &ObjectId,
 ) -> Option<(f64, f64)> {
   let geometry = crate::straddle::drawn_rect(state, object)?;
-  Some((
-    state.input.pointer_x - f64::from(geometry.x),
-    state.input.pointer_y - f64::from(geometry.y),
+  Some(crate::xwayland::scale::point_for(
+    state,
+    object,
+    (
+      state.input.pointer_x - f64::from(geometry.x),
+      state.input.pointer_y - f64::from(geometry.y),
+    ),
   ))
 }
 

@@ -27,9 +27,20 @@ pub(crate) fn update(state: &mut CompositorState) {
   }
 }
 
+/// Sends the logical geometry to Xwayland's xdg-outputs only, after the X
+/// scale changed.
+pub(crate) fn update_xwayland(state: &mut CompositorState) {
+  for output in state.xdg_outputs.values() {
+    if crate::xwayland::scale::is_xwayland(output.client().as_ref()) {
+      send_metadata(state, output, false);
+    }
+  }
+}
+
 /// Sends the logical geometry of the output `resource` was created for,
 /// or of the first output when that `wl_output` stands for an output that
-/// is gone.
+/// is gone. Xwayland gets it at the X scale, so the X screen is the
+/// layout in X pixels (crate::xwayland::scale).
 fn send_metadata(
   state: &CompositorState,
   resource: &ZxdgOutputV1,
@@ -39,7 +50,14 @@ fn send_metadata(
     .data::<WlOutput>()
     .and_then(|bound| state.outputs.of_resource(bound))
     .unwrap_or_else(|| state.primary());
-  let rect = output.rect;
+  let rect = if crate::xwayland::scale::is_xwayland(resource.client().as_ref())
+  {
+    let x =
+      crate::xwayland::scale::rect_to_x(output.rect, state.xwayland.scale);
+    shingle_core::Rect::new(x.x, x.y, x.width, x.height)
+  } else {
+    output.rect
+  };
   resource.logical_position(rect.x, rect.y);
   resource.logical_size(rect.width as i32, rect.height as i32);
   if created && resource.version() >= 2 {

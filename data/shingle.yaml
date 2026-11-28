@@ -62,6 +62,7 @@ behavior:
 xwayland:
   mode: lazy
   startup_script: ""
+  zero_scaling: false
 
 security_context:
   privileged_protocols: >-

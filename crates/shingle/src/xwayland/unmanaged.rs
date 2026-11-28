@@ -157,20 +157,20 @@ pub(crate) fn changed(
   }
 }
 
-/// Where an unmanaged window is drawn: its X geometry, which is in
-/// Shingle's logical coordinates.
+/// Where an unmanaged window is drawn: its X geometry in logical
+/// coordinates, which are X coordinates at X scale 1.
 pub(crate) fn geometry(
   state: &CompositorState,
   role: &XwaylandRole,
 ) -> Option<Rect> {
   role.unmanaged?;
   let info = &state.xwayland.windows.get(&role.window?)?.info;
-  let geometry = info.geometry.nonzero();
+  let geometry = super::windows::from_x(state, info.geometry.nonzero());
   Some(Rect::new(
     geometry.x,
     geometry.y,
-    geometry.width,
-    geometry.height,
+    geometry.width.max(1),
+    geometry.height.max(1),
   ))
 }
 

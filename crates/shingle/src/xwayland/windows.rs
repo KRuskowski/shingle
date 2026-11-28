@@ -83,6 +83,25 @@ fn rect(geometry: Geometry) -> Rect {
   Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
 }
 
+/// The X geometry of logical rectangle `rect` at the X scale.
+pub(crate) fn to_x(state: &CompositorState, rect: Rect) -> Geometry {
+  super::scale::rect_to_x(rect, state.xwayland.scale)
+}
+
+/// The logical rectangle of X geometry `geometry` at the X scale.
+pub(crate) fn from_x(state: &CompositorState, geometry: Geometry) -> Rect {
+  super::scale::rect_from_x(geometry, state.xwayland.scale)
+}
+
+/// The logical size of X size hint `size` at the X scale; unset stays
+/// unset.
+fn size_from_x(
+  state: &CompositorState,
+  size: Option<(i32, i32)>,
+) -> (i32, i32) {
+  super::scale::size_from_x(size.unwrap_or((0, 0)), state.xwayland.scale)
+}
+
 /// Applies one window manager event.
 pub(crate) fn apply(state: &mut CompositorState, event: XwmEvent) {
   match event {
@@ -320,9 +339,9 @@ fn new_toplevel(
       .and_then(|parent| shingle_window(state, parent)),
     tiled: true,
     opacity: 1.0,
-    floating_geometry: rect(entry.start.unwrap_or(info.geometry)),
-    min_size: info.size_hints.min.unwrap_or((0, 0)),
-    max_size: info.size_hints.max.unwrap_or((0, 0)),
+    floating_geometry: from_x(state, entry.start.unwrap_or(info.geometry)),
+    min_size: size_from_x(state, info.size_hints.min),
+    max_size: size_from_x(state, info.size_hints.max),
     configured_geometry: None,
     configure: crate::shell::ConfigureState::default(),
     created_rules_pending: None,
@@ -464,14 +483,16 @@ fn changed(state: &mut CompositorState, window: Window, info: WindowInfo) {
       info.draws_own_frame(),
     );
   }
+  let min_size = size_from_x(state, info.size_hints.min);
+  let max_size = size_from_x(state, info.size_hints.max);
   if old.size_hints != info.size_hints
     && let Some(toplevel) = state
       .surfaces
       .get_mut(&object)
       .and_then(|surface| surface.role.toplevel_mut())
   {
-    toplevel.min_size = info.size_hints.min.unwrap_or((0, 0));
-    toplevel.max_size = info.size_hints.max.unwrap_or((0, 0));
+    toplevel.min_size = min_size;
+    toplevel.max_size = max_size;
   }
 }
 
@@ -504,6 +525,8 @@ fn set_app_id(state: &mut CompositorState, object: &ObjectId, app_id: String) {
 /// request is the X window's own rectangle, so a decorated window's
 /// geometry is the request grown by its frame, and it is clamped with the
 /// frame, as Wayfire's `configure_request` expands it by the margins.
+/// The request and the reply are in X pixels, Shingle's geometry in
+/// logical ones; an unmapped window gets its request back unconverted.
 fn configure_request(
   state: &mut CompositorState,
   window: Window,
@@ -515,6 +538,7 @@ fn configure_request(
   let margins = toplevel_object(state, window)
     .map(|object| crate::decorator::margins(state, &object))
     .unwrap_or_default();
+  let logical = from_x(state, request);
   let placement = match shingle_window(state, window) {
     Some(shingle) => placement(state, window, shingle),
     None => {
@@ -527,21 +551,23 @@ fn configure_request(
           .get_mut(&object)
           .and_then(|surface| surface.role.toplevel_mut())
       {
-        toplevel.floating_geometry = margins.expand(rect(request));
+        toplevel.floating_geometry = margins.expand(logical);
       }
       Placement::Unmapped
     }
   };
   let reply = match placement {
     Placement::Floating { .. } => {
-      let frame =
-        configure_reply(geometry(margins.expand(rect(request))), placement);
+      let frame = configure_reply(geometry(margins.expand(logical)), placement);
       if let Some(shingle) = shingle_window(state, window) {
         let _ = shell::set_floating_geometry(state, shingle, rect(frame));
       }
-      geometry(margins.shrink(rect(frame)))
+      to_x(state, margins.shrink(rect(frame)))
     }
-    _ => configure_reply(request, placement),
+    Placement::Fixed(current) => {
+      configure_reply(request, Placement::Fixed(to_x(state, rect(current))))
+    }
+    Placement::Unmapped => configure_reply(request, placement),
   };
   state.xwayland.requests.push(XRequest::Configure {
     window,
@@ -608,9 +634,10 @@ pub(crate) fn configure(
     focused: states.activated,
     modal: false,
   };
+  let geometry = to_x(state, rect);
   state.xwayland.requests.push(XRequest::Configure {
     window,
-    geometry: geometry(rect),
+    geometry,
     force: false,
   });
   state.xwayland.requests.push(XRequest::State {

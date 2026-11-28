@@ -108,7 +108,27 @@ pub(crate) fn pending(
   state.viewports.get(object).map(|viewport| viewport.pending)
 }
 
+/// The surface's size in the layout as its viewport sets it, if it has
+/// one. An X window's surface at an X scale other than 1 always has one:
+/// its viewport's size, or else its buffer's, in X pixels over the X
+/// scale (crate::xwayland::scale).
 pub(crate) fn dimensions(
+  state: &CompositorState,
+  object: &ObjectId,
+) -> Option<(u32, u32)> {
+  let own = own_dimensions(state, object);
+  let surface = state.surfaces.get(object)?;
+  let x_scale = crate::xwayland::scale::of_surface(state, surface);
+  if x_scale == 1.0 {
+    return own;
+  }
+  let size =
+    own.unwrap_or_else(|| crate::shell::logical_buffer_dimensions(surface));
+  Some(crate::xwayland::scale::size_over(size, x_scale))
+}
+
+/// The size `object`'s viewport gives it in its client's units.
+fn own_dimensions(
   state: &CompositorState,
   object: &ObjectId,
 ) -> Option<(u32, u32)> {

@@ -12,7 +12,8 @@
 //! [`shell`] is the `xwayland_shell_v1` protocol and [`windows`] turns
 //! managed X windows into Shingle toplevels (sections 3 and 4).
 //! [`selection`] bridges the clipboard and primary selection, and [`dnd`]
-//! drag and drop (section 5).
+//! drag and drop (section 5). [`scale`] is the zero-scaling mode, which
+//! lets X clients draw in physical pixels (section 6, XW-7).
 
 #[cfg(test)]
 mod behaviour_tests;
@@ -21,6 +22,9 @@ pub(crate) mod dnd;
 pub(crate) mod fixture;
 pub(crate) mod focus;
 pub(crate) mod requests;
+pub(crate) mod scale;
+#[cfg(test)]
+mod scale_tests;
 pub(crate) mod selection;
 pub(crate) mod shell;
 pub(crate) mod unmanaged;
@@ -43,7 +47,7 @@ use serde_json::json;
 use shingle_config::XwaylandMode;
 use shingle_xwayland::{
   DisplaySockets, Pairing, Readiness, Restart, Selection, StartMode, Window,
-  X11Connection, XwaylandServer, Xwm, server,
+  X11Connection, XwaylandServer, Xwm, XwmError, server,
 };
 use wayland_server::DisplayHandle;
 
@@ -71,6 +75,11 @@ pub struct XwaylandSettings {
   /// The Xwayland binary. `None` uses `SHINGLE_XWAYLAND` when set, else
   /// `Xwayland` from `PATH`. Read only at startup.
   pub program: Option<OsString>,
+  /// X clients draw in physical pixels at the largest output scale, and
+  /// Shingle scales their windows down (`xwayland.zero_scaling`, XW-7).
+  /// Off, X clients are scaled up and blurry above scale 1, as in
+  /// Wayfire.
+  pub zero_scaling: bool,
 }
 
 impl Default for XwaylandSettings {
@@ -85,6 +94,7 @@ impl Default for XwaylandSettings {
       discard_script_output: true,
       socket_base: PathBuf::from("/tmp"),
       program: None,
+      zero_scaling: false,
     }
   }
 }
@@ -111,6 +121,8 @@ pub(crate) struct Status {
   pub(crate) windows: HashMap<Window, XWindowState>,
   /// Requests for the window manager's next flush.
   pub(crate) requests: Vec<XRequest>,
+  /// The X scale X clients see the layout at ([`scale`]).
+  pub(crate) scale: scale::XScale,
   /// The last map sequence number given to an unmanaged window.
   pub(crate) sequence: u64,
   /// Wayland clients' requests for an X client's selection, as MIME type
@@ -149,6 +161,11 @@ pub(crate) struct Xwayland {
   bridge: selection::Bridge,
   /// The drag and drop bridge's glue for the current window manager.
   drag: dnd::DragBridge,
+  /// `xwayland.zero_scaling` ([`scale`]).
+  zero_scaling: bool,
+  /// The X scale the current window manager last wrote X resources and
+  /// the root cursor for, `None` before it wrote any.
+  resources_for: Option<scale::XScale>,
 }
 
 /// The start mode of an enabled [`XwaylandMode`].
@@ -189,6 +206,8 @@ impl Xwayland {
       xwm_source: None,
       bridge: selection::Bridge::default(),
       drag: dnd::DragBridge::default(),
+      zero_scaling: settings.zero_scaling,
+      resources_for: None,
     })
   }
 
@@ -223,9 +242,58 @@ impl Xwayland {
     self.discard_script_output = discard;
   }
 
+  /// Turns zero scaling on or off. The X scale follows on the next
+  /// [`Xwayland::poll`]: X clients see the new layout, their windows are
+  /// configured again and new X clients get the new X resources; running
+  /// X clients keep the DPI they started with.
+  pub(crate) fn set_zero_scaling(&mut self, zero_scaling: bool) {
+    self.zero_scaling = zero_scaling;
+  }
+
   /// The start mode this display runs in.
   pub(crate) fn mode(&self) -> StartMode {
     self.server.mode()
+  }
+
+  /// Moves the X scale to the one zero scaling and the outputs' scales
+  /// ask for, and tells X clients when it changed.
+  fn sync_scale(&mut self, state: &mut CompositorState) {
+    let target = scale::target(
+      self.zero_scaling,
+      state.outputs.iter().map(|output| output.scale),
+    );
+    if target == state.xwayland.scale {
+      return;
+    }
+    eprintln!(
+      "shingle: X clients see the layout at scale {}",
+      target.get()
+    );
+    state.xwayland.scale = target;
+    scale::changed(state);
+  }
+
+  /// Writes the X resources for the X scale when the window manager has
+  /// not written them for it yet. Without zero scaling nothing is
+  /// written, as before XW-7.
+  fn sync_resources(
+    &mut self,
+    state: &CompositorState,
+  ) -> Result<(), XwmError> {
+    let Some(xwm) = &mut self.xwm else {
+      return Ok(());
+    };
+    let wanted = self.zero_scaling.then_some(state.xwayland.scale);
+    if wanted == self.resources_for
+      || (self.resources_for.is_none()
+        && wanted.is_none_or(scale::XScale::is_identity))
+    {
+      return Ok(());
+    }
+    let x_scale = wanted.unwrap_or_default();
+    xwm.set_resources(&scale::resources(x_scale))?;
+    self.resources_for = Some(x_scale);
+    Ok(())
   }
 
   /// Acts on whatever the event sources flagged during this turn.
@@ -235,6 +303,7 @@ impl Xwayland {
     display: &DisplayHandle,
     handle: &LoopHandle<'static, CompositorState>,
   ) {
+    self.sync_scale(state);
     if std::mem::take(&mut state.xwayland.connection_pending)
       && self.server.waiting_for_connection()
     {
@@ -262,13 +331,16 @@ impl Xwayland {
     handle: &LoopHandle<'static, CompositorState>,
   ) {
     let requests = std::mem::take(&mut state.xwayland.requests);
+    let mut result = self.sync_resources(state);
     let Some(xwm) = &mut self.xwm else {
       return;
     };
     let focus = focus::target(state);
     let stacking = focus::stacking(state);
-    let mut result = Ok(());
     for request in requests {
+      if result.is_err() {
+        break;
+      }
       result = match request {
         XRequest::Configure {
           window,
@@ -279,9 +351,6 @@ impl Xwayland {
         XRequest::Close(window) => xwm.close(window),
         XRequest::OfferFocus(window) => xwm.offer_focus(window),
       };
-      if result.is_err() {
-        break;
-      }
     }
     let result = result
       .and_then(|()| self.drag.sync(state, xwm))
@@ -340,6 +409,8 @@ impl Xwayland {
     display: &DisplayHandle,
     handle: &LoopHandle<'static, CompositorState>,
   ) {
+    // Xwayland's first wl_output and xdg-output events carry the X scale.
+    self.sync_scale(state);
     let wayland = match self.server.start() {
       Ok(wayland) => wayland,
       Err(error) => {
@@ -428,6 +499,14 @@ impl Xwayland {
             }
             self.xwm_source = watch(handle, xwm_fd(&xwm), Source::Xwm);
             self.xwm = Some(xwm);
+            // Before the startup script and the first X clients, which
+            // read Xft.dpi when they start.
+            let written = self.sync_resources(state).and_then(|()| {
+              self.xwm.as_mut().map_or(Ok(()), |xwm| xwm.flush())
+            });
+            if let Err(error) = written {
+              eprintln!("shingle: cannot write the X resources: {error}");
+            }
           }
           Err(error) => {
             eprintln!("shingle: X window manager failed, stopping: {error}");
@@ -553,6 +632,7 @@ impl Xwayland {
     remove(handle, &mut self.xwm_source);
     self.bridge.clear(handle);
     self.drag.clear();
+    self.resources_for = None;
     if self.xwm.take().is_some() {
       dnd::forget_x11(state);
       windows::forget_all(state);

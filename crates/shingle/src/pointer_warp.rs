@@ -61,6 +61,8 @@ impl Dispatch<WpPointerWarpV1, ()> for CompositorState {
       let Some(geometry) = crate::straddle::drawn_rect(state, &object) else {
         return;
       };
+      // An X window warps in X pixels.
+      let (x, y) = crate::xwayland::scale::point_from(state, &object, (x, y));
       if x < 0.0
         || y < 0.0
         || x >= f64::from(geometry.width)

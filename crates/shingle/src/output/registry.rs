@@ -12,7 +12,10 @@ use wayland_server::{
   protocol::wl_output::{self, WlOutput},
 };
 
-use crate::OutputInfo;
+use crate::{
+  OutputInfo,
+  xwayland::scale::{self, XScale},
+};
 
 /// Where an output comes from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,13 +152,21 @@ impl OutputState {
   }
 
   /// Describes the output to `resource`: geometry, mode, scale and
-  /// description, the name too when `bind`, then `done`.
-  pub(crate) fn send(&self, resource: &WlOutput, bind: bool) {
+  /// description, the name too when `bind`, then `done`. Xwayland gets
+  /// its position at X scale `x_scale` and its scale over the X scale, as
+  /// KWin sends a client with a scale override
+  /// (crate::xwayland::scale).
+  pub(crate) fn send(&self, resource: &WlOutput, bind: bool, x_scale: XScale) {
     let info = &self.info;
     let (width_mm, height_mm) = info.physical_size_mm;
+    let x_scale = if scale::is_xwayland(resource.client().as_ref()) {
+      x_scale
+    } else {
+      XScale::default()
+    };
     resource.geometry(
-      self.rect.x,
-      self.rect.y,
+      scale::to_x(self.rect.x, x_scale),
+      scale::to_x(self.rect.y, x_scale),
       width_mm.min(i32::MAX as u32) as i32,
       height_mm.min(i32::MAX as u32) as i32,
       info.subpixel,
@@ -171,7 +182,8 @@ impl OutputState {
       info.refresh_mhz as i32,
     );
     if resource.version() >= 2 {
-      resource.scale(self.scale.ceil().clamp(1.0, i32::MAX as f64) as i32);
+      let scale = self.scale / x_scale.get();
+      resource.scale(scale.ceil().clamp(1.0, i32::MAX as f64) as i32);
     }
     if resource.version() >= 4 {
       if bind {
@@ -184,10 +196,21 @@ impl OutputState {
     }
   }
 
-  /// Sends the current state to every bound `wl_output`.
-  pub(crate) fn send_all(&self) {
+  /// Sends the current state to every bound `wl_output`, with X scale
+  /// `x_scale` for Xwayland's.
+  pub(crate) fn send_all(&self, x_scale: XScale) {
     for resource in self.bound.values() {
-      self.send(resource, false);
+      self.send(resource, false, x_scale);
+    }
+  }
+
+  /// Sends the current state to Xwayland's bound `wl_output`s only, after
+  /// the X scale changed to `x_scale`.
+  pub(crate) fn send_xwayland(&self, x_scale: XScale) {
+    for resource in self.bound.values() {
+      if scale::is_xwayland(resource.client().as_ref()) {
+        self.send(resource, false, x_scale);
+      }
     }
   }
 }

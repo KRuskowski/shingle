@@ -595,7 +595,7 @@ pub(crate) fn moved(state: &mut CompositorState, id: &OutputId) {
   let Some(output) = state.outputs.get(id) else {
     return;
   };
-  output.send_all();
+  output.send_all(state.xwayland.scale);
   let rect = output.rect;
   crate::layer_shell::update_workarea(state);
   crate::shell::reconfigure_lock_surfaces(state);

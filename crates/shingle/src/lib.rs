@@ -572,6 +572,7 @@ impl From<shingle_config::ShingleConfig> for Config {
         mode: config.xwayland.mode,
         startup_script: config.xwayland.startup_script,
         discard_script_output: config.behavior.discard_command_output,
+        zero_scaling: config.xwayland.zero_scaling,
         ..XwaylandSettings::default()
       },
       tiling,
@@ -2147,8 +2148,9 @@ impl Compositor {
     Ok(())
   }
 
-  /// Takes a reloaded startup script. A changed mode needs a restart, as
-  /// in Wayfire, which reads `core/xwayland` once; it is only logged.
+  /// Takes a reloaded startup script and zero-scaling switch. A changed
+  /// mode needs a restart, as in Wayfire, which reads `core/xwayland`
+  /// once; it is only logged.
   fn apply_xwayland_config(&mut self, settings: XwaylandSettings) {
     let running = self.xwayland.as_ref().map(xwayland::Xwayland::mode);
     let wanted = match settings.mode {
@@ -2171,6 +2173,7 @@ impl Compositor {
         settings.startup_script,
         settings.discard_script_output,
       );
+      xwayland.set_zero_scaling(settings.zero_scaling);
     }
   }
 

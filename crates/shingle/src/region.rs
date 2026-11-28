@@ -33,8 +33,11 @@ pub(crate) fn commit_input(state: &mut CompositorState, surface: &ObjectId) {
   }
 }
 
+/// Whether the point (`x`, `y`), in logical pixels from the top left of
+/// `surface`, is in its input region, which is in its client's units:
+/// X pixels for an X window.
 pub(crate) fn contains(
-  _state: &CompositorState,
+  state: &CompositorState,
   surface: &Surface,
   x: f64,
   y: f64,
@@ -42,6 +45,8 @@ pub(crate) fn contains(
   let Some(region) = &surface.input_region else {
     return true;
   };
+  let scale = crate::xwayland::scale::of_surface(state, surface);
+  let (x, y) = crate::xwayland::scale::point_to_client(x, y, scale);
   region.iter().any(|rectangle| {
     x >= f64::from(rectangle.x)
       && y >= f64::from(rectangle.y)

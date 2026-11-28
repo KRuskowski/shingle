@@ -190,8 +190,12 @@ impl DragBridge {
       xwm.drag_start(mime_types, DndActions::from_bits(actions))?;
     }
     if let Some(window) = plan.motion {
-      let (x, y) = (state.input.pointer_x, state.input.pointer_y);
-      // Positions are in root coordinates, which are Shingle's.
+      // Positions are in root coordinates: Shingle's times the X scale.
+      let (x, y) = super::scale::point_to_client(
+        state.input.pointer_x,
+        state.input.pointer_y,
+        state.xwayland.scale.get(),
+      );
       let events =
         xwm.drag_motion(window, x.floor() as i32, y.floor() as i32, NOW)?;
       for event in events {
