@@ -1228,7 +1228,11 @@ class Scenario:
         ok = self.browse('blue', 'paste', typed=False)
         self.record('paste', ok, 'a pasted data: URL paints the page blue')
         copier.stop()
+        # Firefox focuses and selects its location bar after it has read
+        # Ctrl+L, so a Ctrl+C in the same read goes to the page; a person
+        # never types them that fast, and browse() waits as well.
         self.sweep.chord('ctrl+l')
+        time.sleep(0.5)
         self.sweep.chord('ctrl+c')
         text = xw.wait_for(lambda: (self.sweep.wl_paste() or '').startswith(
             'data:text/html'), timeout=10)
