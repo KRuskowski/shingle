@@ -11,7 +11,10 @@ use shingle_config::{AnimationDuration, ViewProperties};
 use shingle_core::{Rect, WindowId as TileWindowId};
 use shingle_render::{GpuTexture, RenderRect, RenderTile, TileEffect};
 
-use super::Frontend;
+use super::{
+  Frontend,
+  whole_view::{AnimatedView, ViewImage, ViewPieces},
+};
 use crate::animate::{Animation, Effect, FireOptions, Kind, Timing, ViewInfo};
 
 pub(super) struct GeometryAnimation {
@@ -27,9 +30,67 @@ pub(super) struct ClosingAnimation {
   pub(super) window: Option<TileWindowId>,
   /// The output it is drawn on, where its surface was drawn last.
   pub(super) output: shingle::OutputHandle,
+  /// Where its root surface was drawn last, and its buffer.
   pub(super) geometry: RenderRect,
   pub(super) buffer: BufferSnapshot,
+  /// Where the view was.
+  pub(super) view: AnimatedView,
+  /// What is drawn of it.
+  pub(super) image: ClosingImage,
   pub(super) animation: Animation,
+}
+
+/// What a closing or minimizing view draws: its root surface's last
+/// buffer, or for a view of more pieces the texture its last frame is
+/// drawn into, as Wayfire's animate draws a snapshot of the view taken
+/// when it unmaps (wayfire:plugins/animate/unmapped-view-node.hpp,
+/// wayfire:src/view/view.cpp:94-116, `take_snapshot`).
+pub(super) enum ClosingImage {
+  /// The root surface alone, from its texture.
+  Surface,
+  /// The pieces, until a frame of the output draws them into a texture.
+  Pending(Box<ViewPieces>),
+  /// The texture.
+  Drawn(ViewImage),
+}
+
+impl ClosingAnimation {
+  /// The animation of the view of a root surface last drawn at `geometry`
+  /// with `buffer`, of `window`, on `output`; `pieces` are the view's
+  /// when it is more than that surface.
+  pub(super) fn new(
+    (window, output): (Option<TileWindowId>, shingle::OutputHandle),
+    (geometry, buffer): (RenderRect, BufferSnapshot),
+    animation: Animation,
+    pieces: Option<ViewPieces>,
+  ) -> Self {
+    let view = pieces
+      .as_ref()
+      .and_then(ViewPieces::view)
+      .unwrap_or_else(|| AnimatedView::surface(rect_of(geometry)));
+    let image = match pieces {
+      Some(pieces) if pieces.is_whole() => {
+        ClosingImage::Pending(Box::new(pieces))
+      }
+      _ => ClosingImage::Surface,
+    };
+    Self {
+      window,
+      output,
+      geometry,
+      buffer,
+      view,
+      image,
+      animation,
+    }
+  }
+
+  /// Whether the view's pieces are still to be drawn, and the frame title
+  /// of `window` with them.
+  pub(super) fn draws_title_of(&self, window: TileWindowId) -> bool {
+    matches!(&self.image, ClosingImage::Pending(pieces)
+      if pieces.frame.as_ref().is_some_and(|frame| frame.window == window))
+  }
 }
 
 /// Which of the three animations of a view: `open`, `close` or
@@ -99,8 +160,12 @@ impl Frontend {
 
   /// Wayfire's name for the type of the view `snapshot` shows
   /// (wayfire:src/core/view-access-interface.cpp:101-145); `None` for a
-  /// Wayland drag icon, which is no view.
+  /// Wayland drag icon or a subsurface, which are no views: a subsurface
+  /// animates with its view.
   fn view_type(snapshot: &SurfaceSnapshot) -> Option<&'static str> {
+    if snapshot.role == SurfaceRole::Subsurface {
+      return None;
+    }
     // A Wayland client's drag icon, which has no X class, is no view in
     // Wayfire and never animates.
     if snapshot.role == SurfaceRole::DragIcon && snapshot.app_id.is_none() {
@@ -307,7 +372,8 @@ impl Frontend {
     let Some(effect) = Effect::from_name(&name) else {
       return;
     };
-    let info = self.view_info(snapshot.id, snapshot.window, snapshot.geometry);
+    let geometry = self.framed_geometry(snapshot);
+    let info = self.view_info(snapshot.id, snapshot.window, geometry);
     let animation = Animation::start(
       effect,
       Kind::Map,
@@ -327,6 +393,7 @@ impl Frontend {
     surface: SurfaceId,
     window: Option<TileWindowId>,
     geometry: RenderRect,
+    pieces: Option<&ViewPieces>,
   ) -> Option<Animation> {
     let matches = self.with_properties(self.view_matches_of(surface), window);
     let (name, duration) = self.choose_animation(Which::Close, &matches);
@@ -339,7 +406,10 @@ impl Frontend {
       opening.set_kind(Kind::Unmap, now);
       return Some(opening);
     }
-    let info = self.view_info(surface, window, rect_of(geometry));
+    let view = pieces
+      .and_then(ViewPieces::view)
+      .unwrap_or_else(|| AnimatedView::surface(rect_of(geometry)));
+    let info = self.view_info(surface, window, view.geometry);
     Some(Animation::start(
       effect,
       Kind::Unmap,
@@ -412,6 +482,7 @@ impl Frontend {
     let Some((output, (geometry, buffer))) = self.previous_of(surface) else {
       return;
     };
+    let pieces = self.view_pieces(surface);
     let animation = match self.open_animations.remove(&surface) {
       Some(mut restoring)
         if restoring.effect == effect && restoring.kind == Kind::Restore =>
@@ -420,19 +491,22 @@ impl Frontend {
         restoring
       }
       _ => {
-        let info = self.view_info(surface, Some(window), rect_of(geometry));
+        let view = pieces
+          .as_ref()
+          .and_then(ViewPieces::view)
+          .unwrap_or_else(|| AnimatedView::surface(rect_of(geometry)));
+        let info = self.view_info(surface, Some(window), view.geometry);
         Animation::start(effect, Kind::Minimize, timing, now, &info)
       }
     };
     self.minimize_animations.insert(
       surface,
-      ClosingAnimation {
-        window: Some(window),
-        output,
-        geometry,
-        buffer,
+      ClosingAnimation::new(
+        (Some(window), output),
+        (geometry, buffer),
         animation,
-      },
+        pieces,
+      ),
     );
   }
 
@@ -478,7 +552,8 @@ impl Frontend {
         {
           return;
         }
-        let info = self.view_info(snapshot.id, Some(window), snapshot.geometry);
+        let geometry = self.framed_geometry(&snapshot);
+        let info = self.view_info(snapshot.id, Some(window), geometry);
         Animation::start(effect, Kind::Restore, timing, now, &info)
       }
     };
@@ -548,7 +623,7 @@ impl Frontend {
   }
 
   /// Runs a frame of the fire animations drawn on `output` at `now`, the
-  /// live ones of `drawn` surfaces at their `geometry`.
+  /// live ones of `drawn` views with their bounds.
   pub(super) fn step_animations(
     &mut self,
     output: &shingle::OutputHandle,
@@ -570,7 +645,7 @@ impl Frontend {
       .filter(|closing| closing.output == *output)
       .filter(|closing| closing.animation.effect == Effect::Fire)
     {
-      closing.animation.step(now, size(rect_of(closing.geometry)));
+      closing.animation.step(now, size(closing.view.bounds));
     }
   }
 
@@ -585,6 +660,30 @@ impl Frontend {
       self.closing_animations.remove(&surface);
       self.textures.remove(&surface);
     }
+    // Frame titles go once no closing view is still to be drawn with one.
+    let departed = std::mem::take(&mut self.departed_titles);
+    for window in departed {
+      if self
+        .closing_animations
+        .values()
+        .chain(self.minimize_animations.values())
+        .any(|closing| closing.draws_title_of(window))
+      {
+        self.departed_titles.push(window);
+      } else {
+        self.frame_textures.window_destroyed(window);
+      }
+    }
+  }
+
+  /// The geometry of the window `snapshot` is the root surface of: its
+  /// frame's rectangle if it has one, else its own.
+  pub(super) fn framed_geometry(&self, snapshot: &SurfaceSnapshot) -> Rect {
+    self
+      .compositor
+      .frames()
+      .get(&snapshot.id)
+      .map_or(snapshot.geometry, |frame| frame.rect)
   }
 
   pub(super) fn expire_minimize_animations(&mut self, now: Instant) {
@@ -625,17 +724,19 @@ pub(super) fn rect_of(rect: RenderRect) -> Rect {
   Rect::new(rect.x, rect.y, rect.width, rect.height)
 }
 
-/// Draws `tile`, a surface of the view at `view`, as `animation` shows it
-/// at `now`; fire's particles come back as a tile to draw above it.
+/// Draws `tile`, the view at `view` or the texture it is drawn into, as
+/// `animation` shows it at `now`; fire's particles come back as a tile to
+/// draw above it. The 2D effects scale and turn about the centre of the
+/// view's geometry, fire and squeezimize work in its bounds.
 pub(super) fn apply_animation<'a>(
   tile: &mut RenderTile<'a>,
   animation: &'a Animation,
   now: Instant,
-  view: Rect,
+  view: AnimatedView,
 ) -> Option<RenderTile<'a>> {
   match animation.effect {
     Effect::Squeezimize => {
-      if let Some((area, squeeze)) = animation.squeeze(now, view) {
+      if let Some((area, squeeze)) = animation.squeeze(now, view.bounds) {
         tile.geometry = area;
         tile.effect = TileEffect::Squeeze(squeeze);
       }
@@ -643,6 +744,7 @@ pub(super) fn apply_animation<'a>(
     }
     Effect::Fire => {
       let (line, particles) = animation.fire()?;
+      let view = view.bounds;
       // The view is drawn above its progress line, and the particles
       // over it (wayfire:plugins/animate/fire/fire.cpp:185-211).
       let height = (f64::from(view.height) * line).floor().max(0.0) as u32;
@@ -666,6 +768,7 @@ pub(super) fn apply_animation<'a>(
     }
     _ => {
       let transform = animation.transform(now);
+      let view = view.geometry;
       let center = (
         f64::from(view.x) + f64::from(view.width) / 2.0,
         f64::from(view.y) + f64::from(view.height) / 2.0,
@@ -721,14 +824,24 @@ mod tests {
     let fade =
       Animation::start(Effect::Fade, Kind::Map, linear, now, &info(view));
     let mut tile = RenderTile::solid(geometry, [1.0; 4]);
-    apply_animation(&mut tile, &fade, now + Duration::from_millis(100), view);
+    apply_animation(
+      &mut tile,
+      &fade,
+      now + Duration::from_millis(100),
+      AnimatedView::surface(view),
+    );
     assert_eq!(tile.geometry, geometry);
     assert_eq!(tile.color, [0.25; 4]);
 
     let zoom =
       Animation::start(Effect::Zoom, Kind::Map, linear, now, &info(view));
     let mut tile = RenderTile::solid(geometry, [1.0; 4]);
-    apply_animation(&mut tile, &zoom, now + Duration::from_millis(200), view);
+    apply_animation(
+      &mut tile,
+      &zoom,
+      now + Duration::from_millis(200),
+      AnimatedView::surface(view),
+    );
     assert_eq!(
       tile.geometry,
       // Two thirds of the size about the centre, rounded at the edges.
@@ -741,7 +854,7 @@ mod tests {
     );
     assert_eq!(tile.color[3], 0.5);
     let mut start = RenderTile::solid(geometry, [1.0; 4]);
-    apply_animation(&mut start, &zoom, now, view);
+    apply_animation(&mut start, &zoom, now, AnimatedView::surface(view));
     assert_eq!(start.geometry.width, 66);
     assert_eq!(start.geometry.height, 34);
     assert_eq!(start.color[3], 0.0);
@@ -761,14 +874,23 @@ mod tests {
     let spin =
       Animation::start(Effect::Spin, Kind::Map, linear, now, &info(view));
     let mut tile = RenderTile::solid(geometry, [1.0; 4]);
-    apply_animation(&mut tile, &spin, now + Duration::from_millis(100), view);
+    apply_animation(
+      &mut tile,
+      &spin,
+      now + Duration::from_millis(100),
+      AnimatedView::surface(view),
+    );
     assert!((tile.rotation - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
     let mut fire =
       Animation::start(Effect::Fire, Kind::Map, linear, now, &info(view));
     fire.step(now + Duration::from_millis(100), (400.0, 400.0));
     let mut tile = RenderTile::solid(geometry, [1.0; 4]);
-    let particles =
-      apply_animation(&mut tile, &fire, now + Duration::from_millis(100), view);
+    let particles = apply_animation(
+      &mut tile,
+      &fire,
+      now + Duration::from_millis(100),
+      AnimatedView::surface(view),
+    );
     assert_eq!(tile.geometry.height, 100);
     assert!(matches!(
       particles.map(|tile| tile.effect),

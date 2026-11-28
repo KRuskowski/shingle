@@ -12,7 +12,7 @@ use wayland_client::{
   Connection, Dispatch, EventQueue, Proxy, QueueHandle,
   protocol::{
     wl_buffer, wl_callback, wl_compositor, wl_output, wl_pointer, wl_registry,
-    wl_seat, wl_shm, wl_shm_pool, wl_surface,
+    wl_seat, wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface,
   },
 };
 use wayland_protocols::{
@@ -43,7 +43,9 @@ use wayland_protocols::{
     zwp_pointer_gesture_swipe_v1::{self, ZwpPointerGestureSwipeV1},
     zwp_pointer_gestures_v1::ZwpPointerGesturesV1,
   },
-  xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
+  xdg::shell::client::{
+    xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
+  },
 };
 use wayland_protocols_wlr::{
   layer_shell::v1::client::{
@@ -150,8 +152,38 @@ impl Capture {
 /// A mapped toplevel; dropping it leaves the window in place.
 pub(crate) struct Toplevel {
   pub(crate) surface: wl_surface::WlSurface,
+  pub(crate) xdg_surface: xdg_surface::XdgSurface,
+  pub(crate) toplevel: xdg_toplevel::XdgToplevel,
+}
+
+impl Toplevel {
+  /// Destroys the toplevel and its surface, closing the window.
+  pub(crate) fn destroy(self) {
+    self.toplevel.destroy();
+    self.xdg_surface.destroy();
+    self.surface.destroy();
+  }
+}
+
+/// A mapped subsurface; dropping it leaves it in place.
+pub(crate) struct Subsurface {
+  pub(crate) surface: wl_surface::WlSurface,
+  pub(crate) subsurface: wl_subsurface::WlSubsurface,
+}
+
+impl Subsurface {
+  /// Destroys the subsurface and its surface.
+  pub(crate) fn destroy(self) {
+    self.subsurface.destroy();
+    self.surface.destroy();
+  }
+}
+
+/// A mapped popup; dropping it leaves it in place.
+pub(crate) struct Popup {
+  _surface: wl_surface::WlSurface,
   _xdg_surface: xdg_surface::XdgSurface,
-  _toplevel: xdg_toplevel::XdgToplevel,
+  _popup: xdg_popup::XdgPopup,
 }
 
 /// A connected client with its event queue.
@@ -252,8 +284,72 @@ impl TestClient {
     self.attach_buffer(compositor, &surface, width, height);
     Toplevel {
       surface,
+      xdg_surface,
+      toplevel,
+    }
+  }
+
+  /// A desynchronized subsurface of `parent` at (`x`, `y`) in it, mapped
+  /// with a `size` buffer of one colour, `bgra` bytes, on top of it. The
+  /// parent commits, so that the position applies.
+  pub(crate) fn subsurface(
+    &mut self,
+    compositor: &mut Compositor,
+    parent: &wl_surface::WlSurface,
+    (x, y): (i32, i32),
+    size: (i32, i32),
+    bgra: [u8; 4],
+  ) -> Subsurface {
+    let wl_compositor = self.bind::<wl_compositor::WlCompositor>(4);
+    let subcompositor = self.bind::<wl_subcompositor::WlSubcompositor>(1);
+    let surface = wl_compositor.create_surface(&self.handle, ());
+    let subsurface =
+      subcompositor.get_subsurface(&surface, parent, &self.handle, ());
+    subsurface.set_position(x, y);
+    subsurface.set_desync();
+    self.attach_colour(compositor, &surface, size, bgra);
+    parent.commit();
+    self.roundtrip(compositor);
+    Subsurface {
+      surface,
+      subsurface,
+    }
+  }
+
+  /// An `xdg_popup` of `parent`, a `size` rectangle of one colour, `bgra`
+  /// bytes, anchored at the top left corner of the rectangle at
+  /// (`x`, `y`) in the parent's window geometry.
+  pub(crate) fn popup(
+    &mut self,
+    compositor: &mut Compositor,
+    parent: &Toplevel,
+    (x, y): (i32, i32),
+    size: (i32, i32),
+    bgra: [u8; 4],
+  ) -> Popup {
+    let wl_compositor = self.bind::<wl_compositor::WlCompositor>(4);
+    let wm_base = self.bind::<xdg_wm_base::XdgWmBase>(1);
+    let surface = wl_compositor.create_surface(&self.handle, ());
+    let xdg_surface = wm_base.get_xdg_surface(&surface, &self.handle, ());
+    let positioner = wm_base.create_positioner(&self.handle, ());
+    positioner.set_size(size.0, size.1);
+    positioner.set_anchor_rect(x, y, 1, 1);
+    positioner.set_anchor(xdg_positioner::Anchor::TopLeft);
+    positioner.set_gravity(xdg_positioner::Gravity::BottomRight);
+    let popup = xdg_surface.get_popup(
+      Some(&parent.xdg_surface),
+      &positioner,
+      &self.handle,
+      (),
+    );
+    positioner.destroy();
+    surface.commit();
+    self.roundtrip(compositor);
+    self.attach_colour(compositor, &surface, size, bgra);
+    Popup {
+      _surface: surface,
       _xdg_surface: xdg_surface,
-      _toplevel: toplevel,
+      _popup: popup,
     }
   }
 
@@ -1009,6 +1105,10 @@ ignore_events!(
   ZwpPointerGesturesV1,
   wl_compositor::WlCompositor,
   wl_surface::WlSurface,
+  wl_subcompositor::WlSubcompositor,
+  wl_subsurface::WlSubsurface,
+  xdg_positioner::XdgPositioner,
+  xdg_popup::XdgPopup,
   wl_shm::WlShm,
   wl_shm_pool::WlShmPool,
   wl_output::WlOutput,

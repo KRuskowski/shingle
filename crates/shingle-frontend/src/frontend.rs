@@ -4,8 +4,9 @@
 //! `drag`, `effects` (zoom, inversion, alpha), `animation`, `outputs`
 //! (what is kept per output, and which outputs need a frame), `frames`
 //! (server-side window frames), `scene` (the scene build and drawing),
-//! `session` (saving, config reload, the lock client) and `vswipe`
-//! (touchpad workspace swipes).
+//! `session` (saving, config reload, the lock client), `vswipe`
+//! (touchpad workspace swipes) and `whole_view` (views drawn as one for
+//! their animations).
 
 mod animation;
 mod bindings;
@@ -23,6 +24,7 @@ mod switcher;
 #[cfg(test)]
 mod tests;
 mod vswipe;
+mod whole_view;
 
 pub use cursor::{CursorImage, CursorPlane};
 
@@ -152,6 +154,11 @@ pub struct Frontend {
   decoration_config: shingle_config::DecorationConfig,
   /// The title and button textures of server-side frames.
   frame_textures: frames::FrameTextures,
+  /// The windows gone whose frame titles stay until a closing animation
+  /// drew its view.
+  departed_titles: Vec<TileWindowId>,
+  /// The textures of views drawn as one while they open.
+  view_textures: whole_view::ViewTextures,
   scale_filter: String,
   scale_filter_texture: Option<ScaleTitle>,
   expo: Option<crate::expo::ExpoState>,
@@ -554,6 +561,8 @@ impl Frontend {
       scale_icons: HashMap::new(),
       decoration_config: config.decoration.clone(),
       frame_textures: frames::FrameTextures::default(),
+      departed_titles: Vec::new(),
+      view_textures: whole_view::ViewTextures::default(),
       scale_filter: String::new(),
       scale_filter_texture: None,
       expo: None,
@@ -647,6 +656,17 @@ impl Frontend {
       .iter()
       .any(|event| !matches!(event, Event::SurfaceCommitted(_)));
     let mut save = false;
+    // The views that go, as last drawn, before any of their surfaces is
+    // forgotten below: a subsurface may go first.
+    let mut departing = events
+      .iter()
+      .filter_map(|event| match event {
+        Event::SurfaceDestroyed { surface } => {
+          Some((*surface, self.view_pieces(*surface)?))
+        }
+        _ => None,
+      })
+      .collect::<HashMap<_, _>>();
     for event in events {
       match event {
         Event::WindowDestroyed { window, .. } => {
@@ -654,7 +674,8 @@ impl Frontend {
           self.scale_window_destroyed(window);
           self.scale_titles.remove(&window);
           self.scale_icons.remove(&window);
-          self.frame_textures.window_destroyed(window);
+          // A closing animation may still draw its frame's title.
+          self.departed_titles.push(window);
           self.rotations.remove(&window);
           if self
             .rotation_drag
@@ -812,19 +833,19 @@ impl Frontend {
           let window = self.surface_window(surface);
           let closing =
             previous.filter(|_| self.textures.contains_key(&surface));
+          let pieces = departing.remove(&surface);
           if let Some((output, (geometry, buffer))) = closing
             && let Some(animation) =
-              self.close_animation(surface, window, geometry)
+              self.close_animation(surface, window, geometry, pieces.as_ref())
           {
             self.closing_animations.insert(
               surface,
-              ClosingAnimation {
-                window,
-                output,
-                geometry,
-                buffer,
+              ClosingAnimation::new(
+                (window, output),
+                (geometry, buffer),
                 animation,
-              },
+                pieces,
+              ),
             );
           } else {
             self.textures.remove(&surface);
@@ -1327,6 +1348,7 @@ impl Frontend {
     self.scale_titles.clear();
     self.scale_icons.clear();
     self.frame_textures.clear();
+    self.view_textures.clear();
     self.scale_filter_texture = None;
     self.request_redraw();
   }

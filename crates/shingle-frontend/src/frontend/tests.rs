@@ -38,6 +38,7 @@ mod outputs;
 mod straddle;
 mod switcher;
 mod vswipe;
+mod whole_view;
 use crate::{
   host::{Axis, Host, InputEvent, Touch, TouchPhase},
   render_target::RenderTarget,

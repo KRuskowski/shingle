@@ -20,8 +20,8 @@ use shingle_render::{
 use super::{
   Frontend,
   animation::{
-    ClosingAnimation, GeometryAnimation, StartupFrame, apply_animation,
-    has_effect, rect_of,
+    ClosingAnimation, ClosingImage, GeometryAnimation, StartupFrame,
+    apply_animation, has_effect,
   },
   drag::DragState,
   frames::map_rect,
@@ -30,6 +30,7 @@ use super::{
     translate,
   },
   scale::ScaleTitle,
+  whole_view::{self, AnimatedView, ViewImage},
 };
 use crate::{
   animate::Timing,
@@ -58,17 +59,18 @@ impl Frontend {
       if closing.output != *output {
         continue;
       }
-      let Some(texture) = textures.get(&surface) else {
-        continue;
+      let mut tile = if let ClosingImage::Drawn(image) = &closing.image {
+        RenderTile::textured(image.area, &image.texture)
+      } else {
+        let Some(texture) = textures.get(&surface) else {
+          continue;
+        };
+        let mut tile = RenderTile::textured(closing.geometry, texture);
+        apply_buffer(&mut tile, &closing.buffer);
+        tile
       };
-      let mut tile = RenderTile::textured(closing.geometry, texture);
-      apply_buffer(&mut tile, &closing.buffer);
-      let above = apply_animation(
-        &mut tile,
-        &closing.animation,
-        now,
-        rect_of(closing.geometry),
-      );
+      let above =
+        apply_animation(&mut tile, &closing.animation, now, closing.view);
       tiles.push(tile);
       tiles.extend(above);
     }
@@ -462,6 +464,8 @@ impl Frontend {
       .is_some_and(|shown| shown.output == *output);
     let cursor_ids: Vec<SurfaceId>;
     let background_shown: bool;
+    // The views drawn into textures of their own, which the tiles sample.
+    let whole: HashMap<SurfaceId, (ViewImage, AnimatedView)>;
     let (mut tiles, mut locks) = {
       let renderer = &mut *target;
       renderer.set_scale_factor(view.scale);
@@ -498,7 +502,9 @@ impl Frontend {
       renderer.set_gamma_ramp(self.compositor.gamma_ramp_of(output))?;
       renderer.set_inversion(self.inverted, self.invert_preserve_hue);
       let mut snapshots = if expo_here {
-        self.compositor.scale_surfaces_on(output, true, false)
+        self.with_subsurfaces(
+          self.compositor.scale_surfaces_on(output, true, false),
+        )
       } else {
         self.compositor.visible_surfaces_on(output)
       };
@@ -523,18 +529,20 @@ impl Frontend {
       {
         extend(
           &mut snapshots,
-          self.compositor.scale_surfaces_on(
+          self.with_subsurfaces(self.compositor.scale_surfaces_on(
             output,
             state.all_workspaces,
             self.scale_config.include_minimized,
-          ),
+          )),
         );
       }
       let wall = self.vswipe_viewport(output, now);
       if scene.workspace_transition.is_some() || wall.is_some() {
         extend(
           &mut snapshots,
-          self.compositor.scale_surfaces_on(output, true, false),
+          self.with_subsurfaces(
+            self.compositor.scale_surfaces_on(output, true, false),
+          ),
         );
       }
       if switcher_here && let Some(shown) = &self.switcher_view {
@@ -558,14 +566,6 @@ impl Frontend {
         {
           extend(&mut snapshots, dragged);
         }
-      }
-      // Fire moves its particles once per frame of its output.
-      if self.has_fire() {
-        let drawn = snapshots
-          .iter()
-          .map(|snapshot| (snapshot.id, snapshot.geometry))
-          .collect::<Vec<_>>();
-        self.step_animations(output, &drawn, now);
       }
       for snapshot in &snapshots {
         let Some(buffer) = &snapshot.buffer else {
@@ -634,6 +634,29 @@ impl Frontend {
         &self.decoration_config,
         view.scale,
       )?;
+      // Each view's subsurfaces, which move and animate with it.
+      let roots = whole_view::subsurface_roots(&snapshots);
+      let members = whole_view::view_members(&snapshots, &roots);
+      let view_locks;
+      (whole, view_locks) = self.draw_whole_views(
+        &*renderer,
+        (view, &snapshots),
+        &frames,
+        &members,
+      );
+      // Fire moves its particles once per frame of its output.
+      if self.has_fire() {
+        let drawn = snapshots
+          .iter()
+          .map(|snapshot| {
+            let bounds = whole
+              .get(&snapshot.id)
+              .map_or(snapshot.geometry, |(_, view)| view.bounds);
+            (snapshot.id, bounds)
+          })
+          .collect::<Vec<_>>();
+        self.step_animations(output, &drawn, now);
+      }
       for snapshot in &snapshots {
         if snapshot.buffer.is_none() {
           continue;
@@ -746,6 +769,22 @@ impl Frontend {
         _ => None,
       };
       let dragging = |window: TileWindowId| moved == Some(window);
+      // A subsurface takes its view's window, role and geometry with its
+      // frame, so that it moves with the view in the overviews and on the
+      // walls.
+      let owners = roots
+        .iter()
+        .filter_map(|(member, root)| {
+          let root = snapshots.iter().find(|snapshot| snapshot.id == *root)?;
+          let content = whole_view::render_rect(root.geometry);
+          let window_rect = frames.get(&root.id).map_or(content, |frame| {
+            whole_view::render_rect(
+              whole_view::shifted_frame(frame, root.shift).rect,
+            )
+          });
+          Some((*member, (root.id, root.window, root.role, window_rect)))
+        })
+        .collect::<HashMap<_, _>>();
       let tiles = if let Some(shown) = switcher {
         super::switcher::SwitcherScene {
           compositor: &self.compositor,
@@ -761,7 +800,18 @@ impl Frontend {
         snapshots
           .iter()
           .filter_map(|snapshot| {
-            let texture = self.textures.get(&snapshot.id)?;
+            // A view drawn as one draws its subsurfaces with it.
+            if roots
+              .get(&snapshot.id)
+              .is_some_and(|root| whole.contains_key(root))
+            {
+              return None;
+            }
+            let whole_view = whole.get(&snapshot.id);
+            let texture = match whole_view {
+              Some((image, _)) => &image.texture,
+              None => self.textures.get(&snapshot.id)?,
+            };
             let geometry = snapshot.geometry;
             let content_rect = RenderRect {
               x: geometry.x,
@@ -771,16 +821,39 @@ impl Frontend {
             };
             // The window's geometry, which includes its frame if it has one.
             // A frame is where its window is on its own workspace; it is
-            // drawn moved with the window.
-            let window_rect =
-              frames.get(&snapshot.id).map_or(content_rect, |frame| {
-                RenderRect {
-                  x: frame.rect.x.saturating_add(snapshot.shift.0),
-                  y: frame.rect.y.saturating_add(snapshot.shift.1),
-                  width: frame.rect.width,
-                  height: frame.rect.height,
-                }
-              });
+            // drawn moved with the window. A subsurface takes its view's.
+            let (owner, window, role, window_rect) =
+              match owners.get(&snapshot.id) {
+                Some(&owner) => owner,
+                None => (
+                  snapshot.id,
+                  snapshot.window,
+                  snapshot.role,
+                  frames.get(&snapshot.id).map_or(content_rect, |frame| {
+                    RenderRect {
+                      x: frame.rect.x.saturating_add(snapshot.shift.0),
+                      y: frame.rect.y.saturating_add(snapshot.shift.1),
+                      width: frame.rect.width,
+                      height: frame.rect.height,
+                    }
+                  }),
+                ),
+              };
+            // Moves the tiles to `target`, the surface's place, and a view
+            // drawn as one to the place that puts its surface there.
+            let whole_area = whole_view.map(|(image, _)| image.area);
+            let place = |tiles: &mut Vec<RenderTile<'_>>,
+                         target: RenderRect| {
+              let last = tiles.len().saturating_sub(1);
+              for (index, tile) in tiles.iter_mut().enumerate() {
+                tile.geometry = match whole_area {
+                  Some(area) if index == last => {
+                    map_rect(area, content_rect, target)
+                  }
+                  _ => target,
+                };
+              }
+            };
             // The surface and its window on their own workspace.
             let own_content =
               crate::straddle::unshifted(geometry, snapshot.shift);
@@ -795,17 +868,20 @@ impl Frontend {
             );
             // Its copies on a wall, one for each workspace it overlaps.
             let mut copies = Vec::new();
-            let mut tile = RenderTile::textured(
-              RenderRect {
-                x: geometry.x,
-                y: geometry.y,
-                width: geometry.width,
-                height: geometry.height,
-              },
-              texture,
-            );
-            tile.color = [snapshot.opacity; 4];
-            if let Some(buffer) = &snapshot.buffer {
+            // A view drawn as one has its opacity in its texture.
+            let opacity = if whole_view.is_some() {
+              1.0
+            } else {
+              snapshot.opacity
+            };
+            let mut tile = match whole_view {
+              Some((image, _)) => RenderTile::textured(image.area, texture),
+              None => RenderTile::textured(content_rect, texture),
+            };
+            tile.color = [opacity; 4];
+            if whole_view.is_none()
+              && let Some(buffer) = &snapshot.buffer
+            {
               apply_buffer(&mut tile, buffer);
             }
             let mut tiles = Vec::with_capacity(2);
@@ -831,19 +907,22 @@ impl Frontend {
                 self.animation_easing,
                 f64::from(progress),
               ) as f32;
-              tile.color = [snapshot.opacity * progress; 4];
+              tile.color = [opacity * progress; 4];
             }
             // Fire's particles, drawn above the surface and its frame.
             let mut above = None;
             if let Some(animation) = self.open_animations.get(&snapshot.id) {
-              above =
-                apply_animation(&mut tile, animation, now, snapshot.geometry);
+              let placed = whole_view.map_or(
+                AnimatedView::surface(snapshot.geometry),
+                |(_, placed)| *placed,
+              );
+              above = apply_animation(&mut tile, animation, now, placed);
             }
             tiles.push(tile);
             if scale_here
-              && snapshot.role == SurfaceRole::Toplevel
-              && !self.minimize_animations.contains_key(&snapshot.id)
-              && let Some(window) = snapshot.window
+              && role == SurfaceRole::Toplevel
+              && !self.minimize_animations.contains_key(&owner)
+              && let Some(window) = window
               && let Some(state) =
                 self.scale.as_ref().or(self.scale_exit.as_ref())
               && let Some(geometry) = state.geometry.get(&window)
@@ -883,13 +962,13 @@ impl Frontend {
                 window_rect,
                 interpolate_scale_rect(origin, *geometry, progress),
               );
+              place(&mut tiles, target);
               for tile in &mut tiles {
-                tile.geometry = target;
                 tile.color[3] *= opacity;
               }
             }
             if expo_here
-              && let Some(window) = snapshot.window
+              && let Some(window) = window
               && let Some(state) =
                 self.expo.as_ref().or(self.expo_exit.as_ref())
               && let Some(geometry) = state.geometry.get(&window)
@@ -925,8 +1004,8 @@ impl Frontend {
                 target.y = (y - f64::from(target.height) / 2.0).round() as i32;
               }
               let target = map_rect(content_rect, window_rect, target);
+              place(&mut tiles, target);
               for tile in &mut tiles {
-                tile.geometry = target;
                 for component in &mut tile.color[..3] {
                   *component *= brightness;
                 }
@@ -940,7 +1019,7 @@ impl Frontend {
                 copies = crate::straddle::expo_copies(cells, rect, overlapped);
               }
             }
-            if let Some(window) = snapshot.window
+            if let Some(window) = window
               && let Some(transition) = &scene.workspace_transition
               && let Ok(info) = self.compositor.core().window_info(window)
               && info.location.output.as_str() == output.name()
@@ -962,9 +1041,7 @@ impl Frontend {
                 now,
                 vswitch_timing,
               );
-              for tile in &mut tiles {
-                tile.geometry = geometry;
-              }
+              place(&mut tiles, geometry);
               if !dragging(window) {
                 let overlapped = crate::straddle::overlapped_workspaces(
                   own_window,
@@ -988,7 +1065,7 @@ impl Frontend {
                 );
               }
             }
-            if let Some(window) = snapshot.window
+            if let Some(window) = window
               && let Some(viewport) = wall
               && let Ok(info) = self.compositor.core().window_info(window)
               && info.location.output.as_str() == output.name()
@@ -1009,9 +1086,7 @@ impl Frontend {
                 layout,
                 viewport,
               );
-              for tile in &mut tiles {
-                tile.geometry = geometry;
-              }
+              place(&mut tiles, geometry);
               if !dragging(window) {
                 let overlapped = crate::straddle::overlapped_workspaces(
                   own_window,
@@ -1043,6 +1118,7 @@ impl Frontend {
             // rotated window is drawn without one, since its pieces would
             // turn about their own centres.
             if let Some(frame) = frames.get(&snapshot.id)
+              && whole_view.is_none()
               && let Some(content) = tiles.last()
               && content.rotation == 0.0
               && !has_effect(content)
@@ -1091,11 +1167,29 @@ impl Frontend {
           ))
         })
         .collect();
-      let locks = snapshots
+      // What a view that goes is drawn from: its pieces as drawn now.
+      scene.previous_opacities = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.opacity < 1.0)
+        .map(|snapshot| (snapshot.id, snapshot.opacity))
+        .collect();
+      scene.view_members = members;
+      scene.previous_frames = frames
+        .into_iter()
+        .map(|(surface, frame)| {
+          let shift = snapshots
+            .iter()
+            .find(|snapshot| snapshot.id == surface)
+            .map_or((0, 0), |snapshot| snapshot.shift);
+          (surface, whole_view::shifted_frame(&frame, shift))
+        })
+        .collect();
+      let mut locks = snapshots
         .iter()
         .filter_map(|snapshot| snapshot.buffer.as_ref()?.dmabuf())
         .map(|content| content.lock.clone())
         .collect::<Vec<_>>();
+      locks.extend(view_locks);
       background_shown = snapshots.iter().any(|snapshot| {
         snapshot.layer == Some(shingle::ShellLayer::Background)
           && snapshot.buffer.is_some()

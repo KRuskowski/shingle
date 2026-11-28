@@ -11,7 +11,7 @@ use std::{
 
 use shingle::{
   BufferSnapshot, CaptureRequest, CaptureSource, OutputHandle, OutputKind,
-  SurfaceId,
+  SurfaceId, frame::FrameSnapshot,
 };
 use shingle_core::{Rect, WindowId as TileWindowId};
 use shingle_render::{GpuTexture, RenderRect};
@@ -64,6 +64,14 @@ pub(super) struct OutputScene {
   /// The [`shingle::SurfaceSnapshot::shift`] of each surface of
   /// `previous_surfaces` drawn on another workspace than its window's.
   pub(super) previous_shifts: HashMap<SurfaceId, (i32, i32)>,
+  /// The opacity of each surface of `previous_surfaces` drawn with less
+  /// than 1.
+  pub(super) previous_opacities: HashMap<SurfaceId, f32>,
+  /// The surfaces of each view of the last frame that has subsurfaces,
+  /// its root among them, bottom to top.
+  pub(super) view_members: HashMap<SurfaceId, Vec<SurfaceId>>,
+  /// The frames of the last frame, by surface.
+  pub(super) previous_frames: HashMap<SurfaceId, FrameSnapshot>,
   /// Geometry animations of surfaces drawn here.
   pub(super) animations: HashMap<SurfaceId, GeometryAnimation>,
   /// The surfaces with a buffer drawn in the last frame.
@@ -143,6 +151,9 @@ impl OutputScene {
       label: None,
       previous_surfaces: HashMap::new(),
       previous_shifts: HashMap::new(),
+      previous_opacities: HashMap::new(),
+      view_members: HashMap::new(),
+      previous_frames: HashMap::new(),
       animations: HashMap::new(),
       drawn: HashSet::new(),
       animation_enabled: HashMap::new(),
@@ -160,6 +171,9 @@ impl OutputScene {
   pub(super) fn forget_surfaces(&mut self) {
     self.previous_surfaces.clear();
     self.previous_shifts.clear();
+    self.previous_opacities.clear();
+    self.view_members.clear();
+    self.previous_frames.clear();
     self.animations.clear();
   }
 
@@ -167,6 +181,9 @@ impl OutputScene {
   pub(super) fn surface_destroyed(&mut self, surface: SurfaceId) {
     self.previous_surfaces.remove(&surface);
     self.previous_shifts.remove(&surface);
+    self.previous_opacities.remove(&surface);
+    self.view_members.remove(&surface);
+    self.previous_frames.remove(&surface);
     self.animations.remove(&surface);
     self.drawn.remove(&surface);
     self.animation_enabled.remove(&surface);
