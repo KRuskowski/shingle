@@ -228,3 +228,32 @@ fn a_frame_hangs_over_with_its_window() {
     ))
   );
 }
+
+#[test]
+fn a_window_dragged_by_the_part_shown_lands_where_it_is_dropped() {
+  let mut fixture = Fixture::new(grid());
+  let window = hanging_over(&mut fixture);
+  fixture.switch_to(1);
+  // Drawn from -150 to 50; dragged by it 400 to the right.
+  fixture.move_pointer(30.0, 150.0);
+  fixture.key(KEY_LEFTMETA, true);
+  fixture.button(BTN_LEFT, true);
+  assert!(matches!(
+    fixture.frontend.drag,
+    Some(DragState::Move { source, .. }) if source == window
+  ));
+  fixture.move_pointer(230.0, 150.0);
+  fixture.move_pointer(430.0, 150.0);
+  fixture.button(BTN_LEFT, false);
+  fixture.key(KEY_LEFTMETA, false);
+  // Its centre is on the workspace shown now, which takes it, at the
+  // place it was dropped.
+  let compositor = fixture.frontend.compositor();
+  let info = compositor.core().window_info(window).unwrap();
+  assert_eq!(info.location.workspace.x, 1);
+  assert_eq!(
+    info.state.floating,
+    Some(shingle_core::Rect::new(250, 100, 200, 150))
+  );
+  assert_eq!(fixture.focused(), Some(window));
+}

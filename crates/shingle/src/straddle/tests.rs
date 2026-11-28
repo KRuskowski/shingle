@@ -348,3 +348,56 @@ fn a_screencopy_of_the_neighbour_shows_the_part_hanging_over() {
   assert!(pixels[10..].iter().all(|pixel| *pixel == [26, 26, 26, 255]));
   let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn a_window_adopted_by_the_workspace_shown_stays_where_it_is_drawn() {
+  let (mut compositor, mut client, path) = fixture();
+  let (_left, left) = mapped(&mut compositor, &mut client, "left");
+  place(&mut compositor, left, Rect::new(1100, 100, 300, 200));
+  // Its own workspace shown, nothing moves.
+  assert!(!compositor.adopt_on_current_workspace(left).unwrap());
+  switch(&mut compositor, 1, 0);
+  click(&mut compositor, &mut client, 50.0, 150.0);
+  assert!(compositor.adopt_on_current_workspace(left).unwrap());
+  assert_eq!(workspace_of(&compositor, left), WorkspaceId::new(1, 0));
+  assert_eq!(
+    drawn(&compositor),
+    vec![(left, Rect::new(-180, 100, 300, 200), (0, 0))]
+  );
+  assert_eq!(
+    compositor.focused_window(),
+    Some(left),
+    "it keeps the focus"
+  );
+  switch(&mut compositor, 0, 0);
+  assert_eq!(
+    drawn(&compositor),
+    vec![(left, Rect::new(1100, 100, 300, 200), (1280, 0))]
+  );
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_window_settles_on_the_workspace_holding_its_centre() {
+  let (mut compositor, mut client, path) = fixture();
+  let (_moved, moved) = mapped(&mut compositor, &mut client, "moved");
+  place(&mut compositor, moved, Rect::new(100, 100, 300, 200));
+  // Moved as a drag moves it, with its centre past the edge.
+  crate::shell::set_floating_geometry(
+    &mut compositor.state,
+    moved,
+    Rect::new(1200, 100, 300, 200),
+  )
+  .unwrap();
+  assert_eq!(workspace_of(&compositor, moved), WorkspaceId::new(0, 0));
+  assert!(compositor.settle_on_centre_workspace(moved).unwrap());
+  assert_eq!(workspace_of(&compositor, moved), WorkspaceId::new(1, 0));
+  // Drawn where it was put, from the neighbour.
+  assert_eq!(
+    drawn(&compositor),
+    vec![(moved, Rect::new(1200, 100, 300, 200), (1280, 0))]
+  );
+  assert_eq!(compositor.focused_window(), Some(moved));
+  assert!(!compositor.settle_on_centre_workspace(moved).unwrap());
+  let _ = std::fs::remove_file(path);
+}

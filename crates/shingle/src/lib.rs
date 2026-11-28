@@ -3228,6 +3228,29 @@ impl Compositor {
     Ok(changed)
   }
 
+  /// Moves floating `window`, drawn on its output's current workspace
+  /// while it belongs to another one it straddles, onto the current one,
+  /// keeping where it is drawn. Returns whether it moved; a window of the
+  /// current workspace, a sticky one and a tiled one stay. Call it before
+  /// snapping such a window into a slot of the current workspace.
+  pub fn adopt_on_current_workspace(
+    &mut self,
+    window: WindowId,
+  ) -> Result<bool, Error> {
+    straddle::adopt(&mut self.state, window)
+  }
+
+  /// Puts floating `window` on the workspace of its set that holds its
+  /// centre, Wayfire's main workspace for a view, keeping where it is
+  /// drawn, as at the end of a move. Returns whether its workspace
+  /// changed. Sticky and tiled windows stay.
+  pub fn settle_on_centre_workspace(
+    &mut self,
+    window: WindowId,
+  ) -> Result<bool, Error> {
+    straddle::settle(&mut self.state, window)
+  }
+
   /// Toggles maximized state and returns the new state. A maximized
   /// floating window is drawn over the whole workarea.
   pub fn toggle_maximized(&mut self, window: WindowId) -> Result<bool, Error> {

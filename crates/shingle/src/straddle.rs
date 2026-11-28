@@ -172,6 +172,70 @@ pub(crate) fn straddlers(
   found
 }
 
+/// Moves floating `window` of another workspace onto the one its output
+/// shows, where it is drawn, keeping its place there; returns whether it
+/// moved. Snapping a window drawn on a workspace it straddles into one of
+/// that workspace's slots puts it there, as Wayfire's grid snaps a view
+/// into the current workspace's workarea. Its focus stays.
+pub(crate) fn adopt(
+  state: &mut CompositorState,
+  window: WindowId,
+) -> Result<bool, crate::Error> {
+  let shift = window_shift(state, window);
+  let info = state.core.window_info(window)?;
+  if shift == (0, 0) || info.state.floating.is_none() {
+    return Ok(false);
+  }
+  // A shift means an output shows the set.
+  let shown = state.core.wset(info.wset)?.current_workspace;
+  let Some(object) = crate::input::object_for_window(state, window) else {
+    return Ok(false);
+  };
+  let Some(geometry) = shell::window_geometry(state, &object) else {
+    return Ok(false);
+  };
+  let focused = crate::input::focused_window(state) == Some(window);
+  shell::set_floating_geometry(state, window, shifted(geometry, shift))?;
+  let index =
+    shown.y as usize * state.workspace_width as usize + shown.x as usize;
+  state.move_window_to_workspace_as(window, index, false)?;
+  if focused {
+    crate::input::focus_window(state, window);
+  }
+  Ok(true)
+}
+
+/// Puts floating `window` on the workspace holding its centre, where
+/// Wayfire counts a view as being, keeping where it is drawn; returns
+/// whether its workspace changed. A move that ends with the centre past
+/// its workspace's edge so leaves the window on the neighbour, drawn
+/// where it was dropped. Its focus stays.
+pub(crate) fn settle(
+  state: &mut CompositorState,
+  window: WindowId,
+) -> Result<bool, crate::Error> {
+  let info = state.core.window_info(window)?;
+  if info.state.floating.is_none() || info.state.sticky {
+    return Ok(false);
+  }
+  let Some(object) = crate::input::object_for_window(state, window) else {
+    return Ok(false);
+  };
+  let Some(geometry) = shell::window_geometry(state, &object) else {
+    return Ok(false);
+  };
+  let before = info.location.workspace;
+  let focused = crate::input::focused_window(state) == Some(window);
+  let plane =
+    crate::ipc::workspace_coords::window_offset(state, window).apply(geometry);
+  crate::ipc::workspace_coords::place_window(state, window, plane)?;
+  let moved = state.core.window_info(window)?.location.workspace != before;
+  if moved && focused {
+    crate::input::focus_window(state, window);
+  }
+  Ok(moved)
+}
+
 /// One entry of a stacking order merged by [`merge_by_recency`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Stacked<T> {

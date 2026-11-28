@@ -64,6 +64,13 @@ impl Frontend {
       self.drop_preview = None;
       if let DragState::Move { source, .. } = drag {
         if let Some(slot) = drop_slot {
+          // A window drawn here from a workspace it straddles snaps into
+          // this workspace's slot, as Wayfire's grid snaps a view into
+          // the current workarea.
+          if let Err(error) = self.compositor.adopt_on_current_workspace(source)
+          {
+            eprintln!("shingle: moving to the workspace failed: {error}");
+          }
           if let Err(error) = self.compositor.snap_window(source, slot) {
             eprintln!("shingle: grid snap failed: {error}");
           }
@@ -90,6 +97,14 @@ impl Frontend {
             }
           } else {
             self.drop_on_output(source, floating);
+            // Its workspace is the one holding its centre, as Wayfire
+            // counts a view's workspace; it is drawn where it was put.
+            if floating
+              && let Err(error) =
+                self.compositor.settle_on_centre_workspace(source)
+            {
+              eprintln!("shingle: settling the window failed: {error}");
+            }
           }
         }
         self.save();
