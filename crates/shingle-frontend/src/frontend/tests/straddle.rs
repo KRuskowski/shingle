@@ -302,3 +302,42 @@ fn a_window_dragged_by_the_part_shown_lands_where_it_is_dropped() {
   );
   assert_eq!(fixture.focused(), Some(window));
 }
+
+#[test]
+fn the_switcher_shows_the_window_hanging_over_where_it_is_drawn() {
+  let mut fixture = Fixture::new(grid());
+  let window = hanging_over(&mut fixture);
+  fixture.switch_to(1);
+  let views = fixture.frontend.switcher_views(&primary());
+  // Wayfire's switcher lists it on the neighbour too, from where it is
+  // drawn there: one output width to the left.
+  assert_eq!(views.windows, vec![window]);
+  assert_eq!(
+    views.bounds[&window],
+    shingle_core::Rect::new(-150, 100, 200, 150)
+  );
+}
+
+#[test]
+fn scale_moves_a_window_hanging_over_from_where_it_is_drawn() {
+  let mut fixture = Fixture::new(grid());
+  let window = hanging_over(&mut fixture);
+  fixture.switch_to(1);
+  fixture.window("here");
+  let here = fixture.focused().expect("the new window is focused");
+  // Its centre is on the first workspace, so Scale of the second leaves
+  // it out, as Wayfire's does.
+  fixture.frontend.toggle_scale(false);
+  let state = fixture.frontend.scale.as_ref().expect("Scale runs");
+  assert_eq!(state.windows, vec![here]);
+  // Scale of all workspaces starts it where it is drawn.
+  fixture.frontend.toggle_scale(true);
+  let state = fixture.frontend.scale.as_ref().expect("Scale runs");
+  assert!(state.windows.contains(&window));
+  assert_eq!(
+    state.animation_origin[&window],
+    rect(-150, 100, 200, 150),
+    "{:?}",
+    state.animation_origin
+  );
+}

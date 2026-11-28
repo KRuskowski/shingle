@@ -1386,16 +1386,20 @@ impl CompositorState {
   }
 
   /// [`CompositorState::scale_surfaces`] for the windows of output `id`'s
-  /// workspace set.
+  /// workspace set. Without `all_workspaces` they are the windows whose
+  /// centre is drawn on the output, as Wayfire's Scale lists its current
+  /// workspace (`straddle::centred_on_shown`): a window hanging over from
+  /// a neighbour with its centre here is among them, and one of this
+  /// workspace whose centre is past its edge is not.
   pub(crate) fn scale_surfaces_on(
     &self,
     id: &OutputId,
     all_workspaces: bool,
     include_minimized: bool,
   ) -> Vec<SurfaceSnapshot> {
-    let Ok(current_workspace) = self.core.current_workspace(id) else {
+    if self.core.current_workspace(id).is_err() {
       return Vec::new();
-    };
+    }
     let mut snapshots = self
       .surfaces
       .iter()
@@ -1408,8 +1412,7 @@ impl CompositorState {
           || info.location.output != *id
           || (info.state.minimized && !include_minimized)
           || (!all_workspaces
-            && !info.state.sticky
-            && info.location.workspace != current_workspace)
+            && !crate::straddle::centred_on_shown(self, id, object, window))
         {
           return None;
         }

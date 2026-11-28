@@ -401,3 +401,110 @@ fn a_window_settles_on_the_workspace_holding_its_centre() {
   assert!(!compositor.settle_on_centre_workspace(moved).unwrap());
   let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn the_centre_rounds_down_and_the_far_edges_are_outside() {
+  let area = Rect::new(0, 0, 1280, 720);
+  let next = Rect::new(1280, 0, 1280, 720);
+  // A centre at 1250 is on the first, one at 1350 on the second.
+  assert!(super::centre_in(Rect::new(1100, 100, 300, 200), area));
+  assert!(!super::centre_in(Rect::new(1100, 100, 300, 200), next));
+  assert!(super::centre_in(Rect::new(1200, 100, 300, 200), next));
+  // 1129 + 301 / 2 = 1279 is the last column.
+  assert!(super::centre_in(Rect::new(1129, 0, 301, 10), area));
+  assert!(!super::centre_in(Rect::new(1130, 0, 301, 10), area));
+  assert!(super::centre_in(Rect::new(-150, -100, 300, 200), area));
+  assert!(!super::centre_in(Rect::new(-151, 0, 300, 10), area));
+}
+
+/// Scale's windows of the current workspace on the output.
+fn scaled(compositor: &Compositor, minimized: bool) -> Vec<WindowId> {
+  let mut windows = compositor
+    .scale_surfaces(false, minimized)
+    .into_iter()
+    .filter_map(|snapshot| snapshot.window)
+    .collect::<Vec<_>>();
+  windows.sort_unstable();
+  windows
+}
+
+fn switchable(compositor: &Compositor) -> Vec<WindowId> {
+  let mut windows = compositor.switchable_windows();
+  windows.sort_unstable();
+  windows
+}
+
+#[test]
+fn the_switchers_list_a_window_on_every_workspace_it_overlaps() {
+  let (mut compositor, mut client, path) = fixture();
+  let (_left, left) = mapped(&mut compositor, &mut client, "left");
+  place(&mut compositor, left, Rect::new(1100, 100, 300, 200));
+  let (_hidden, hidden) = mapped(&mut compositor, &mut client, "hidden");
+  place(&mut compositor, hidden, Rect::new(1100, 400, 300, 200));
+  crate::shell::set_minimized(&mut compositor.state, hidden, true).unwrap();
+  let (_inside, inside) = mapped(&mut compositor, &mut client, "inside");
+  place(&mut compositor, inside, Rect::new(100, 100, 300, 200));
+  assert_eq!(switchable(&compositor), vec![left, hidden, inside]);
+  switch(&mut compositor, 1, 0);
+  let (_here, here) = mapped(&mut compositor, &mut client, "here");
+  place(&mut compositor, here, Rect::new(400, 400, 300, 200));
+  // Both windows hanging over are listed, the minimized one too, as
+  // Wayfire's switcher lists them; the one inside its workspace is not.
+  assert_eq!(switchable(&compositor), vec![left, hidden, here]);
+  // Most recently focused first.
+  assert_eq!(compositor.switchable_windows()[0], here);
+  // Cycling back focuses the window focused first, which hangs over,
+  // without a switch.
+  assert_eq!(compositor.cycle_focus(true), Some(left));
+  assert_eq!(compositor.focused_window(), Some(left));
+  assert_eq!(
+    compositor
+      .core()
+      .current_workspace(&"HEADLESS-1".into())
+      .unwrap(),
+    WorkspaceId::new(1, 0)
+  );
+  switch(&mut compositor, 2, 0);
+  assert!(switchable(&compositor).is_empty());
+  let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn scale_lists_the_windows_whose_centre_is_on_the_output() {
+  let (mut compositor, mut client, path) = fixture();
+  let (_left, left) = mapped(&mut compositor, &mut client, "left");
+  // Its centre is on the first workspace; it hangs over the second.
+  place(&mut compositor, left, Rect::new(1100, 100, 300, 200));
+  let (_moved, moved) = mapped(&mut compositor, &mut client, "moved");
+  place(&mut compositor, moved, Rect::new(100, 400, 300, 200));
+  // Moved by its client with its centre past the edge, without a drop
+  // that would settle it on the neighbour.
+  crate::shell::set_floating_geometry(
+    &mut compositor.state,
+    moved,
+    Rect::new(1200, 400, 300, 200),
+  )
+  .unwrap();
+  assert_eq!(workspace_of(&compositor, moved), WorkspaceId::new(0, 0));
+  assert_eq!(scaled(&compositor, false), vec![left]);
+  switch(&mut compositor, 1, 0);
+  let (_here, here) = mapped(&mut compositor, &mut client, "here");
+  place(&mut compositor, here, Rect::new(400, 100, 300, 200));
+  // `left` is drawn here in part, its centre is not; `moved` has its
+  // centre here, as Wayfire's Scale counts the workspace.
+  assert_eq!(scaled(&compositor, false), vec![moved, here]);
+  // All workspaces lists every window of the set.
+  let mut all = compositor
+    .scale_surfaces(true, false)
+    .into_iter()
+    .filter_map(|snapshot| snapshot.window)
+    .collect::<Vec<_>>();
+  all.sort_unstable();
+  assert_eq!(all, vec![left, moved, here]);
+  // A minimized window counts on its own workspace.
+  crate::shell::set_minimized(&mut compositor.state, moved, true).unwrap();
+  assert_eq!(scaled(&compositor, true), vec![here]);
+  switch(&mut compositor, 0, 0);
+  assert_eq!(scaled(&compositor, true), vec![left, moved]);
+  let _ = std::fs::remove_file(path);
+}

@@ -1858,9 +1858,12 @@ impl Compositor {
   /// Returns buffered toplevels eligible for Scale.
   /// The most recently focused windows come first.
   ///
-  /// The current output is always used. `all_workspaces` includes non-sticky
-  /// windows from other workspaces, and `include_minimized` retains windows
-  /// that are absent from the normal visible-surface snapshot.
+  /// The current output is always used. Without `all_workspaces` these are
+  /// the windows whose centre is drawn on the output, as Wayfire's Scale
+  /// counts its current workspace, a window hanging over from another
+  /// workspace included; with it, every window of the output's set.
+  /// `include_minimized` retains windows that are absent from the normal
+  /// visible-surface snapshot.
   pub fn scale_surfaces(
     &self,
     all_workspaces: bool,
@@ -2858,8 +2861,13 @@ impl Compositor {
   }
 
   /// The windows a window switcher cycles through: the current workspace's
-  /// windows plus sticky windows from other workspaces, most recently focused
-  /// first. Empty during show-desktop. Minimized windows are included.
+  /// windows, sticky windows from other workspaces and the floating
+  /// windows of other workspaces that hang over onto the output, most
+  /// recently focused first. Wayfire's switchers list the views
+  /// `view_visible_on` the current workspace (`WSET_CURRENT_WORKSPACE`,
+  /// wayfire:src/output/workspace-impl.cpp:418), so a view straddling two
+  /// workspaces is in the list on both. Empty during show-desktop.
+  /// Minimized windows are included.
   pub fn switchable_windows(&self) -> Vec<WindowId> {
     if self.state.show_desktop {
       return Vec::new();
@@ -2892,6 +2900,16 @@ impl Compositor {
       .collect::<Vec<_>>();
     sticky.sort_unstable();
     windows.extend(sticky);
+    windows.extend(
+      straddle::overlapping(
+        &self.state,
+        &self.state.active_output,
+        workspace,
+        true,
+      )
+      .into_iter()
+      .map(|straddler| straddler.window),
+    );
     windows.sort_by_key(|window| {
       std::cmp::Reverse(
         self.state.focus_recency.get(window).copied().unwrap_or(0),
@@ -4094,6 +4112,16 @@ impl Compositor {
   /// a window it drags on every output the window crosses with them.
   pub fn window_surfaces(&self, window: WindowId) -> Vec<SurfaceSnapshot> {
     self.state.window_surfaces(window)
+  }
+
+  /// How far `window` is drawn from its place on its own workspace on the
+  /// output that shows its set, which is where the normal scene draws it:
+  /// `(0, 0)` on the current workspace, for a sticky window, a window of
+  /// a set no output shows and a window that is gone. The snapshots of
+  /// [`Compositor::window_surfaces`] and the frames of
+  /// [`Compositor::frames`] are at the window's own place.
+  pub fn window_shift(&self, window: WindowId) -> (i32, i32) {
+    straddle::window_shift(&self.state, window)
   }
 
   /// The output `window` is on, or the active output for a window that

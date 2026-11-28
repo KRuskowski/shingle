@@ -223,11 +223,57 @@ pub fn rect_contains(rect: RenderRect, x: f64, y: f64) -> bool {
     && y < f64::from(rect.y) + f64::from(rect.height)
 }
 
+/// Where a window at `geometry` on its own workspace is drawn now, which
+/// Scale moves its thumbnail from and back to: moved by `shift` when that
+/// puts it over `output`, as for a window hanging over from another
+/// workspace, and at its own place otherwise, as for the windows of
+/// other workspaces that an all-workspaces Scale shows.
+pub fn drawn_geometry(geometry: Rect, shift: (i32, i32), output: Rect) -> Rect {
+  if shift == (0, 0) {
+    return geometry;
+  }
+  let moved = Rect::new(
+    geometry.x.saturating_add(shift.0),
+    geometry.y.saturating_add(shift.1),
+    geometry.width,
+    geometry.height,
+  );
+  let overlaps = |start: i32, size: u32, other: i32, other_size: u32| {
+    i64::from(start) < i64::from(other) + i64::from(other_size)
+      && i64::from(other) < i64::from(start) + i64::from(size)
+  };
+  if overlaps(moved.x, moved.width, output.x, output.width)
+    && overlaps(moved.y, moved.height, output.y, output.height)
+  {
+    moved
+  } else {
+    geometry
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use shingle::{SurfaceId, SurfaceRole};
 
   use super::*;
+
+  #[test]
+  fn a_window_hanging_over_starts_where_it_is_drawn() {
+    let output = Rect::new(0, 0, 1280, 720);
+    let own = Rect::new(1100, 100, 300, 200);
+    // On the neighbour, the part past the edge shows at the left.
+    assert_eq!(
+      drawn_geometry(own, (-1280, 0), output),
+      Rect::new(-180, 100, 300, 200)
+    );
+    // In place on its own workspace.
+    assert_eq!(drawn_geometry(own, (0, 0), output), own);
+    // Two workspaces away nothing of it is shown, so it stays.
+    assert_eq!(drawn_geometry(own, (-2560, 0), output), own);
+    // Touching the edge is not overlapping.
+    let edge = Rect::new(2560, 100, 300, 200);
+    assert_eq!(drawn_geometry(edge, (-1280, 0), output), edge);
+  }
 
   #[test]
   fn scale_cells_respect_output_offsets_margins_and_spacing() {

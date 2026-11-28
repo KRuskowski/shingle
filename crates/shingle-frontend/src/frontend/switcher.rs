@@ -172,9 +172,10 @@ impl Frontend {
   }
 
   /// What the regular switcher shows of `output`: the windows of its
-  /// current workspace, minimized ones too, as Wayfire's
-  /// `get_workspace_views` lists them, each with its bounding box: its
-  /// surfaces, subsurfaces, popups and frame.
+  /// current workspace, minimized ones too, and those hanging over onto it
+  /// from other workspaces, as Wayfire's `get_workspace_views` lists them
+  /// (`Compositor::switchable_windows`), each with its bounding box where
+  /// it is drawn: its surfaces, subsurfaces and frame.
   pub(super) fn switcher_views(&self, output: &OutputHandle) -> Views {
     let Some(view) = self.compositor.output_view(output) else {
       return Views::default();
@@ -412,12 +413,39 @@ fn window_bounds(
   window: TileWindowId,
   frames: &HashMap<SurfaceId, FrameSnapshot>,
 ) -> Option<Rect> {
-  let surfaces = super::whole_view::window_view(compositor, window);
-  bounds_of(&surfaces, frames)
+  bounds_of(&drawn_view(compositor, window), frames)
+}
+
+/// `window`'s view, its toplevel and subsurfaces, where the scene draws
+/// it: moved by its shift when it hangs over from another workspace, so
+/// that its thumbnail starts and ends where it is shown.
+fn drawn_view(
+  compositor: &Compositor,
+  window: TileWindowId,
+) -> Vec<SurfaceSnapshot> {
+  let shift = compositor.window_shift(window);
+  let mut surfaces = super::whole_view::window_view(compositor, window);
+  if shift != (0, 0) {
+    for snapshot in &mut surfaces {
+      snapshot.geometry = shifted(snapshot.geometry, shift);
+      snapshot.shift = shift;
+    }
+  }
+  surfaces
+}
+
+/// `rect` moved by `shift`, saturated.
+fn shifted(rect: Rect, shift: (i32, i32)) -> Rect {
+  Rect::new(
+    rect.x.saturating_add(shift.0),
+    rect.y.saturating_add(shift.1),
+    rect.width,
+    rect.height,
+  )
 }
 
 /// The rectangle around `surfaces` that have a buffer and their frames in
-/// `frames`.
+/// `frames`, each frame moved with its surface's shift.
 fn bounds_of(
   surfaces: &[SurfaceSnapshot],
   frames: &HashMap<SurfaceId, FrameSnapshot>,
@@ -426,12 +454,11 @@ fn bounds_of(
     .iter()
     .filter(|snapshot| snapshot.buffer.is_some())
     .map(|snapshot| snapshot.geometry)
-    .chain(
-      surfaces
-        .iter()
-        .filter_map(|snapshot| frames.get(&snapshot.id))
-        .map(|frame| frame.rect),
-    )
+    .chain(surfaces.iter().filter_map(|snapshot| {
+      frames
+        .get(&snapshot.id)
+        .map(|frame| shifted(frame.rect, snapshot.shift))
+    }))
     .filter(|rect| rect.width > 0 && rect.height > 0)
     .collect::<Vec<_>>();
   let left = rects.iter().map(|rect| rect.x).min()?;
@@ -496,7 +523,7 @@ impl<'a> SwitcherScene<'a, '_> {
     // unmanaged layer, which the switcher covers
     // (wayfire:plugins/single_plugins/switcher.cpp:729-739).
     for (window, paint) in shown.view.thumbnails(now, &stacking) {
-      let surfaces = super::whole_view::window_view(self.compositor, window);
+      let surfaces = drawn_view(self.compositor, window);
       let Some(bounds) = bounds_of(&surfaces, self.frames) else {
         continue;
       };

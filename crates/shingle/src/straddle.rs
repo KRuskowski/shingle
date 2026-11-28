@@ -134,6 +134,20 @@ pub(crate) fn straddlers(
   id: &shingle_core::OutputId,
   shown: WorkspaceId,
 ) -> Vec<Straddler> {
+  overlapping(state, id, shown, false)
+}
+
+/// [`straddlers`], with the minimized windows that would overlap the
+/// output too when `minimized` is set: Wayfire's `WSET_CURRENT_WORKSPACE`
+/// lists a minimized view by its geometry as any other
+/// (wayfire:src/output/workspace-impl.cpp:418-443), and the regular
+/// switcher shows minimized views.
+pub(crate) fn overlapping(
+  state: &CompositorState,
+  id: &shingle_core::OutputId,
+  shown: WorkspaceId,
+  minimized: bool,
+) -> Vec<Straddler> {
   if state.show_desktop {
     return Vec::new();
   }
@@ -159,7 +173,7 @@ pub(crate) fn straddlers(
       let Some(floating) = leaf.floating else {
         continue;
       };
-      if leaf.minimized
+      if (leaf.minimized && !minimized)
         || leaf.sticky
         || leaf.maximized
         || leaf.fullscreen
@@ -196,6 +210,47 @@ pub(crate) fn straddlers(
   }
   found.sort_by_key(|straddler| straddler.window);
   found
+}
+
+/// Whether the centre of `rect`, rounded down to whole pixels as Wayfire
+/// rounds it, lies in `area`: where Scale counts a view as on the
+/// current workspace (wayfire:plugins/scale/scale.cpp:733-749).
+pub(crate) fn centre_in(rect: Rect, area: Rect) -> bool {
+  let centre = |start: i32, size: u32| i64::from(start) + i64::from(size / 2);
+  let inside = |point: i64, start: i32, size: u32| {
+    i64::from(start) <= point && point < i64::from(start) + i64::from(size)
+  };
+  inside(centre(rect.x, rect.width), area.x, area.width)
+    && inside(centre(rect.y, rect.height), area.y, area.height)
+}
+
+/// Whether mapped `window`, whose toplevel surface is `object`, of output
+/// `id`'s set is on the workspace that output shows as Scale counts it:
+/// the centre of its geometry, frame included, moved by its
+/// [`window_shift`], is on the output, whichever workspace holds it. A
+/// minimized window, whose tiled place Shingle does not keep, counts on
+/// its own workspace, or on every one when sticky, as before.
+pub(crate) fn centred_on_shown(
+  state: &CompositorState,
+  id: &shingle_core::OutputId,
+  object: &ObjectId,
+  window: WindowId,
+) -> bool {
+  let (Ok(info), Some(output)) =
+    (state.core.window_info(window), state.outputs.get(id))
+  else {
+    return false;
+  };
+  if info.state.minimized {
+    return info.state.sticky
+      || state
+        .core
+        .current_workspace(id)
+        .is_ok_and(|current| current == info.location.workspace);
+  }
+  shell::window_geometry(state, object).is_some_and(|geometry| {
+    centre_in(shifted(geometry, window_shift(state, window)), output.rect)
+  })
 }
 
 /// Moves floating `window` of another workspace onto the one its output

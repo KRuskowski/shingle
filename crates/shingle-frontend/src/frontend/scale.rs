@@ -10,8 +10,8 @@ use shingle_render::{GpuTexture, RenderRect};
 
 use super::{BTN_LEFT, BTN_MIDDLE, Frontend};
 use crate::scale::{
-  ScaleState, fit_scale_tile, rect_contains, scale_cells, scale_columns,
-  scale_filter_matches, scale_geometry_at,
+  ScaleState, drawn_geometry, fit_scale_tile, rect_contains, scale_cells,
+  scale_columns, scale_filter_matches, scale_geometry_at,
 };
 
 pub(super) struct ScaleTitle {
@@ -139,6 +139,11 @@ impl Frontend {
             buffer.height,
           ))
         })?;
+        let geometry = drawn_geometry(
+          geometry,
+          self.compositor.window_shift(*window),
+          self.output_rect(&self.overview_output()),
+        );
         Some((
           *window,
           RenderRect {
