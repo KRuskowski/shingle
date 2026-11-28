@@ -127,7 +127,7 @@ Since `shingle-colour-and-focus-fixes` every configured colour shows the bytes W
 
 Add long-running nested and native soak tests. Measure CPU, RSS, frame latency and GPU behaviour before making any resource or stability claims.
 
-Headless, offscreen and nested soaks are done: tools/soak_test/run.py, a two-hour offscreen run and 30-minute headless and nested runs, and fixes for the leaks they found ([status.md](status.md#soak-tests)). The slow second nested run was shm uploads into wgpu's staging memory in the crowded PCIe BAR, now staged in system memory ([status.md](status.md#shm-upload-speed)). What remains: the native soak, step 53 of [native-testing.md](native-testing.md), on the test machine.
+Headless, offscreen and nested soaks are done: tools/soak_test/run.py, a two-hour offscreen run and 30-minute headless and nested runs, and fixes for the leaks they found ([status.md](status.md#soak-tests)). The slow second nested run was shm uploads into wgpu's staging memory in the crowded PCIe BAR, now staged in system memory ([status.md](status.md#shm-upload-speed)). What remains: the native soak, step 53 of [native-testing.md](native-testing.md), on the test machine. The session harness's intermittent 55 to 92 ms IPC replies were lavapipe compiling shaders on first use, not slow writes; IPC and nested's Wayland clients no longer wait for a tick or poll to be served ([status.md](status.md#ipc-latency)).
 
 ## 8. Application launcher
 
