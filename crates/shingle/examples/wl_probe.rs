@@ -17,8 +17,16 @@
 //!          [--size WIDTHxHEIGHT] [--damage-square SIDE]
 //!          [--report-outputs] [--layer OUTPUT] [--fullscreen]
 //!          [--decoration server|client] [--drag TEXT] [--drag-icon]
-//!          [--drop] [--cursor] [--report-buttons]
+//!          [--drop] [--cursor] [--report-buttons] [--subsurface]
+//!          [--popup]
 //! ```
+//!
+//! With `--subsurface`, the toplevel has a yellow 80x60 subsurface from
+//! its first buffer on, 16 pixels in from its bottom left corner, and
+//! with `--popup`, once mapped it opens a magenta 64x48 `xdg_popup` at
+//! (16, 16) in its window and reports `popup` when the popup drew, so
+//! that the animate checks can see a view's pieces in captures
+//! (docs/design/wayfire-gaps.md, "Whole views as built").
 //!
 //! With `--report-buttons`, the probe reports each pointer button it
 //! gets as `button` (the evdev code and whether it was pressed), so that
@@ -138,7 +146,7 @@ use wayland_client::{
     wl_buffer, wl_callback, wl_compositor, wl_data_device,
     wl_data_device_manager, wl_data_offer, wl_data_source, wl_keyboard,
     wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool,
-    wl_surface,
+    wl_subcompositor, wl_subsurface, wl_surface,
   },
 };
 use wayland_protocols::{
@@ -153,7 +161,9 @@ use wayland_protocols::{
     decoration::zv1::client::{
       zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
     },
-    shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base},
+    shell::client::{
+      xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
+    },
   },
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
@@ -228,7 +238,19 @@ struct Options {
   cursor: bool,
   /// Reports the pointer buttons it gets.
   report_buttons: bool,
+  /// Gives the toplevel a yellow subsurface.
+  subsurface: bool,
+  /// Opens a magenta popup once mapped.
+  popup: bool,
 }
+
+/// `--subsurface`'s size, and how far it is in from the toplevel's
+/// bottom left corner.
+const SUBSURFACE_SIZE: (i32, i32) = (80, 60);
+const SUBSURFACE_INSET: i32 = 16;
+
+/// `--popup`'s place in the window and its size.
+const POPUP_RECT: (i32, i32, i32, i32) = (16, 16, 64, 48);
 
 /// The size of the `--cursor` cursor.
 const CURSOR_SIZE: i32 = 16;
@@ -304,6 +326,8 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
       "--drop" => options.drop = true,
       "--cursor" => options.cursor = true,
       "--report-buttons" => options.report_buttons = true,
+      "--subsurface" => options.subsurface = true,
+      "--popup" => options.popup = true,
       "--size" => {
         let value = arguments.next().ok_or("--size needs WIDTHxHEIGHT")?;
         options.size = Some(parse_size(value)?);
@@ -432,7 +456,15 @@ struct Probe {
   offer_types: Vec<(wl_data_offer::WlDataOffer, Vec<String>)>,
   /// The offer of the drag over the probe.
   drag_offer: Option<wl_data_offer::WlDataOffer>,
+  subcompositor: Option<wl_subcompositor::WlSubcompositor>,
+  /// The `--subsurface`, which each draw places at the bottom left.
+  subsurface: Option<wl_subsurface::WlSubsurface>,
+  /// The `--popup`'s surface.
+  popup_surface: Option<wl_surface::WlSurface>,
 }
+
+/// The user data of the popup's `xdg_surface`.
+struct PopupSurface;
 
 impl Probe {
   /// The `--drag-icon` surface with its magenta buffer attached 16 pixels
@@ -477,6 +509,88 @@ impl Probe {
     icon.attach(Some(&buffer), -size / 2, -size / 2);
     icon.damage_buffer(0, 0, size, size);
     Some(icon)
+  }
+
+  /// A `size` XRGB8888 buffer of one colour, `bgra` bytes, in a pool of
+  /// its own, or None after reporting an error.
+  fn solid_buffer(
+    &self,
+    handle: &QueueHandle<Self>,
+    (width, height): (i32, i32),
+    bgra: [u8; 4],
+    label: &str,
+  ) -> Option<wl_buffer::WlBuffer> {
+    let shm = self.shm.as_ref()?;
+    let Ok(fd) =
+      rustix::fs::memfd_create(label, rustix::fs::MemfdFlags::CLOEXEC)
+    else {
+      report("error", &[("text", "\"memfd_create failed\"".into())]);
+      return None;
+    };
+    let mut file = std::fs::File::from(fd);
+    let _ = file.write_all(&bgra.repeat((width * height) as usize));
+    let pool = shm.create_pool(file.as_fd(), width * height * 4, handle, ());
+    let buffer = pool.create_buffer(
+      0,
+      width,
+      height,
+      width * 4,
+      wl_shm::Format::Xrgb8888,
+      handle,
+      (),
+    );
+    pool.destroy();
+    Some(buffer)
+  }
+
+  /// Gives `parent` the `--subsurface`, its yellow buffer committed, to
+  /// show with the parent's next commit.
+  fn add_subsurface(
+    &mut self,
+    handle: &QueueHandle<Self>,
+    parent: &wl_surface::WlSurface,
+  ) -> Result<(), String> {
+    let (Some(compositor), Some(subcompositor)) =
+      (&self.compositor, &self.subcompositor)
+    else {
+      return Err("wl_compositor or wl_subcompositor is missing".into());
+    };
+    let surface = compositor.create_surface(handle, ());
+    let subsurface = subcompositor.get_subsurface(&surface, parent, handle, ());
+    // XRGB8888 bytes B, G, R, X: yellow.
+    let buffer = self
+      .solid_buffer(handle, SUBSURFACE_SIZE, [0, 0xff, 0xff, 0xff], "sub")
+      .ok_or("no buffer for the subsurface")?;
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage_buffer(0, 0, SUBSURFACE_SIZE.0, SUBSURFACE_SIZE.1);
+    surface.commit();
+    self.subsurface = Some(subsurface);
+    Ok(())
+  }
+
+  /// Opens the `--popup` on `parent`, which draws when it is configured.
+  fn open_popup(
+    &mut self,
+    handle: &QueueHandle<Self>,
+    parent: &xdg_surface::XdgSurface,
+  ) -> Result<(), String> {
+    let (Some(compositor), Some(wm_base)) = (&self.compositor, &self.wm_base)
+    else {
+      return Err("wl_compositor or xdg_wm_base is missing".into());
+    };
+    let surface = compositor.create_surface(handle, ());
+    let xdg_surface = wm_base.get_xdg_surface(&surface, handle, PopupSurface);
+    let positioner = wm_base.create_positioner(handle, ());
+    let (x, y, width, height) = POPUP_RECT;
+    positioner.set_size(width, height);
+    positioner.set_anchor_rect(x, y, 1, 1);
+    positioner.set_anchor(xdg_positioner::Anchor::TopLeft);
+    positioner.set_gravity(xdg_positioner::Gravity::BottomRight);
+    xdg_surface.get_popup(Some(parent), &positioner, handle, ());
+    positioner.destroy();
+    surface.commit();
+    self.popup_surface = Some(surface);
+    Ok(())
   }
 
   /// The `--cursor` surface with its yellow buffer attached, to commit
@@ -591,6 +705,13 @@ impl Probe {
     );
     surface.attach(Some(&buffer), 0, 0);
     surface.damage_buffer(0, 0, width, height);
+    // The subsurface's place goes with this commit.
+    if let Some(subsurface) = &self.subsurface {
+      subsurface.set_position(
+        SUBSURFACE_INSET,
+        height - SUBSURFACE_INSET - SUBSURFACE_SIZE.1,
+      );
+    }
     surface.commit();
     pool.destroy();
     self.drawn = Some((width, height));
@@ -678,6 +799,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
         probe.decoration_manager = Some(registry.bind(name, 1, handle, ()));
       }
       "wl_shm" => probe.shm = Some(registry.bind(name, 1, handle, ())),
+      "wl_subcompositor" => {
+        probe.subcompositor = Some(registry.bind(name, 1, handle, ()));
+      }
       "xdg_wm_base" => probe.wm_base = Some(registry.bind(name, 1, handle, ())),
       "wl_seat" => probe.seat = Some(registry.bind(name, 1, handle, ())),
       "wl_data_device_manager" => {
@@ -734,6 +858,54 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for Probe {
       ],
     );
     probe.draw(handle, width, height);
+  }
+}
+
+impl Dispatch<xdg_surface::XdgSurface, PopupSurface> for Probe {
+  fn event(
+    probe: &mut Self,
+    xdg_surface: &xdg_surface::XdgSurface,
+    event: xdg_surface::Event,
+    _: &PopupSurface,
+    _: &Connection,
+    handle: &QueueHandle<Self>,
+  ) {
+    let xdg_surface::Event::Configure { serial } = event else {
+      return;
+    };
+    xdg_surface.ack_configure(serial);
+    let Some(surface) = probe.popup_surface.clone() else {
+      return;
+    };
+    let (_, _, width, height) = POPUP_RECT;
+    // XRGB8888 bytes B, G, R, X: magenta.
+    let Some(buffer) = probe.solid_buffer(
+      handle,
+      (width, height),
+      [0xff, 0, 0xff, 0xff],
+      "popup",
+    ) else {
+      return;
+    };
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage_buffer(0, 0, width, height);
+    surface.commit();
+    report("popup", &[]);
+  }
+}
+
+impl Dispatch<xdg_popup::XdgPopup, ()> for Probe {
+  fn event(
+    _: &mut Self,
+    _: &xdg_popup::XdgPopup,
+    event: xdg_popup::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let xdg_popup::Event::PopupDone = event {
+      report("popup_done", &[]);
+    }
   }
 }
 
@@ -1552,7 +1724,10 @@ ignore_events!(
   wp_fifo_manager_v1::WpFifoManagerV1,
   wp_fifo_v1::WpFifoV1,
   wp_presentation::WpPresentation,
-  zxdg_decoration_manager_v1::ZxdgDecorationManagerV1
+  zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
+  wl_subcompositor::WlSubcompositor,
+  wl_subsurface::WlSubsurface,
+  xdg_positioner::XdgPositioner
 );
 
 impl Dispatch<wl_data_offer::WlDataOffer, ()> for Probe {
@@ -1642,8 +1817,16 @@ fn run(options: &Options) -> Result<(), String> {
     }
     None => None,
   };
+  if options.subsurface {
+    probe.add_subsurface(&handle, &surface)?;
+  }
   surface.commit();
   probe.surface = Some(surface.clone());
+  if options.popup {
+    wait_mapped(&mut queue, &mut probe)?;
+    probe.open_popup(&handle, &xdg_surface)?;
+    queue.flush().map_err(|error| error.to_string())?;
+  }
   if options.fullscreen {
     wait_mapped(&mut queue, &mut probe)?;
     toplevel.set_fullscreen(None);
@@ -1770,8 +1953,12 @@ mod tests {
         drop: false,
         cursor: false,
         report_buttons: false,
+        subsurface: false,
+        popup: false,
       }
     );
+    let options = parse(&arguments(&["--subsurface", "--popup"])).unwrap();
+    assert!(options.subsurface && options.popup);
     let options = parse(&arguments(&["--drag", "text", "--drop"])).unwrap();
     assert_eq!(options.drag.as_deref(), Some("text"));
     assert!(options.drop);
