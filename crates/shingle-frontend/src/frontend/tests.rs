@@ -1068,6 +1068,38 @@ fn stipc_keys_fire_xkb_command_bindings_in_shingles_layout() {
 }
 
 #[test]
+fn a_command_runs_although_a_plugin_binds_its_key_too() {
+  let marker = std::env::temp_dir().join(format!(
+    "shingle-frontend-shared-key-{}",
+    std::process::id()
+  ));
+  let _ = std::fs::remove_file(&marker);
+  // super+r is also wrot's `reset-one` by default, as in Wayfire, which
+  // runs both.
+  let config = yaml_config(&format!(
+    concat!(
+      "commands:\n",
+      "  - binding: super+r\n",
+      "    command: touch {}\n",
+    ),
+    marker.display()
+  ));
+  assert_eq!(
+    String::from(config.keybindings.wrot_reset_one.clone()),
+    "super+r"
+  );
+  let mut fixture = Fixture::new(config);
+  fixture.stipc_tap("KEY_R", &["KEY_LEFTMETA"]);
+  let deadline = Instant::now() + Duration::from_secs(5);
+  while !marker.exists() && Instant::now() < deadline {
+    fixture.process();
+    thread::sleep(Duration::from_millis(10));
+  }
+  assert!(marker.exists(), "super+r ran its command");
+  let _ = std::fs::remove_file(&marker);
+}
+
+#[test]
 fn stipc_keys_fire_ipc_bindings_once() {
   let mut fixture = Fixture::new(ShingleConfig::default());
   let reply = fixture.ipc(concat!(

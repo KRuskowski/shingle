@@ -530,6 +530,18 @@ impl Frontend {
       return;
     }
     if pressed && !self.compositor.shortcuts_inhibited() {
+      // Wayfire runs every binding of a key
+      // (wayfire:src/core/seat/bindings-repository.cpp:96-101), so a
+      // command bound to a key a plugin binds too, such as super+r of
+      // `[command]` and of `[wrot] reset-one`, still runs. Commands run
+      // first; a built-in binding of the same key then runs as before.
+      let commanded = self.run_matching_symbol_command(
+        modifiers,
+        event.symbol.as_deref(),
+        pressed,
+        repeat,
+      ) || self
+        .run_matching_command(modifiers, key, pressed, repeat);
       if self.keybindings.wrot_reset.matches(modifiers, key) {
         self.rotations.clear();
         self.rotation_drag = None;
@@ -936,15 +948,7 @@ impl Frontend {
         self.save();
         return;
       }
-      if self.run_matching_symbol_command(
-        modifiers,
-        event.symbol.as_deref(),
-        pressed,
-        repeat,
-      ) {
-        return;
-      }
-      if self.run_matching_command(modifiers, key, pressed, repeat) {
+      if commanded {
         return;
       }
       if self.keybindings.lock.matches(modifiers, key) {
