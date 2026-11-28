@@ -124,9 +124,11 @@ pub(crate) fn drawn_rect(
 /// The windows of output `id`'s set on workspaces other than `shown`, the
 /// one it shows, whose geometry, frame included, overlaps the output once
 /// moved by their [`window_shift`], as `view_visible_on` decides from a
-/// view's geometry. Minimized, sticky, unmapped and bufferless windows are
-/// left out, and so is everything while the desktop is shown. In window
-/// order.
+/// view's geometry. Only floating windows can reach past their
+/// workspace's edge, so the others, and minimized, sticky, maximized and
+/// fullscreen ones, are passed over on their tree's state alone, without
+/// looking for their surface; unmapped and bufferless windows are left
+/// out, and so is everything while the desktop is shown. In window order.
 pub(crate) fn straddlers(
   state: &CompositorState,
   id: &shingle_core::OutputId,
@@ -135,39 +137,63 @@ pub(crate) fn straddlers(
   if state.show_desktop {
     return Vec::new();
   }
-  let Some(output) = state.outputs.get(id) else {
+  let (Some(output), Ok(workspaces)) =
+    (state.outputs.get(id), state.core.workspaces(id))
+  else {
     return Vec::new();
   };
   let size = (output.rect.width, output.rect.height);
-  let mut found = state
-    .surfaces
-    .iter()
-    .filter_map(|(object, surface)| {
-      surface.buffer.as_ref()?;
-      let window = surface.role.toplevel()?.window()?;
-      let info = state.core.window_info(window).ok()?;
-      if info.presence != shingle_core::WindowPresence::Mapped
-        || info.location.output != *id
-        || info.location.workspace == shown
-        || info.state.sticky
-        || info.state.minimized
+  let mut found = Vec::new();
+  for workspace in workspaces {
+    let Ok(tree) = state.core.tree(id, workspace) else {
+      continue;
+    };
+    if workspace == shown {
+      continue;
+    }
+    let shift = shift_between(workspace, shown, size);
+    for &window in tree.stack_order() {
+      let Ok(leaf) = tree.leaf_state(window) else {
+        continue;
+      };
+      let Some(floating) = leaf.floating else {
+        continue;
+      };
+      if leaf.minimized
+        || leaf.sticky
+        || leaf.maximized
+        || leaf.fullscreen
+        || crate::surface_outputs::intersection(
+          shifted(floating, shift),
+          output.rect,
+        )
+        .is_none()
       {
-        return None;
+        continue;
       }
-      let shift = shift_between(info.location.workspace, shown, size);
-      let geometry = shell::window_geometry(state, object)?;
-      crate::surface_outputs::intersection(
-        shifted(geometry, shift),
-        output.rect,
-      )?;
-      Some(Straddler {
-        object: object.clone(),
-        window,
-        stacking: info.state.stacking,
-        shift,
-      })
-    })
-    .collect::<Vec<_>>();
+      // The surface's own geometry decides; the tree's floating
+      // rectangle above only spares the search for most windows.
+      let Some(object) = crate::input::object_for_window(state, window) else {
+        continue;
+      };
+      let overlaps =
+        shell::window_geometry(state, &object).is_some_and(|geometry| {
+          crate::surface_outputs::intersection(
+            shifted(geometry, shift),
+            output.rect,
+          )
+          .is_some()
+        });
+      if overlaps {
+        found.push(Straddler {
+          object,
+          window,
+          stacking: leaf.stacking,
+          shift,
+        });
+      }
+    }
+  }
   found.sort_by_key(|straddler| straddler.window);
   found
 }
