@@ -32,7 +32,8 @@ namespaces:
                vswipe|decoration|switcher|colours|minimize-focus|
                drag-icon|resize|resize-nested|nested-scaled|
                nested-clipboard|screencast|image-copy-capture|
-               ext-data-control|launcher|animate|lock|rehearsal|
+               ext-data-control|launcher|animate|animate-cost|lock|
+               rehearsal|
                first-frame|straddle|apps|
                app-NAME ... [--wayfire-ini PATH]
 
@@ -106,7 +107,9 @@ drives shingle-launcher (`--launcher`, the release build by default)
 through STIPC keys and pointer: type-to-launch, the in-place edits,
 persistence and its startup time. `--checks animate` (animate_checks.py)
 captures every animation of Wayfire's animate, slowed to seconds, half
-way through, and the output's fade-in at start. `--checks lock`
+way through, on views of one surface and of several pieces, and the
+output's fade-in at start; `--checks animate-cost` times the frames of
+eight views closing at once at 4K. `--checks lock`
 (lock_checks.py) locks with shingle-lock (`--lock`, the debug build by
 default) and checks every presented frame, recorded with
 `SHINGLE_RECORD_FRAMES`: no client unblurred from the lock request to
@@ -203,7 +206,7 @@ CHECK_GROUPS = ('offscreen', 'nested', 'baseline', 'buffers', 'shm',
                 'colours', 'minimize-focus', 'drag-icon', 'resize',
                 'resize-nested', 'nested-clipboard', 'screencast',
                 'image-copy-capture', 'ext-data-control',
-                'launcher', 'animate', 'lock', 'rehearsal',
+                'launcher', 'animate', 'animate-cost', 'lock', 'rehearsal',
                 'first-frame', 'straddle') + APP_GROUPS
 # DB-4's and DB-5's groups whose NVIDIA Vulkan swapchains need
 # nvidia-modeset, and nested Shingle's on NVIDIA in `resize-nested`;

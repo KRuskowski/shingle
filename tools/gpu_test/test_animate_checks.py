@@ -93,5 +93,61 @@ class PredicateTest(unittest.TestCase):
     self.assertTrue(animate_checks.startup_dark(Shot(lambda x, y: (20,) * 3)))
     self.assertFalse(animate_checks.startup_dark(Shot(lambda x, y: None)))
 
+class PiecesTest(unittest.TestCase):
+  """The colours and places of a view's pieces."""
+
+  def test_the_pieces_colours(self):
+    self.assertTrue(animate_checks.yellow(255, 255, 0))
+    self.assertFalse(animate_checks.yellow(170, 170, 86))
+    self.assertTrue(animate_checks.yellowish(170, 170, 86))
+    self.assertTrue(animate_checks.yellowish(255, 255, 0))
+    for colour in COLOURS.values():
+      self.assertFalse(animate_checks.yellowish(*colour), colour)
+      self.assertFalse(animate_checks.magenta(*colour), colour)
+      self.assertFalse(animate_checks.dark(*colour), colour)
+      faded = tuple((value + 128) // 2 for value in colour)
+      self.assertFalse(animate_checks.dark(*faded), faded)
+    self.assertFalse(animate_checks.yellowish(*GREY))
+    # Faded red over the grey is no yellow.
+    self.assertFalse(animate_checks.yellowish(170, 86, 86))
+    self.assertTrue(animate_checks.magenta(255, 0, 255))
+    # Black at three quarters over the grey, blended in linear light.
+    self.assertTrue(animate_checks.dark(66, 66, 66))
+    self.assertFalse(animate_checks.dark(*GREY))
+
+  def test_the_area_around_a_view(self):
+    self.assertEqual(animate_checks.around(VIEW, 10),
+                     {'x': 10, 'y': 10, 'width': 100, 'height': 100})
+    self.assertEqual(animate_checks.box_centre((10, 20, 30, 60)), (20, 40))
+    framed = {'geometry': {'x': 100, 'y': 100, 'width': 344, 'height': 294},
+              'base-geometry': {'x': 112, 'y': 142, 'width': 320,
+                                'height': 240}}
+    self.assertEqual(animate_checks.title_bar(framed),
+                     {'x': 100, 'y': 100, 'width': 344, 'height': 42})
+
+class CostTest(unittest.TestCase):
+  """Reading the render turns of a cost run."""
+
+  def test_render_turns_in_the_window(self):
+    log = '\n'.join([
+        'shingle: turn render 4.5 ms at 10.000000 after 1.0 ms idle: draw 4',
+        'shingle: turn process 0.2 ms at 10.100000 after 0.1 ms idle: x 0',
+        'shingle: turn render 6.25 ms at 11.500000 after 2.0 ms idle: draw 6',
+        'shingle: turn render 9.0 ms at 13.000000 after 2.0 ms idle: draw 9',
+    ])
+    self.assertEqual(animate_checks.render_turns(log, 10.0, 12.0),
+                     [4.5, 6.25])
+    self.assertEqual(animate_checks.summary([]), 'no frames')
+    self.assertEqual(animate_checks.summary([1.0, 3.0, 2.0]),
+                     '3 frames, median 2.00 ms, p95 3.00 ms, max 3.00 ms')
+
+  def test_cost_configs(self):
+    framed = animate_checks.cost_config('spin', True)
+    self.assertEqual(framed['decoration'], {'forced_views': 'all'})
+    self.assertEqual(framed['animate']['close_animation'], 'spin')
+    self.assertEqual(framed['outputs'][0]['mode'], '3840x2160@60')
+    plain = animate_checks.cost_config('zoom', False)
+    self.assertEqual(plain['decoration'], {'forced_views': 'none'})
+
 if __name__ == '__main__':
   unittest.main()
