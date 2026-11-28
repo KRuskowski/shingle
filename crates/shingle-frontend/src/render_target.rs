@@ -6,8 +6,8 @@
 //! an [`OffscreenRenderer`]; the native backend will pass its KMS target.
 
 use shingle_render::{
-  DmabufDescriptor, GpuTexture, OffscreenRenderer, RenderError, RenderTile,
-  Renderer, TextureTransform,
+  DmabufDescriptor, GpuContext, GpuTexture, OffscreenRenderer, RenderError,
+  RenderTile, Renderer, TextureTransform,
 };
 
 /// A renderer the frontend can build its scene for and draw into.
@@ -91,6 +91,31 @@ pub trait RenderTarget {
     clear: [f64; 4],
     buffer: &DmabufDescriptor<'_>,
   ) -> Result<(), RenderError>;
+
+  /// The GPU context the target draws with.
+  fn gpu_context(&self) -> &GpuContext;
+
+  /// A `width` by `height` texture for [`RenderTarget::draw_view`]
+  /// ([`GpuContext::create_view_texture`]).
+  fn create_view_texture(
+    &self,
+    width: u32,
+    height: u32,
+  ) -> Result<GpuTexture, RenderError> {
+    self.gpu_context().create_view_texture(width, height)
+  }
+
+  /// Draws `tiles` into `texture` at `scale`, before the frame that
+  /// samples it ([`shingle_render::draw_view`]).
+  fn draw_view(
+    &self,
+    texture: &GpuTexture,
+    scale: f64,
+    tiles: &[RenderTile<'_>],
+  ) -> Result<(), RenderError> {
+    shingle_render::draw_view(self.gpu_context(), texture, scale, tiles)
+      .map(|_| ())
+  }
 }
 
 impl RenderTarget for Renderer {
@@ -173,6 +198,10 @@ impl RenderTarget for Renderer {
     buffer: &DmabufDescriptor<'_>,
   ) -> Result<(), RenderError> {
     Renderer::capture_into(self, tiles, clear, buffer)
+  }
+
+  fn gpu_context(&self) -> &GpuContext {
+    Renderer::gpu(self)
   }
 }
 
@@ -258,5 +287,9 @@ impl RenderTarget for OffscreenRenderer {
     buffer: &DmabufDescriptor<'_>,
   ) -> Result<(), RenderError> {
     OffscreenRenderer::capture_into(self, tiles, clear, buffer)
+  }
+
+  fn gpu_context(&self) -> &GpuContext {
+    OffscreenRenderer::gpu(self)
   }
 }

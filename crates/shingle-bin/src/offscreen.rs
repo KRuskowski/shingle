@@ -562,6 +562,10 @@ impl RenderTarget for OffscreenOutput<'_> {
       clear,
     )
   }
+
+  fn gpu_context(&self) -> &GpuContext {
+    self.gpu
+  }
 }
 
 #[cfg(test)]

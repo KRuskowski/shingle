@@ -1209,6 +1209,8 @@ struct RecordingTarget {
   clears: Vec<[f64; 4]>,
   /// The colour and projection of every tile of every frame.
   looks: Vec<Vec<([f32; 4], Option<shingle_render::Projection>)>>,
+  /// The tiles of every view drawn into a texture of its own.
+  views: std::cell::RefCell<Vec<Vec<RenderRect>>>,
 }
 
 impl RecordingTarget {
@@ -1334,6 +1336,23 @@ impl RenderTarget for RecordingTarget {
       clear,
     )
   }
+
+  fn gpu_context(&self) -> &GpuContext {
+    &self.gpu
+  }
+
+  fn draw_view(
+    &self,
+    texture: &GpuTexture,
+    scale: f64,
+    tiles: &[RenderTile<'_>],
+  ) -> Result<(), RenderError> {
+    self
+      .views
+      .borrow_mut()
+      .push(tiles.iter().map(|tile| tile.geometry).collect());
+    shingle_render::draw_view(&self.gpu, texture, scale, tiles).map(|_| ())
+  }
 }
 
 /// A recording target, or `None` without a GPU adapter. It waits while
@@ -1352,6 +1371,7 @@ fn recording_target() -> Option<RecordingTarget> {
     captures: Vec::new(),
     clears: Vec::new(),
     looks: Vec::new(),
+    views: Default::default(),
   })
 }
 

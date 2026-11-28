@@ -598,6 +598,10 @@ impl RenderTarget for NativeTarget<'_> {
       self.gpu, self.state, buffer, tiles, clear,
     )
   }
+
+  fn gpu_context(&self) -> &GpuContext {
+    self.gpu
+  }
 }
 
 impl ScanoutImporter for GpuRenderer {

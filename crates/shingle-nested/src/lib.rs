@@ -308,6 +308,10 @@ impl RenderTarget for WindowOutput<'_> {
       clear,
     )
   }
+
+  fn gpu_context(&self) -> &GpuContext {
+    self.gpu
+  }
 }
 
 /// The [`Host`] side of the nested windows: what the frontend asks of
