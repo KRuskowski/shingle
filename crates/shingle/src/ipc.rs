@@ -49,8 +49,34 @@ struct IpcClient {
   subscriptions: Option<HashSet<String>>,
   bindings: HashSet<u64>,
   closed: bool,
+  /// Whether the queued reply waits for [`IpcServer::flush_held`], because
+  /// it answers STIPC input that is sent to Wayland clients only later.
+  held: bool,
   /// The socket's source in the server's event loop.
   token: Option<RegistrationToken>,
+}
+
+/// Whether the reply to `method` is held until the Wayland clients were
+/// flushed: STIPC input, which a frontend delivers in its next turn and a
+/// compositor without one sends at the end of this one.
+///
+/// Wayfire's STIPC replies after the input went to the clients, so a test
+/// that sends the next key on the reply cannot have it reach a client in
+/// the same read as the one before. Answered at once, a burst of keys
+/// arrived within microseconds, and Firefox ran Ctrl+C before the Ctrl+L
+/// before it had focused its location bar.
+fn holds_reply(method: Option<&str>) -> bool {
+  matches!(
+    method,
+    Some(
+      "stipc/feed_key"
+        | "stipc/feed_button"
+        | "stipc/feed_gesture"
+        | "stipc/move_cursor"
+        | "stipc/touch"
+        | "stipc/touch_release"
+    )
+  )
 }
 
 impl IpcServer {
@@ -111,6 +137,7 @@ impl IpcServer {
             subscriptions: None,
             bindings: HashSet::new(),
             closed: false,
+            held: false,
             token,
           });
         }
@@ -137,6 +164,17 @@ impl IpcServer {
       !client.closed
     });
     state.ipc_clients = self.clients.len();
+  }
+
+  /// Sends the replies held back by [`holds_reply`]. The compositor calls
+  /// it right after flushing the Wayland clients, once they have the
+  /// input those replies answer: at the end of a turn without a frontend,
+  /// at the end of the frontend's turn with one.
+  pub(crate) fn flush_held(&mut self) {
+    for client in self.clients.iter_mut().filter(|client| client.held) {
+      client.held = false;
+      client.flush();
+    }
   }
 
   fn cleanup_clients(&mut self, state: &mut CompositorState) {
@@ -222,6 +260,9 @@ fn insert_wake_source<F: std::os::fd::AsFd + 'static>(
 
 impl IpcClient {
   fn flush(&mut self) {
+    if self.held {
+      return;
+    }
     while !self.output.is_empty() {
       match self.stream.write(&self.output) {
         Ok(0) => {
@@ -281,8 +322,12 @@ impl IpcClient {
       }
       let message = self.input[4..length + 4].to_vec();
       self.input.drain(..length + 4);
-      let response = match serde_json::from_slice(&message) {
-        Ok(message) => self.dispatch(state, &message, next_binding),
+      let response = match serde_json::from_slice::<Value>(&message) {
+        Ok(message) => {
+          let method = message.get("method").and_then(Value::as_str);
+          self.held |= holds_reply(method);
+          self.dispatch(state, &message, next_binding)
+        }
         Err(error) => json_error(&format!("invalid JSON: {error}")),
       };
       self.queue(response);

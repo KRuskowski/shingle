@@ -1119,6 +1119,9 @@ impl Frontend {
     self.publish_plugin_activations();
     self.turns.mark("pace");
     self.flush(host);
+    // What this turn sent, STIPC input among it, reaches the clients
+    // before the IPC replies that answer it.
+    self.compositor.flush_clients();
     self.turns.mark("flush");
     self.publish_counts();
   }

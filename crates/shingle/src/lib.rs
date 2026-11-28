@@ -1613,6 +1613,11 @@ impl Compositor {
     // callbacks, would wait out the timeout.
     self.state.buffer_releases.flush();
     self.display.flush_clients()?;
+    // Replies to STIPC input go out only once the clients have it; a
+    // frontend that did not call `flush_clients` gets them out here.
+    if let Some(ipc) = &mut self.ipc {
+      ipc.flush_held();
+    }
     self
       .event_loop
       .dispatch(timeout, &mut self.state)
@@ -1671,7 +1676,29 @@ impl Compositor {
     shell::flush_configures(&mut self.state);
     self.state.buffer_releases.flush();
     self.display.flush_clients()?;
+    // Without a frontend STIPC input went to the clients in this turn.
+    if !self.state.stipc_key_events
+      && !self.state.stipc_pointer_events
+      && let Some(ipc) = &mut self.ipc
+    {
+      ipc.flush_held();
+    }
     Ok(dispatched)
+  }
+
+  /// Sends what is queued for the Wayland clients, then the IPC replies
+  /// to STIPC input that waited for it. A frontend that takes STIPC input
+  /// as events calls this at the end of its turn, once it has fed them,
+  /// so that a test's next key never reaches a client in the same read
+  /// as the one before, as with Wayfire, which answers STIPC after the
+  /// input went out.
+  pub fn flush_clients(&mut self) {
+    // Flushing every client skips the ones that fail; their next dispatch
+    // drops them.
+    let _ = self.display.flush_clients();
+    if let Some(ipc) = &mut self.ipc {
+      ipc.flush_held();
+    }
   }
 
   /// [`Compositor::poll`] without waiting; call it whenever the [`AsFd`]
@@ -5076,6 +5103,122 @@ pub(crate) mod tests {
     // The closed client's source is gone, so it does not spin the loop.
     assert!(!readable(compositor.as_fd(), Duration::ZERO));
     assert_eq!(compositor.state.ipc_clients, 0);
+  }
+
+  // Sends one length-prefixed IPC request on `stream`.
+  fn send_ipc(stream: &mut std::os::unix::net::UnixStream, request: &str) {
+    use std::io::Write;
+    let length = u32::try_from(request.len()).unwrap().to_le_bytes();
+    stream.write_all(&length).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+  }
+
+  // Reads one IPC reply from `stream`.
+  fn read_ipc(
+    stream: &mut std::os::unix::net::UnixStream,
+  ) -> serde_json::Value {
+    use std::io::Read;
+    stream
+      .set_read_timeout(Some(Duration::from_secs(1)))
+      .unwrap();
+    let mut header = [0; 4];
+    stream.read_exact(&mut header).expect("a reply came");
+    let mut reply = vec![0; u32::from_le_bytes(header) as usize];
+    stream.read_exact(&mut reply).unwrap();
+    serde_json::from_slice(&reply).unwrap()
+  }
+
+  // A STIPC key is answered only once the frontend has sent it and the
+  // Wayland clients were flushed, as Wayfire answers after the key went
+  // out. Answered at once, a test's next key reached Firefox in the same
+  // read as the one before, and Ctrl+C ran before Ctrl+L had focused the
+  // location bar.
+  #[test]
+  fn stipc_input_is_answered_after_the_client_has_it() {
+    use crate::test_client::TestClient;
+    use wayland_client::protocol::wl_seat::WlSeat;
+    let (mut compositor, path) = test_compositor();
+    let ipc = path.with_extension("ipc");
+    compositor.enable_ipc(&ipc).unwrap();
+    let mut client = TestClient::connect(&mut compositor, &path);
+    let seat = client.bind::<WlSeat>(5);
+    let _keyboard = seat.get_keyboard(&client.handle, ());
+    let toplevel = client.toplevel(&mut compositor, "keys");
+    client.attach_buffer(&mut compositor, &toplevel.surface, 8, 8);
+    compositor.add_input_device(InputDeviceInfo {
+      name: "stipc keyboard".into(),
+      vendor: None,
+      product: None,
+      kind: InputDeviceKind::Keyboard,
+    });
+    compositor.set_stipc_key_events(true);
+    client.roundtrip(&mut compositor);
+    client.events.keyboard.clear();
+    compositor.drain_events();
+    let mut stream =
+      std::os::unix::net::UnixStream::connect(&ipc).expect("IPC accepts");
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    let wayland = client.socket();
+    // A request that is not input is answered in its turn.
+    send_ipc(&mut stream, r#"{"method": "stipc/ping"}"#);
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    assert!(readable(stream.as_fd(), Duration::ZERO), "ping answered");
+    assert_eq!(read_ipc(&mut stream)["result"], "ok");
+    // KEY_A.
+    send_ipc(
+      &mut stream,
+      concat!(
+        r#"{"method": "stipc/feed_key","#,
+        r#" "data": {"key": "KEY_A", "state": true}}"#
+      ),
+    );
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    assert!(
+      !readable(stream.as_fd(), Duration::ZERO),
+      "the reply waits for the frontend's turn"
+    );
+    assert!(!readable(wayland.as_fd(), Duration::ZERO));
+    // The frontend's turn feeds the key.
+    for event in compositor.drain_events() {
+      if let Event::StipcKey {
+        device,
+        code,
+        pressed,
+      } = event
+      {
+        compositor.keyboard_key(device, code, pressed);
+      }
+    }
+    compositor.flush_clients();
+    assert!(readable(stream.as_fd(), Duration::ZERO), "answered now");
+    assert!(
+      readable(wayland.as_fd(), Duration::ZERO),
+      "the client has the key by the time the reply is sent"
+    );
+    assert_eq!(read_ipc(&mut stream)["result"], "ok");
+    client.roundtrip(&mut compositor);
+    assert_eq!(client.events.keyboard, ["key 30 pressed"]);
+    // Without a frontend the key goes out in the turn that serves it, and
+    // the reply after it.
+    compositor.set_stipc_key_events(false);
+    send_ipc(
+      &mut stream,
+      concat!(
+        r#"{"method": "stipc/feed_key","#,
+        r#" "data": {"key": "KEY_A", "state": false}}"#
+      ),
+    );
+    compositor.dispatch_pending().expect("dispatch succeeds");
+    assert!(readable(stream.as_fd(), Duration::ZERO), "answered");
+    assert!(readable(wayland.as_fd(), Duration::ZERO), "after the key");
+    assert_eq!(read_ipc(&mut stream)["result"], "ok");
+    client.roundtrip(&mut compositor);
+    assert_eq!(
+      client.events.keyboard,
+      ["key 30 pressed", "key 30 released"]
+    );
+    drop(client);
+    let _ = std::fs::remove_file(path);
   }
 
   #[test]
