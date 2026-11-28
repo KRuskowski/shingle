@@ -821,6 +821,13 @@ class Sweep:
       return None
     return done.stdout.decode(errors='replace')
 
+  def keep_log(self, kind, text):
+    """Saves `text` as NAME-KIND.log beside the captures, if they are
+    kept."""
+    if self.captures_directory:
+      _write(os.path.join(self.captures_directory,
+                          f'{self.name}-{kind}.log'), text)
+
   def stop(self, results):
     """Ends every helper, the bus and Shingle; checks Shingle's exit."""
     keep = descendants(self.shingle.process.pid) | {os.getpid()}
@@ -832,6 +839,7 @@ class Sweep:
     log = self.shingle.log_text()
     alive = self.shingle.alive()
     status = self.shingle.stop()
+    self.keep_log('shingle', self.shingle.log_text())
     results.check(f'{self.name}: Shingle ran throughout and SIGTERM exits '
                   'it with status 0', alive and status == 0,
                   f'status {status}, {checks.tail(log)}')
@@ -1398,6 +1406,7 @@ class Scenario:
       status = self.client.process.poll()
     self.client.log.close()
     log = self.log()
+    self.sweep.keep_log('client', log)
     errors = protocol_errors(log)
     self.record('protocol', not errors, '; '.join(errors[:3]) or 'none')
     crashed = crash_lines(log)
