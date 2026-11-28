@@ -7,15 +7,15 @@ use std::{
   ffi::OsString,
   fs,
   path::{Path, PathBuf},
+  process::{Command, Stdio},
 };
 
 use crate::files::absolute;
 
 /// The theme every lookup falls back to.
 pub const FALLBACK_THEME: &str = "hicolor";
-/// The file types searched, in order. XPM is not decoded, so it is not
-/// searched.
-const EXTENSIONS: [&str; 2] = ["png", "svg"];
+/// The file types searched, in the specification's order.
+const EXTENSIONS: [&str; 3] = ["png", "svg", "xpm"];
 
 /// How a theme directory's icons fit sizes (`Type` in `index.theme`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,8 +223,8 @@ impl IconLookup {
 
   /// The file of the icon `icon` (an `Icon` value) closest to `size`
   /// logical pixels at integer `scale`, or `None`. An absolute path is
-  /// taken as it is; a name with a `.png` or `.svg` extension is looked up
-  /// without it, as many desktop files expect.
+  /// taken as it is; a name with a `.png`, `.svg` or `.xpm` extension is
+  /// looked up without it, as many desktop files expect.
   pub fn find(&mut self, icon: &str, size: u32, scale: u32) -> Option<PathBuf> {
     if icon.is_empty() {
       return None;
@@ -304,7 +304,8 @@ impl IconLookup {
     closest.map(|(_, path)| path)
   }
 
-  /// `NAME.png` or `NAME.svg` in `subdirectory` of `theme` under any base
+  /// `NAME.png`, `NAME.svg` or `NAME.xpm` in `subdirectory` of `theme`
+  /// under any base
   /// directory, the first base directory winning.
   fn file_in(
     &mut self,
@@ -367,12 +368,16 @@ impl IconLookup {
 /// desktop's setting, else `hicolor`. Under KDE (by
 /// `$XDG_CURRENT_DESKTOP`) `kdeglobals`' `[Icons] Theme` comes before
 /// GTK's `gtk-icon-theme-name` (GTK 4's `settings.ini`, then GTK 3's);
-/// elsewhere GTK's comes first. `read` reads a file under
-/// `$XDG_CONFIG_HOME` (default `~/.config`).
+/// elsewhere GTK's comes first. GNOME's own setting, which `gnome` reads
+/// (`org.gnome.desktop.interface icon-theme`, see [`gnome_theme`]), comes
+/// first under GNOME, where GTK takes it over `settings.ini`, and after
+/// the files elsewhere. `read` reads a file under `$XDG_CONFIG_HOME`
+/// (default `~/.config`).
 pub fn theme_name(
   configured: &str,
   var: impl Fn(&str) -> Option<OsString>,
   read: impl Fn(&Path) -> Option<String>,
+  gnome: impl FnOnce() -> Option<String>,
 ) -> String {
   let configured = configured.trim();
   if !configured.is_empty() {
@@ -381,12 +386,16 @@ pub fn theme_name(
   let home = var("HOME").map(PathBuf::from).unwrap_or_default();
   let config =
     absolute(var("XDG_CONFIG_HOME")).unwrap_or_else(|| home.join(".config"));
-  let kde_first = var("XDG_CURRENT_DESKTOP").is_some_and(|value| {
-    value
-      .to_string_lossy()
-      .split(':')
-      .any(|desktop| desktop.eq_ignore_ascii_case("KDE"))
-  });
+  let desktop = |name: &str| {
+    var("XDG_CURRENT_DESKTOP").is_some_and(|value| {
+      value
+        .to_string_lossy()
+        .split(':')
+        .any(|desktop| desktop.eq_ignore_ascii_case(name))
+    })
+  };
+  let kde_first = desktop("KDE");
+  let gnome_first = !kde_first && desktop("GNOME");
   let kde = || {
     read(&config.join("kdeglobals"))
       .and_then(|text| ini_value(&text, "Icons", "Theme"))
@@ -397,12 +406,94 @@ pub fn theme_name(
         .and_then(|text| ini_value(&text, "Settings", "gtk-icon-theme-name"))
     })
   };
+  let gnome = || gnome().filter(|theme| !theme.trim().is_empty());
   let found = if kde_first {
-    kde().or_else(gtk)
+    kde().or_else(gtk).or_else(gnome)
+  } else if gnome_first {
+    gnome().or_else(gtk).or_else(kde)
   } else {
-    gtk().or_else(kde)
+    gtk().or_else(kde).or_else(gnome)
   };
   found.unwrap_or_else(|| FALLBACK_THEME.to_owned())
+}
+
+/// GNOME's icon theme setting through the `gsettings` binary, cached in
+/// the file `cache` while the dconf database `database` keeps its time,
+/// so that a start runs `gsettings` only after the setting may have
+/// changed. Outside GNOME (`!gnome`) a missing database means GNOME's
+/// settings were never written, and the schema's default (Adwaita) is not
+/// taken for a choice. `run` runs `gsettings` ([`run_gsettings`]).
+pub fn gnome_theme(
+  gnome: bool,
+  database: &Path,
+  cache: &Path,
+  run: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+  let stamp = fs::metadata(database)
+    .and_then(|metadata| metadata.modified())
+    .ok()
+    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+    .map(|duration| duration.as_nanos());
+  if stamp.is_none() && !gnome {
+    return None;
+  }
+  let stamp = stamp.unwrap_or_default().to_string();
+  if let Some(cached) = fs::read_to_string(cache)
+    .ok()
+    .and_then(|text| cached_theme(&text, &stamp))
+  {
+    return cached;
+  }
+  let theme = run().as_deref().and_then(parse_gsettings);
+  let text = format!("{stamp}\n{}\n", theme.as_deref().unwrap_or(""));
+  let _ = crate::files::write_atomically(cache, text.as_bytes());
+  theme
+}
+
+/// The theme a [`gnome_theme`] cache file holds for the database time
+/// `stamp`: `Some(None)` when it recorded none, `None` when it is of
+/// another time.
+fn cached_theme(text: &str, stamp: &str) -> Option<Option<String>> {
+  let (time, theme) = text.split_once('\n')?;
+  (time == stamp).then(|| {
+    let theme = theme.trim();
+    (!theme.is_empty()).then(|| theme.to_owned())
+  })
+}
+
+/// The string `gsettings get` printed, in GVariant text form: `'name'`.
+fn parse_gsettings(output: &str) -> Option<String> {
+  let output = output.trim();
+  let value = output
+    .strip_prefix('\'')
+    .and_then(|rest| rest.strip_suffix('\''))
+    .or_else(|| {
+      output
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    })?;
+  (!value.is_empty() && !value.contains(['\'', '"', '\\']))
+    .then(|| value.to_owned())
+}
+
+/// `gsettings get org.gnome.desktop.interface icon-theme`'s output, or
+/// `None` when it is not installed or fails. It reads dconf's database
+/// file and needs no D-Bus: the session bus is set to an address that
+/// cannot connect and `DISPLAY` is removed, so that GIO starts no bus of
+/// its own, and its stderr is dropped.
+pub fn run_gsettings() -> Option<String> {
+  let output = Command::new("gsettings")
+    .args(["get", "org.gnome.desktop.interface", "icon-theme"])
+    .env("DBUS_SESSION_BUS_ADDRESS", "disabled:")
+    .env_remove("DISPLAY")
+    .stdin(Stdio::null())
+    .stderr(Stdio::null())
+    .output()
+    .ok()?;
+  output
+    .status
+    .success()
+    .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// The value of `key` in `[group]` of an INI text, without quotes; `None`
@@ -681,33 +772,110 @@ Type=Fixed
     let kde = Some("[General]\nTheme=x\n[Icons]\nTheme=breeze-dark\n");
     let gtk3 = Some("[Settings]\ngtk-icon-theme-name = \"Adwaita\"\n");
     let gtk4 = Some("[Settings]\ngtk-icon-theme-name=Papirus\n");
+    let none = || None;
     assert_eq!(
-      theme_name(" Mine ", env("KDE"), files(kde, gtk3, gtk4)),
+      theme_name(" Mine ", env("KDE"), files(kde, gtk3, gtk4), none),
       "Mine"
     );
     assert_eq!(
-      theme_name("", env("KDE"), files(kde, gtk3, gtk4)),
+      theme_name("", env("KDE"), files(kde, gtk3, gtk4), none),
       "breeze-dark"
     );
     assert_eq!(
-      theme_name("", env("GNOME"), files(kde, gtk3, gtk4)),
+      theme_name("", env("GNOME"), files(kde, gtk3, gtk4), none),
       "Papirus"
     );
     assert_eq!(
-      theme_name("", env("GNOME"), files(kde, gtk3, None)),
+      theme_name("", env("GNOME"), files(kde, gtk3, None), none),
       "Adwaita"
     );
     assert_eq!(
-      theme_name("", env("wayfire"), files(kde, None, None)),
+      theme_name("", env("wayfire"), files(kde, None, None), none),
       "breeze-dark"
     );
     assert_eq!(
-      theme_name("", env("KDE"), files(None, gtk3, None)),
+      theme_name("", env("KDE"), files(None, gtk3, None), none),
       "Adwaita"
     );
     assert_eq!(
-      theme_name("", env("KDE"), files(None, None, None)),
+      theme_name("", env("KDE"), files(None, None, None), none),
       "hicolor"
     );
+    let gnome = || Some("Papirus-Dark".to_owned());
+    // GNOME's setting wins under GNOME, where GTK follows it.
+    assert_eq!(
+      theme_name("", env("GNOME"), files(kde, gtk3, gtk4), gnome),
+      "Papirus-Dark"
+    );
+    assert_eq!(
+      theme_name("x", env("GNOME"), files(kde, gtk3, gtk4), gnome),
+      "x"
+    );
+    // Elsewhere it comes after the files.
+    assert_eq!(
+      theme_name("", env("wayfire"), files(None, gtk3, None), gnome),
+      "Adwaita"
+    );
+    assert_eq!(
+      theme_name("", env("wayfire"), files(None, None, None), gnome),
+      "Papirus-Dark"
+    );
+    assert_eq!(
+      theme_name("", env("KDE"), files(None, None, None), || Some(" ".into())),
+      "hicolor"
+    );
+  }
+
+  #[test]
+  fn gsettings_output_is_a_quoted_name() {
+    assert_eq!(parse_gsettings("'breeze'\n"), Some("breeze".to_owned()));
+    assert_eq!(parse_gsettings("\"Adwaita\""), Some("Adwaita".to_owned()));
+    assert_eq!(parse_gsettings("''"), None);
+    assert_eq!(parse_gsettings("breeze"), None);
+    assert_eq!(parse_gsettings("'a'b'"), None);
+  }
+
+  #[test]
+  fn gnome_theme_runs_gsettings_once_per_database_time() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("dconf/user");
+    let cache = directory.path().join("cache/gnome-icon-theme");
+    let runs = std::cell::Cell::new(0);
+    let run = |output: &'static str| {
+      let runs = &runs;
+      move || {
+        runs.set(runs.get() + 1);
+        Some(output.to_owned())
+      }
+    };
+    // Outside GNOME, no database means no setting, without a run.
+    assert_eq!(gnome_theme(false, &database, &cache, run("'x'")), None);
+    assert_eq!(runs.get(), 0);
+    // Under GNOME the default counts; the answer is cached.
+    assert_eq!(
+      gnome_theme(true, &database, &cache, run("'Adwaita'")),
+      Some("Adwaita".to_owned())
+    );
+    assert_eq!(
+      gnome_theme(true, &database, &cache, run("'other'")),
+      Some("Adwaita".to_owned())
+    );
+    assert_eq!(runs.get(), 1);
+    // A database written since asks again, and its answer is cached too.
+    write(&database, "gvdb");
+    assert_eq!(
+      gnome_theme(false, &database, &cache, run("'breeze'")),
+      Some("breeze".to_owned())
+    );
+    assert_eq!(
+      gnome_theme(false, &database, &cache, run("'other'")),
+      Some("breeze".to_owned())
+    );
+    assert_eq!(runs.get(), 2);
+    // A failed run is cached as no setting.
+    fs::remove_file(&cache).unwrap();
+    assert_eq!(gnome_theme(false, &database, &cache, || None), None);
+    assert_eq!(gnome_theme(false, &database, &cache, run("'y'")), None);
+    assert_eq!(runs.get(), 2);
   }
 }

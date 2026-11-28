@@ -469,10 +469,46 @@ impl State {
   /// arrives in the main loop as it is ready, and the cache is written at
   /// the end.
   fn start_icons(&mut self) {
-    let (size, pixels) = self.icon_pixels();
+    let (_, pixels) = self.icon_pixels();
     if !self.icon_passes.insert(pixels) {
       return;
     }
+    let names = self.icon_names();
+    let cache = self.icon_cache_path();
+    // A cache that is old, or missing, is looked up in full.
+    let full = std::fs::metadata(&cache)
+      .and_then(|metadata| metadata.modified())
+      .ok()
+      .and_then(|time| SystemTime::now().duration_since(time).ok())
+      .is_none_or(|age| age > ICON_RECHECK);
+    self.spawn_icon_pass(names, full);
+  }
+
+  /// Looks up the icons of the entries a rescan brought that no pass
+  /// knows yet, as for an application installed since the index was
+  /// cached: they are drawn as soon as they are decoded, not at the next
+  /// start. Icons of another size are left to their own pass.
+  fn start_new_icons(&mut self) {
+    let (_, pixels) = self.icon_pixels();
+    if !self.icon_passes.contains(&pixels) {
+      return;
+    }
+    let names = self
+      .icon_names()
+      .into_iter()
+      .filter(|name| !self.icons.knows(name))
+      .collect::<Vec<_>>();
+    if !names.is_empty() {
+      self.spawn_icon_pass(names, false);
+    }
+  }
+
+  /// Looks up and decodes `names` at the size drawn now in a thread,
+  /// all of them when `full`, else only those the store lacks or whose
+  /// file changed; each arrives in the main loop as it is ready, and
+  /// those that changed are merged into the cache file at the end.
+  fn spawn_icon_pass(&mut self, names: Vec<String>, full: bool) {
+    let (size, pixels) = self.icon_pixels();
     let (sender, receiver) = channel::channel::<(u32, String, CachedIcon)>();
     let inserted = self.handle.insert_source(receiver, |event, _, state| {
       if let ChannelEvent::Msg((pixels, name, icon)) = event
@@ -485,15 +521,8 @@ impl State {
     if inserted.is_err() {
       return;
     }
-    let names = self.icon_names();
     let cache = self.icon_cache_path();
-    // A cache that is old, or missing, is looked up in full.
-    let full = std::fs::metadata(&cache)
-      .and_then(|metadata| metadata.modified())
-      .ok()
-      .and_then(|time| SystemTime::now().duration_since(time).ok())
-      .is_none_or(|age| age > ICON_RECHECK);
-    let mut store = self.icons.clone();
+    let store = self.icons.clone();
     let mut lookup = IconLookup::new(
       self.options.icon_paths.clone(),
       &self.options.icon_theme,
@@ -503,7 +532,7 @@ impl State {
       std::thread::Builder::new()
         .name("icons".to_owned())
         .spawn(move || {
-          let mut changed = false;
+          let mut changed = Vec::new();
           for name in names {
             let known = store.icons.get(&name);
             let fresh = known.is_some_and(|known| {
@@ -518,14 +547,15 @@ impl State {
             if known == Some(&icon) {
               continue;
             }
-            changed = true;
-            store.icons.insert(name.clone(), icon.clone());
+            changed.push((name.clone(), icon.clone()));
             if sender.send((pixels, name, icon)).is_err() {
               return;
             }
           }
-          if (changed || full)
-            && let Err(error) = store.save(&cache)
+          // A full pass writes even an unchanged cache, which renews
+          // its time.
+          if (!changed.is_empty() || full)
+            && let Err(error) = IconStore::save_merged(&cache, pixels, changed)
           {
             eprintln!(
               "shingle-launcher: cannot write {}: {error}",
@@ -676,6 +706,7 @@ impl State {
       if let ChannelEvent::Msg(index) = event {
         state.trace(json!({"event": "index", "entries": index.entries.len()}));
         state.model.set_index(index);
+        state.start_new_icons();
         state.dirty = true;
       }
     });

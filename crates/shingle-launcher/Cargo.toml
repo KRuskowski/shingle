@@ -12,8 +12,13 @@ gloomy-core.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Gloomy's own wgpu and pollster, for the device handed to its renderer.
 pollster = "0.3"
-# Gloomy's versions, for decoding SVG icons.
-resvg = { version = "0.36", default-features = false }
+# Gloomy's versions, for decoding SVG icons, with their text drawn in
+# the system's fonts.
+resvg = { version = "0.36", default-features = false, features = [
+  "memmap-fonts",
+  "system-fonts",
+  "text",
+] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

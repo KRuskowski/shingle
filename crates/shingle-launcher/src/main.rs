@@ -16,7 +16,7 @@ use shingle_launcher::{
   files::Paths,
   history::History,
   icon_cache::{IconStore, resolve},
-  icons::{IconLookup, IconPaths, theme_name},
+  icons::{IconLookup, IconPaths, gnome_theme, run_gsettings, theme_name},
   index::{SearchPaths, load_cache, save_cache, scan},
   launch::pick_terminal,
   layout::LayoutStore,
@@ -186,9 +186,25 @@ fn run(arguments: Arguments, started: Instant) -> Result<(), String> {
   let terminal =
     pick_terminal(&config.terminal, var("TERMINAL"), &search_paths.path_dirs);
   let icon_paths = IconPaths::from_env(var);
-  let icon_theme = theme_name(&config.icon_theme, var, |path| {
-    std::fs::read_to_string(path).ok()
-  });
+  let icon_theme = theme_name(
+    &config.icon_theme,
+    var,
+    |path| std::fs::read_to_string(path).ok(),
+    || {
+      let gnome = var("XDG_CURRENT_DESKTOP").is_some_and(|value| {
+        value
+          .to_string_lossy()
+          .split(':')
+          .any(|desktop| desktop.eq_ignore_ascii_case("GNOME"))
+      });
+      gnome_theme(
+        gnome,
+        &paths.dconf_database,
+        &paths.icon_cache.join("gnome-icon-theme"),
+        run_gsettings,
+      )
+    },
+  );
 
   let socket = paths
     .runtime

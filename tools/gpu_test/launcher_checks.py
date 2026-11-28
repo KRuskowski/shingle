@@ -13,7 +13,9 @@ text, moving to a category by keyboard and by drag, the context menu,
 persistence across restarts, the toggle, closing by a click outside, and
 the startup time; icons from a configured theme, hicolor and pixmaps in
 captures and from the icon cache in a later first frame; a desktop
-action found by search and by the Menu key and a right click; and the
+action found by search and by the Menu key and a right click; entries
+installed after the index was cached getting their icons from the
+rescan, an XPM and an SVG of text; and the
 panel at scales 1, 1.25, 1.5 and 2, which must be the output's device
 pixels and match the launcher's own `--screenshot --scale` drawing in
 the capture but for a few glyph edges. Then it checks type-to-launch again under the
@@ -65,6 +67,27 @@ ICON_THEME = 'ProbeTheme'
 # hicolor and gamma's a PNG in pixmaps.
 ICONS = {'alpha': ('alpha-icon', 'yellow'), 'beta': ('beta-icon', 'green'),
          'gamma': ('gamma-icon', 'blue')}
+# The entries installed after the index is cached, by ID: their names and
+# icons, delta's a red XPM in pixmaps, epsilon's an SVG in hicolor that is
+# nothing but green text.
+LATE = {'delta': ('Delta Probe', 'delta-icon'),
+        'epsilon': ('Epsilon Probe', 'epsilon-icon')}
+XPM = """/* XPM */
+static char *delta[] = {
+"4 4 2 1",
+". c None",
+"# c #FF0000",
+"####",
+"####",
+"####",
+"####"
+};
+"""
+# Two wide glyphs of a heavy weight cover much of the square in any font.
+TEXT_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48">'
+            '<text x="0" y="44" font-size="48" font-weight="bold" '
+            'fill="#00ff00" stroke="#00ff00" stroke-width="6" '
+            'font-family="DejaVu Sans, sans-serif">MW</text></svg>')
 # Alpha's desktop action: its ID, name, the probe it starts and its icon,
 # a cyan PNG in hicolor.
 ACTION = {'id': 'second', 'name': 'Second Window', 'app_id': 'alpha-second',
@@ -274,6 +297,7 @@ class Fixture:
     for path in (self.data_home, applications, self.bin):
       os.makedirs(path)
     os.symlink(wl_probe, os.path.join(self.bin, 'wl_probe'))
+    self.wl_probe = wl_probe
     for app_id, name, categories in PROBES:
       actions = ()
       if app_id == 'alpha':
@@ -301,6 +325,18 @@ class Fixture:
                                     'launcher.yaml')
     self.icon_cache = os.path.join(self.directory, 'cache', 'shingle',
                                    'launcher-icons')
+
+  def install_late(self):
+    """Installs LATE's entries and icons, as a package installed while
+    the launcher's caches are warm."""
+    applications = os.path.join(self.system, 'applications')
+    for app_id, (name, icon) in LATE.items():
+      with open(os.path.join(applications, f'{app_id}.desktop'), 'w') as file:
+        file.write(desktop_entry(name, f'{self.wl_probe} {app_id}',
+                                 'Utility;', icon))
+    write_file(os.path.join(self.system, 'pixmaps', 'delta-icon.xpm'), XPM)
+    write_file(os.path.join(self.system, 'icons', 'hicolor', 'scalable',
+                            'apps', 'epsilon-icon.svg'), TEXT_SVG)
 
   def icon_cache_file(self, pixels):
     """The icon cache of the fixture's theme at `pixels` device pixels."""
@@ -417,6 +453,17 @@ def icon_colours(shot, frame, names):
     colours[name] = (checks.classify(*shot.pixel(*centre(icon['rect'])))
                      if icon else None)
   return colours
+
+def coloured_share(shot, rect, colour):
+  """The share of the pixels of the trace rectangle `rect` in `shot` that
+  classify as `colour`."""
+  left, top = int(rect['x']), int(rect['y'])
+  width, height = int(rect['width']), int(rect['height'])
+  points = [(x, y) for y in range(top, top + height)
+            for x in range(left, left + width)]
+  matching = sum(1 for point in points
+                 if checks.classify(*shot.pixel(*point)) == colour)
+  return matching / len(points) if points else 0.0
 
 def mapped_count(shingle, app_id):
   """How many mapped views have `app_id`."""
@@ -907,6 +954,49 @@ def _run_scenario(results, shingle, binary, fixture, config_path, captures,
       f'launcher: the first frame comes within {STARTUP_TARGET_MS:.0f} ms '
       '(median of warm starts)',
       own and statistics.median(own) < STARTUP_TARGET_MS, summary(own))
+
+  # 13. Applications installed since the index was cached: the background
+  # rescan lists them and loads their icons at once, an XPM in pixmaps
+  # and an SVG whose only content is text, drawn in a system font.
+  fixture.install_late()
+  launcher = Launcher(shingle, binary, fixture, config_path)
+  frame = launcher.wait_frame(lambda frame: True, timeout=20)
+  if frame is None and 'closed the open launcher' in launcher.client.output():
+    # A launcher of the timing loop still had its socket; this start
+    # closed it, as a second invocation does, so start once more.
+    print('INFO launcher: a launcher was still open before step 13',
+          flush=True)
+    _finish(launcher, launched)
+    launcher, frame = _start(shingle, binary, fixture, config_path,
+                             results, 'installed late')
+  elif frame is None:
+    results.check('launcher: installed late: the launcher shows a frame',
+                  False, checks.tail(launcher.client.output()))
+  if frame is None:
+    return
+  late = [name for name, _ in LATE.values()]
+  launcher.type('probe')
+  iconed = launcher.wait_frame(
+      lambda frame: all((row(frame, name) or {}).get('icon')
+                        for name in late), timeout=15)
+  seen = [None]
+
+  def shows_late_icons(shot):
+    xpm = row(iconed, LATE['delta'][0])['icon']['rect']
+    text = row(iconed, LATE['epsilon'][0])['icon']['rect']
+    seen[0] = (checks.classify(*shot.pixel(*centre(xpm))),
+               coloured_share(shot, text, 'green'))
+    return seen[0][0] == 'red' and seen[0][1] > 0.1
+  shot = captures.settled(shingle, shows_late_icons) if iconed else None
+  results.check(
+      'launcher: an application the rescan finds gets its icon at once: an '
+      'XPM, and an SVG\'s text drawn in a system font',
+      iconed is not None and seen[0] is not None and seen[0][0] == 'red'
+      and seen[0][1] > 0.1,
+      f'{seen[0]}, {json.dumps(launcher.frame())[:300]}')
+  launcher.key('esc')
+  launcher.exited()
+  _finish(launcher, launched)
 
 CHECKS = {
     'launcher': launcher_checks,

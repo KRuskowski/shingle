@@ -7,9 +7,10 @@
 //! ([`layout`]), what is shown with it applied ([`catalog`]), the state
 //! keys and the pointer change ([`model`]), the panel as Gloomy widgets
 //! ([`view`], [`theme`]) and entries' icons ([`icons`] finds them in the
-//! icon theme, [`icon_cache`] decodes and caches them). [`render`] draws
-//! that with Gloomy, [`shm`] holds the pixels for the compositor and
-//! [`launch`] runs the choice; the binary adds the Wayland client.
+//! icon theme, [`icon_cache`] decodes and caches them, with [`xpm`] for
+//! old pixmaps). [`render`] draws that with Gloomy, [`shm`] holds the
+//! pixels for the compositor and [`launch`] runs the choice; the binary
+//! adds the Wayland client.
 
 pub mod catalog;
 pub mod desktop;
@@ -27,3 +28,4 @@ pub mod search;
 pub mod shm;
 pub mod theme;
 pub mod view;
+pub mod xpm;

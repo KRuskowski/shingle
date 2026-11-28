@@ -18,6 +18,9 @@ pub struct Paths {
   pub index_cache: PathBuf,
   /// Decoded icons: `$XDG_CACHE_HOME/shingle/launcher-icons`.
   pub icon_cache: PathBuf,
+  /// dconf's user database, whose time says whether GNOME's settings
+  /// changed: `$XDG_CONFIG_HOME/dconf/user`.
+  pub dconf_database: PathBuf,
   /// The directory of the single-instance socket, `$XDG_RUNTIME_DIR`.
   pub runtime: Option<PathBuf>,
 }
@@ -39,6 +42,7 @@ impl Paths {
       index_cache: shingle("XDG_CACHE_HOME", ".cache")
         .join("launcher-index.json"),
       icon_cache: shingle("XDG_CACHE_HOME", ".cache").join("launcher-icons"),
+      dconf_database: base("XDG_CONFIG_HOME", ".config").join("dconf/user"),
       runtime: absolute(var("XDG_RUNTIME_DIR")),
     }
   }
@@ -92,6 +96,10 @@ mod tests {
     assert_eq!(
       paths.icon_cache,
       Path::new("/home/u/.cache/shingle/launcher-icons")
+    );
+    assert_eq!(
+      paths.dconf_database,
+      Path::new("/home/u/.config/dconf/user")
     );
     assert_eq!(paths.runtime.as_deref(), Some(Path::new("/run/user/7")));
   }

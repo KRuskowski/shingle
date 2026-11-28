@@ -8,16 +8,18 @@ use std::{
   fs,
   os::unix::ffi::{OsStrExt, OsStringExt},
   path::{Path, PathBuf},
-  sync::Arc,
+  sync::{Arc, Mutex, OnceLock},
   time::UNIX_EPOCH,
 };
 
-use resvg::usvg::{self, TreeParsing};
+use resvg::usvg::{self, TreeParsing, TreeTextToPath, fontdb};
 
 use crate::{files::write_atomically, icons::IconLookup};
 
-/// The first bytes of a cache file, with its format's version.
-const MAGIC: &[u8; 8] = b"SLICON01";
+/// The first bytes of a cache file, with its format's version. Version 2
+/// decodes XPM files and draws the text of SVG files, which version 1's
+/// pixels lack.
+const MAGIC: &[u8; 8] = b"SLICON02";
 
 /// An icon's pixels: straight (not premultiplied) RGBA, row by row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +155,22 @@ impl IconStore {
   pub fn save(&self, path: &Path) -> std::io::Result<()> {
     write_atomically(path, &self.encode())
   }
+
+  /// Writes `changed` into the cache file at `path` over what it holds
+  /// now, so that passes running one after another, or at once in
+  /// threads of their own, each add their icons and none drops
+  /// another's. A file of another size or version starts empty.
+  pub fn save_merged(
+    path: &Path,
+    pixels: u32,
+    changed: impl IntoIterator<Item = (String, CachedIcon)>,
+  ) -> std::io::Result<()> {
+    static SAVING: Mutex<()> = Mutex::new(());
+    let _saving = SAVING.lock().unwrap_or_else(|error| error.into_inner());
+    let mut store = Self::load(path, pixels);
+    store.icons.extend(changed);
+    store.save(path)
+  }
 }
 
 fn put(bytes: &mut Vec<u8>, value: u32) {
@@ -219,24 +237,52 @@ pub fn modified(path: &Path) -> u64 {
 }
 
 /// The icon file at `path` decoded into a square of `side` pixels: an SVG
-/// drawn at that size, a PNG scaled to it, either centred with its aspect
-/// ratio kept. Text in SVG files is not drawn, since no fonts are loaded.
+/// drawn at that size, its text with the system's fonts, a PNG or an XPM
+/// scaled to it, each centred with its aspect ratio kept.
 pub fn decode_file(path: &Path, side: u32) -> Result<IconPixels, String> {
   let data = fs::read(path).map_err(|error| error.to_string())?;
-  let is_svg = path
+  let extension = path
     .extension()
-    .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"));
-  if is_svg {
-    decode_svg(&data, side)
-  } else {
-    decode_png(&data, side)
+    .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
+  match extension.as_deref() {
+    Some("svg") => decode_svg_with(&data, side, system_fonts),
+    Some("xpm") => decode_xpm(&data, side),
+    _ => decode_png(&data, side),
   }
 }
 
-/// An SVG drawn into a square of `side` pixels.
+/// The system's fonts, found through fontconfig's configuration as
+/// resvg's own tools find them, loaded once, the first time an SVG icon
+/// with text is decoded: only on the icon thread, after the first frame.
+fn system_fonts() -> &'static fontdb::Database {
+  static FONTS: OnceLock<fontdb::Database> = OnceLock::new();
+  FONTS.get_or_init(|| {
+    let mut fonts = fontdb::Database::new();
+    fonts.load_system_fonts();
+    fonts
+  })
+}
+
+/// An SVG drawn into a square of `side` pixels, without its text.
 pub fn decode_svg(data: &[u8], side: u32) -> Result<IconPixels, String> {
-  let tree = usvg::Tree::from_data(data, &usvg::Options::default())
+  static NO_FONTS: OnceLock<fontdb::Database> = OnceLock::new();
+  decode_svg_with(data, side, || NO_FONTS.get_or_init(fontdb::Database::new))
+}
+
+/// An SVG drawn into a square of `side` pixels, its text with the fonts
+/// `fonts` gives, which is only called for an SVG with text.
+pub fn decode_svg_with<'a>(
+  data: &[u8],
+  side: u32,
+  fonts: impl FnOnce() -> &'a fontdb::Database,
+) -> Result<IconPixels, String> {
+  let mut tree = usvg::Tree::from_data(data, &usvg::Options::default())
     .map_err(|error| error.to_string())?;
+  // Text nodes are drawn only once they are paths. A file without a
+  // `<text` element has none, and loading fonts for it would be wasted.
+  if data.windows(5).any(|window| window == b"<text") {
+    tree.convert_text(fonts());
+  }
   let mut pixmap =
     tiny_skia::Pixmap::new(side, side).ok_or("an empty icon size")?;
   let size = tree.size;
@@ -262,13 +308,31 @@ pub fn decode_svg(data: &[u8], side: u32) -> Result<IconPixels, String> {
   })
 }
 
-/// A PNG scaled into a square of `side` pixels, filtered with its alpha
-/// premultiplied so that transparent pixels do not darken the edges.
+/// A PNG scaled into a square of `side` pixels, centred, filtered with
+/// its alpha premultiplied so that transparent pixels do not darken the
+/// edges.
 pub fn decode_png(data: &[u8], side: u32) -> Result<IconPixels, String> {
   let image =
     image::load_from_memory_with_format(data, image::ImageFormat::Png)
       .map_err(|error| error.to_string())?
       .to_rgba8();
+  fit(image, side)
+}
+
+/// An XPM ([`crate::xpm`]) scaled into a square of `side` pixels as
+/// [`decode_png`] scales a PNG.
+pub fn decode_xpm(data: &[u8], side: u32) -> Result<IconPixels, String> {
+  let decoded = crate::xpm::decode(data)?;
+  let image =
+    image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.rgba)
+      .ok_or("an XPM of the wrong length")?;
+  fit(image, side)
+}
+
+/// `image` scaled into a square of `side` pixels, centred, filtered with
+/// its alpha premultiplied so that transparent pixels do not darken the
+/// edges.
+fn fit(image: image::RgbaImage, side: u32) -> Result<IconPixels, String> {
   let (width, height) = image.dimensions();
   if width == 0 || height == 0 {
     return Err("an empty image".into());
@@ -395,6 +459,70 @@ mod tests {
     assert!(decode_svg(b"not svg", 32).is_err());
   }
 
+  /// A 16 × 16 SVG whose only content is text.
+  const TEXT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg"
+    width="16" height="16" viewBox="0 0 16 16">
+    <text x="0" y="16" font-size="16" fill="#00ff00"
+      font-family="DejaVu Sans, Liberation Sans, sans-serif">MM</text>
+  </svg>"##;
+
+  #[test]
+  fn svg_text_is_drawn_with_fonts_and_left_out_without() {
+    let opaque = |icon: &IconPixels| {
+      icon.rgba.chunks(4).filter(|pixel| pixel[3] > 0).count()
+    };
+    let without = decode_svg(TEXT.as_bytes(), 32).unwrap();
+    assert_eq!(opaque(&without), 0);
+    let fonts = system_fonts();
+    if fonts.is_empty() {
+      eprintln!("no system fonts; text is not drawn");
+      return;
+    }
+    let with = decode_svg_with(TEXT.as_bytes(), 32, || fonts).unwrap();
+    assert!(opaque(&with) > 100, "{} pixels drawn", opaque(&with));
+    // An SVG without text never asks for fonts.
+    let squares = decode_svg_with(SQUARES.as_bytes(), 32, || {
+      panic!("fonts loaded for an SVG without text")
+    });
+    assert!(squares.is_ok());
+  }
+
+  #[test]
+  fn xpms_are_scaled_like_pngs() {
+    let xpm = b"/* XPM */\nstatic char *x[] = {\n\"2 1 2 1\",\n\
+      \". c None\",\n\"# c #0A141E\",\n\".#\"};\n";
+    let icon = decode_xpm(xpm, 2).unwrap();
+    // 2 × 1 in a square of 2, at the top as the centre rounds down.
+    assert_eq!((icon.width, icon.height), (2, 2));
+    assert_eq!(pixel(&icon, 0, 0), [0, 0, 0, 0]);
+    assert_eq!(pixel(&icon, 1, 0), [10, 20, 30, 255]);
+    assert_eq!(pixel(&icon, 1, 1), [0, 0, 0, 0]);
+    assert!(decode_xpm(b"/* XPM */", 2).is_err());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("old.xpm");
+    fs::write(&path, xpm).unwrap();
+    assert_eq!(decode_file(&path, 2), Ok(icon));
+  }
+
+  #[test]
+  fn merged_saves_keep_what_other_passes_wrote() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("icons.bin");
+    let icon = |source: &str| CachedIcon {
+      source: source.into(),
+      modified: 1,
+      pixels: None,
+    };
+    IconStore::save_merged(&path, 8, [("a".to_owned(), icon("/a"))]).unwrap();
+    IconStore::save_merged(&path, 8, [("b".to_owned(), icon("/b"))]).unwrap();
+    let store = IconStore::load(&path, 8);
+    assert_eq!(store.icons.len(), 2);
+    assert_eq!(store.icons["a"], icon("/a"));
+    // Another size starts again.
+    IconStore::save_merged(&path, 9, [("c".to_owned(), icon("/c"))]).unwrap();
+    assert_eq!(IconStore::load(&path, 9).icons.len(), 1);
+  }
+
   #[test]
   fn pngs_are_scaled_without_dark_edges() {
     let big = png(64, 64, [10, 200, 30, 255]);
@@ -438,6 +566,9 @@ mod tests {
     assert_eq!(IconStore::decode(&bytes), Some(store.clone()));
     assert_eq!(IconStore::decode(&bytes[..bytes.len() - 1]), None);
     assert_eq!(IconStore::decode(b"SLICON00"), None);
+    let mut old = bytes.clone();
+    old[..8].copy_from_slice(b"SLICON01");
+    assert_eq!(IconStore::decode(&old), None);
     assert!(store.knows("missing") && store.get("missing").is_none());
     assert_eq!(store.get("app").unwrap().rgba.len(), 16);
     let directory = tempfile::tempdir().unwrap();
