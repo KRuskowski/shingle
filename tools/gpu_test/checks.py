@@ -764,8 +764,9 @@ def all_checks():
   effects (animate_checks.py), the Wayfire comparisons of configured
   colours (colour_checks.py) and of focus after a minimize
   (focus_checks.py), the rehearsal of a real wayfire.ini
-  (rehearsal_checks.py) and the time to first frame of new windows
-  (first_frame_checks.py)."""
+  (rehearsal_checks.py), the time to first frame of new windows
+  (first_frame_checks.py) and views straddling two workspaces
+  (straddle_checks.py)."""
   import animate_checks
   import app_checks
   import colour_checks
@@ -782,6 +783,7 @@ def all_checks():
   import rehearsal_checks
   import resize_checks
   import screencast_checks
+  import straddle_checks
   import switcher_checks
   import vswipe_checks
   import wayfire_checks
@@ -794,7 +796,7 @@ def all_checks():
           **screencast_checks.CHECKS, **launcher_checks.CHECKS,
           **lock_checks.CHECKS, **rehearsal_checks.CHECKS,
           **animate_checks.CHECKS, **first_frame_checks.CHECKS,
-          **app_checks.CHECKS}
+          **straddle_checks.CHECKS, **app_checks.CHECKS}
 
 def run_checks(groups, binary, wl_probe, captures_directory=None):
   """Runs the check `groups` in order; returns 0 when all passed."""
