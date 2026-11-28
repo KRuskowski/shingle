@@ -716,12 +716,57 @@ Fixed, each with unit tests:
 
 Left, and why:
 
-- A view straddling two workspaces is drawn on its own one only; Wayfire draws it on both ([ipc.md](../ipc.md#views-on-other-workspaces) gives the reason).
+- A view straddling two workspaces was drawn on its own one only, where Wayfire draws it on both; `shingle-straddling-views` closed it ([straddling views as built](#straddling-views-as-built)).
 - `list-views` still leaves out override-redirect X windows, which Wayfire lists as `x-or`: Shingle's unmanaged X windows have no core window and no view id, and every view method would need a second kind of id for them.
 - `set-config-options` still changes only the options Shingle keeps live: the others are read once by the part that uses them, and making each one live is work per option, not a fix in IPC.
 - The easing curves of animation durations (`vswitch/duration`, `vswipe/duration`, `switcher/speed`, `expo/duration`, `simple-tile/animation_duration`; wf-config:src/duration.cpp:28-35, :333-336) were still ignored; `shingle-animate` applies them ([animate as built](#animate-as-built)).
 - Touch-screen gestures and hotspots in `command` and other activators, `stipc/tablet/*` and `stipc/delay_next_tx`, and the `wayfire/configuration`, `reload-config-metadata`, `reload-plugins` and `render-metrics` methods of ipc-rules stay as the tables above rank them: there is no touch gesture recogniser or tablet support to bind them to, `delay_next_tx` delays Wayfire's transactions, which Shingle does not have, and the utility methods describe Wayfire's own build and plugin loader.
 - The differences recorded in the as-built sections above for vswipe (WG-5), wayfire-shell (WG-4) and the switcher (WG-7) are unchanged; each is there with its reason.
+
+### Straddling views as built
+
+Branch `shingle-straddling-views` closed the last difference of the workspace follow-ups: a floating window hanging over the edge of its workspace was drawn on that workspace only, clipped at the output's edge.
+
+What Wayfire does, at the pinned commit:
+
+- **The scene.** A workspace set's views share one plane in which workspace `(x, y)` lies `(x - current.x)` output widths and `(y - current.y)` heights from the current one, and a switch moves every view by the difference (wayfire:src/output/workspace-impl.cpp:501-516 `view_visible_on`, :596-617). The output renders whatever of the plane lies over it, so the part of a view past its workspace's edge shows at the facing edge of the neighbour once that is current. A view counts as on a workspace when its geometry, frame included, overlaps it (`view_visible_on`); its main workspace is the one holding its centre (:478-492).
+- **Input.** Input goes to the view drawn under the pointer, and a click focuses it through `wayfire_focus::check_focus_surface` and `focus_raise_view(view)` with `allow_switch_ws` false (wayfire:src/core/wm.cpp:117-135, src/core/window-manager.cpp:130-166): the view is raised and focused, and the workspace stays.
+- **Stacking.** A set's views of one layer are stacked together, and focusing a view brings it to the front (`view_bring_to_front`), so a view hanging over is above the neighbour's views focused before it and below those focused after.
+- **Walls.** vswitch's and vswipe's slides and Expo draw a workspace wall: each workspace is rendered on its own into a buffer of the workspace's size (wayfire:plugins/common/workspace-wall.cpp, src/output/workspace-stream.cpp), so a view is cut at each workspace's edge and shown in every workspace it overlaps, with the wall's gap between the parts. Expo zooms the whole wall, so each workspace is scaled into its cell as a whole (wayfire:plugins/single_plugins/expo.cpp).
+- **Screencopy** captures the output's scene, so it shows what is drawn.
+- **Lists.** Scale's current workspace is the views whose centre is on the output (wayfire:plugins/scale/scale.cpp:733-749). The switcher, fast-switcher and wm-actions' show-desktop list the views `view_visible_on` the current workspace (`WSET_CURRENT_WORKSPACE`, wayfire:src/output/workspace-impl.cpp:418), so a view hanging over is in them on both workspaces.
+- **Moves.** Wayfire has no home workspace: after a move drag the view is wherever its geometry is, and move sends `view-workspace-changed` to the current workspace at the drop (wayfire:plugins/single_plugins/move.cpp:128-133). The grid snaps a view into the current workspace's workarea.
+
+Debian's headless Wayfire 0.9 behaves alike where IPC and `grim` can observe it: `tools/gpu_test/run.py --checks straddle` runs the same steps in it as in offscreen Shingle, a `wl_probe --pattern` 200 pixels into the first workspace's right edge and 100 past it shown to the edge, its other 100 pixels at the second workspace's left edge once that is current, and a click there focusing it without a switch. The slide and Expo are captured in Shingle only; the reference ran without them.
+
+What Shingle does now:
+
+- `visible_surfaces_on` (crates/shingle/src/state.rs) adds, after the current workspace's windows of each stacking layer, the windows of the set's other workspaces whose geometry with its frame, moved by the distance between the two workspaces, overlaps the output (crates/shingle/src/straddle.rs, `straddlers`). Their surfaces, popups and subsurfaces come with `geometry` moved by that distance and with it in the new `SurfaceSnapshot::shift`. Sticky, minimized and unmapped windows are left out, and everything while the desktop is shown.
+- They are stacked among the current workspace's windows by focus: each goes directly below the lowest window of the workspace focused after it, or on top (`merge_by_recency`); the workspace's own order is kept.
+- Input follows what is drawn: hit testing takes the snapshots, and the pointer's, touch's and drag-and-drop's surface coordinates, pointer constraints and warps, frames and the input panel take the surface's drawn rectangle (`drawn_rect`, `window_shift`). A click on the part shown focuses and raises the window without a switch.
+- The CPU screencopy composites the same list; the frontend's captures are of its frames.
+- The window keeps its own workspace, the one holding its centre, for IPC (which already reported its rectangle relative to the current workspace), sessions and focus order; Scale, the switchers and the other lists are unchanged.
+- The frontend draws a window on vswitch's and vswipe's walls once for each workspace it overlaps, placed as on that workspace and cut to that workspace's cell (crates/shingle-frontend/src/straddle.rs, `wall_copies`, `apply_copies`), so the gap lies between the parts; a window inside its workspace is cut to its cell too, as Wayfire's streams cut it. Expo does the same in its cells (`expo_copies`) and takes a press on any part shown.
+- A switch moves a window drawn moved by its shift without animating it as a geometry change, and its frame is drawn with it.
+- At the end of a move drag a floating window goes to the workspace holding its centre, drawn where it was dropped, and one drawn here from another workspace is moved onto the current one before it snaps into a slot (`Compositor::settle_on_centre_workspace`, `Compositor::adopt_on_current_workspace`).
+
+Decisions:
+
+1. A window is drawn on another workspace by moving its snapshots (`SurfaceSnapshot::shift`), not by giving it a second place in the model: within one frame an output shows one workspace, so a window appears at most once in the normal scene, and only the walls draw it several times, which the frontend does from the window's own place. Everything that is not drawing or input (IPC, sessions, focus order, `wl_surface.enter`, window captures) keeps the window's one place.
+2. A window counts as overlapping a workspace by its geometry with its frame, as `view_visible_on` decides. Its popups go with it; a popup of a window that does not itself overlap the workspace is not drawn there, where Wayfire's scene would draw it.
+3. Shingle stacks each workspace on its own, so a window from another workspace is placed by focus order, which is Wayfire's raise order unless a view was raised or lowered without focus.
+4. On the walls a tile is cut on the CPU by geometry and texture coordinates (`RenderTile::crop`), which needs no clip in the renderer. A rotated window (`wrot`) and one drawn by an effect (fire, squeeze) cannot be cut so and stay one uncut copy, as before.
+5. Expo fitted each window into its workspace's cell on its own, keeping a small window at its size in the middle of the cell and piling a workspace's tiles on top of each other; nothing recorded that as intended. It now scales a workspace into its cell as a whole (`expo::workspace_scaled`), as Wayfire's zoomed wall does, without which a window could not be shown in part in two cells. Shingle's cells still follow its own grid of the output, not Wayfire's square wall.
+6. Shingle keeps a home workspace for every window, which Wayfire does not have. Settling a floating window on the workspace holding its centre at the end of a drag keeps the home where Wayfire's main workspace is; adopting it before a snap snaps it into the workspace shown, as Wayfire's grid does. Neither sends `view-workspace-changed`, as the drop sent none before.
+7. Performance: `straddlers` is one pass over the surfaces per output and frame that keeps only mapped windows of the output's set on other workspaces before it computes a geometry; with no window past its workspace's edge nothing more happens and the scene is as before. Each output culls on its own set and its own size. On the walls `overlapped_workspaces` looks only at the columns and rows the window spans, and copies are made only while a slide or Expo is drawn.
+
+Where Shingle still differs, and why:
+
+- The switcher, fast-switcher and show-desktop keep to a window's own workspace, as the task asked for focus order; in Wayfire a view hanging over is in them on both workspaces.
+- An X window's position as X sees it is its place on its own workspace, so an override-redirect menu it opens while it is drawn from a neighbouring workspace appears where the window lies on its own; in Wayfire the view and its X position move with the switch.
+- The workspaces of Shingle's slide show the wall's background colour and not the background layer, as before this branch.
+
+Tested by crates/shingle/src/straddle/tests.rs (through the in-process test client: the shift, the merge by focus, a window drawn on the neighbour and on all four workspaces around a corner and not elsewhere, sticky, minimized and contained windows, a click on the part shown focusing it with the surface coordinates of where it is drawn, the stacking by focus and the click on the window on top, a screencopy of the neighbour, adopting and settling), crates/shingle/src/decorator/tests.rs (a frame hanging over taking hover and its close button where drawn), crates/shingle-frontend/src/straddle.rs (overlapped workspaces at edges, corners and the grid's edge, wall and Expo copies, cutting and the rotated tile left whole), crates/shingle-frontend/src/expo.rs (scaling a workspace into its cell, a press in either cell) and crates/shingle-frontend/src/frontend/tests/straddle.rs (on the GPU: the neighbour's scene without an animation, the click, the slide's two parts 20 pixels apart, vswipe's wall, Expo's two cells, the frame, and a drag by the part shown landing where it is dropped). The real run is `tools/gpu_test/run.py --checks straddle` (tools/gpu_test/straddle_checks.py), recorded in docs/status.md.
 
 ### animate as built
 

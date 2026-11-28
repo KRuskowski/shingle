@@ -135,6 +135,7 @@
 | Evdev code to Wayfire key name table | `crates/shingle-frontend/src/keyboard/names.rs` |
 | Scale layout and title filter | `crates/shingle-frontend/src/scale.rs` |
 | Expo, vswitch transitions, touch gestures | `crates/shingle-frontend/src/expo.rs`, `workspace_transition.rs`, `extra_gestures.rs` |
+| Windows straddling workspaces: which other workspaces' windows an output draws and where, their stacking by focus, input at the drawn place, settling a dropped window by its centre; their copies cut to each workspace on vswitch's and vswipe's walls and in Expo | `crates/shingle/src/straddle.rs`; `crates/shingle-frontend/src/straddle.rs` |
 | Touchpad workspace swipes (vswipe) | `crates/shingle-frontend/src/vswipe.rs`, `frontend/vswipe.rs` |
 | GPU device, pipelines, textures, gamma and effects | `crates/shingle-render/src/gpu.rs` |
 | Configured colours decoded to the linear colours tiles and clears take | `crates/shingle-render/src/color.rs` |

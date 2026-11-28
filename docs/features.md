@@ -54,7 +54,7 @@ scale_title_filter:
 
 Super+E opens every configured workspace in its exact grid position. Arrow, H/J/K/L, or keypad keys and pointer hover select a cell, including an empty workspace. Direct workspace shortcuts commit immediately, even when ordinary keyboard interaction is disabled. Enter, left-click, touch, or Super+E commits the selection. Pointer and touch presses begin a possible drag; release commits it. Dragging a thumbnail to another workspace moves that window there on release. Escape cancels without a drop. Other keys, buttons, and scrolling are captured while Expo is active, and keyboard navigation is suspended while a pointer drag is held. Selection alone never changes the active workspace or moves tiled windows.
 
-Expo redraws current client buffers whenever their contents or layout change. Entry and exit interpolate the workspace wall and its thumbnails. Changing the selection crossfades brightness without changing compositor opacity. Output resizes and window destruction invalidate thumbnail geometry, and configuration reloads dismiss Expo. A zero duration disables the corresponding transition.
+Expo redraws current client buffers whenever their contents or layout change. Each workspace is scaled into its cell as a whole, as Wayfire's expo scales its wall, so windows keep their places and sizes relative to their workspace. Entry and exit interpolate the workspace wall and its thumbnails. Changing the selection crossfades brightness without changing compositor opacity. Output resizes and window destruction invalidate thumbnail geometry, and configuration reloads dismiss Expo. A zero duration disables the corresponding transition.
 
 ```yaml
 expo:
@@ -87,6 +87,8 @@ Wayfire's `[switcher] speed`, `view_thumbnail_scale` and `view_thumbnail_rotatio
 ### Vswitch workspace transitions
 
 Normal workspace switches slide the old and new workspaces along the configured grid. The transition preserves window sizes and positions, keeps layer-shell panels stationary, and never writes temporary coordinates into the session. Opening Scale or Expo cancels the slide so overview transforms remain separate. Output changes and configuration reloads also discard stale transitions.
+
+A floating window hanging over the edge of its workspace shows on the neighbouring workspace too, as in Wayfire: once that workspace is current, the part past the edge is drawn at its facing edge and takes clicks, which focus the window without switching. During a slide each workspace shows its part of the window, cut at the workspace's edge with the gap between the parts, and Expo shows each part in its workspace's cell. The window belongs to the workspace holding its centre, for IPC, the session and focus order; a floating window dropped after a move goes to that workspace and stays where it was dropped.
 
 ```yaml
 vswitch:
