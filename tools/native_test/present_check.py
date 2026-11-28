@@ -86,9 +86,11 @@ def check(flips, events, scanout=None, tearing=False, vrr=False):
   reports that vblank's sequence and timestamp for it: frames flipped in
   one vblank share a sequence, and their callbacks can carry a time before
   their commit. With `tearing` neither is a problem. The frames before the
-  first async flip went with the vblank; i915 on the Latitude 5450 (Meteor
-  Lake) flipped the first two of a probe run that way (2026-11-28), so they
-  are counted as `sync_before_async` instead of failing."""
+  first async flip went with the vblank: an output tears only while a
+  visible surface on it asks for it, and a client's first frames come
+  before its window is visible (two of a probe run on the Latitude 5450,
+  2026-11-28), so they are counted as `sync_before_async` instead of
+  failing."""
   problems = []
   commits = {}
   flip_ms = {(time // 1_000_000) & 0xffffffff for time in flips.values()}
