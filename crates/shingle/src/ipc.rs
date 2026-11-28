@@ -79,9 +79,33 @@ fn holds_reply(method: Option<&str>) -> bool {
   )
 }
 
+/// Binds the IPC socket at `path`, replacing a socket file left there by
+/// a Shingle that did not exit cleanly (killed, or its session ended by
+/// the display manager), which nothing listens on any more. Wayfire
+/// unlinks the path unconditionally before it binds
+/// (wayfire:plugins/ipc/ipc.cpp:73-75); Shingle replaces it only when a
+/// connection is refused, so a second instance cannot take a running
+/// one's socket and fails with `AddrInUse` instead.
+fn bind_replacing_stale(path: &Path) -> std::io::Result<UnixListener> {
+  match UnixListener::bind(path) {
+    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+      match UnixStream::connect(path) {
+        Err(refused)
+          if refused.kind() == std::io::ErrorKind::ConnectionRefused =>
+        {
+          std::fs::remove_file(path)?;
+          UnixListener::bind(path)
+        }
+        _ => Err(error),
+      }
+    }
+    result => result,
+  }
+}
+
 impl IpcServer {
   pub(crate) fn new(path: &Path) -> std::io::Result<Self> {
-    let listener = UnixListener::bind(path)?;
+    let listener = bind_replacing_stale(path)?;
     listener.set_nonblocking(true)?;
     Ok(Self {
       listener,
@@ -3462,6 +3486,39 @@ pub(crate) fn respond(state: &mut CompositorState, message: &Value) -> Value {
 #[cfg(test)]
 mod tests {
   use serde_json::{Value, json};
+
+  /// A fresh directory for one test's socket, removed by the caller.
+  fn socket_directory(name: &str) -> std::path::PathBuf {
+    let directory = std::env::temp_dir()
+      .join(format!("shingle-ipc-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    directory
+  }
+
+  #[test]
+  fn a_stale_ipc_socket_is_replaced() {
+    let directory = socket_directory("stale");
+    let path = directory.join("ipc");
+    // A socket file whose listener is gone, as a killed Shingle leaves.
+    drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+    assert!(path.exists());
+    let listener = super::bind_replacing_stale(&path).unwrap();
+    assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
+    drop(listener);
+    std::fs::remove_dir_all(directory).unwrap();
+  }
+
+  #[test]
+  fn a_live_ipc_socket_is_not_taken() {
+    let directory = socket_directory("live");
+    let path = directory.join("ipc");
+    let running = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let error = super::bind_replacing_stale(&path).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+    drop(running);
+    std::fs::remove_dir_all(directory).unwrap();
+  }
 
   #[test]
   fn stipc_key_names_are_evdev_codes() {
