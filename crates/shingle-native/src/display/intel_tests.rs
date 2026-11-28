@@ -411,3 +411,12 @@ fn async_flips_come_back_with_tiled_buffers_on_display_version_9() {
   display.present_on("eDP-1", &Drawn::InPlace, Instant::now());
   assert_eq!(flags_since(before), [(async_flip, true)]);
 }
+
+#[test]
+fn a_non_desktop_connector_stays_dark() {
+  let mut fake = drm_info::whiskey_lake();
+  // DP-1 drives a VR headset.
+  fake.set_value(105, "non-desktop", 1);
+  let (_, display) = start(fake, OutputPolicy::default());
+  assert_eq!(display.outputs(), vec!["eDP-1", "DP-2"]);
+}

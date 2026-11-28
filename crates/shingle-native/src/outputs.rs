@@ -115,17 +115,21 @@ pub fn first_mode(
 /// lights them (docs/design/multi-output.md, section 7, "Decision:
 /// native"): those in `lit` (in its order), then those the configuration
 /// names (in its order), then internal panels, then the rest in the
-/// card's order, skipping every connector for which `off` is true. The
-/// caller lights as many as it has CRTCs for, from the front.
+/// card's order, skipping every connector for which `off` is true and
+/// every one whose `non-desktop` property is 1. The caller lights as
+/// many as it has CRTCs for, from the front.
 pub fn rank<'a>(
   card: &'a Card,
   policy: &OutputPolicy,
   lit: &[&str],
   off: &dyn Fn(&str) -> bool,
 ) -> Vec<&'a ConnectorInfo> {
+  // A non-desktop connector, such as a VR headset's, is not part of the
+  // desktop; wlroots leaves it dark for DRM leasing.
   let usable: Vec<&ConnectorInfo> = card
     .connectors
     .iter()
+    .filter(|(_, table)| table.value("non-desktop") != Some(1))
     .map(|(info, _)| info)
     .filter(|info| info.connection == Connection::Connected)
     .filter(|info| !off(&info.name))
