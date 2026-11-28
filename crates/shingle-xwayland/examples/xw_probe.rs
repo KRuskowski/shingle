@@ -18,8 +18,14 @@
 //!     [--no-input] [--take-focus] [--no-delete] [--override-redirect]
 //!     [--state fullscreen,maximized,hidden] [--color RRGGBB]
 //!     [--no-background] [--no-map] [--no-decorations]
-//!     [--xdnd-source TEXT [--drag-icon]] [--xdnd-target]
+//!     [--xdnd-source TEXT [--drag-icon]] [--xdnd-target] [--checkers]
+//!     [--buttons]
 //! ```
+//!
+//! `--checkers` fills the window with a checkerboard of single black and
+//! white pixels, which shows in a capture whether one X pixel is drawn
+//! as one output pixel (XW-7). `--buttons` reports every button press as
+//! a `button` event with the button and the window and root positions.
 //!
 //! `--no-decorations` sets `_MOTIF_WM_HINTS` to ask for no decorations,
 //! as a client that draws its own frame does.
@@ -70,9 +76,10 @@ use x11rb::{
     Event,
     xfixes::ConnectionExt as _,
     xproto::{
-      AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt,
-      CreateWindowAux, EventMask, InputFocus, PropMode, SELECTION_NOTIFY_EVENT,
-      SelectionNotifyEvent, SelectionRequestEvent, Window, WindowClass,
+      AtomEnum, ChangeGCAux, ClientMessageEvent, ConfigureWindowAux,
+      ConnectionExt, CreateGCAux, CreateWindowAux, EventMask, InputFocus,
+      PropMode, Rectangle, SELECTION_NOTIFY_EVENT, SelectionNotifyEvent,
+      SelectionRequestEvent, Window, WindowClass,
     },
   },
   rust_connection::RustConnection,
@@ -112,6 +119,10 @@ struct Options {
   drag_icon: bool,
   /// Makes the window an Xdnd target.
   xdnd_target: bool,
+  /// Fills the window with a one-pixel checkerboard.
+  checkers: bool,
+  /// Reports button presses.
+  buttons: bool,
 }
 
 impl Default for Options {
@@ -138,6 +149,8 @@ impl Default for Options {
       xdnd_source: None,
       drag_icon: false,
       xdnd_target: false,
+      checkers: false,
+      buttons: false,
     }
   }
 }
@@ -205,10 +218,51 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
       "--xdnd-source" => options.xdnd_source = Some(value()?),
       "--drag-icon" => options.drag_icon = true,
       "--xdnd-target" => options.xdnd_target = true,
+      "--checkers" => options.checkers = true,
+      "--buttons" => options.buttons = true,
       _ => return Err(format!("unknown option {argument}")),
     }
   }
   Ok(options)
+}
+
+/// A 2x2 pixmap of the screen's depth with black pixels at the top left
+/// and bottom right and white ones elsewhere, which tiles into a
+/// checkerboard of single pixels.
+fn checkerboard(
+  connection: &RustConnection,
+  screen: &x11rb::protocol::xproto::Screen,
+) -> Result<u32, String> {
+  let error = |error: x11rb::errors::ConnectionError| error.to_string();
+  let pixmap = connection.generate_id().map_err(|e| e.to_string())?;
+  connection
+    .create_pixmap(screen.root_depth, pixmap, screen.root, 2, 2)
+    .map_err(error)?;
+  let gc = connection.generate_id().map_err(|e| e.to_string())?;
+  let aux = CreateGCAux::new().foreground(screen.white_pixel);
+  connection.create_gc(gc, pixmap, &aux).map_err(error)?;
+  let all = Rectangle {
+    x: 0,
+    y: 0,
+    width: 2,
+    height: 2,
+  };
+  connection
+    .poly_fill_rectangle(pixmap, gc, &[all])
+    .map_err(error)?;
+  let aux = ChangeGCAux::new().foreground(screen.black_pixel);
+  connection.change_gc(gc, &aux).map_err(error)?;
+  let pixel = |x, y| Rectangle {
+    x,
+    y,
+    width: 1,
+    height: 1,
+  };
+  connection
+    .poly_fill_rectangle(pixmap, gc, &[pixel(0, 0), pixel(1, 1)])
+    .map_err(error)?;
+  connection.free_gc(gc).map_err(error)?;
+  Ok(pixmap)
 }
 
 /// Quotes `text` as a JSON string.
@@ -324,6 +378,8 @@ struct Probe {
   /// The text to drag, for an Xdnd source.
   drag_text: Option<String>,
   drag_icon: bool,
+  /// Reports button presses.
+  buttons: bool,
   drag: RefCell<DragState>,
 }
 
@@ -345,10 +401,15 @@ impl Probe {
         | EventMask::BUTTON_RELEASE
         | EventMask::BUTTON_MOTION;
     }
+    if options.buttons {
+      mask |= EventMask::BUTTON_PRESS;
+    }
     let mut aux = CreateWindowAux::new()
       .event_mask(mask)
       .override_redirect(u32::from(options.override_redirect));
-    if options.background {
+    if options.checkers {
+      aux = aux.background_pixmap(checkerboard(&connection, screen)?);
+    } else if options.background {
       aux = aux.background_pixel(options.color.unwrap_or(white));
     }
     let (x, y) = options.position.unwrap_or((0, 0));
@@ -376,6 +437,7 @@ impl Probe {
       xdnd: XdndAtoms::new(&connection)?,
       drag_text: options.xdnd_source.clone(),
       drag_icon: options.drag_icon,
+      buttons: options.buttons,
       drag: RefCell::default(),
       connection,
       root,
@@ -782,9 +844,23 @@ impl Probe {
           .map_or("null".to_string(), |value| value.to_string());
         report("wm_state", &[("value", value)]);
       }
-      Event::ButtonPress(event) if event.detail == 1 => {
-        self.drag.borrow_mut().pressed =
-          Some((event.root_x.into(), event.root_y.into()));
+      Event::ButtonPress(event) => {
+        if self.buttons {
+          report(
+            "button",
+            &[
+              ("button", event.detail.to_string()),
+              ("x", event.event_x.to_string()),
+              ("y", event.event_y.to_string()),
+              ("root_x", event.root_x.to_string()),
+              ("root_y", event.root_y.to_string()),
+            ],
+          );
+        }
+        if event.detail == 1 {
+          self.drag.borrow_mut().pressed =
+            Some((event.root_x.into(), event.root_y.into()));
+        }
       }
       Event::MotionNotify(event) => {
         self.drag_motion(
@@ -1337,9 +1413,13 @@ mod tests {
       "--color",
       "ff0000",
       "--no-decorations",
+      "--checkers",
+      "--buttons",
     ]))
     .unwrap();
     assert!(options.no_decorations);
+    assert!(options.checkers);
+    assert!(options.buttons);
     assert_eq!(options.color, Some(0xff0000));
     assert_eq!(options.class, "Probe");
     assert_eq!(options.instance, "probe");

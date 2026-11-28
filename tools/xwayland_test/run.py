@@ -22,7 +22,7 @@ user namespaces:
       [--probe target/debug/examples/xw_probe]
       [--wl-probe target/debug/examples/wl_probe] [--keep]
       [--only lazy|disabled|eager|running|idle|windows|probe|behaviour|
-              session|nested|selection|outputs|decoration|dnd ...]
+              session|nested|selection|outputs|decoration|dnd|hidpi ...]
 
 It prints one line per check and exits 0 when all pass. Every signal it
 sends goes to its own children or, through `kill_xwayland`, to a
@@ -50,11 +50,20 @@ drags text with STIPC's pointer from an `xw_probe --xdnd-source` window
 into a `wl_probe --drop` window and from a `wl_probe --drag` window into
 an `xw_probe --xdnd-target` window, and between two X windows, and checks
 that the data arrives, that each side hears the other's answers and that
-the X drag icon is drawn above the windows in a capture.
+the X drag icon is drawn above the windows in a capture. The `hidpi`
+group (XW-7) runs offscreen Shingle on lavapipe with one output at scale
+2 and at 1.5 and `xwayland.zero_scaling`, and checks that `xdpyinfo`,
+`xrandr` and `Xft.dpi` show the physical size, that an
+`xw_probe --checkers` window is drawn one X pixel to one output pixel in
+a capture, and that clicks on it and on an override-redirect window land
+at their X positions; off at scale 2 the window is scaled up until a
+config reload turns the option on; and headless Shingle with outputs at
+scale 1 and 1.5 is one X screen at X scale 1.5.
 """
 
 import argparse
 import json
+import math
 import os
 import shutil
 import signal
@@ -2665,7 +2674,7 @@ def _selection_no_primary(results, binary):
 
 GROUPS = ('lazy', 'disabled', 'eager', 'running', 'idle', 'windows', 'probe',
           'behaviour', 'session', 'nested', 'selection', 'outputs',
-          'decoration', 'dnd')
+          'decoration', 'dnd', 'hidpi')
 
 def path_points(start, end, steps):
   """`steps` integer points from just after `start` to `end`, evenly
@@ -3010,6 +3019,308 @@ def outputs_checks(results, binary, work):
                 shingle.stop_detail(status))
   return shingle.log_text()
 
+# The physical size of the `hidpi` group's output: 960x540 logical pixels
+# at scale 2 and 1280x720 at scale 1.5.
+HIDPI_MODE = (1920, 1080)
+# Where the `hidpi` group's override-redirect menu asks to be, in X
+# pixels, and its size.
+HIDPI_MENU = {'x': 300, 'y': 210, 'width': 240, 'height': 150}
+
+def to_x(value, scale):
+  """The X coordinate of logical coordinate `value` at X scale `scale`,
+  rounded half away from zero as Shingle rounds it
+  (crates/shingle/src/xwayland/scale.rs, `to_x`)."""
+  scaled = value * scale
+  rounded = math.floor(abs(scaled) + 0.5)
+  return int(rounded if scaled >= 0 else -rounded)
+
+def from_x(value, scale):
+  """The logical coordinate of X coordinate `value` (`from_x`)."""
+  return to_x(value, 1 / scale)
+
+def rect_to_x(rect, scale):
+  """The X geometry of logical {x, y, width, height} `rect`, converted by
+  its edges as Shingle's `rect_to_x` does."""
+  x, y = to_x(rect['x'], scale), to_x(rect['y'], scale)
+  return {'x': x, 'y': y,
+          'width': to_x(rect['x'] + rect['width'], scale) - x,
+          'height': to_x(rect['y'] + rect['height'], scale) - y}
+
+def rect_from_x(rect, scale):
+  """The logical rectangle of X geometry `rect` (`rect_from_x`)."""
+  return rect_to_x(rect, 1 / scale)
+
+def box_of(rect):
+  """The (left, top, right, bottom) pixel box of `rect`, inclusive, as
+  `Capture.matching` reports one."""
+  return (rect['x'], rect['y'], rect['x'] + rect['width'] - 1,
+          rect['y'] + rect['height'] - 1)
+
+def checker_fraction(shot, rect, inset=4, step=3):
+  """The fraction of sampled pixels inside `rect`, `inset` pixels in from
+  each edge, that show `xw_probe --checkers`'s one-pixel checkerboard
+  aligned with `rect`: black where the distance from its corner, x plus
+  y, is even, white where it is odd. 1.0 means one X pixel is one output
+  pixel; a window scaled up shows 2x2 blocks or grey and scores about
+  half or less."""
+  matched = total = 0
+  for y in range(rect['y'] + inset, rect['y'] + rect['height'] - inset, step):
+    for x in range(rect['x'] + inset, rect['x'] + rect['width'] - inset,
+                   step):
+      if not (0 <= x < shot.width and 0 <= y < shot.height):
+        continue
+      r, g, b = shot.pixel(x, y)
+      total += 1
+      if (x - rect['x'] + y - rect['y']) % 2 == 0:
+        matched += r < 40 and g < 40 and b < 40
+      else:
+        matched += r > 215 and g > 215 and b > 215
+  return matched / total if total else 0.0
+
+def x_resource(shingle, display, name):
+  """The value of resource `name` in `xrdb -query`, or None."""
+  _, output = shingle.x_client(['xrdb', '-query'], display)
+  for line in output.splitlines():
+    key, _, value = line.partition(':')
+    if key.strip() == name:
+      return value.strip()
+  return None
+
+def x_root_size(shingle, display):
+  """The root window's size `xdpyinfo` reports, or None."""
+  _, output = shingle.x_client(['xdpyinfo'], display)
+  match = re.search(r'dimensions:\s+(\d+)x(\d+) pixels', output)
+  return (int(match.group(1)), int(match.group(2))) if match else None
+
+def x_monitors(shingle, display):
+  """The monitor geometries `xrandr --listmonitors` lists, sorted."""
+  status, output = shingle.x_client(['xrandr', '--listmonitors'], display)
+  if status != 0:
+    return None
+  return sorted(geometry for _, geometry in parse_listmonitors(output))
+
+def hidpi_checks(results, binary, work, probe):
+  """XW-7: with `xwayland.zero_scaling`, X clients see the output in
+  physical pixels at scale 2 and 1.5 and are drawn one X pixel to one
+  output pixel, and clicks and an override-redirect menu land where they
+  should; off, X sees logical pixels and is scaled up, until a reload
+  turns it on; and a mixed layout of scale 1 and 1.5 is one X screen at
+  the larger scale. The pixel runs use the offscreen backend on
+  lavapipe, the mixed layout headless Shingle."""
+  del work
+  for scale in (2, 1.5):
+    _hidpi_run(results, binary, probe, scale, True)
+  _hidpi_run(results, binary, probe, 2, False)
+  _hidpi_mixed(results, binary)
+
+def _hidpi_run(results, binary, probe, scale, zero_scaling):
+  """One offscreen Shingle with one output at `scale`."""
+  label = f'hidpi {scale}' + ('' if zero_scaling else ' off')
+  width, height = HIDPI_MODE
+  config = {
+      'xwayland': {'mode': True, 'zero_scaling': zero_scaling},
+      'outputs': [{'name': 'HEADLESS-1', 'mode': f'{width}x{height}@60',
+                   'scale': scale}],
+  }
+  name = 'hidpi-' + str(scale).replace('.', '-') + (
+      '' if zero_scaling else '-off')
+  shingle = Shingle(binary, None, name, config,
+                    backend=('--backend', 'offscreen'),
+                    extra_environment={'VK_ICD_FILENAMES': LAVAPIPE})
+  ready = wait_for(lambda: 'Xwayland ready' in shingle.log_text(),
+                   timeout=30)
+  results.check(f'{label}: Xwayland runs in offscreen Shingle', ready,
+                shingle.log_text()[-300:])
+  clients = []
+  try:
+    if ready:
+      _hidpi_window(results, shingle, probe, label, scale, zero_scaling,
+                    clients)
+  finally:
+    for client in clients:
+      client.stop()
+  status = shingle.stop()
+  results.check(f'{label}: SIGTERM exits with status 0', status == 0,
+                shingle.stop_detail(status))
+
+def _hidpi_screen(results, shingle, display, label, scale, x_scale):
+  """The X screen is the output at `x_scale`, with Xft.dpi to match."""
+  width, height = HIDPI_MODE
+  logical = {'x': 0, 'y': 0, 'width': round(width / scale),
+             'height': round(height / scale)}
+  screen = rect_to_x(logical, x_scale)
+  size = (screen['width'], screen['height'])
+  kind = 'physical' if x_scale != 1 else 'logical'
+  root = wait_for(lambda: x_root_size(shingle, display) == size) and size
+  results.check(f'{label}: xdpyinfo reports the {kind} size {size}',
+                root == size, str(x_root_size(shingle, display)))
+  monitors = x_monitors(shingle, display)
+  results.check(f'{label}: xrandr lists the output at its {kind} size',
+                monitors == [(0, 0, *size)], str(monitors))
+  dpi = str(round(96 * x_scale)) if x_scale != 1 else None
+  seen = wait_for(lambda: x_resource(shingle, display, 'Xft.dpi') == dpi,
+                  timeout=5) or dpi is None
+  results.check(f'{label}: Xft.dpi is {dpi}',
+                seen and x_resource(shingle, display, 'Xft.dpi') == dpi,
+                str(x_resource(shingle, display, 'Xft.dpi')))
+
+def _hidpi_window(results, shingle, probe, label, scale, zero_scaling,
+                  clients):
+  """The checks with the probe windows in one run."""
+  display = ':0'
+  x_scale = scale if zero_scaling else 1
+  _hidpi_screen(results, shingle, display, label, scale, x_scale)
+  client, _, view = start_probe(shingle, probe, display, 'Checkers',
+                                '--checkers', '--buttons', '--no-decorations')
+  clients.append(client)
+  if not view:
+    results.check(f'{label}: the checkerboard probe maps', False)
+    return
+  geometry = view['geometry']
+  expected = rect_to_x(geometry, x_scale)
+  configured = wait_for(lambda: same_geometry(
+      probe_query(client, 'geometry', 'geometry') or {}, expected))
+  results.check(f'{label}: the X window is its view geometry in X pixels',
+                configured, f'view {json.dumps(geometry)}, X '
+                f'{json.dumps(probe_query(client, "geometry", "geometry"))}')
+  # Where it is drawn, in output pixels.
+  drawn = rect_to_x(geometry, scale)
+  if zero_scaling:
+    shot = settled_capture(
+        shingle, lambda shot: checker_fraction(shot, drawn) > 0.99)
+    fraction = checker_fraction(shot, drawn) if shot else 0
+    results.check(f'{label}: one X pixel is one output pixel (sharp)',
+                  fraction > 0.99, f'{fraction:.3f} of the checkerboard')
+  else:
+    time.sleep(2)
+    shot = capture(shingle)
+    save_capture(shot)
+    fraction = checker_fraction(shot, drawn) if shot else 1
+    results.check(f'{label}: the X window is scaled up, as in Wayfire',
+                  shot is not None and fraction < 0.75,
+                  f'{fraction:.3f} of the checkerboard')
+  _hidpi_click(results, shingle, client, label, geometry, x_scale,
+               'a click on the X window')
+  _hidpi_menu(results, shingle, probe, display, label, scale, x_scale,
+              clients)
+  if not zero_scaling:
+    _hidpi_reload(results, shingle, client, display, label, scale, geometry,
+                  drawn)
+
+def _hidpi_click(results, shingle, client, label, geometry, x_scale, what):
+  """A click 100, 60 logical pixels into `geometry` reaches `client` at
+  that point in X pixels, and the X pointer is there."""
+  x, y = geometry['x'] + 100, geometry['y'] + 60
+  want = (to_x(x, x_scale), to_x(y, x_scale))
+  origin = rect_to_x(geometry, x_scale)
+  count = len(client.events())
+  shingle.click(x, y)
+  button = client.wait_event('button', after=count, timeout=5) or {}
+  seen = (int(button.get('root_x', -1)), int(button.get('root_y', -1)))
+  local = (int(button.get('x', -1)), int(button.get('y', -1)))
+  results.check(f'{label}: {what} lands at its X position {want}',
+                seen == want
+                and local == (want[0] - origin['x'], want[1] - origin['y']),
+                json.dumps(button))
+  pointer = probe_query(client, 'pointer', 'pointer') or {}
+  results.check(f'{label}: the X pointer is at {want}',
+                (int(pointer.get('x', -1)), int(pointer.get('y', -1))) == want,
+                json.dumps(pointer))
+
+def _hidpi_menu(results, shingle, probe, display, label, scale, x_scale,
+                clients):
+  """An override-redirect window at HIDPI_MENU in X pixels is drawn at
+  that X geometry over the X scale and takes clicks there."""
+  menu = XClient(shingle, [
+      probe, '--class', 'menu,Menu', '--override-redirect', '--position',
+      f'{HIDPI_MENU["x"]},{HIDPI_MENU["y"]}', '--size',
+      f'{HIDPI_MENU["width"]}x{HIDPI_MENU["height"]}', '--color', 'ff0000',
+      '--buttons'], display, 'xw_probe')
+  clients.append(menu)
+  if probe_window(menu) is None or not menu.wait_event('mapped'):
+    results.check(f'{label}: the override-redirect menu maps', False)
+    return
+  logical = rect_from_x(HIDPI_MENU, x_scale)
+  drawn = rect_to_x(logical, scale)
+  shot = settled_capture(
+      shingle, lambda shot: shot.matching(red)[1] == box_of(drawn))
+  box = shot.matching(red)[1] if shot else None
+  results.check(f'{label}: the override-redirect menu is drawn at '
+                f'{box_of(drawn)}', box == box_of(drawn), str(box))
+  _hidpi_click(results, shingle, menu, label, logical, x_scale,
+               'a click on the menu')
+  # Gone before the checks that look at the window under it.
+  menu.stop()
+  if x_scale == 1:
+    return
+  # An X position between two logical pixels is drawn at the nearest one,
+  # on whole output pixels, and stays sharp.
+  odd = {'x': 301, 'y': 211, 'width': 120, 'height': 90}
+  checkers = XClient(shingle, [
+      probe, '--class', 'odd,Odd', '--override-redirect', '--position',
+      f'{odd["x"]},{odd["y"]}', '--size', f'{odd["width"]}x{odd["height"]}',
+      '--checkers'], display, 'xw_probe')
+  clients.append(checkers)
+  drawn = rect_to_x(rect_from_x(odd, x_scale), scale)
+  shot = checkers.wait_event('mapped') and settled_capture(
+      shingle, lambda shot: checker_fraction(shot, drawn, inset=2) > 0.99)
+  fraction = checker_fraction(shot, drawn, inset=2) if shot else 0
+  results.check(f'{label}: an X window at {odd["x"]},{odd["y"]} is drawn '
+                f'sharp at {drawn["x"]},{drawn["y"]}', fraction > 0.99,
+                f'{fraction:.3f} of the checkerboard')
+  checkers.stop()
+
+def _hidpi_reload(results, shingle, client, display, label, scale, geometry,
+                  drawn):
+  """Turning zero scaling on in the config file applies it to the running
+  X display: the screen, Xft.dpi and the X window follow."""
+  with open(shingle.config_path) as file:
+    config = json.load(file)
+  config['xwayland']['zero_scaling'] = True
+  with open(shingle.config_path, 'w') as file:
+    json.dump(config, file)
+  label = f'{label}, then on'
+  _hidpi_screen(results, shingle, display, label, scale, scale)
+  expected = rect_to_x(geometry, scale)
+  configured = wait_for(lambda: same_geometry(
+      probe_query(client, 'geometry', 'geometry') or {}, expected))
+  results.check(f'{label}: the X window is configured in X pixels',
+                configured,
+                json.dumps(probe_query(client, 'geometry', 'geometry')))
+  shot = settled_capture(
+      shingle, lambda shot: checker_fraction(shot, drawn) > 0.99)
+  fraction = checker_fraction(shot, drawn) if shot else 0
+  results.check(f'{label}: one X pixel is one output pixel (sharp)',
+                fraction > 0.99, f'{fraction:.3f} of the checkerboard')
+
+def _hidpi_mixed(results, binary):
+  """The operator's mix of scales: a 1680x1050 output at scale 1 beside a
+  3840x2160 one at 1.5 is one X screen at X scale 1.5."""
+  config = {
+      'xwayland': {'mode': True, 'zero_scaling': True},
+      'outputs': [
+          {'name': 'HEADLESS-1', 'mode': '1680x1050@60', 'scale': 1},
+          {'name': 'HEADLESS-2', 'mode': '3840x2160@60', 'scale': 1.5},
+      ],
+  }
+  shingle = Shingle(binary, None, 'hidpi-mixed', config,
+                    backend=('--headless', '--outputs', '2'))
+  pid = shingle.wait_pid(lambda value: value > 0)
+  results.check('hidpi mixed: Xwayland runs', pid > 0, f'pid {pid}')
+  layout = [(0, 0, 2520, 1575), (2520, 0, 3840, 2160)]
+  seen = wait_for(lambda: x_monitors(shingle, ':0') == layout)
+  results.check('hidpi mixed: xrandr lists both outputs at X scale 1.5, '
+                'side by side', seen, str(x_monitors(shingle, ':0')))
+  root = x_root_size(shingle, ':0')
+  results.check('hidpi mixed: xdpyinfo reports their union in X pixels',
+                root == (6360, 2160), str(root))
+  dpi = x_resource(shingle, ':0', 'Xft.dpi')
+  results.check('hidpi mixed: Xft.dpi is 144', dpi == '144', str(dpi))
+  status = shingle.stop()
+  results.check('hidpi mixed: SIGTERM exits with status 0', status == 0,
+                shingle.stop_detail(status))
+  return shingle.log_text()
+
 def inner(binary, probe, wl_probe, work, groups):
   """Runs the check `groups` inside the namespace; returns the status."""
   private_tmp = os.path.join(work, 'tmp')
@@ -3043,13 +3354,15 @@ def inner(binary, probe, wl_probe, work, groups):
       'outputs': outputs_checks,
       'decoration': decoration_checks,
       'dnd': dnd_checks,
+      'hidpi': hidpi_checks,
   }
   for group in groups:
     if group in ('behaviour', 'dnd'):
       log = checks[group](results, binary, work, probe, wl_probe)
     elif group == 'selection':
       log = checks[group](results, binary, work, wl_probe)
-    elif group in ('windows', 'probe', 'session', 'nested', 'decoration'):
+    elif group in ('windows', 'probe', 'session', 'nested', 'decoration',
+                   'hidpi'):
       log = checks[group](results, binary, work, probe)
     else:
       log = checks[group](results, binary, work)

@@ -370,5 +370,41 @@ class HostRuntimeTest(unittest.TestCase):
       if saved is not None:
         os.environ[run.HOST_UID_VARIABLE] = saved
 
+class HidpiTest(unittest.TestCase):
+  """The `hidpi` group's conversions and checkerboard count."""
+
+  def test_coordinates_round_half_away_from_zero_like_rust(self):
+    self.assertEqual(run.to_x(201, 1.5), 302)
+    self.assertEqual(run.to_x(-201, 1.5), -302)
+    self.assertEqual(run.to_x(10, 2), 20)
+    self.assertEqual(run.from_x(301, 1.5), 201)
+    self.assertEqual(run.from_x(301, 2), 151)
+
+  def test_rectangles_convert_by_their_edges(self):
+    rect = {'x': 640, 'y': 0, 'width': 641, 'height': 720}
+    self.assertEqual(run.rect_to_x(rect, 1.5),
+                     {'x': 960, 'y': 0, 'width': 962, 'height': 1080})
+    self.assertEqual(
+        run.rect_from_x({'x': 301, 'y': 211, 'width': 120, 'height': 90},
+                        1.5),
+        {'x': 201, 'y': 141, 'width': 80, 'height': 60})
+    self.assertEqual(run.box_of({'x': 1, 'y': 2, 'width': 3, 'height': 4}),
+                     (1, 2, 3, 5))
+
+  def test_checkerboard_fraction(self):
+    width, height = 16, 12
+    pixels = bytearray()
+    for y in range(height):
+      for x in range(width):
+        pixels += bytes([0, 0, 0] if (x + y) % 2 == 0 else [255] * 3)
+    shot = run.Capture(width, height, bytes(pixels))
+    rect = {'x': 0, 'y': 0, 'width': width, 'height': height}
+    self.assertEqual(run.checker_fraction(shot, rect, inset=1, step=1), 1.0)
+    shifted = dict(rect, x=1)
+    self.assertEqual(
+        run.checker_fraction(shot, shifted, inset=1, step=1), 0.0)
+    grey = run.Capture(width, height, bytes([128] * width * height * 3))
+    self.assertEqual(run.checker_fraction(grey, rect, inset=1, step=1), 0.0)
+
 if __name__ == '__main__':
   unittest.main()
