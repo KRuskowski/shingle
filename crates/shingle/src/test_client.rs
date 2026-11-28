@@ -73,7 +73,16 @@ use wayland_protocols::{
       wp_linux_drm_syncobj_manager_v1, wp_linux_drm_syncobj_surface_v1,
       wp_linux_drm_syncobj_timeline_v1,
     },
+    pointer_constraints::zv1::client::{
+      zwp_confined_pointer_v1::{self, ZwpConfinedPointerV1},
+      zwp_locked_pointer_v1::{self, ZwpLockedPointerV1},
+      zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
+    },
     presentation_time::client::{wp_presentation, wp_presentation_feedback},
+    relative_pointer::zv1::client::{
+      zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+      zwp_relative_pointer_v1::{self, ZwpRelativePointerV1},
+    },
     single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1,
     text_input::zv1::client::{
       zwp_text_input_manager_v1::ZwpTextInputManagerV1,
@@ -298,6 +307,12 @@ pub(crate) struct Events {
     Vec<(ObjectId, zwp_input_method_context_v1::Event)>,
   /// Every `zwp_input_method_v2` event, in order.
   pub(crate) input_method_v2: Vec<zwp_input_method_v2::Event>,
+  /// `zwp_relative_pointer_v1.relative_motion` deltas, in order, as
+  /// (dx, dy, dx_unaccel, dy_unaccel).
+  pub(crate) relative_motion: Vec<(f64, f64, f64, f64)>,
+  /// Pointer-constraint events, in order: `locked`, `unlocked`,
+  /// `confined` and `unconfined`.
+  pub(crate) constraints: Vec<&'static str>,
   synced: bool,
 }
 
@@ -1882,6 +1897,8 @@ ignore_events!(
   zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
   zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
   ZwpTextInputManagerV1,
+  ZwpPointerConstraintsV1,
+  ZwpRelativePointerManagerV1,
   wp_fifo_manager_v1::WpFifoManagerV1,
   wp_fifo_v1::WpFifoV1,
   wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1,
@@ -1895,6 +1912,64 @@ ignore_events!(
   ZwlrDataControlManagerV1,
   ZwlrScreencopyManagerV1,
 );
+
+impl Dispatch<ZwpRelativePointerV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ZwpRelativePointerV1,
+    event: zwp_relative_pointer_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    if let zwp_relative_pointer_v1::Event::RelativeMotion {
+      dx,
+      dy,
+      dx_unaccel,
+      dy_unaccel,
+      ..
+    } = event
+    {
+      events
+        .relative_motion
+        .push((dx, dy, dx_unaccel, dy_unaccel));
+    }
+  }
+}
+
+impl Dispatch<ZwpLockedPointerV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ZwpLockedPointerV1,
+    event: zwp_locked_pointer_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.constraints.push(match event {
+      zwp_locked_pointer_v1::Event::Locked => "locked",
+      zwp_locked_pointer_v1::Event::Unlocked => "unlocked",
+      _ => return,
+    });
+  }
+}
+
+impl Dispatch<ZwpConfinedPointerV1, ()> for Events {
+  fn event(
+    events: &mut Self,
+    _: &ZwpConfinedPointerV1,
+    event: zwp_confined_pointer_v1::Event,
+    _: &(),
+    _: &Connection,
+    _: &QueueHandle<Self>,
+  ) {
+    events.constraints.push(match event {
+      zwp_confined_pointer_v1::Event::Confined => "confined",
+      zwp_confined_pointer_v1::Event::Unconfined => "unconfined",
+      _ => return,
+    });
+  }
+}
 
 impl Dispatch<ZwpTextInputV1, ()> for Events {
   fn event(

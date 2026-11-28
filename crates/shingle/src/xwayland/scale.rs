@@ -166,11 +166,7 @@ pub(crate) fn point_for(
   object: &wayland_server::backend::ObjectId,
   (x, y): (f64, f64),
 ) -> (f64, f64) {
-  let scale = state
-    .surfaces
-    .get(object)
-    .map_or(1.0, |surface| of_surface(state, surface));
-  point_to_client(x, y, scale)
+  point_to_client(x, y, of_object(state, object))
 }
 
 /// The point (`x`, `y`) of `object`'s surface in its client's units, in
@@ -180,11 +176,35 @@ pub(crate) fn point_from(
   object: &wayland_server::backend::ObjectId,
   (x, y): (f64, f64),
 ) -> (f64, f64) {
-  let scale = state
+  let scale = of_object(state, object);
+  (x / scale, y / scale)
+}
+
+/// [`of_surface`] of the surface `object`, 1 for one that is gone.
+pub(crate) fn of_object(
+  state: &CompositorState,
+  object: &wayland_server::backend::ObjectId,
+) -> f64 {
+  state
     .surfaces
     .get(object)
-    .map_or(1.0, |surface| of_surface(state, surface));
-  (x / scale, y / scale)
+    .map_or(1.0, |surface| of_surface(state, surface))
+}
+
+/// A rectangle of `object`'s surface in logical pixels from its top left
+/// corner, such as its size, in its client's units: X pixels for an X
+/// window. Its edges are converted, rounded, as [`rect_to_x`] converts.
+pub(crate) fn rect_for(
+  state: &CompositorState,
+  object: &wayland_server::backend::ObjectId,
+  rect: Rect,
+) -> Rect {
+  let scale = of_object(state, object);
+  if scale == 1.0 {
+    return rect;
+  }
+  let geometry = rect_to_x(rect, XScale::new(scale));
+  Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
 }
 
 /// Whether `client` is Shingle's Xwayland.

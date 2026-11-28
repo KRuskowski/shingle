@@ -7,6 +7,12 @@ use serde_json::json;
 use shingle_core::Rect;
 use shingle_xwayland::{Geometry, WindowType, XwmEvent};
 use wayland_client::protocol::{wl_output, wl_pointer, wl_seat};
+use wayland_protocols::wp::{
+  pointer_constraints::zv1::client::zwp_pointer_constraints_v1::{
+    self, ZwpPointerConstraintsV1,
+  },
+  relative_pointer::zv1::client::zwp_relative_pointer_manager_v1 as relative,
+};
 use wayland_protocols::xdg::xdg_output::zv1::client::{
   zxdg_output_manager_v1::ZxdgOutputManagerV1, zxdg_output_v1,
 };
@@ -322,5 +328,167 @@ fn pointer_and_touch_positions_reach_x_windows_in_x_pixels() {
       .any(|event| matches!(event,
     wayland_client::protocol::wl_touch::Event::Down { x, y, .. }
       if *x == 30.0 && *y == 15.0))
+  );
+}
+
+/// A fixture at output and X scale `scale` with the test Xwayland's
+/// pointer bound and XTerm mapped, and XTerm's surface, pointer and tile.
+fn pointer_fixture(
+  scale: f64,
+) -> (
+  Fixture,
+  wayland_client::protocol::wl_surface::WlSurface,
+  wl_pointer::WlPointer,
+  Rect,
+) {
+  let mut fixture = Fixture::new();
+  set_scales(&mut fixture, scale, scale);
+  let seat = fixture.client.bind::<wl_seat::WlSeat>(7);
+  let handle = fixture.client.handle.clone();
+  let pointer = seat.get_pointer(&handle, ());
+  fixture.client.roundtrip(&mut fixture.compositor);
+  let (surface, _role) = map(&mut fixture, XTERM, "XTerm", 5);
+  let tile = view_geometry(&mut fixture, "XTerm");
+  (fixture, surface, pointer, tile)
+}
+
+#[test]
+fn relative_motion_and_scroll_reach_x_windows_in_x_pixels() {
+  for (scale, factor) in [(1.5, 1.5), (1.0, 1.0)] {
+    let (mut fixture, _surface, pointer, tile) = pointer_fixture(scale);
+    let manager = fixture
+      .client
+      .bind::<relative::ZwpRelativePointerManagerV1>(1);
+    let handle = fixture.client.handle.clone();
+    manager.get_relative_pointer(&pointer, &handle, ());
+    fixture.client.roundtrip(&mut fixture.compositor);
+    let (x, y) = (f64::from(tile.x) + 20.0, f64::from(tile.y) + 10.0);
+    crate::input::pointer_motion(fixture.state(), x, y);
+    fixture.client.roundtrip(&mut fixture.compositor);
+    fixture.client.events.relative_motion.clear();
+    crate::input::pointer_relative_motion(fixture.state(), 2.0, 4.0, 1.0, 2.0);
+    crate::input::pointer_axis_detailed(
+      fixture.state(),
+      crate::Axis {
+        vertical: 10.0,
+        source: crate::AxisSource::Finger,
+        ..crate::Axis::default()
+      },
+    );
+    crate::input::pointer_axis_detailed(
+      fixture.state(),
+      crate::Axis {
+        vertical: 15.0,
+        vertical_steps: 1,
+        source: crate::AxisSource::Wheel,
+        ..crate::Axis::default()
+      },
+    );
+    fixture.client.roundtrip(&mut fixture.compositor);
+    assert_eq!(
+      fixture.client.events.relative_motion,
+      vec![(2.0 * factor, 4.0 * factor, factor, 2.0 * factor)],
+      "at X scale {scale}"
+    );
+    let axes = fixture
+      .client
+      .events
+      .pointer
+      .iter()
+      .filter_map(|event| match event {
+        wl_pointer::Event::Axis { value, .. } => Some(*value),
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    // A finger's distance and a wheel click's are in X pixels; the
+    // click itself stays one click.
+    assert_eq!(axes, vec![10.0 * factor, 15.0 * factor], "at {scale}");
+    let clicks = fixture
+      .client
+      .events
+      .pointer
+      .iter()
+      .filter(|event| {
+        matches!(event, wl_pointer::Event::AxisDiscrete { discrete: 1, .. })
+      })
+      .count();
+    assert_eq!(clicks, 1);
+  }
+}
+
+#[test]
+fn a_confining_region_in_x_pixels_holds_the_pointer() {
+  let (mut fixture, surface, pointer, tile) = pointer_fixture(1.5);
+  let constraints = fixture.client.bind::<ZwpPointerConstraintsV1>(1);
+  let handle = fixture.client.handle.clone();
+  // 30 by 30 X pixels from 15, 15: 20 by 20 logical pixels from 10, 10.
+  let region = fixture.wl_compositor.create_region(&handle, ());
+  region.add(15, 15, 30, 30);
+  constraints.confine_pointer(
+    &surface,
+    &pointer,
+    Some(&region),
+    zwp_pointer_constraints_v1::Lifetime::Persistent,
+    &handle,
+    (),
+  );
+  fixture.client.roundtrip(&mut fixture.compositor);
+  let (left, top) = (f64::from(tile.x), f64::from(tile.y));
+  crate::input::pointer_motion(fixture.state(), left + 15.0, top + 15.0);
+  fixture.client.roundtrip(&mut fixture.compositor);
+  assert_eq!(fixture.client.events.constraints, vec!["confined"]);
+  crate::input::pointer_motion(fixture.state(), left + 200.0, top + 200.0);
+  let state = fixture.state();
+  let (x, y) = (state.input.pointer_x - left, state.input.pointer_y - top);
+  // Held just inside the region's far edge at 30 logical pixels.
+  assert!((29.99..30.0).contains(&x), "{x}");
+  assert!((29.99..30.0).contains(&y), "{y}");
+  crate::input::pointer_motion(fixture.state(), left, top);
+  let state = fixture.state();
+  assert_eq!(
+    (state.input.pointer_x - left, state.input.pointer_y - top),
+    (10.0, 10.0)
+  );
+  // X sees the pointer at the region's corner in its own pixels.
+  fixture.client.roundtrip(&mut fixture.compositor);
+  assert!(fixture.client.events.pointer.iter().any(|event| matches!(
+    event,
+    wl_pointer::Event::Motion { surface_x, surface_y, .. }
+      if *surface_x == 15.0 && *surface_y == 15.0
+  )));
+}
+
+#[test]
+fn a_lock_puts_the_pointer_at_its_hint_in_x_pixels() {
+  let (mut fixture, surface, pointer, tile) = pointer_fixture(1.5);
+  let constraints = fixture.client.bind::<ZwpPointerConstraintsV1>(1);
+  let handle = fixture.client.handle.clone();
+  let (left, top) = (f64::from(tile.x), f64::from(tile.y));
+  crate::input::pointer_motion(fixture.state(), left + 5.0, top + 5.0);
+  let locked = constraints.lock_pointer(
+    &surface,
+    &pointer,
+    None,
+    zwp_pointer_constraints_v1::Lifetime::Persistent,
+    &handle,
+    (),
+  );
+  fixture.commit_buffer(&surface);
+  assert_eq!(fixture.client.events.constraints, vec!["locked"]);
+  // Locked, relative motion moves nothing.
+  crate::input::pointer_relative_motion(fixture.state(), 9.0, 9.0, 9.0, 9.0);
+  let state = fixture.state();
+  assert_eq!(
+    (state.input.pointer_x - left, state.input.pointer_y - top),
+    (5.0, 5.0)
+  );
+  locked.set_cursor_position_hint(30.0, 15.0);
+  fixture.commit_buffer(&surface);
+  locked.destroy();
+  fixture.client.roundtrip(&mut fixture.compositor);
+  let state = fixture.state();
+  assert_eq!(
+    (state.input.pointer_x - left, state.input.pointer_y - top),
+    (20.0, 10.0)
   );
 }

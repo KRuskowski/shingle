@@ -68,6 +68,11 @@ pub(crate) fn create_globals(handle: &DisplayHandle) {
     .create_global::<CompositorState, ZwpRelativePointerManagerV1, ()>(1, ());
 }
 
+/// Sends relative motion of (`dx`, `dy`), (`dx_unaccel`, `dy_unaccel`)
+/// unaccelerated, in logical pixels, to the relative pointers of the
+/// client with the pointer focus, in that surface's units: X pixels for
+/// an X window under `xwayland.zero_scaling`, as its pointer positions
+/// are (crate::xwayland::scale).
 pub(crate) fn relative_motion(
   state: &mut CompositorState,
   dx: f64,
@@ -75,15 +80,18 @@ pub(crate) fn relative_motion(
   dx_unaccel: f64,
   dy_unaccel: f64,
 ) {
-  let Some(client) = state
-    .input
-    .pointer_focus
-    .as_ref()
-    .and_then(|surface| state.surfaces.get(surface))
-    .map(|surface| surface.client.clone())
+  let Some((object, client)) =
+    state.input.pointer_focus.as_ref().and_then(|object| {
+      let surface = state.surfaces.get(object)?;
+      Some((object.clone(), surface.client.clone()))
+    })
   else {
     return;
   };
+  let scale = crate::xwayland::scale::of_object(state, &object);
+  let (dx, dy) = crate::xwayland::scale::point_to_client(dx, dy, scale);
+  let (dx_unaccel, dy_unaccel) =
+    crate::xwayland::scale::point_to_client(dx_unaccel, dy_unaccel, scale);
   let micros = crate::input::timestamp_usec(state);
   for pointer in state
     .input
@@ -237,10 +245,13 @@ fn destroy(state: &mut CompositorState, id: &ObjectId) {
     return;
   };
   if constraint.active
-    && let Some((x, y)) = constraint.cursor_hint
+    && let Some(hint) = constraint.cursor_hint
     && let Some(geometry) =
       crate::straddle::drawn_rect(state, &constraint.surface)
   {
+    // The hint is in the surface's units, X pixels for an X window.
+    let (x, y) =
+      crate::xwayland::scale::point_from(state, &constraint.surface, hint);
     crate::input::pointer_warp(
       state,
       f64::from(geometry.x) + x,
@@ -276,6 +287,9 @@ pub(crate) fn pointer_destroyed(
   }
 }
 
+/// The region `constraint` keeps the pointer in, in its surface's units
+/// as the client gave it (X pixels for an X window): the requested region
+/// within the input region, or the whole surface.
 fn region_rects(state: &CompositorState, constraint: &Constraint) -> Vec<Rect> {
   let Some(surface) = state.surfaces.get(&constraint.surface) else {
     return Vec::new();
@@ -293,7 +307,13 @@ fn region_rects(state: &CompositorState, constraint: &Constraint) -> Vec<Rect> {
     (Some(requested), None) => requested,
     (None, Some(input)) => input.clone(),
     (None, None) => crate::shell::surface_rect(state, &constraint.surface)
-      .map(|geometry| vec![Rect::new(0, 0, geometry.width, geometry.height)])
+      .map(|geometry| {
+        vec![crate::xwayland::scale::rect_for(
+          state,
+          &constraint.surface,
+          Rect::new(0, 0, geometry.width, geometry.height),
+        )]
+      })
       .unwrap_or_default(),
   }
 }
@@ -320,8 +340,13 @@ fn closest_point(
   y: f64,
 ) -> Option<(f64, f64)> {
   let geometry = crate::straddle::drawn_rect(state, &constraint.surface)?;
-  let local_x = x - f64::from(geometry.x);
-  let local_y = y - f64::from(geometry.y);
+  // The region is in the surface's units, so the point is compared and
+  // clamped in them and the result converted back.
+  let (local_x, local_y) = crate::xwayland::scale::point_for(
+    state,
+    &constraint.surface,
+    (x - f64::from(geometry.x), y - f64::from(geometry.y)),
+  );
   region_rects(state, constraint)
     .into_iter()
     .map(|rect| {
@@ -330,6 +355,11 @@ fn closest_point(
       let px = local_x.clamp(f64::from(rect.x), right - 1.0 / 256.0);
       let py = local_y.clamp(f64::from(rect.y), bottom - 0.0001);
       let distance = (px - local_x).powi(2) + (py - local_y).powi(2);
+      let (px, py) = crate::xwayland::scale::point_from(
+        state,
+        &constraint.surface,
+        (px, py),
+      );
       (
         px + f64::from(geometry.x),
         py + f64::from(geometry.y),

@@ -1232,8 +1232,11 @@ pub(crate) fn pointer_axis_detailed(state: &mut CompositorState, axis: Axis) {
   let speed = state.input.scroll_speed;
   let invert = state.input.natural_scroll && !state.input.device_natural_scroll;
   let direction = if invert { -1 } else { 1 };
-  let horizontal = horizontal * speed * f64::from(direction);
-  let vertical = vertical * speed * f64::from(direction);
+  // Scroll amounts are in the surface's units, as motion is: X pixels
+  // for an X window under `xwayland.zero_scaling`. Wheel clicks are not.
+  let units = crate::xwayland::scale::of_object(state, &target);
+  let horizontal = horizontal * speed * f64::from(direction) * units;
+  let vertical = vertical * speed * f64::from(direction) * units;
   let (horizontal_steps, vertical_steps) = if speed == 0.0 {
     (0, 0)
   } else {
@@ -1297,6 +1300,8 @@ pub(crate) fn pointer_axis_virtual(
   if !pointer_allowed(state, &target) {
     return;
   }
+  // In the surface's units, as in `pointer_axis_detailed`.
+  let value = value * crate::xwayland::scale::of_object(state, &target);
   let time = timestamp(state);
   for pointer in pointers_for(state, &target) {
     if let Some(source) = source
