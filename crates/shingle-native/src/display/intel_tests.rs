@@ -420,3 +420,29 @@ fn a_non_desktop_connector_stays_dark() {
   let (_, display) = start(fake, OutputPolicy::default());
   assert_eq!(display.outputs(), vec!["eDP-1", "DP-2"]);
 }
+
+#[test]
+fn meteor_lake_takes_square_cursors_only() {
+  let mut fake = drm_info::meteor_lake();
+  let cursor = Object::Plane(PlaneId(83));
+  let request_for = |fake: &mut FakeKms, height: u32| {
+    let buffer = fake.create_argb_framebuffer(256, height).unwrap();
+    let mut request = AtomicRequest::new();
+    for (name, value) in [
+      ("FB_ID", u64::from(buffer.framebuffer.0)),
+      ("CRTC_ID", 88),
+      ("SRC_W", 256 << 16),
+      ("SRC_H", u64::from(height) << 16),
+      ("CRTC_W", 256),
+      ("CRTC_H", u64::from(height)),
+    ] {
+      let property = fake.property_id(name);
+      request.set(cursor, property, value);
+    }
+    request
+  };
+  let short = request_for(&mut fake, 64);
+  assert!(fake.commit(&short, CommitFlags::TEST_ONLY).is_err());
+  let square = request_for(&mut fake, 256);
+  assert!(fake.commit(&square, CommitFlags::TEST_ONLY).is_ok());
+}

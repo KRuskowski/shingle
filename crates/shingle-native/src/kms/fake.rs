@@ -578,7 +578,8 @@ impl FakeKms {
   /// it cannot flip async (intel_display.c, `intel_async_flip_check_hw`:
   /// `LINEAR` before display version 12, and every CCS modifier of these
   /// generations), and a cursor plane of another size than 64, 128 or 256
-  /// pixels wide and 8 to that many lines high, scaled, or with a stride
+  /// pixels wide and 8 to that many lines high (as many from display
+  /// version 14 on, which has no `HAS_CUR_FBC`), scaled, or with a stride
   /// other than its width in pixels (intel_cursor.c, `i9xx_check_cursor`).
   fn refuse_i915(
     &self,
@@ -640,8 +641,9 @@ impl FakeKms {
         let height = after(object, "CRTC_H");
         let scaled = after(object, "SRC_W") != width << 16
           || after(object, "SRC_H") != height << 16;
+        let lowest = if display_version >= 14 { width } else { 8 };
         if ![64, 128, 256].contains(&width)
-          || !(8..=width).contains(&height)
+          || !(lowest..=width).contains(&height)
           || scaled
           || u64::from(stride) != width * 4
           || !self.argb.contains(&framebuffer)
