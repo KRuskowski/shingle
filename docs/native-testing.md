@@ -751,7 +751,7 @@ From NB-10 on, each lit monitor shows the cursor on its CRTC's cursor plane wher
    Expected on a driver with `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP` (step 44.1): about 600 async lines, `status=0` with `"tearing": 600` and flags 6 (hardware clock and completion, no vsync) in every `presented` line, and a `median_frame_interval_ms` below one refresh period when the copy path or the GPU allows it. With copy scanout (`SHINGLE_SCANOUT=copy`) the same; record both medians.
 3. Real clients: `ipc stipc/run '{"cmd": "vkcube --wsi wayland --present_mode 0"}'` (immediate mode, which Mesa's and NVIDIA's Vulkan WSI present through `wp_tearing_control_v1` when offered): the trace shows async flips while it runs, and vkcube's frame rate is not capped at the refresh rate. Record the frame rate and whether tearing is visible.
 4. Forced fallback: restart with `SHINGLE_ASYNC_FLIPS=0`: the log starts with `SHINGLE_ASYNC_FLIPS=0 keeps every page flip synchronized`, no async lines, and `present_check.py` passes without `--tearing` (flags 7).
-5. On a driver without the capability the log says once `a client asks for tearing, but the driver has no atomic async page flips; its frames wait for the vblank` and the run passes without `--tearing`. A driver that advertises the capability but refuses a flip logs `output CONN: frames wait for the vblank again, because the card refused an async page flip: ...`, and the frame and later ones flip in sync; record the error.
+5. On a driver without the capability the log says once `a client asks for tearing, but the driver has no atomic async page flips; its frames wait for the vblank` and the run passes without `--tearing`. A driver that advertises the capability but refuses a flip logs `output CONN: frames wait for the vblank again, because the card refused an async page flip: ...`, and the frame and later ones flip in sync; record the error. On i915 before display version 12 (the Latitude 5400's UHD 620) copy scanout's LINEAR buffers are refused this way, and the zero-copy buffers that follow log `output CONN: trying async page flips again with the new buffers` and flip async.
 
 ### Step 49: zero-copy frames hand the plane their render fence
 
@@ -836,6 +836,56 @@ While the session lock hides the clients, a native modeset shows a black buffer 
 4. Unplug and replug the second monitor while locked: it shows black, then the lock.
 5. `kill -KILL` the lock client: both monitors go black and stay black; `super+f8` starts a new `shingle-lock`, which unlocks with the phrase.
 6. Record what each monitor showed in each case.
+
+## Intel laptops (i915)
+
+The first machines are a Latitude 5400 (UHD 620, i915 display version 9) and a Latitude 5450 (Meteor Lake Arc, display version 14), both on Debian trixie. [design/native-backend.md](design/native-backend.md#intel-laptops-desk-check-against-i915) lists what was read against i915 before they arrived and what that fixed; the fixture tests in crates/shingle-native/src/display/intel_tests.rs run those findings on fake cards built from public drm_info dumps of the same GPUs. These steps check on the laptops what the dumps cannot: their own panel, firmware and kernel. Run them after the first session of [laptop-bringup.md](laptop-bringup.md), on each laptop.
+
+### Step 55: the laptop's own drm_info against the fixture
+
+1. `tools/native_test/bringup.py report LAPTOP` (with the user in `video`) saves target/bringup/LAPTOP/drm_info.json. Turn it into a fixture: `tools/native_test/drm_info_fixture.py --source 'LAPTOP, Linux VERSION' target/bringup/LAPTOP/drm_info.json crates/shingle-native/testdata/drm_info/LAPTOP.json`; it drops EDIDs and MST paths.
+2. Compare it with the drmdb fixture of its GPU (whiskey_lake_uhd620.json or meteor_lake_arc.json): the primary planes' XR24 modifiers, the cursor planes and `CURSOR_WIDTH`, `ATOMIC_ASYNC_PAGE_FLIP` (expected 1 on 6.12), `vrr_capable` on eDP-1 (absent on the 5400; 0 or 1 on the 5450, by its VBT and panel), and `max bpc`, `link-status`, `Colorspace` and `content type` on each connector. Record every difference.
+3. On the development host, add a loader for the new fixture beside `whiskey_lake` in crates/shingle-native/src/kms/fake/drm_info.rs and run the tests of intel_tests.rs on it as well; a test that fails is a finding.
+
+### Step 56: zero-copy on Y-tiled or 4-tiled buffers, and what CCS would save
+
+1. Start Shingle on tty1 as in step 37. Expected in native.log: `output eDP-1: zero-copy scanout, modifier INTEL 0x0100000000000002` (Y-tiled) on the 5400 and `INTEL 0x0100000000000009` (4-tiled) on the 5450.
+2. Measure the render side, which is what CCS compresses: with `foot` running `yes` full screen for 60 s, record `sudo intel_gpu_top -J -s 1000` (package `intel-gpu-tools`; Render/3D busy and IMC reads) and the package energy from `/sys/class/powercap/intel-rapl:0/energy_uj` before and after, once with zero-copy and once with `SHINGLE_SCANOUT=copy`. Record both. Multi-plane (CCS) scanout is worth building only if zero-copy's render busy or memory reads are high enough here that halving them would matter.
+3. Leave the panel idle for 60 s with zero-copy and record `sudo cat /sys/kernel/debug/dri/0/i915_fbc_status` and `i915_edp_psr_status` (the card's number may differ): whether FBC and PSR are active, and why not if they are not.
+
+### Step 57: docks, DP-MST and bad links
+
+1. Connect a USB-C or DP-MST dock with two monitors while Shingle runs. Expected: `DP-N connected` lines for new connectors, both monitors lit (`output DP-N: WxH at R Hz`), and on the 5400 the panel and two monitors on its three pipes; with three monitors there one logs `every CRTC that can drive DP-N is in use; DP-N stays dark`.
+2. Unplug the dock. Expected: the monitors' outputs go, the panel keeps drawing, `drm_info` shows their CRTCs inactive, and `sudo dmesg | tail` has no `drm` errors. Plug it in again: the monitors come back, under new connector names if the kernel gave new ids.
+3. A bad link: watch for `output CONN: the kernel marked its link bad; setting the mode again` while plugging, after resume (step 60) and with long or cheap cables. Expected after it: the monitor shows a picture again, perhaps at a lower mode. Record every occurrence and the mode that followed; `drm_info` shows `link-status` Good.
+
+### Step 58: VRR on the panel, and what it costs
+
+1. On the 5400, with `nb10-vrr.yaml` (step 44): `output eDP-1: variable refresh rate stays off, because the monitor or the driver is not VRR-capable (vrr_capable is not 1)`.
+2. On the 5450, if step 55 found `vrr_capable` 1: step 47 on the panel. Then compare idle power with `vrr: true` and `false` for eDP-1: 60 s of an idle desktop each, the package energy as in step 56.2 and `i915_edp_psr_status` (i915 keeps PSR off while VRR is on). Record both; this decides whether a laptop config should ever set `vrr` on the panel.
+
+### Step 59: what another session left is cleared
+
+1. On tty2, run a session that leaves KMS state behind: GNOME with Night Light forced on, or any compositor with `wlsunset` or `gammastep` running; on the 5450 with an HDR monitor, KDE with HDR on. Note `drm_info | grep -E 'GAMMA_LUT|CTM|max bpc|Colorspace|rotation'`.
+2. Switch to tty1 and start Shingle. Expected: neutral colours (no tint, no washed-out HDR), and `drm_info` shows `GAMMA_LUT`, `DEGAMMA_LUT` and `CTM` 0, `max bpc` 8 (the connector's minimum if that is higher), `Colorspace` Default, `HDR_OUTPUT_METADATA` 0, `content type` Graphics on HDMI and every lit plane's `rotation` rotate-0.
+3. Switch back to tty2: that session sets its own state again (record whether it does).
+
+### Step 60: suspend and resume
+
+1. With Shingle running, a client open and a dock attached if there is one: `systemctl suspend`, wait 10 s, wake it with the power button.
+2. Expected: the picture returns without a VT switch, input works, clients are alive, `native.log` has a hotplug probe (`DP-N connected` or nothing changed) and no `page flip timed out`; a link marked bad on resume is set again (step 57.3). Record the log lines between suspend and wake.
+3. Repeat with the lid: close it for 10 s and open it, if logind suspends on the lid (`HandleLidSwitch=suspend`, the default).
+
+### Step 61: the lid with a dock
+
+1. Set `HandleLidSwitchDocked=ignore` (logind's default) and attach an external monitor. Close the lid.
+2. Expected, as in Wayfire: the panel stays lit (libinput turns the internal keyboard and touchpad off), its windows stay there, and nothing in native.log changes. With `[output:eDP-1] mode = off` (or `outputs: [{name: eDP-1, mode: "off"}]`) the panel is dark from the start and its pipe free. Record what the operator wants to happen on lid close; Shingle has no lid handling.
+
+### Step 62: brightness keys
+
+1. Add a binding, in Wayfire's form `binding_bright_up = KEY_BRIGHTNESSUP` and `command_bright_up = brightnessctl set +5%` (and the same for `KEY_BRIGHTNESSDOWN` with `5%-`), or Shingle's `commands: [{binding: brightnessup, command: brightnessctl set +5%}, {binding: brightnessdown, command: brightnessctl set 5%-}]`; `repeatable_binding_` (or `repeatable: true`) repeats while the key is held. `brightnessctl` needs the `video` group's write access to `/sys/class/backlight/*/brightness` (Debian's package installs the udev rule) or logind's `SetBrightness`.
+2. Press Fn+F11 and Fn+F12 (the Latitudes' brightness keys): the panel dims and brightens by one step per press. `wev` (step 3) shows `brightnessdown` and `brightnessup` from the "Video Bus" or "Dell WMI hotkeys" device. Record the device name and whether the firmware also changed the brightness itself (two steps per press).
+3. Leave it idle past `idle.dpms_seconds`: the panel and its backlight go off; a key brings both back at the brightness set before.
 
 ## Results
 
