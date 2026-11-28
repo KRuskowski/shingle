@@ -5,7 +5,7 @@ use wayland_server::{
   Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 
-use crate::{Event, shell, state::CompositorState};
+use crate::{Event, state::CompositorState};
 
 pub(crate) fn create_global(handle: &DisplayHandle) {
   handle.create_global::<CompositorState, WpPointerWarpV1, ()>(1, ());
@@ -58,7 +58,7 @@ impl Dispatch<WpPointerWarpV1, ()> for CompositorState {
       if !valid {
         return;
       }
-      let Some(geometry) = shell::surface_rect(state, &object) else {
+      let Some(geometry) = crate::straddle::drawn_rect(state, &object) else {
         return;
       };
       if x < 0.0

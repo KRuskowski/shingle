@@ -29,6 +29,13 @@ pub struct ExpoState {
   pub geometry: HashMap<WindowId, RenderRect>,
   /// Thumbnail rectangle of each window when the zoom started.
   pub geometry_origin: HashMap<WindowId, RenderRect>,
+  /// The workspaces each window overlaps, its own first, with the shift
+  /// that moves it onto each
+  /// ([`crate::straddle::overlapped_workspaces`]); the thumbnail is drawn
+  /// and taken in each of their cells.
+  pub overlaps: HashMap<WindowId, crate::straddle::Overlaps>,
+  /// The output Expo shows.
+  output: Rect,
   /// When the current zoom animation started.
   pub animation_started: Instant,
   /// When the current brightness crossfade started.
@@ -67,6 +74,8 @@ impl ExpoState {
       windows: Vec::new(),
       geometry: HashMap::new(),
       geometry_origin: HashMap::new(),
+      overlaps: HashMap::new(),
+      output,
       animation_started: now,
       selection_started: now,
       pointer: None,
@@ -197,12 +206,7 @@ impl ExpoState {
       self.pointer = None;
       return;
     }
-    let geometry = self.geometry_at(now, timing);
-    let window = self.windows.iter().copied().find(|window| {
-      geometry
-        .get(window)
-        .is_some_and(|rect| rect_contains(*rect, x, y))
-    });
+    let window = self.thumbnail_at(x, y, now, timing);
     self.pointer = Some(ExpoPointer {
       window,
       start_x: x,
@@ -211,6 +215,37 @@ impl ExpoState {
       y,
       dragging: false,
     });
+  }
+
+  /// The window whose thumbnail is drawn at (`x`, `y`): in each cell of a
+  /// workspace it overlaps, the part of it that cell shows.
+  fn thumbnail_at(
+    &self,
+    x: f64,
+    y: f64,
+    now: Instant,
+    timing: Timing,
+  ) -> Option<WindowId> {
+    let geometry = self.geometry_at(now, timing);
+    let cells = self.cells_at(now, timing);
+    self.windows.iter().copied().find(|window| {
+      let Some(rect) = geometry.get(window) else {
+        return false;
+      };
+      let Some(overlaps) = self.overlaps.get(window) else {
+        return rect_contains(*rect, x, y);
+      };
+      crate::straddle::expo_copies(&cells, self.output, overlaps)
+        .iter()
+        .any(|copy| {
+          let moved = RenderRect {
+            x: rect.x.saturating_add(copy.dx),
+            y: rect.y.saturating_add(copy.dy),
+            ..*rect
+          };
+          rect_contains(moved, x, y) && rect_contains(copy.clip, x, y)
+        })
+    })
   }
 
   /// Moves the selection and promotes a press after five logical pixels.
@@ -299,6 +334,33 @@ pub fn expo_wall_cells(
       }
     })
     .collect()
+}
+
+/// Where Expo draws `rect`, a window's rectangle on the full-size wall
+/// whose cell for its workspace is `wall`, in that workspace's grid
+/// `cell`: the workspace is scaled into its cell as a whole, as Wayfire's
+/// expo scales its workspace wall, so the window keeps its place and size
+/// relative to its workspace.
+pub fn workspace_scaled(
+  rect: RenderRect,
+  wall: RenderRect,
+  cell: RenderRect,
+) -> RenderRect {
+  if wall.width == 0 || wall.height == 0 {
+    return rect;
+  }
+  let scale_x = f64::from(cell.width) / f64::from(wall.width);
+  let scale_y = f64::from(cell.height) / f64::from(wall.height);
+  let left = f64::from(cell.x) + f64::from(rect.x - wall.x) * scale_x;
+  let top = f64::from(cell.y) + f64::from(rect.y - wall.y) * scale_y;
+  let right = left + f64::from(rect.width) * scale_x;
+  let bottom = top + f64::from(rect.height) * scale_y;
+  RenderRect {
+    x: left.round() as i32,
+    y: top.round() as i32,
+    width: (right.round() - left.round()).max(0.0) as u32,
+    height: (bottom.round() - top.round()).max(0.0) as u32,
+  }
 }
 
 /// Interpolates renderer-only rectangles without changing client geometry.
@@ -489,6 +551,62 @@ mod tests {
     let end = started + transition.duration;
     assert_eq!(state.brightness(0, end, transition, 0.7), 0.7);
     assert_eq!(state.brightness(1, end, transition, 0.7), 1.0);
+  }
+
+  #[test]
+  fn a_workspace_is_scaled_into_its_cell_as_a_whole() {
+    let rect = |x, y, width, height| RenderRect {
+      x,
+      y,
+      width,
+      height,
+    };
+    let wall = rect(1000, 0, 1000, 500);
+    let cell = rect(510, 10, 500, 250);
+    // A quarter-size window at the workspace's centre stays at its
+    // centre, at half its size.
+    assert_eq!(
+      workspace_scaled(rect(1375, 125, 250, 250), wall, cell),
+      rect(698, 73, 125, 125)
+    );
+    // Over the workspace's right edge, it goes past the cell's.
+    assert_eq!(
+      workspace_scaled(rect(1900, 100, 200, 100), wall, cell),
+      rect(960, 60, 100, 50)
+    );
+  }
+
+  #[test]
+  fn a_thumbnail_over_two_cells_is_taken_in_both() {
+    let now = Instant::now();
+    let timing = Timing::linear(Duration::ZERO);
+    // Two half-size cells, 10 apart, of a 230x110 output.
+    let mut state = ExpoState::new(0, Rect::new(0, 0, 230, 110), 2, 1, 10);
+    let window = WindowId(1);
+    state.windows.push(window);
+    // From x 90 to 120 of the first cell, which ends at 110.
+    state.geometry.insert(
+      window,
+      RenderRect {
+        x: 90,
+        y: 30,
+        width: 30,
+        height: 20,
+      },
+    );
+    state
+      .overlaps
+      .insert(window, vec![(0, (0, 0)), (1, (-230, 0))]);
+    let at = |state: &ExpoState, x| state.thumbnail_at(x, 40.0, now, timing);
+    assert_eq!(at(&state, 100.0), Some(window));
+    // The gap between the cells shows neither part.
+    assert_eq!(at(&state, 115.0), None);
+    // The part in the second cell is moved by the gap.
+    assert_eq!(at(&state, 125.0), Some(window));
+    assert_eq!(at(&state, 135.0), None);
+    // Without overlaps, the thumbnail is taken where it is.
+    state.overlaps.clear();
+    assert_eq!(at(&state, 115.0), Some(window));
   }
 
   #[test]

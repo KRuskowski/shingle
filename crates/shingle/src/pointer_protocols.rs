@@ -239,7 +239,7 @@ fn destroy(state: &mut CompositorState, id: &ObjectId) {
   if constraint.active
     && let Some((x, y)) = constraint.cursor_hint
     && let Some(geometry) =
-      crate::shell::surface_rect(state, &constraint.surface)
+      crate::straddle::drawn_rect(state, &constraint.surface)
   {
     crate::input::pointer_warp(
       state,
@@ -319,7 +319,7 @@ fn closest_point(
   x: f64,
   y: f64,
 ) -> Option<(f64, f64)> {
-  let geometry = crate::shell::surface_rect(state, &constraint.surface)?;
+  let geometry = crate::straddle::drawn_rect(state, &constraint.surface)?;
   let local_x = x - f64::from(geometry.x);
   let local_y = y - f64::from(geometry.y);
   region_rects(state, constraint)

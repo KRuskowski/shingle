@@ -902,7 +902,9 @@ impl CompositorState {
   }
 
   /// The surfaces to draw on output `id`, bottom to top: its layer
-  /// surfaces, the windows of its workspace set, the unmanaged X windows
+  /// surfaces, the windows of its workspace set's current workspace with
+  /// those of other workspaces that overlap it (`straddle.rs`), the
+  /// unmanaged X windows
   /// whose top-left corner is on it, and the cursor while the pointer is
   /// on it. From the moment a lock client asks for the lock until it
   /// unlocks, also after it crashed ([`LockState::hides_clients`]), only
@@ -975,22 +977,54 @@ impl CompositorState {
         .toplevel()
         .and_then(|toplevel| toplevel.window())
     });
+    // Windows of other workspaces that hang over onto this one, which
+    // Wayfire draws here too.
+    let straddlers = crate::straddle::straddlers(self, id, workspace);
     for mode in [
       shingle_core::StackingMode::AlwaysOnBottom,
       shingle_core::StackingMode::Normal,
       shingle_core::StackingMode::AlwaysOnTop,
     ] {
-      for window in tree.stack_order() {
-        if self.show_desktop
-          || tree
-            .leaf_state(*window)
-            .is_ok_and(|state| state.minimized || state.stacking != mode)
-        {
-          continue;
-        }
+      let own = tree
+        .stack_order()
+        .iter()
+        .copied()
+        .filter(|window| {
+          !self.show_desktop
+            && !tree
+              .leaf_state(*window)
+              .is_ok_and(|state| state.minimized || state.stacking != mode)
+        })
+        .collect::<Vec<_>>();
+      let foreign = straddlers
+        .iter()
+        .filter(|straddler| straddler.stacking == mode)
+        .map(|straddler| straddler.window)
+        .collect::<Vec<_>>();
+      let stacked =
+        crate::straddle::merge_by_recency(&own, &foreign, |window| {
+          self.focus_recency.get(&window).copied().unwrap_or(0)
+        });
+      for entry in stacked {
+        let window = match entry {
+          crate::straddle::Stacked::Own(window) => window,
+          crate::straddle::Stacked::Foreign(window) => {
+            if let Some(straddler) = straddlers
+              .iter()
+              .find(|straddler| straddler.window == window)
+            {
+              self.append_shifted(
+                &straddler.object,
+                straddler.shift,
+                &mut snapshots,
+              );
+            }
+            continue;
+          }
+        };
         let object = self.surfaces.iter().find_map(|(object, surface)| {
           let matches = surface.role.toplevel().is_some_and(|toplevel| {
-            toplevel.window() == Some(*window) && surface.buffer.is_some()
+            toplevel.window() == Some(window) && surface.buffer.is_some()
           });
           matches.then_some(object.clone())
         });
@@ -1323,6 +1357,22 @@ impl CompositorState {
     }
   }
 
+  /// [`CompositorState::append_surface_and_popups`] for a window drawn on
+  /// another workspace than its own, each surface moved by `shift`.
+  fn append_shifted(
+    &self,
+    object: &ObjectId,
+    shift: (i32, i32),
+    snapshots: &mut Vec<SurfaceSnapshot>,
+  ) {
+    let start = snapshots.len();
+    self.append_surface_and_popups(object, snapshots);
+    for snapshot in &mut snapshots[start..] {
+      snapshot.geometry = crate::straddle::shifted(snapshot.geometry, shift);
+      snapshot.shift = shift;
+    }
+  }
+
   pub(crate) fn scale_surfaces(
     &self,
     all_workspaces: bool,
@@ -1394,6 +1444,7 @@ impl CompositorState {
       title,
       icon: crate::toplevel_icon::for_surface(self, object),
       geometry,
+      shift: (0, 0),
       opacity: shell::opacity(self, object),
       buffer: surface.buffer.clone(),
       layer: match &surface.role {

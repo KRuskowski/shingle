@@ -61,6 +61,9 @@ pub(super) struct OutputScene {
   /// The geometry and buffer of each surface drawn in the last frame.
   pub(super) previous_surfaces:
     HashMap<SurfaceId, (RenderRect, BufferSnapshot)>,
+  /// The [`shingle::SurfaceSnapshot::shift`] of each surface of
+  /// `previous_surfaces` drawn on another workspace than its window's.
+  pub(super) previous_shifts: HashMap<SurfaceId, (i32, i32)>,
   /// Geometry animations of surfaces drawn here.
   pub(super) animations: HashMap<SurfaceId, GeometryAnimation>,
   /// The surfaces with a buffer drawn in the last frame.
@@ -139,6 +142,7 @@ impl OutputScene {
       workspace_transition: None,
       label: None,
       previous_surfaces: HashMap::new(),
+      previous_shifts: HashMap::new(),
       animations: HashMap::new(),
       drawn: HashSet::new(),
       animation_enabled: HashMap::new(),
@@ -155,12 +159,14 @@ impl OutputScene {
   /// next frame starts none.
   pub(super) fn forget_surfaces(&mut self) {
     self.previous_surfaces.clear();
+    self.previous_shifts.clear();
     self.animations.clear();
   }
 
   /// Forgets everything known about `surface`, which is gone.
   pub(super) fn surface_destroyed(&mut self, surface: SurfaceId) {
     self.previous_surfaces.remove(&surface);
+    self.previous_shifts.remove(&surface);
     self.animations.remove(&surface);
     self.drawn.remove(&surface);
     self.animation_enabled.remove(&surface);

@@ -9,7 +9,7 @@ use shingle_core::WindowId as TileWindowId;
 use shingle_render::RenderRect;
 
 use super::{BTN_LEFT, Frontend};
-use crate::{expo, scale::fit_scale_tile};
+use crate::expo;
 
 impl Frontend {
   /// Opens Expo or commits the currently selected workspace.
@@ -211,6 +211,8 @@ impl Frontend {
     );
     let current = self.compositor.current_workspace_index().unwrap_or(0);
     let original = self.original_expo_geometry(current);
+    let output = self.output_rect(&self.overview_output());
+    let wall = expo::expo_wall_cells(output, grid_width, grid_height, current);
     let geometry = original
       .iter()
       .filter_map(|(window, original)| {
@@ -219,7 +221,22 @@ impl Frontend {
           * grid_width as usize
           + info.location.workspace.x as usize;
         let cell = *cells.get(workspace)?;
-        Some((*window, fit_scale_tile(cell, *original, false)))
+        let wall = *wall.get(workspace)?;
+        Some((*window, expo::workspace_scaled(*original, wall, cell)))
+      })
+      .collect::<HashMap<_, _>>();
+    let overlaps = geometry
+      .keys()
+      .filter_map(|window| {
+        let info = self.compositor.core().window_info(*window).ok()?;
+        let rect = self.window_geometry(*window)?;
+        let overlapped = crate::straddle::overlapped_workspaces(
+          rect,
+          info.location.workspace,
+          output,
+          (grid_width, grid_height),
+        );
+        Some((*window, overlapped))
       })
       .collect::<HashMap<_, _>>();
     let windows = self
@@ -232,6 +249,7 @@ impl Frontend {
       state.cells == cells
         && state.windows == windows
         && state.geometry == geometry
+        && state.overlaps == overlaps
     }) {
       return;
     }
@@ -253,6 +271,7 @@ impl Frontend {
       state.cells = cells;
       state.windows = windows;
       state.geometry = geometry;
+      state.overlaps = overlaps;
       state.animation_started = now;
     }
   }

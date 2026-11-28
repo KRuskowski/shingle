@@ -101,6 +101,7 @@ mod shell;
 mod shortcuts;
 mod single_pixel_buffer;
 mod state;
+mod straddle;
 mod subsurface;
 mod surface_outputs;
 mod tearing;
@@ -819,6 +820,14 @@ pub struct SurfaceSnapshot {
   /// fullscreen (output) rectangle; for popups and subsurfaces it follows
   /// the parent.
   pub geometry: Rect,
+  /// How far `geometry` is moved from the surface's place on its window's
+  /// own workspace, in logical pixels: `(0, 0)`, except for the surfaces
+  /// of a window of another workspace that overlaps the one its output
+  /// shows, which Wayfire draws there too. Those are drawn moved by the
+  /// distance between the two workspaces, the output's size times their
+  /// difference in columns and rows
+  /// (wayfire:src/output/workspace-impl.cpp, `view_visible_on`).
+  pub shift: (i32, i32),
   /// Combined alpha in `0.0..=1.0`: the window's opacity (`wf/alpha`) times
   /// the surface's wp-alpha-modifier value. Popups and subsurfaces inherit
   /// their toplevel's opacity.
@@ -3977,7 +3986,10 @@ impl Compositor {
 
   /// The surfaces to draw on one output, bottom to top, as
   /// [`Compositor::visible_surfaces`] lists them for the first: its layer
-  /// surfaces, the windows of the workspace set it shows, the unmanaged X
+  /// surfaces, the windows of the workspace its set shows, with those of
+  /// its other workspaces that overlap it moved there by
+  /// [`SurfaceSnapshot::shift`], as Wayfire draws a view on every
+  /// workspace it overlaps, the unmanaged X
   /// windows that belong to it and the cursor while the pointer is on it.
   /// With `behavior.remove_output_limits`, windows of other outputs that
   /// overlap it follow its own windows. A dark output, or one turned off,

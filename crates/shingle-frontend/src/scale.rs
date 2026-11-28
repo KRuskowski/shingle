@@ -374,6 +374,7 @@ mod tests {
       title: Some("Alpha\tEditor".into()),
       icon: None,
       geometry: Rect::new(0, 0, 100, 100),
+      shift: (0, 0),
       opacity: 1.0,
       buffer: None,
       layer: None,

@@ -607,7 +607,7 @@ fn enter(
     offer.source_actions(source.actions);
     offer.action(wl_data_device_manager::DndAction::Copy);
   }
-  let geometry = crate::shell::surface_rect(state, target).unwrap_or_default();
+  let geometry = crate::straddle::drawn_rect(state, target).unwrap_or_default();
   let surface_resource = surface.resource.clone();
   let serial = state.serial();
   device.resource.enter(
@@ -629,7 +629,7 @@ fn motion(state: &CompositorState, target: &ObjectId) {
   let Some(surface) = state.surfaces.get(target) else {
     return;
   };
-  let geometry = crate::shell::surface_rect(state, target).unwrap_or_default();
+  let geometry = crate::straddle::drawn_rect(state, target).unwrap_or_default();
   let time = crate::input::timestamp(state);
   for device in state.data_devices.devices.values() {
     if device.client.id() == surface.client {

@@ -1078,7 +1078,16 @@ fn pointer_motion_inner(
     Some(Hit::Frame(window)) => Some(window),
     _ => None,
   };
-  crate::decorator::pointer_moved(state, frame, x, y);
+  // A frame takes the point where its window is drawn.
+  let (dx, dy) = frame.map_or((0, 0), |window| {
+    crate::straddle::window_shift(state, window)
+  });
+  crate::decorator::pointer_moved(
+    state,
+    frame,
+    x - f64::from(dx),
+    y - f64::from(dy),
+  );
   let Some(target) = target else {
     return;
   };
@@ -1333,7 +1342,7 @@ pub(crate) fn touch_down(state: &mut CompositorState, id: i32, x: f64, y: f64) {
   else {
     return;
   };
-  let Some(geometry) = shell::surface_rect(state, &object) else {
+  let Some(geometry) = crate::straddle::drawn_rect(state, &object) else {
     return;
   };
   let local_x = x - f64::from(geometry.x);
@@ -1367,7 +1376,7 @@ pub(crate) fn touch_motion(
   if id == 0 {
     crate::wayfire_shell::input_moved(state, x, y);
   }
-  let Some(geometry) = shell::surface_rect(state, &object) else {
+  let Some(geometry) = crate::straddle::drawn_rect(state, &object) else {
     return;
   };
   let local_x = x - f64::from(geometry.x);
@@ -1770,7 +1779,15 @@ fn hit_at(state: &CompositorState, x: f64, y: f64) -> Option<Hit> {
       if snapshot.role != crate::SurfaceRole::Toplevel {
         return None;
       }
-      crate::decorator::frame_at(state, object, x, y).map(Hit::Frame)
+      // The frame is where the window is drawn.
+      let (dx, dy) = snapshot.shift;
+      crate::decorator::frame_at(
+        state,
+        object,
+        x - f64::from(dx),
+        y - f64::from(dy),
+      )
+      .map(Hit::Frame)
     })
 }
 
@@ -1793,7 +1810,7 @@ pub(crate) fn local_position(
   state: &CompositorState,
   object: &ObjectId,
 ) -> Option<(f64, f64)> {
-  let geometry = shell::surface_rect(state, object)?;
+  let geometry = crate::straddle::drawn_rect(state, object)?;
   Some((
     state.input.pointer_x - f64::from(geometry.x),
     state.input.pointer_y - f64::from(geometry.y),

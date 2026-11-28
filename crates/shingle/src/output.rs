@@ -671,6 +671,6 @@ mod focus_tests;
 #[cfg(test)]
 mod multi_tests;
 #[cfg(test)]
-mod protocol_tests;
+pub(crate) mod protocol_tests;
 #[cfg(test)]
 mod tests;

@@ -35,6 +35,7 @@ mod cursor;
 mod frames;
 mod lock;
 mod outputs;
+mod straddle;
 mod switcher;
 mod vswipe;
 use crate::{
@@ -2235,6 +2236,7 @@ fn only_x_drag_icons_may_animate() {
     title: None,
     icon: None,
     geometry: shingle_core::Rect::new(0, 0, 32, 32),
+    shift: (0, 0),
     opacity: 1.0,
     buffer: None,
     layer: None,
@@ -2421,6 +2423,7 @@ fn layer_views_are_named_after_their_layer() {
     title: None,
     icon: None,
     geometry: shingle_core::Rect::new(0, 0, 32, 32),
+    shift: (0, 0),
     opacity: 1.0,
     buffer: None,
     layer: Some(layer),

@@ -390,6 +390,45 @@ fn shell_float(fixture: &mut Fixture, window: WindowId) {
 }
 
 #[test]
+fn a_frame_hanging_over_takes_input_where_it_is_drawn() {
+  let mut fixture = Fixture::new(Config {
+    workspace_width: 2,
+    workspace_height: 1,
+    ..Config::default()
+  });
+  let seat = fixture.client.bind::<WlSeat>(7);
+  let _pointer = seat.get_pointer(&fixture.client.handle, ());
+  let (toplevel, window) = fixture.ssd("over");
+  shell_float(&mut fixture, window);
+  // Its centre, 1230, is on the first workspace, its right part on the
+  // second.
+  crate::shell::set_floating_geometry(
+    &mut fixture.compositor.state,
+    window,
+    Rect::new(1080, 100, 300, 200),
+  )
+  .unwrap();
+  fixture.roundtrip();
+  let reply = fixture.ipc(
+    "vswitch/set-workspace",
+    json!({"output-id": 1, "x": 1, "y": 0}),
+  );
+  assert_eq!(reply, json!({"result": "ok"}));
+  fixture.roundtrip();
+  // The close button is drawn at the second workspace's left edge.
+  let (x, y) = fixture.button_centre(window, FrameButton::Close);
+  let drawn_x = 1080.0 - 1280.0 + x;
+  assert!(drawn_x > 0.0, "the button is on the output");
+  fixture
+    .compositor
+    .pointer_motion(fixture.pointer, drawn_x, 100.0 + y);
+  fixture.roundtrip();
+  assert_eq!(fixture.frame(window).unwrap().hovered, Some(0));
+  fixture.click();
+  assert_eq!(fixture.client.events.closes, [toplevel.toplevel.id()]);
+}
+
+#[test]
 fn dragging_the_title_moves_and_a_border_press_resizes() {
   let mut fixture = Fixture::new(Config::default());
   let (_, window) = fixture.ssd("drag");

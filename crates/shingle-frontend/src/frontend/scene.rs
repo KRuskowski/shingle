@@ -638,18 +638,29 @@ impl Frontend {
         if snapshot.buffer.is_none() {
           continue;
         }
-        let geometry = RenderRect {
-          x: snapshot.geometry.x,
-          y: snapshot.geometry.y,
-          width: snapshot.geometry.width,
-          height: snapshot.geometry.height,
-        };
+        // A window drawn on another workspace than its own moves with
+        // the workspace shown, which is no change of its geometry.
+        let own = crate::straddle::unshifted(snapshot.geometry, snapshot.shift);
         let Some((old_geometry, old_buffer)) =
           scene.previous_surfaces.get(&snapshot.id)
         else {
           continue;
         };
-        if *old_geometry == geometry
+        let old_shift = scene
+          .previous_shifts
+          .get(&snapshot.id)
+          .copied()
+          .unwrap_or((0, 0));
+        let old_own = crate::straddle::unshifted(
+          shingle_core::Rect::new(
+            old_geometry.x,
+            old_geometry.y,
+            old_geometry.width,
+            old_geometry.height,
+          ),
+          old_shift,
+        );
+        if old_own == own
           || scene.animations.contains_key(&snapshot.id)
           || self.animation_duration.is_zero()
         {
@@ -677,11 +688,18 @@ impl Frontend {
             &old_rgba,
           )?
         };
+        // The old frame is drawn where the workspace shown puts it now.
+        let old_geometry = RenderRect {
+          x: old_own.x.saturating_add(snapshot.shift.0),
+          y: old_own.y.saturating_add(snapshot.shift.1),
+          width: old_own.width,
+          height: old_own.height,
+        };
         scene.animations.insert(
           snapshot.id,
           GeometryAnimation {
             started: now,
-            old_geometry: *old_geometry,
+            old_geometry,
             old_texture,
           },
         );
@@ -717,6 +735,17 @@ impl Frontend {
       });
       scene.animations.retain(|id, _| drawn.contains(id));
       let switcher = self.switcher_view.as_ref().filter(|_| switcher_here);
+      // Expo's cells as drawn now, which cut the thumbnails.
+      let expo_cells = expo_here
+        .then(|| self.expo.as_ref().or(self.expo_exit.as_ref()))
+        .flatten()
+        .map(|state| state.cells_at(now, expo_timing));
+      // A window being moved is drawn whole, over the workspaces.
+      let moved = match &self.drag {
+        Some(DragState::Move { source, .. }) => Some(*source),
+        _ => None,
+      };
+      let dragging = |window: TileWindowId| moved == Some(window);
       let tiles = if let Some(shown) = switcher {
         super::switcher::SwitcherScene {
           compositor: &self.compositor,
@@ -741,15 +770,31 @@ impl Frontend {
               height: geometry.height,
             };
             // The window's geometry, which includes its frame if it has one.
+            // A frame is where its window is on its own workspace; it is
+            // drawn moved with the window.
             let window_rect =
               frames.get(&snapshot.id).map_or(content_rect, |frame| {
                 RenderRect {
-                  x: frame.rect.x,
-                  y: frame.rect.y,
+                  x: frame.rect.x.saturating_add(snapshot.shift.0),
+                  y: frame.rect.y.saturating_add(snapshot.shift.1),
                   width: frame.rect.width,
                   height: frame.rect.height,
                 }
               });
+            // The surface and its window on their own workspace.
+            let own_content =
+              crate::straddle::unshifted(geometry, snapshot.shift);
+            let own_window = crate::straddle::unshifted(
+              shingle_core::Rect::new(
+                window_rect.x,
+                window_rect.y,
+                window_rect.width,
+                window_rect.height,
+              ),
+              snapshot.shift,
+            );
+            // Its copies on a wall, one for each workspace it overlaps.
+            let mut copies = Vec::new();
             let mut tile = RenderTile::textured(
               RenderRect {
                 x: geometry.x,
@@ -886,13 +931,22 @@ impl Frontend {
                   *component *= brightness;
                 }
               }
+              // A dragged thumbnail follows the pointer whole; the others
+              // show on each workspace they overlap, as Expo's wall does.
+              if dragged.is_none()
+                && let Some(cells) = &expo_cells
+                && let Some(overlapped) = state.overlaps.get(&window)
+              {
+                copies = crate::straddle::expo_copies(cells, rect, overlapped);
+              }
             }
             if let Some(window) = snapshot.window
               && let Some(transition) = &scene.workspace_transition
               && let Ok(info) = self.compositor.core().window_info(window)
               && info.location.output.as_str() == output.name()
             {
-              let (grid_width, _) = self.compositor.workspace_grid_dimensions();
+              let (grid_width, grid_height) =
+                self.compositor.workspace_grid_dimensions();
               let workspace = info.location.workspace.y as usize
                 * grid_width as usize
                 + info.location.workspace.x as usize;
@@ -902,7 +956,7 @@ impl Frontend {
                 gap: f64::from(self.vswitch.gap),
               };
               let geometry = transition.geometry(
-                snapshot.geometry,
+                own_content,
                 workspace,
                 layout,
                 now,
@@ -911,13 +965,36 @@ impl Frontend {
               for tile in &mut tiles {
                 tile.geometry = geometry;
               }
+              if !dragging(window) {
+                let overlapped = crate::straddle::overlapped_workspaces(
+                  own_window,
+                  info.location.workspace,
+                  rect,
+                  (grid_width, grid_height),
+                );
+                copies = crate::straddle::wall_copies(
+                  own_content,
+                  rect,
+                  &overlapped,
+                  |placed, index| {
+                    transition.geometry(
+                      placed,
+                      index,
+                      layout,
+                      now,
+                      vswitch_timing,
+                    )
+                  },
+                );
+              }
             }
             if let Some(window) = snapshot.window
               && let Some(viewport) = wall
               && let Ok(info) = self.compositor.core().window_info(window)
               && info.location.output.as_str() == output.name()
             {
-              let (grid_width, _) = self.compositor.workspace_grid_dimensions();
+              let (grid_width, grid_height) =
+                self.compositor.workspace_grid_dimensions();
               let workspace = info.location.workspace.y as usize
                 * grid_width as usize
                 + info.location.workspace.x as usize;
@@ -927,13 +1004,31 @@ impl Frontend {
                 gap: self.vswipe_config.gap,
               };
               let geometry = workspace_transition::wall_geometry(
-                snapshot.geometry,
+                own_content,
                 workspace,
                 layout,
                 viewport,
               );
               for tile in &mut tiles {
                 tile.geometry = geometry;
+              }
+              if !dragging(window) {
+                let overlapped = crate::straddle::overlapped_workspaces(
+                  own_window,
+                  info.location.workspace,
+                  rect,
+                  (grid_width, grid_height),
+                );
+                copies = crate::straddle::wall_copies(
+                  own_content,
+                  rect,
+                  &overlapped,
+                  |placed, index| {
+                    workspace_transition::wall_geometry(
+                      placed, index, layout, viewport,
+                    )
+                  },
+                );
               }
             }
             if let Some(angle) = snapshot
@@ -954,7 +1049,12 @@ impl Frontend {
             {
               let mut framed = self.frame_textures.tiles(
                 frame,
-                content_rect,
+                RenderRect {
+                  x: own_content.x,
+                  y: own_content.y,
+                  width: own_content.width,
+                  height: own_content.height,
+                },
                 content,
                 &self.decoration_config,
                 view.scale,
@@ -963,11 +1063,16 @@ impl Frontend {
               tiles = framed;
             }
             tiles.extend(above);
-            Some(tiles)
+            Some(crate::straddle::apply_copies(tiles, &copies))
           })
           .flatten()
           .collect::<Vec<_>>()
       };
+      scene.previous_shifts = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.shift != (0, 0))
+        .map(|snapshot| (snapshot.id, snapshot.shift))
+        .collect();
       scene.previous_surfaces = snapshots
         .iter()
         .filter_map(|snapshot| {

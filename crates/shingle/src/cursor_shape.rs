@@ -65,6 +65,7 @@ fn shape_snapshot(state: &CompositorState, shape: Shape) -> SurfaceSnapshot {
       image.width,
       image.height,
     ),
+    shift: (0, 0),
     opacity: 1.0,
     buffer: Some(BufferSnapshot {
       width: image.width,

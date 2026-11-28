@@ -64,7 +64,7 @@ fn two_outputs() -> (Compositor, std::path::PathBuf) {
 }
 
 /// Binds every `wl_output` global the client sees, by output name.
-fn bind_outputs(
+pub(crate) fn bind_outputs(
   compositor: &mut Compositor,
   client: &mut TestClient,
 ) -> HashMap<String, WlOutput> {
@@ -562,7 +562,7 @@ fn fifo_barriers_wait_for_the_frames_of_the_primary_output() {
 /// Captures `region` of `output`, all of it for `None`, into an shm
 /// buffer of the size the compositor gives. Returns that size and the
 /// pixels as BGRA bytes, or `None` if the capture failed.
-fn capture(
+pub(crate) fn capture(
   compositor: &mut Compositor,
   client: &mut TestClient,
   output: &WlOutput,
