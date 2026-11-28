@@ -331,10 +331,24 @@ pub(crate) fn quad(
   let rect = tile.geometry;
   let output_width = output_width as f32 / scale_factor;
   let output_height = output_height as f32 / scale_factor;
-  let x0 = rect.x as f32 / output_width * 2.0 - 1.0;
-  let x1 = (rect.x + rect.width as i32) as f32 / output_width * 2.0 - 1.0;
-  let y0 = 1.0 - rect.y as f32 / output_height * 2.0;
-  let y1 = 1.0 - (rect.y + rect.height as i32) as f32 / output_height * 2.0;
+  // Edges on whole output pixels, as wlroots' scene rounds a node's box
+  // at the output's scale, so that at a fractional scale a buffer of the
+  // drawn size is still sampled texel for texel instead of half a pixel
+  // off. At whole scales every edge is a whole pixel already; a zoomed
+  // output scales every edge again, so there it would gain nothing.
+  let unzoomed = zoom.factor == 1.0;
+  let snap = |logical: i32| {
+    let logical = logical as f32;
+    if unzoomed {
+      (logical * scale_factor).round() / scale_factor
+    } else {
+      logical
+    }
+  };
+  let x0 = snap(rect.x) / output_width * 2.0 - 1.0;
+  let x1 = snap(rect.x + rect.width as i32) / output_width * 2.0 - 1.0;
+  let y0 = 1.0 - snap(rect.y) / output_height * 2.0;
+  let y1 = 1.0 - snap(rect.y + rect.height as i32) / output_height * 2.0;
   let mut top_left = transformed_vertex(tile, x0, y0, 0.0, 0.0);
   let mut top_right = transformed_vertex(tile, x1, y0, 1.0, 0.0);
   let mut bottom_left = transformed_vertex(tile, x0, y1, 0.0, 1.0);
@@ -565,6 +579,35 @@ mod tests {
     );
     assert_eq!(vertices[0].position, [-1.0, 1.0]);
     assert_eq!(vertices[5].position, [1.0, -1.0]);
+  }
+
+  #[test]
+  fn fractional_scales_put_tile_edges_on_whole_pixels() {
+    let tile = RenderTile::solid(
+      RenderRect {
+        x: 201,
+        y: 141,
+        width: 80,
+        height: 61,
+      },
+      [1.0; 4],
+    );
+    // 1920x1080 output pixels at scale 1.5; logical 201 is pixel 301.5.
+    let vertices = quad(
+      &tile,
+      1920,
+      1080,
+      1.5,
+      Zoom::default(),
+      TextureTransform::Normal,
+    );
+    let pixel_x = |clip: f32| (clip + 1.0) / 2.0 * 1920.0;
+    let pixel_y = |clip: f32| (1.0 - clip) / 2.0 * 1080.0;
+    let close = |value: f32, expected: f32| (value - expected).abs() < 0.01;
+    assert!(close(pixel_x(vertices[0].position[0]), 302.0));
+    assert!(close(pixel_y(vertices[0].position[1]), 212.0));
+    assert!(close(pixel_x(vertices[5].position[0]), 422.0));
+    assert!(close(pixel_y(vertices[5].position[1]), 303.0));
   }
 
   /// `matrix` as a column-major [`Projection`] around (`x`, `y`).
