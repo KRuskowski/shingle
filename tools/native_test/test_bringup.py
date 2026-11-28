@@ -389,8 +389,13 @@ class DeployTest(unittest.TestCase):
     uploaded = [path for _, path in machine.puts]
     self.assertIn('shingle-bringup/bin/shingle.new', uploaded)
     self.assertIn('shingle-bringup/bin/present_probe.new', uploaded)
+    self.assertIn('shingle-bringup/bin/shingle-lock.new', uploaded)
+    self.assertIn('shingle-bringup/bin/shingle-launcher.new', uploaded)
     self.assertIn('shingle-bringup/tools/native_test/start_tty1.py', uploaded)
     install = [s for s in machine.scripts if s.startswith('set -e')][0]
+    for name in ('shingle-lock', 'shingle-launcher'):
+      self.assertIn(f'ln -sf "$HOME/shingle-bringup/bin/{name}" '
+                    f'"$HOME/.local/bin/{name}"', install)
     self.assertIn('ln -sf "$HOME/shingle-bringup/tools/native_test/'
                   'start_tty1.py" "$HOME/.local/bin/shingle-tty1"', install)
     self.assertIn('"commit": "abcdef1234567890"', install)

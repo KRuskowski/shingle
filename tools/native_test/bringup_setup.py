@@ -5,12 +5,13 @@
 for real: it only asks `sudo -n -l CMD`, which lists whether CMD may run
 without a password and runs nothing.
 
-`deploy` builds `shingle` and the present_probe example here in release
-and copies them, with the test tools and the tty1 start script, to
-~/shingle-bringup on the test machine, after checking that the binaries'
-glibc symbol versions and shared libraries exist there. Otherwise it
-pushes the commit into ~/shingle on the test machine with git over the
-same SSH connection and builds there.
+`deploy` builds `shingle`, `shingle-lock`, `shingle-launcher` and the
+present_probe example here in release and copies them, with the test
+tools and the tty1 start script, to ~/shingle-bringup on the test
+machine, after checking that the binaries' glibc symbol versions and
+shared libraries exist there. Otherwise it pushes the commit into
+~/shingle on the test machine with git over the same SSH connection and
+builds there.
 """
 
 import dataclasses
@@ -34,7 +35,11 @@ BUILD_PACKAGES = ['libwayland-dev', 'libxkbcommon-dev', 'libpam0g-dev',
                   'libgbm-dev', 'pkg-config', 'git']
 TEST_CONFIG = 'session: {restore: false}\nxwayland: {mode: false}\n'
 SHIPPED_TOOLS = ['ipc.py', 'uinput.py', 'present_check.py', 'start_tty1.py']
+# The lock screen and the launcher run from bindings (a Wayfire import
+# swaps swaylock and rofi for them), so a session needs them on PATH too.
 BINARIES = {'shingle': 'release/shingle',
+            'shingle-lock': 'release/shingle-lock',
+            'shingle-launcher': 'release/shingle-launcher',
             'present_probe': 'release/examples/present_probe'}
 LOAD_LIMIT = 12.0
 
@@ -271,16 +276,18 @@ def git_state(local, repo):
   return commit, dirty
 
 def cargo_builds(jobs):
-  """The cargo commands of a release build of both binaries."""
+  """The cargo commands of a release build of the deployed binaries."""
   common = ['cargo', 'build', '--release', '--jobs', str(jobs)]
   return [common + ['-p', 'shingle-bin', '--bin', 'shingle'],
+          common + ['-p', 'shingle-lock', '--bin', 'shingle-lock'],
+          common + ['-p', 'shingle-launcher', '--bin', 'shingle-launcher'],
           common + ['-p', 'shingle-native', '--example', 'present_probe']]
 
 class DeployError(Exception):
   """Deploying failed; the message says where."""
 
 def build_here(local, repo, target_dir, jobs, load, out=print):
-  """Builds both binaries here; returns their paths."""
+  """Builds the deployed binaries here; returns their paths."""
   if load > LOAD_LIMIT:
     raise DeployError(f'the load is {load:.1f}, above {LOAD_LIMIT:g}; wait '
                       'for other builds to finish')
@@ -329,9 +336,10 @@ def install_script(commit_record, source_dir=None):
   lines += [
       'chmod 755 tools/native_test/*.py',
       'mkdir -p "$HOME/.local/bin"',
-      f'ln -sf "$HOME/{BASE}/bin/shingle" "$HOME/.local/bin/shingle"',
-      f'ln -sf "$HOME/{BASE}/bin/present_probe" '
-      '"$HOME/.local/bin/present_probe"',
+  ]
+  lines += [f'ln -sf "$HOME/{BASE}/bin/{name}" "$HOME/.local/bin/{name}"'
+            for name in BINARIES]
+  lines += [
       f'ln -sf "$HOME/{TOOLS}/start_tty1.py" "$HOME/.local/bin/shingle-tty1"',
       f'printf %s {shlex.quote(json.dumps(commit_record))} > DEPLOYED.json',
       'bin/shingle --version']
