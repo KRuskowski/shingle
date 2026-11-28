@@ -103,7 +103,17 @@ pub struct ConnectorProps {
   /// property's range, so that what another DRM master set does not
   /// stay.
   pub max_bpc: Option<(PropertyId, u64)>,
+  /// `Colorspace` and `HDR_OUTPUT_METADATA`, where the connector has
+  /// them: modesets set both to 0, the default colorimetry and no HDR
+  /// metadata, for Shingle's sRGB frames.
+  pub color: [Option<PropertyId>; 2],
+  /// `content type`, which HDMI connectors have: modesets set it to
+  /// [`CONTENT_TYPE_GRAPHICS`].
+  pub content_type: Option<PropertyId>,
 }
+
+/// The `content type` value of a desktop (`DRM_MODE_CONTENT_TYPE_GRAPHICS`).
+pub const CONTENT_TYPE_GRAPHICS: u64 = 1;
 
 /// The bits per colour Shingle's XRGB8888 frames have, which modesets
 /// give `max bpc`, as wlroots' `pick_max_bpc` does for 8-bit formats.
@@ -132,6 +142,8 @@ impl ConnectorProps {
         };
         (id, value)
       }),
+      color: ["Colorspace", "HDR_OUTPUT_METADATA"].map(|name| table.id(name)),
+      content_type: table.id("content type"),
     })
   }
 }

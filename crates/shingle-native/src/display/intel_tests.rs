@@ -355,6 +355,9 @@ fn the_first_modeset_clears_what_another_session_left() {
   fake.set_value(51, "CTM", 701);
   fake.set_value(31, "rotation", 4);
   fake.set_value(95, "max bpc", 6);
+  // An HDR session left DP-1 in BT.2020 with HDR metadata.
+  fake.set_value(105, "Colorspace", 9);
+  fake.set_value(105, "HDR_OUTPUT_METADATA", 702);
   let (card, _display) = start(fake, OutputPolicy::default());
   let fake = card.borrow();
   assert_eq!(fake.value(51, "GAMMA_LUT"), 0);
@@ -366,6 +369,8 @@ fn the_first_modeset_clears_what_another_session_left() {
   for connector in [95, 105, 121] {
     assert_eq!(fake.value(connector, "max bpc"), 8);
   }
+  assert_eq!(fake.value(105, "Colorspace"), 0);
+  assert_eq!(fake.value(105, "HDR_OUTPUT_METADATA"), 0);
 }
 
 #[test]

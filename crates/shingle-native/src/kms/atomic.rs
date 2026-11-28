@@ -11,7 +11,10 @@
 
 use super::{
   BlobId, FramebufferId, Object, PropertyId,
-  props::{ConnectorProps, CrtcProps, LINK_STATUS_GOOD, PlaneProps, ROTATE_0},
+  props::{
+    CONTENT_TYPE_GRAPHICS, ConnectorProps, CrtcProps, LINK_STATUS_GOOD,
+    PlaneProps, ROTATE_0,
+  },
 };
 
 /// Properties to set in one atomic commit, in the order they were added.
@@ -191,12 +194,20 @@ fn set_output(
     request.set(connector, link_status, LINK_STATUS_GOOD);
   }
   // What another DRM master may have left: a lower or higher `max bpc`,
-  // gamma and colour tables (Shingle applies gamma when it draws) and a
-  // rotated plane. wlroots sets `max bpc` and `GAMMA_LUT` this way;
-  // Mutter and KWin also reset `DEGAMMA_LUT`, `CTM` and `rotation`.
+  // an HDR colorimetry and metadata, gamma and colour tables (Shingle
+  // applies gamma when it draws) and a rotated plane. wlroots sets
+  // `max bpc`, `Colorspace`, `HDR_OUTPUT_METADATA`, `content type` and
+  // `GAMMA_LUT` this way; Mutter and KWin also reset `DEGAMMA_LUT`, `CTM`
+  // and `rotation`.
   if state.active {
     if let Some((max_bpc, value)) = output.connector.max_bpc {
       request.set(connector, max_bpc, value);
+    }
+    for property in output.connector.color.into_iter().flatten() {
+      request.set(connector, property, 0);
+    }
+    if let Some(content_type) = output.connector.content_type {
+      request.set(connector, content_type, CONTENT_TYPE_GRAPHICS);
     }
     for property in output.crtc.color.into_iter().flatten() {
       request.set(Object::Crtc(output.crtc.id), property, 0);
@@ -329,6 +340,8 @@ pub(crate) mod tests {
         crtc_id: PropertyId(10),
         link_status: None,
         max_bpc: None,
+        color: [None; 2],
+        content_type: None,
       },
       crtc: CrtcProps {
         id: CrtcId(2),
@@ -455,6 +468,8 @@ pub(crate) mod tests {
   fn a_modeset_resets_what_another_master_left() {
     let mut props = props_with_cursor();
     props.connector.max_bpc = Some((PropertyId(12), 8));
+    props.connector.color = [Some(PropertyId(13)), Some(PropertyId(14))];
+    props.connector.content_type = Some(PropertyId(15));
     props.crtc.color = [Some(PropertyId(23)), None, Some(PropertyId(25))];
     props.plane.rotation = Some(PropertyId(90));
     if let Some(cursor) = &mut props.cursor {
@@ -465,6 +480,13 @@ pub(crate) mod tests {
     assert_eq!(
       request.get(Object::Connector(ConnectorId(1)), PropertyId(12)),
       Some(8)
+    );
+    let connector = Object::Connector(ConnectorId(1));
+    assert_eq!(request.get(connector, PropertyId(13)), Some(0));
+    assert_eq!(request.get(connector, PropertyId(14)), Some(0));
+    assert_eq!(
+      request.get(connector, PropertyId(15)),
+      Some(CONTENT_TYPE_GRAPHICS)
     );
     assert_eq!(request.get(crtc, PropertyId(23)), Some(0));
     assert_eq!(request.get(crtc, PropertyId(25)), Some(0));
@@ -504,6 +526,8 @@ pub(crate) mod tests {
         crtc_id: PropertyId(40),
         link_status: None,
         max_bpc: None,
+        color: [None; 2],
+        content_type: None,
       }],
       crtcs: vec![CrtcProps {
         id: CrtcId(5),
@@ -555,6 +579,8 @@ pub(crate) mod tests {
         crtc_id: PropertyId(10),
         link_status: None,
         max_bpc: None,
+        color: [None; 2],
+        content_type: None,
       },
       crtc: CrtcProps {
         id: CrtcId(8),
