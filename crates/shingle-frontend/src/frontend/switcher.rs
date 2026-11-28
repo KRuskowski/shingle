@@ -406,13 +406,13 @@ impl Frontend {
 
 /// The layout rectangle around `window`'s surfaces and frame, or `None`
 /// without a mapped buffer: Wayfire's `view_bounding_box_up_to` below
-/// the switcher's transformer.
+/// the switcher's transformer, which its popups are not under.
 fn window_bounds(
   compositor: &Compositor,
   window: TileWindowId,
   frames: &HashMap<SurfaceId, FrameSnapshot>,
 ) -> Option<Rect> {
-  let surfaces = compositor.window_surfaces(window);
+  let surfaces = super::whole_view::window_view(compositor, window);
   bounds_of(&surfaces, frames)
 }
 
@@ -490,8 +490,13 @@ impl<'a> SwitcherScene<'a, '_> {
     // Wayfire's stacking order lists the topmost first.
     let mut stacking = self.compositor.stacking_order_on(&shown.output);
     stacking.reverse();
+    // A thumbnail is the window's view, its toplevel, subsurfaces and
+    // frame, which Wayfire's switcher draws through the view's
+    // transformed node; its popups are views of their own in the
+    // unmanaged layer, which the switcher covers
+    // (wayfire:plugins/single_plugins/switcher.cpp:729-739).
     for (window, paint) in shown.view.thumbnails(now, &stacking) {
-      let surfaces = self.compositor.window_surfaces(window);
+      let surfaces = super::whole_view::window_view(self.compositor, window);
       let Some(bounds) = bounds_of(&surfaces, self.frames) else {
         continue;
       };
