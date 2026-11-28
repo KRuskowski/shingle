@@ -33,6 +33,7 @@ pub mod mime;
 pub mod pairing;
 pub mod policy;
 pub mod props;
+pub mod resources;
 pub mod selection;
 pub mod window;
 
@@ -1213,6 +1214,40 @@ impl<C: XConnection> Xwm<C> {
   /// When the server has no ARGB32 picture format, or a request fails.
   pub fn set_cursor(&mut self, image: &CursorImage) -> Result<(), XwmError> {
     self.connection.set_root_cursor(image)
+  }
+
+  /// Applies `changes` to the root's `RESOURCE_MANAGER`, the database
+  /// `xrdb` writes, keeping its other entries ([`resources::merge`]):
+  /// `(name, Some(value))` sets an entry, `(name, None)` removes it. X
+  /// clients read it when they start.
+  ///
+  /// # Errors
+  ///
+  /// When the property cannot be read or the request cannot be queued.
+  pub fn set_resources(
+    &mut self,
+    changes: &[(&str, Option<String>)],
+  ) -> Result<(), XwmError> {
+    let property = u32::from(AtomEnum::RESOURCE_MANAGER);
+    let current = self
+      .connection
+      .get_properties(self.root, &[property])?
+      .into_iter()
+      .next()
+      .flatten()
+      .filter(|current| current.format == 8)
+      .map(|current| String::from_utf8_lossy(&current.value).into_owned())
+      .unwrap_or_default();
+    let merged = resources::merge(&current, changes);
+    if merged == current {
+      return Ok(());
+    }
+    self.connection.change_property8(
+      self.root,
+      property,
+      AtomEnum::STRING.into(),
+      merged.as_bytes(),
+    )
   }
 
   /// Closes a window: `WM_DELETE_WINDOW` when it lists that protocol,

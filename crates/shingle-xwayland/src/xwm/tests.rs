@@ -1529,3 +1529,59 @@ fn override_redirect_windows_map_on_map_notify_and_stay_unlisted() {
   // No WM_STATE or list change for it.
   assert!(xwm.connection.requests.is_empty());
 }
+
+#[test]
+fn set_resources_merges_into_the_root_database() {
+  let mut xwm = started();
+  let resource_manager = u32::from(AtomEnum::RESOURCE_MANAGER);
+  let string = u32::from(AtomEnum::STRING);
+  xwm
+    .set_resources(&[("Xft.dpi", Some("144".into()))])
+    .unwrap();
+  assert_eq!(
+    xwm.connection.requests,
+    [
+      Request::GetProperties(ROOT, 1),
+      Request::Property8(
+        ROOT,
+        resource_manager,
+        string,
+        b"Xft.dpi:\t144\n".to_vec()
+      ),
+    ]
+  );
+  // A database merged by the startup script keeps its other entries.
+  xwm.connection.properties.insert(
+    (ROOT, resource_manager),
+    Property {
+      kind: string,
+      format: 8,
+      value: b"XTerm*faceName:\tMono\nXft.dpi:\t144\n".to_vec(),
+    },
+  );
+  xwm.connection.requests.clear();
+  xwm.set_resources(&[("Xft.dpi", None)]).unwrap();
+  assert_eq!(
+    xwm.connection.requests.last(),
+    Some(&Request::Property8(
+      ROOT,
+      resource_manager,
+      string,
+      b"XTerm*faceName:\tMono\n".to_vec()
+    ))
+  );
+  // Nothing to change, nothing written.
+  xwm.connection.properties.insert(
+    (ROOT, resource_manager),
+    Property {
+      kind: string,
+      format: 8,
+      value: b"Xft.dpi:\t144\n".to_vec(),
+    },
+  );
+  xwm.connection.requests.clear();
+  xwm
+    .set_resources(&[("Xft.dpi", Some("144".into()))])
+    .unwrap();
+  assert_eq!(xwm.connection.requests, [Request::GetProperties(ROOT, 1)]);
+}
