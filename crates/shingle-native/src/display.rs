@@ -1723,8 +1723,9 @@ impl Display {
 
   /// Shows `scanout`'s current buffer on lit output `index` with a
   /// blocking flip, after a `TEST_ONLY` one, then frees the old scanout's
-  /// buffers, which are off screen by then. On failure the new scanout is
-  /// freed and the old one stays.
+  /// buffers, which are off screen by then, and lets the new ones try
+  /// async flips again. On failure the new scanout is freed and the old
+  /// one stays.
   fn switch_scanout(
     &mut self,
     index: usize,
@@ -1740,8 +1741,18 @@ impl Display {
       scanout.destroy(self.device.as_mut());
       return Err(error);
     }
-    let mut old = std::mem::replace(&mut self.lit[index].scanout, scanout);
+    let lit = &mut self.lit[index];
+    let mut old = std::mem::replace(&mut lit.scanout, scanout);
     old.destroy(self.device.as_mut());
+    // A refused async flip may have been the buffers': i915 flips LINEAR
+    // buffers async only from display version 12 on, so copy scanout's
+    // dumb buffers flip in sync there while tiled GBM buffers need not.
+    if lit.async_refused.take().is_some() {
+      diagnostics::log(&format!(
+        "output {}: trying async page flips again with the new buffers",
+        lit.name()
+      ));
+    }
     Ok(())
   }
 

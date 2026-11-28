@@ -367,3 +367,47 @@ fn the_first_modeset_clears_what_another_session_left() {
     assert_eq!(fake.value(connector, "max bpc"), 8);
   }
 }
+
+#[test]
+fn async_flips_come_back_with_tiled_buffers_on_display_version_9() {
+  let (card, mut display) =
+    start(drm_info::whiskey_lake(), OutputPolicy::default());
+  display.set_tearing("eDP-1", true);
+  let async_flip = CommitFlags::NONBLOCK
+    | CommitFlags::PAGE_FLIP_EVENT
+    | CommitFlags::PAGE_FLIP_ASYNC;
+  let flags_since = |since: usize| -> Vec<(CommitFlags, bool)> {
+    card.borrow().commits[since..]
+      .iter()
+      .map(|(_, flags, accepted)| (*flags, *accepted))
+      .collect()
+  };
+  // Copy scanout's dumb buffers are LINEAR, which i915 does not flip
+  // async before display version 12: the frame flips in sync.
+  let before = card.borrow().commits.len();
+  assert!(display.begin_frame_on("eDP-1"));
+  let frame = crate::scanout::Frame {
+    width: 1920,
+    height: 1080,
+    rgba: vec![0; 1920 * 1080 * 4],
+  };
+  display.present_on("eDP-1", &Drawn::Pixels(frame), Instant::now());
+  let sync = CommitFlags::NONBLOCK | CommitFlags::PAGE_FLIP_EVENT;
+  assert_eq!(flags_since(before), [(async_flip, false), (sync, true)]);
+  let crtc = crate::kms::CrtcId(51);
+  card
+    .borrow_mut()
+    .complete_flip_on(crtc, Duration::from_millis(16), 1);
+  display.dispatch_flips();
+  // Y-tiled GBM buffers do flip async: the refusal was the buffers'.
+  display.set_scanout_choice(ScanoutChoice::Auto);
+  display.upgrade_scanout("eDP-1", &mut gen9_renderer(&card));
+  assert_eq!(
+    display.scanout_status("eDP-1"),
+    Some(ScanoutStatus::ZeroCopy(Y_TILED))
+  );
+  let before = card.borrow().commits.len();
+  assert!(display.begin_frame_on("eDP-1"));
+  display.present_on("eDP-1", &Drawn::InPlace, Instant::now());
+  assert_eq!(flags_since(before), [(async_flip, true)]);
+}
