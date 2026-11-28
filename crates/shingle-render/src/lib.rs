@@ -25,6 +25,9 @@
 //! byte order, damaged rectangles only ([`upload`]), through staging
 //! buffers in system memory ([`staging`]).
 //!
+//! A view can be drawn into a texture of its own with [`draw_view`], for
+//! an effect that transforms the view as a whole.
+//!
 //! A frame's submission can end with a sync_file that signals when the GPU
 //! has finished it ([`fence`]), for a KMS plane to wait for.
 
@@ -41,6 +44,7 @@ mod state;
 mod target;
 mod tile_effects;
 pub mod upload;
+mod view;
 
 use std::time::{Duration, Instant};
 
@@ -62,6 +66,7 @@ pub use target::{
 };
 pub use tile_effects::{Particle, Squeeze, TileEffect};
 pub use upload::{ShmImage, TextureUploader, UploadError, UploadRect};
+pub use view::{draw_view, is_view_texture};
 
 use state::Zoom;
 
@@ -120,6 +125,10 @@ pub enum RenderError {
   /// The surface reports no supported texture format for this adapter.
   #[error("the GPU surface offers no texture format")]
   NoSurfaceFormat,
+  /// [`draw_view`] was given a texture that cannot be drawn into, one
+  /// that [`GpuContext::create_view_texture`] did not make.
+  #[error("the texture cannot be drawn into")]
+  NotViewTexture,
   /// A DMA-BUF to draw into could not be imported.
   #[error("{0}")]
   Import(#[from] ImportError),

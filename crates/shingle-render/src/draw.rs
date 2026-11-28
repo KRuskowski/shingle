@@ -79,11 +79,47 @@ pub fn draw_with_access(
   size: (u32, u32),
   tiles: &[RenderTile<'_>],
   clear: [f64; 4],
+  foreign: ForeignAccess,
+) -> wgpu::SubmissionIndex {
+  composite(
+    gpu,
+    state,
+    (view, size),
+    tiles,
+    clear,
+    foreign,
+    Grading::Output,
+  )
+}
+
+/// Whether a pass ends in the output's colour grading, the gamma ramp and
+/// the inversion effect, or leaves colours as they are, for a texture
+/// that a later pass draws onto an output ([`crate::draw_view`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Grading {
+  /// The gamma ramp and inversion of the [`GpuContext`].
+  Output,
+  /// The identity ramp and no inversion.
+  Neutral,
+}
+
+/// [`draw_with_access`] into `view` of `size` physical pixels, graded as
+/// `grading` says.
+pub(crate) fn composite(
+  gpu: &GpuContext,
+  state: &RenderState,
+  (view, size): (&wgpu::TextureView, (u32, u32)),
+  tiles: &[RenderTile<'_>],
+  clear: [f64; 4],
   mut foreign: ForeignAccess,
+  grading: Grading,
 ) -> wgpu::SubmissionIndex {
   let device = gpu.device();
-  let clear =
-    invert_clear(clear, gpu.effects.inverted, gpu.effects.preserve_hue);
+  let (gamma, effects) = match grading {
+    Grading::Output => (&gpu.gamma_lut.bind_group, &gpu.effects),
+    Grading::Neutral => (&gpu.neutral_gamma.bind_group, &gpu.neutral_effects),
+  };
+  let clear = invert_clear(clear, effects.inverted, effects.preserve_hue);
   let mut encoder =
     device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
       label: Some("shingle frame encoder"),
@@ -130,8 +166,8 @@ pub fn draw_with_access(
       })],
       ..Default::default()
     });
-    pass.set_bind_group(1, &gpu.gamma_lut.bind_group, &[]);
-    pass.set_bind_group(2, &gpu.effects.bind_group, &[]);
+    pass.set_bind_group(1, gamma, &[]);
+    pass.set_bind_group(2, &effects.bind_group, &[]);
     // Which pipeline and vertex buffer are bound: the tile pipeline,
     // squeezing, or one of the two particle passes.
     let mut bound = None;

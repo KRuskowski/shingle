@@ -88,6 +88,10 @@ pub struct GpuContext {
   pub(crate) white_texture: GpuTexture,
   pub(crate) gamma_lut: GammaLut,
   pub(crate) effects: Effects,
+  // The identity ramp and no inversion, never changed, for passes into a
+  // texture that is graded when it is drawn ([`crate::draw_view`]).
+  pub(crate) neutral_gamma: GammaLut,
+  pub(crate) neutral_effects: Effects,
   dmabuf: Result<DmabufCaps, DmabufUnavailable>,
   foreign_barriers: bool,
   // Staging buffers in system memory for shm uploads, shared by every
@@ -121,6 +125,8 @@ impl GpuContext {
     let gamma_lut = create_gamma_lut(&device, &queue, &gamma_layout);
     let effect_layout = effect_bind_group_layout(&device);
     let effects = create_effects(&device, &effect_layout);
+    let neutral_gamma = create_gamma_lut(&device, &queue, &gamma_layout);
+    let neutral_effects = create_effects(&device, &effect_layout);
     let pipeline_layout =
       device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("shingle pipeline layout"),
@@ -163,6 +169,8 @@ impl GpuContext {
       white_texture,
       gamma_lut,
       effects,
+      neutral_gamma,
+      neutral_effects,
       dmabuf,
       foreign_barriers: true,
     })
