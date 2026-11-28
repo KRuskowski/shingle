@@ -156,6 +156,44 @@ impl LauncherConfig {
   }
 }
 
+/// `shingle-launcher` for a bare `rofi -show MODE` whose modes are all
+/// ones the launcher covers (`drun`, `run`, `combi`), as Wayfire configs
+/// bind rofi as their launcher; `None` for anything else: a path such as
+/// `/usr/bin/rofi`, `-dmenu`, other modes such as `window` or `ssh`, and
+/// commands with shell syntax, which are kept as written.
+pub(crate) fn swap_rofi(command: &str) -> Option<String> {
+  if command.contains(|c: char| ";|&$`()<>\\'\"".contains(c)) {
+    return None;
+  }
+  let words: Vec<&str> = command.split_whitespace().collect();
+  if words.first() != Some(&"rofi") || words.contains(&"-dmenu") {
+    return None;
+  }
+  let covered = |modes: &str| {
+    modes
+      .split(',')
+      .all(|mode| matches!(mode, "drun" | "run" | "combi"))
+  };
+  let mut shown = false;
+  for pair in words.windows(2) {
+    match pair[0] {
+      "-show" => {
+        if !covered(pair[1]) {
+          return None;
+        }
+        shown = true;
+      }
+      "-modi" | "-modes" | "-combi-modi" | "-combi-modes"
+        if !covered(pair[1]) =>
+      {
+        return None;
+      }
+      _ => {}
+    }
+  }
+  shown.then(|| "shingle-launcher".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
   use crate::{ConfigFormat, ShingleConfig};
@@ -227,7 +265,7 @@ mod tests {
   }
 
   #[test]
-  fn a_wayfire_import_keeps_the_defaults_and_its_rofi_binding() {
+  fn a_wayfire_import_keeps_the_defaults_and_runs_the_launcher_for_rofi() {
     let (config, _) = ShingleConfig::parse_with_warnings(
       "[command]\nbinding_launcher = <super> KEY_D\n\
        command_launcher = rofi -show drun\n",
@@ -240,6 +278,42 @@ mod tests {
       .iter()
       .map(|command| command.command.as_str())
       .collect::<Vec<_>>();
-    assert_eq!(commands, ["rofi -show drun"]);
+    assert_eq!(commands, ["shingle-launcher"]);
+  }
+
+  #[test]
+  fn rofi_as_a_launcher_becomes_shingle_launcher() {
+    for command in [
+      "rofi -show drun",
+      "rofi -show run",
+      "rofi -show combi -combi-modi drun,run",
+      "rofi -show drun -show-icons -theme Arc",
+      "  rofi   -show drun ",
+    ] {
+      assert_eq!(
+        swap_rofi(command).as_deref(),
+        Some("shingle-launcher"),
+        "{command}"
+      );
+    }
+  }
+
+  #[test]
+  fn other_rofi_commands_are_kept() {
+    for command in [
+      "/usr/bin/rofi -show drun",
+      "rofi -show window",
+      "rofi -show ssh",
+      "rofi -show drun -modi drun,window",
+      "rofi -dmenu",
+      "rofi",
+      "rofi -show drun; notify-send done",
+      "echo a | rofi -dmenu",
+      "rofi -show drun -theme '~/x.rasi'",
+      "rofi-wayland -show drun",
+      "kitty",
+    ] {
+      assert_eq!(swap_rofi(command), None, "{command}");
+    }
   }
 }

@@ -84,6 +84,22 @@ fn swaylock_swapped(command: &str, notes: &mut Vec<String>) -> String {
   }
 }
 
+/// `command` with rofi as a launcher replaced by `shingle-launcher`
+/// ([`crate::launcher::swap_rofi`]), noting the change. A path such as
+/// `/usr/bin/rofi` keeps rofi.
+fn rofi_swapped(command: &str, notes: &mut Vec<String>) -> String {
+  match crate::launcher::swap_rofi(command) {
+    Some(swapped) => {
+      notes.push(format!(
+        "runs {swapped} instead of rofi ({command}); write /usr/bin/rofi to \
+         keep rofi"
+      ));
+      swapped
+    }
+    None => command.to_owned(),
+  }
+}
+
 /// A `[command]` binding, waiting for its `command_NAME`.
 struct CommandEntry {
   value: String,
@@ -369,6 +385,7 @@ pub(crate) fn parse(
     let applied =
       importer.option(entry.line, &entry.context, |config, notes| {
         let command = swaylock_swapped(&command, notes);
+        let command = rofi_swapped(&command, notes);
         config.commands.push(crate::CommandBinding {
           binding: import::binding_or_modifiers(&entry.value, notes)?,
           command,
@@ -1466,6 +1483,34 @@ mod tests {
 
   fn text(binding: &Binding) -> String {
     String::from(binding.clone())
+  }
+
+  #[test]
+  fn rofi_as_a_launcher_runs_shingle_launcher() {
+    let (config, warnings) = import(concat!(
+      "[command]\n",
+      "binding_launcher = <super> KEY_R\n",
+      "command_launcher = rofi -show drun\n",
+      "binding_rofi = <super> KEY_T\n",
+      "command_rofi = /usr/bin/rofi -show drun\n",
+    ));
+    let commands: Vec<&str> = config
+      .commands
+      .iter()
+      .map(|command| command.command.as_str())
+      .collect();
+    assert!(commands.contains(&"shingle-launcher"), "{commands:?}");
+    assert!(
+      commands.contains(&"/usr/bin/rofi -show drun"),
+      "{commands:?}"
+    );
+    assert_eq!(
+      warnings,
+      [concat!(
+        "line 2: [command] binding_launcher: runs shingle-launcher instead ",
+        "of rofi (rofi -show drun); write /usr/bin/rofi to keep rofi"
+      )]
+    );
   }
 
   #[test]
