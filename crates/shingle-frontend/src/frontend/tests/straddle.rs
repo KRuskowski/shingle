@@ -156,6 +156,51 @@ fn the_slide_shows_both_parts_with_the_gap_between_them() {
 }
 
 #[test]
+fn the_swipe_wall_shows_both_parts_with_its_gap_between_them() {
+  let Some(mut target) = recording_target() else {
+    return;
+  };
+  let mut config = grid();
+  config.vswipe.gap = 20.0;
+  let mut fixture = Fixture::new(config);
+  hanging_over(&mut fixture);
+  render_until_idle(&mut fixture, &mut target);
+  fixture.move_pointer(500.0, 400.0);
+  let swipe = |gesture| InputEvent::Swipe(gesture);
+  fixture.input(
+    fixture.pointer,
+    swipe(shingle::Gesture::Begin { fingers: 4 }),
+  );
+  for _ in 0..8 {
+    fixture.input(
+      fixture.pointer,
+      swipe(shingle::Gesture::Update {
+        dx: -12.8,
+        dy: 0.0,
+        scale: 1.0,
+        rotation: 0.0,
+      }),
+    );
+  }
+  assert!(
+    fixture
+      .frontend
+      .vswipe_viewport(&primary(), Instant::now())
+      .is_some(),
+    "the wall is drawn"
+  );
+  fixture
+    .frontend
+    .render(&mut fixture.host, &primary(), &mut target)
+    .expect("the frame renders");
+  let drawn = textured(&target);
+  assert_eq!(drawn.len(), 2, "{drawn:?}");
+  let (left, right) = (drawn[0], drawn[1]);
+  assert_eq!((left.width, right.width), (150, 50), "{drawn:?}");
+  assert_eq!(right.x, left.x + 150 + 20, "{drawn:?}");
+}
+
+#[test]
 fn expo_shows_each_part_in_its_workspaces_cell() {
   let Some(mut target) = recording_target() else {
     return;
