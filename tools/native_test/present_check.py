@@ -79,14 +79,24 @@ def check(flips, events, scanout=None, tearing=False, vrr=False):
   """Returns (problems, statistics) for the probe's events. `scanout` is
   'zero-copy' or 'copy' to require every presented frame to carry the
   zero_copy flag or none to, or None to accept either. With `tearing`
-  every presented frame must be an async flip, without vsync, and with
-  `vrr` have a refresh of 0."""
+  every presented frame from the first async flip on must be an async
+  flip, without vsync, and with `vrr` have a refresh of 0.
+
+  An async flip completes within the current vblank, and the kernel
+  reports that vblank's sequence and timestamp for it: frames flipped in
+  one vblank share a sequence, and their callbacks can carry a time before
+  their commit. With `tearing` neither is a problem. The frames before the
+  first async flip went with the vblank; i915 on the Latitude 5450 (Meteor
+  Lake) flipped the first two of a probe run that way (2026-11-28), so they
+  are counted as `sync_before_async` instead of failing."""
   problems = []
   commits = {}
   flip_ms = {(time // 1_000_000) & 0xffffffff for time in flips.values()}
   last_frame = None
   last_seq = None
   differences = []
+  async_seen = False
+  sync_before_async = 0
   for event in events:
     kind = event.get('event')
     n = event.get('n')
@@ -96,7 +106,8 @@ def check(flips, events, scanout=None, tearing=False, vrr=False):
       time = event['time_ms']
       if time not in flip_ms:
         problems.append(f'frame {n}: callback at {time} ms is no flip time')
-      if n in commits and time < (commits[n] // 1_000_000) & 0xffffffff:
+      if (not tearing and n in commits
+          and time < (commits[n] // 1_000_000) & 0xffffffff):
         problems.append(f'frame {n}: callback before its commit')
       if last_frame is not None and time < last_frame:
         problems.append(f'frame {n}: callback went back in time')
@@ -112,12 +123,18 @@ def check(flips, events, scanout=None, tearing=False, vrr=False):
         if difference > TOLERANCE_NS:
           problems.append(
               f'frame {n}: presented {difference} ns from its flip')
-      if last_seq is not None and seq <= last_seq:
+      if last_seq is not None and (seq < last_seq
+                                   or (seq == last_seq and not tearing)):
         problems.append(f'frame {n}: seq {seq} after {last_seq}')
       last_seq = seq
       flags = event['flags']
       if tearing:
-        if flags & HARDWARE != HARDWARE or flags & VSYNC:
+        torn = flags & HARDWARE == HARDWARE and not flags & VSYNC
+        if torn:
+          async_seen = True
+        elif not async_seen:
+          sync_before_async += 1
+        else:
           problems.append(f'frame {n}: flags {flags:#x}, not an async flip')
       elif flags & FLIP_FLAGS != FLIP_FLAGS:
         problems.append(f'frame {n}: flags {flags:#x}')
@@ -142,6 +159,7 @@ def check(flips, events, scanout=None, tearing=False, vrr=False):
                        and e['flags'] & ZERO_COPY),
       'tearing': sum(1 for e in events if e.get('event') == 'presented'
                      and not e['flags'] & VSYNC),
+      'sync_before_async': sync_before_async,
       'variable_refresh': sum(1 for e in events
                               if e.get('event') == 'presented'
                               and e['refresh'] == 0),

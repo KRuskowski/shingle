@@ -4,7 +4,7 @@ Shingle is a tiling Wayland compositor written in Rust, built around Wayfire's t
 
 It reads a WCM-written `wayfire.ini` and behaves like Wayfire with it: simple-tile, vswitch, wsets, oswitch, expo, scale, the switcher, animate, window rules, decorations and wf-shell's protocol, with Wayfire's IPC. Xwayland windows, several monitors, client DMA-BUFs with explicit sync, screen sharing through xdg-desktop-portal-wlr, `shingle-launcher` (an application launcher edited in place) and `shingle-lock` (a blurred lock screen that reads swaylock's config and never shows the desktop before an unlock) are built in.
 
-Shingle runs **nested** inside another Wayland or X11 session, offscreen or headless today. The native backend (libseat, libinput, atomic KMS with planes, VRR and zero-copy scanout) is built and unit-tested but has not run on hardware yet, so it is not yet a replacement for Wayfire on a real seat. See [docs/status.md](docs/status.md).
+Shingle runs **nested** inside another Wayland or X11 session, offscreen or headless today. The native backend (libseat, libinput, atomic KMS with planes, VRR and zero-copy scanout) first ran on hardware on 2026-11-28, a Dell Latitude 5450 with Intel graphics started from SDDM with a `wayfire.ini`, and is still being brought up; other GPUs and several monitors have not run natively yet. See [docs/status.md](docs/status.md).
 
 ## Quick start
 
@@ -42,7 +42,7 @@ sudo install -D -m 644 data/shingle.desktop \
   /usr/local/share/wayland-sessions/shingle.desktop
 ```
 
-Use `/usr/share/wayland-sessions` instead if the display manager does not search `/usr/local/share` (SDDM, for example, only reads `/usr/share/wayland-sessions` by default). To start with a `wayfire.ini`, change `Exec` to `shingle --config /home/USER/.config/wayfire.ini`. The session sets `XDG_CURRENT_DESKTOP` to `Shingle:Wayfire:wlroots` from `DesktopNames`, which Shingle keeps: xdg-desktop-portal then uses `wayfire-portals.conf` when Wayfire is installed, and otherwise the portals that name `wlroots` as their desktop, such as xdg-desktop-portal-wlr. `desktop-file-validate` reports `DesktopNames` as an unknown key, as it does for Wayfire's file; display managers read it. The native backend has not run on hardware yet ([docs/status.md](docs/status.md)).
+Use `/usr/share/wayland-sessions` instead if the display manager does not search `/usr/local/share` (SDDM, for example, only reads `/usr/share/wayland-sessions` by default). To start with a `wayfire.ini`, change `Exec` to `shingle --config /home/USER/.config/wayfire.ini`. The session sets `XDG_CURRENT_DESKTOP` to `Shingle:Wayfire:wlroots` from `DesktopNames`, which Shingle keeps: xdg-desktop-portal then uses `wayfire-portals.conf` when Wayfire is installed, and otherwise the portals that name `wlroots` as their desktop, such as xdg-desktop-portal-wlr. `desktop-file-validate` reports `DesktopNames` as an unknown key, as it does for Wayfire's file; display managers read it. The native backend has run from SDDM on one laptop so far ([docs/status.md](docs/status.md#native-backend-first-runs-on-the-latitude-5450)).
 
 ## Configuration
 

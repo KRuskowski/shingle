@@ -159,8 +159,31 @@ class PresentCheckTest(unittest.TestCase):
     self.assertEqual(statistics['tearing'], 1)
     problems, _ = present_check.check(flips, torn, tearing=True)
     self.assertEqual(problems, [])
-    problems, _ = present_check.check(flips, self.events(), tearing=True)
-    self.assertEqual(problems, ['frame 0: flags 0x7, not an async flip'])
+    # A synchronized flip before the first async one is counted, one
+    # after it fails.
+    problems, statistics = present_check.check(
+        flips, self.events(), tearing=True)
+    self.assertEqual((problems, statistics['sync_before_async']), ([], 1))
+    synced_after = torn + [dict(event, n=1) for event in self.events()
+                           if event['event'] == 'presented']
+    problems, _ = present_check.check(flips, synced_after, tearing=True)
+    self.assertEqual(problems, ['frame 1: flags 0x7, not an async flip'])
+
+  def test_async_flips_may_share_a_vblank(self):
+    log = self.LOG + ['shingle: page flip seq=12 at 100.040000000 s async']
+    flips = present_check.parse_flips(log)
+    first = self.events(flags=0x6, seq=12)
+    second = [dict(event, n=1) for event in first]
+    events = first + second
+    problems, _ = present_check.check(flips, events)
+    self.assertIn('frame 1: seq 12 after 12', problems)
+    problems, _ = present_check.check(flips, events, tearing=True)
+    self.assertNotIn('frame 1: seq 12 after 12', problems)
+    # The callback of an async flip carries the vblank's time, which can
+    # be before the commit.
+    early = self.events(flags=0x6, frame_ms=100_005)
+    problems, _ = present_check.check(flips, early, tearing=True)
+    self.assertNotIn('frame 0: callback before its commit', problems)
 
   def test_variable_refresh_can_be_required(self):
     flips = present_check.parse_flips(self.LOG)

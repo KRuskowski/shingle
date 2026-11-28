@@ -12,6 +12,8 @@ Add DRM/KMS and libinput with careful failure handling. The design is [design/na
 
 In short, the interactive frontend moves out of `shingle-nested` into a shared `shingle-frontend` crate, and `shingle-render` loses winit. A single `shingle` binary picks its backend like Wayfire: nested inside a Wayland session, native from a TTY. The native backend uses libseat for the session and VT switching and libinput for input, and drives atomic KMS itself through the `drm` crate, rendering zero-copy into GBM buffers imported into wgpu, with a dumb-buffer copy fallback. Native code is built and unit-tested on this host but only ever run on a dedicated test machine, which is being set up; no VMs. The work is split into ten workspaces, each with acceptance criteria in the design:
 
+First run on hardware (2026-11-28): the Latitude 5450 runs a native session from SDDM with the operator's `wayfire.ini`; display, presentation, the cursor plane, VT switching, DPMS, tearing, input, the launcher and the lock screen were checked by hand there, and four bugs the session found are fixed ([status.md](status.md#native-backend-first-runs-on-the-latitude-5450)). Open: the bring-up steps through `bringup.py` with `shingle-tty1`, several monitors, the lid, suspend, the 5400, and the operator's daily use.
+
 1. NB-1 `shingle-render-targets`: shared GPU context and render targets, no winit in `shingle-render`. Done ([status.md](status.md#compositor-and-renderer)).
 2. NB-2 `shingle-compositor-host-api`: done; see [status.md](status.md#backend-host-api).
 3. NB-3 `shingle-frontend-extract`: done; see [status.md](status.md#configuration-and-wcm) and [status.md](status.md#with-real-clients).
