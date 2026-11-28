@@ -66,9 +66,10 @@ fn startup_tests_the_preferred_mode_without_committing() {
   assert!(accepted);
   assert_eq!(flags, CommitFlags::TEST_ONLY | CommitFlags::ALLOW_MODESET);
   assert_eq!(display.size(), Some((1280, 720)));
-  // The full property set of a modeset: connector, CRTC and 10 plane
-  // properties, and no VRR on a CRTC without it.
-  assert_eq!(request.entries().len(), 13);
+  // The full property set of a modeset: connector, CRTC with its
+  // cleared GAMMA_LUT and 10 plane properties, and no VRR on a CRTC
+  // without it.
+  assert_eq!(request.entries().len(), 14);
   drop(fake);
   assert_eq!(crtc_value(&card, request, "ACTIVE"), Some(1));
   let blob = crtc_value(&card, request, "MODE_ID").unwrap() as u32;
@@ -318,7 +319,7 @@ fn a_pause_forgets_the_pending_flip_and_resume_modesets_again() {
     ]
   );
   let request = &fake.commits.last().unwrap().0;
-  assert_eq!(request.entries().len(), 13, "a full modeset");
+  assert_eq!(request.entries().len(), 14, "a full modeset");
   drop(fake);
   assert!(display.ready());
 }
@@ -401,7 +402,7 @@ fn dpms_off_clears_active_and_on_modesets_again() {
   let (request, flags) = card.borrow().real_commits().pop().unwrap();
   assert_eq!(flags, CommitFlags::ALLOW_MODESET);
   assert_eq!(crtc_value(&card, &request, "ACTIVE"), Some(1));
-  assert_eq!(request.entries().len(), 13, "DPMS on is a full modeset");
+  assert_eq!(request.entries().len(), 14, "DPMS on is a full modeset");
 }
 
 #[test]
@@ -785,7 +786,7 @@ fn two_monitors_are_lit_with_one_combined_modeset() {
     );
     assert!(fake.real_commits().is_empty());
     // The second test holds both outputs.
-    assert_eq!(fake.commits[1].0.entries().len(), 26);
+    assert_eq!(fake.commits[1].0.entries().len(), 28);
   }
   display.start().unwrap();
   let (request, flags) = card.borrow().real_commits().pop().unwrap();
@@ -836,7 +837,7 @@ fn the_combined_modeset_turns_off_only_what_no_output_uses() {
     ours.iter().map(|crtc| on(*crtc)).collect::<Vec<_>>(),
     [Some(1), Some(1)]
   );
-  assert_eq!(request.entries().len(), 26 + 5);
+  assert_eq!(request.entries().len(), 28 + 5);
 }
 
 #[test]
@@ -1079,7 +1080,7 @@ fn outputs_turn_off_and_on_one_at_a_time() {
   display.set_output_dpms("DP-1", true);
   assert!(display.output_on("DP-1") && display.ready_on("DP-1"));
   let (request, _) = card.borrow().real_commits().pop().unwrap();
-  assert_eq!(request.entries().len(), 13, "a modeset of DP-1 alone");
+  assert_eq!(request.entries().len(), 14, "a modeset of DP-1 alone");
 }
 
 #[test]

@@ -344,3 +344,26 @@ fn a_link_the_kernel_marked_bad_is_set_good_by_a_modeset() {
   );
   assert_eq!(card.borrow().value(monitor.0, "link-status"), 0);
 }
+
+#[test]
+fn the_first_modeset_clears_what_another_session_left() {
+  // A session before Shingle left a night-light gamma ramp and a colour
+  // matrix on the panel's CRTC, its primary plane rotated by 180 degrees
+  // and the panel at 6 bits per colour.
+  let mut fake = drm_info::whiskey_lake();
+  fake.set_value(51, "GAMMA_LUT", 700);
+  fake.set_value(51, "CTM", 701);
+  fake.set_value(31, "rotation", 4);
+  fake.set_value(95, "max bpc", 6);
+  let (card, _display) = start(fake, OutputPolicy::default());
+  let fake = card.borrow();
+  assert_eq!(fake.value(51, "GAMMA_LUT"), 0);
+  assert_eq!(fake.value(51, "DEGAMMA_LUT"), 0);
+  assert_eq!(fake.value(51, "CTM"), 0);
+  assert_eq!(fake.value(31, "rotation"), 1);
+  // Pipe A's cursor plane too, though it stays off.
+  assert_eq!(fake.value(47, "rotation"), 1);
+  for connector in [95, 105, 121] {
+    assert_eq!(fake.value(connector, "max bpc"), 8);
+  }
+}

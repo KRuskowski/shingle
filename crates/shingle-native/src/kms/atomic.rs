@@ -11,7 +11,7 @@
 
 use super::{
   BlobId, FramebufferId, Object, PropertyId,
-  props::{ConnectorProps, CrtcProps, LINK_STATUS_GOOD, PlaneProps},
+  props::{ConnectorProps, CrtcProps, LINK_STATUS_GOOD, PlaneProps, ROTATE_0},
 };
 
 /// Properties to set in one atomic commit, in the order they were added.
@@ -190,6 +190,18 @@ fn set_output(
   {
     request.set(connector, link_status, LINK_STATUS_GOOD);
   }
+  // What another DRM master may have left: a lower or higher `max bpc`,
+  // gamma and colour tables (Shingle applies gamma when it draws) and a
+  // rotated plane. wlroots sets `max bpc` and `GAMMA_LUT` this way;
+  // Mutter and KWin also reset `DEGAMMA_LUT`, `CTM` and `rotation`.
+  if state.active {
+    if let Some((max_bpc, value)) = output.connector.max_bpc {
+      request.set(connector, max_bpc, value);
+    }
+    for property in output.crtc.color.into_iter().flatten() {
+      request.set(Object::Crtc(output.crtc.id), property, 0);
+    }
+  }
   request.set(crtc, output.crtc.mode_id, u64::from(state.mode.0));
   request.set(crtc, output.crtc.active, u64::from(state.active));
   if let Some(vrr) = output.crtc.vrr_enabled {
@@ -207,8 +219,14 @@ fn set_output(
   request.set(plane, p.crtc_y, 0);
   request.set(plane, p.crtc_w, u64::from(width));
   request.set(plane, p.crtc_h, u64::from(height));
+  if let Some(rotation) = p.rotation {
+    request.set(plane, rotation, ROTATE_0);
+  }
   if let Some(cursor) = &output.cursor {
     set_cursor(request, cursor, output.crtc.id, state.cursor);
+    if let Some(rotation) = cursor.rotation {
+      request.set(Object::Plane(cursor.id), rotation, ROTATE_0);
+    }
   }
 }
 
@@ -310,12 +328,14 @@ pub(crate) mod tests {
         id: ConnectorId(1),
         crtc_id: PropertyId(10),
         link_status: None,
+        max_bpc: None,
       },
       crtc: CrtcProps {
         id: CrtcId(2),
         mode_id: PropertyId(20),
         active: PropertyId(21),
         vrr_enabled: vrr.then_some(PropertyId(22)),
+        color: [None; 3],
       },
       plane: PlaneProps {
         id: PlaneId(3),
@@ -331,6 +351,7 @@ pub(crate) mod tests {
         crtc_h: PropertyId(39),
         in_formats: None,
         in_fence_fd: None,
+        rotation: None,
       },
       cursor: None,
     }
@@ -355,6 +376,7 @@ pub(crate) mod tests {
       crtc_h: PropertyId(79),
       in_formats: None,
       in_fence_fd: None,
+      rotation: None,
     });
     props
   }
@@ -430,6 +452,37 @@ pub(crate) mod tests {
   }
 
   #[test]
+  fn a_modeset_resets_what_another_master_left() {
+    let mut props = props_with_cursor();
+    props.connector.max_bpc = Some((PropertyId(12), 8));
+    props.crtc.color = [Some(PropertyId(23)), None, Some(PropertyId(25))];
+    props.plane.rotation = Some(PropertyId(90));
+    if let Some(cursor) = &mut props.cursor {
+      cursor.rotation = Some(PropertyId(91));
+    }
+    let request = modeset(&props, &state(), &Teardown::default());
+    let crtc = Object::Crtc(CrtcId(2));
+    assert_eq!(
+      request.get(Object::Connector(ConnectorId(1)), PropertyId(12)),
+      Some(8)
+    );
+    assert_eq!(request.get(crtc, PropertyId(23)), Some(0));
+    assert_eq!(request.get(crtc, PropertyId(25)), Some(0));
+    assert_eq!(
+      request.get(Object::Plane(PlaneId(3)), PropertyId(90)),
+      Some(ROTATE_0)
+    );
+    assert_eq!(
+      request.get(Object::Plane(PlaneId(4)), PropertyId(91)),
+      Some(ROTATE_0),
+      "the cursor plane, off or not"
+    );
+    // A flip changes none of them.
+    let flipped = flip(&props, FramebufferId(61));
+    assert_eq!(flipped.entries().len(), 1);
+  }
+
+  #[test]
   fn a_modeset_turns_vrr_off_where_the_crtc_has_it() {
     let crtc = Object::Crtc(CrtcId(2));
     let request = modeset(&output_props(true), &state(), &Teardown::default());
@@ -450,12 +503,14 @@ pub(crate) mod tests {
         id: ConnectorId(4),
         crtc_id: PropertyId(40),
         link_status: None,
+        max_bpc: None,
       }],
       crtcs: vec![CrtcProps {
         id: CrtcId(5),
         mode_id: PropertyId(41),
         active: PropertyId(42),
         vrr_enabled: None,
+        color: [None; 3],
       }],
       planes: vec![PlaneProps {
         id: PlaneId(6),
@@ -499,6 +554,7 @@ pub(crate) mod tests {
         id: ConnectorId(7),
         crtc_id: PropertyId(10),
         link_status: None,
+        max_bpc: None,
       },
       crtc: CrtcProps {
         id: CrtcId(8),
@@ -522,6 +578,7 @@ pub(crate) mod tests {
         mode_id: PropertyId(41),
         active: PropertyId(42),
         vrr_enabled: None,
+        color: [None; 3],
       }],
       ..Teardown::default()
     };

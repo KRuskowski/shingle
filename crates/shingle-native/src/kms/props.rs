@@ -59,6 +59,11 @@ impl PropertyTable {
     self.find(name).map(|property| property.value)
   }
 
+  /// The range of range property `name`, if the object has it.
+  pub fn range(&self, name: &str) -> Option<(u64, u64)> {
+    self.find(name).and_then(|property| property.range)
+  }
+
   /// The id of property `name`, which the object must have.
   pub fn require(
     &self,
@@ -94,7 +99,15 @@ pub struct ConnectorProps {
   /// `link-status`, which DP and HDMI connectors have: the kernel sets it
   /// to bad when link training fails, and a modeset sets it good again.
   pub link_status: Option<PropertyId>,
+  /// `max bpc` with the value modesets give it: [`MAX_BPC`] within the
+  /// property's range, so that what another DRM master set does not
+  /// stay.
+  pub max_bpc: Option<(PropertyId, u64)>,
 }
+
+/// The bits per colour Shingle's XRGB8888 frames have, which modesets
+/// give `max bpc`, as wlroots' `pick_max_bpc` does for 8-bit formats.
+pub const MAX_BPC: u64 = 8;
 
 /// The `link-status` value of a good link (`DRM_MODE_LINK_STATUS_GOOD`).
 pub const LINK_STATUS_GOOD: u64 = 0;
@@ -112,6 +125,13 @@ impl ConnectorProps {
       id,
       crtc_id: table.require("CRTC_ID")?,
       link_status: table.id("link-status"),
+      max_bpc: table.id("max bpc").map(|id| {
+        let value = match table.range("max bpc") {
+          Some((min, max)) => MAX_BPC.clamp(min, max.max(min)),
+          None => MAX_BPC,
+        };
+        (id, value)
+      }),
     })
   }
 }
@@ -127,6 +147,9 @@ pub struct CrtcProps {
   pub active: PropertyId,
   /// `VRR_ENABLED`, where the driver has it.
   pub vrr_enabled: Option<PropertyId>,
+  /// `GAMMA_LUT`, `DEGAMMA_LUT` and `CTM`, where the driver has them:
+  /// modesets clear them, since Shingle applies gamma when it draws.
+  pub color: [Option<PropertyId>; 3],
 }
 
 impl CrtcProps {
@@ -140,6 +163,7 @@ impl CrtcProps {
       mode_id: table.require("MODE_ID")?,
       active: table.require("ACTIVE")?,
       vrr_enabled: table.id("VRR_ENABLED"),
+      color: ["GAMMA_LUT", "DEGAMMA_LUT", "CTM"].map(|name| table.id(name)),
     })
   }
 }
@@ -174,7 +198,13 @@ pub struct PlaneProps {
   /// `IN_FENCE_FD`, where the driver has it: a sync_file the plane waits
   /// for before it scans out a new framebuffer.
   pub in_fence_fd: Option<PropertyId>,
+  /// `rotation`, where the driver has it: modesets set it to
+  /// [`ROTATE_0`].
+  pub rotation: Option<PropertyId>,
 }
+
+/// The `rotation` value of an unrotated plane (`DRM_MODE_ROTATE_0`).
+pub const ROTATE_0: u64 = 1;
 
 impl PlaneProps {
   /// Takes the ids from a loaded table.
@@ -196,6 +226,7 @@ impl PlaneProps {
       crtc_h: table.require("CRTC_H")?,
       in_formats: table.id("IN_FORMATS"),
       in_fence_fd: table.id("IN_FENCE_FD"),
+      rotation: table.id("rotation"),
     })
   }
 }
@@ -234,5 +265,37 @@ mod tests {
     let table = PropertyTable::load(&mut device, Object::Crtc(crtc)).unwrap();
     let props = CrtcProps::new(crtc, &table).unwrap();
     assert_eq!(props.vrr_enabled, None);
+  }
+
+  #[test]
+  fn max_bpc_is_eight_within_the_range() {
+    use crate::kms::Property;
+    let table = |range: Option<(u64, u64)>| PropertyTable {
+      object: None,
+      properties: vec![
+        Property {
+          id: PropertyId(1),
+          name: "CRTC_ID".into(),
+          value: 0,
+          range: None,
+        },
+        Property {
+          id: PropertyId(2),
+          name: "max bpc".into(),
+          value: 12,
+          range,
+        },
+      ],
+    };
+    let bpc = |range| {
+      ConnectorProps::new(ConnectorId(1), &table(range))
+        .unwrap()
+        .max_bpc
+        .map(|(_, value)| value)
+    };
+    assert_eq!(bpc(Some((6, 12))), Some(8));
+    assert_eq!(bpc(Some((10, 16))), Some(10));
+    assert_eq!(bpc(Some((6, 6))), Some(6));
+    assert_eq!(bpc(None), Some(8));
   }
 }
