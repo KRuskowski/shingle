@@ -16,7 +16,8 @@ use shingle::{
 };
 use shingle_config::ShingleConfig;
 use shingle_session::{
-  SessionSnapshot, SessionStore, launch_autostart, launch_program, launch_saved,
+  Durability, SessionSnapshot, SessionStore, SyncCommand, launch_autostart,
+  launch_program, launch_saved,
 };
 
 /// How many outputs Shingle starts with: `--outputs`, else the backend's
@@ -122,7 +123,14 @@ pub fn run(
   }
   let _session_children = session_children;
   run_with_frames(&mut compositor)?;
-  shut_down(compositor, |snapshot| store.save_snapshot(snapshot))?;
+  // The exit waits for no disk (docs/design/session-exit.md).
+  shut_down(compositor, |snapshot| {
+    store.save_snapshot_with(
+      snapshot,
+      Durability::Unsynced,
+      &SyncCommand::default(),
+    )
+  })?;
   Ok(())
 }
 
@@ -131,9 +139,9 @@ pub fn run(
 /// lock and sockets and closes the Wayland and IPC sockets, and only then
 /// hands the snapshot to `save`.
 ///
-/// Saving syncs the file and its directory to disk, which took more than
-/// 10 s on a busy disk, so the display is freed first: a SIGKILL sent
-/// because the exit took too long then leaves nothing behind.
+/// The display is freed first, so that a SIGKILL sent because the exit
+/// took too long leaves nothing behind, as when saving still synced to
+/// disk, which took more than 10 s on a busy one.
 fn shut_down<E>(
   compositor: Compositor,
   save: impl FnOnce(&SessionSnapshot) -> Result<(), E>,

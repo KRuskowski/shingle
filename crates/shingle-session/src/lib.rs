@@ -21,6 +21,7 @@
 #![warn(missing_docs)]
 
 mod environment;
+mod sync;
 mod writer;
 
 use std::{
@@ -33,7 +34,8 @@ use std::{
 
 pub use environment::{ClientEnvironment, DesktopVariables};
 pub use shingle_core::SessionSnapshot;
-pub use writer::{ReportFn, SessionWriter, WriteFn};
+pub use sync::SyncCommand;
+pub use writer::{Durability, FINISH_LIMIT, ReportFn, SessionWriter, WriteFn};
 
 use shingle_core::{
   LaunchIdentity, NodeSnapshot, Shingle, ShingleError, WindowId,
@@ -179,6 +181,65 @@ impl SessionStore {
       fs::create_dir_all(parent)?;
     }
     snapshot.save_atomic(&self.path)?;
+    Ok(())
+  }
+
+  /// Removes the temporary files that writes given up for a newer one
+  /// left next to the session file ([`SessionSnapshot::save_atomic_with`]),
+  /// `.NAME.tmp.*` for a session file NAME. Call it before this store's
+  /// writer starts, while no write of it is in progress.
+  pub fn remove_given_up_writes(&self) {
+    let (Some(parent), Some(name)) =
+      (self.path.parent(), self.path.file_name())
+    else {
+      return;
+    };
+    let mut prefix = OsString::from(".");
+    prefix.push(name);
+    prefix.push(".tmp.");
+    let Ok(entries) = fs::read_dir(parent) else {
+      return;
+    };
+    for entry in entries.flatten() {
+      if entry
+        .file_name()
+        .as_encoded_bytes()
+        .starts_with(prefix.as_encoded_bytes())
+      {
+        let _ = fs::remove_file(entry.path());
+      }
+    }
+  }
+
+  /// Saves `snapshot` atomically, as [`SessionStore::save_snapshot`]
+  /// does, with `durability`: synced through `command` in a child
+  /// process, which the write stops waiting for once it is superseded, or
+  /// not synced at all.
+  ///
+  /// # Errors
+  ///
+  /// As [`SessionStore::save`], and an error of kind
+  /// [`io::ErrorKind::Interrupted`] for a write superseded before its file
+  /// was synced, which leaves the session file as it was and its
+  /// temporary file to [`SessionStore::remove_given_up_writes`].
+  pub fn save_snapshot_with(
+    &self,
+    snapshot: &SessionSnapshot,
+    durability: Durability<'_>,
+    command: &SyncCommand,
+  ) -> Result<(), SessionError> {
+    if let Some(parent) = self.path.parent() {
+      fs::create_dir_all(parent)?;
+    }
+    match durability {
+      Durability::Synced { superseded } => snapshot
+        .save_atomic_with(&self.path, &mut |target| {
+          command.sync(target, superseded)
+        })?,
+      Durability::Unsynced => {
+        snapshot.save_atomic_with(&self.path, &mut |_| Ok(()))?
+      }
+    }
     Ok(())
   }
 

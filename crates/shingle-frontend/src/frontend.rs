@@ -1372,14 +1372,15 @@ impl Frontend {
   ///
   /// The snapshot is taken first, then Xwayland is stopped and the X
   /// display's lock and sockets are removed, and only then is the
-  /// snapshot written: the write syncs to disk, which can take many
-  /// seconds on a busy one, and a SIGKILL during it must not leave the
+  /// snapshot written, so that a SIGKILL during the write cannot leave the
   /// display behind. Stopping Xwayland takes the X windows out of the
   /// model, so a later save would lose them.
   ///
-  /// The final write waits for a background save still in progress, drops
-  /// one still waiting, and is on disk when this returns
-  /// ([`SessionWriter::finish`]).
+  /// The final write gives up the sync of a background save still in
+  /// progress, drops one still waiting, and is renamed into place without
+  /// a sync, so the exit never waits for the disk; it waits at most
+  /// [`shingle_session::FINISH_LIMIT`] ([`SessionWriter::finish`],
+  /// docs/design/session-exit.md).
   pub fn shutdown(&mut self) {
     let Some(session) = self.session.take() else {
       return;
