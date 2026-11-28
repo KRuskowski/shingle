@@ -384,6 +384,24 @@ impl FakeKms {
     self.extra_connectors.push(info);
   }
 
+  /// Sets property `name` of `object` as the kernel would, such as a
+  /// connector's `link-status` after a failed link training.
+  pub(crate) fn set_value(&mut self, object: u32, name: &str, value: u64) {
+    self.value_mut(object, name, value);
+  }
+
+  /// The connector `id` beyond the first, to change what it offers.
+  pub(crate) fn connector_mut(
+    &mut self,
+    id: ConnectorId,
+  ) -> &mut ConnectorInfo {
+    self
+      .extra_connectors
+      .iter_mut()
+      .find(|info| info.id == id)
+      .expect("a connector beyond the first")
+  }
+
   /// Rejects every commit whose primary plane is `width` pixels wide with
   /// `EINVAL`, as a driver refuses a mode it cannot drive.
   pub(crate) fn reject_width(&mut self, width: u32) {

@@ -18,8 +18,8 @@ use super::{
   edid::{self, Edid},
   in_formats::{self, InFormats},
   props::{
-    ConnectorProps, CrtcProps, MissingProperty, PLANE_TYPE_CURSOR,
-    PLANE_TYPE_PRIMARY, PlaneProps, PropertyTable,
+    ConnectorProps, CrtcProps, LINK_STATUS_BAD, MissingProperty,
+    PLANE_TYPE_CURSOR, PLANE_TYPE_PRIMARY, PlaneProps, PropertyTable,
   },
 };
 use crate::{crtcs, kms::Connection};
@@ -140,6 +140,18 @@ impl Card {
       .and_then(|name| connected().find(|info| info.name == name))
       .or_else(|| connected().find(|info| info.internal))
       .or_else(|| connected().next())
+  }
+
+  /// Whether the kernel marked the link of connector `id` bad, as i915
+  /// does when DP link training fails, until a modeset sets it good.
+  pub fn link_bad(&self, id: ConnectorId) -> bool {
+    self
+      .connectors
+      .iter()
+      .find(|(info, _)| info.id == id)
+      .is_some_and(|(_, table)| {
+        table.value("link-status") == Some(LINK_STATUS_BAD)
+      })
   }
 
   /// The connector with `id`, if the card has it.

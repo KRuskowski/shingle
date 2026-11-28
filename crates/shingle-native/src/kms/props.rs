@@ -91,7 +91,16 @@ pub struct ConnectorProps {
   pub id: ConnectorId,
   /// `CRTC_ID`.
   pub crtc_id: PropertyId,
+  /// `link-status`, which DP and HDMI connectors have: the kernel sets it
+  /// to bad when link training fails, and a modeset sets it good again.
+  pub link_status: Option<PropertyId>,
 }
+
+/// The `link-status` value of a good link (`DRM_MODE_LINK_STATUS_GOOD`).
+pub const LINK_STATUS_GOOD: u64 = 0;
+
+/// The `link-status` value of a bad link (`DRM_MODE_LINK_STATUS_BAD`).
+pub const LINK_STATUS_BAD: u64 = 1;
 
 impl ConnectorProps {
   /// Takes the ids from a loaded table.
@@ -102,6 +111,7 @@ impl ConnectorProps {
     Ok(Self {
       id,
       crtc_id: table.require("CRTC_ID")?,
+      link_status: table.id("link-status"),
     })
   }
 }

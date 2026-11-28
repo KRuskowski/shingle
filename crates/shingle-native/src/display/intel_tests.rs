@@ -11,6 +11,7 @@ use crate::{
   kms::{
     ConnectorId, KmsDevice, MODIFIER_LINEAR, Object, PlaneId,
     fake::{FakeKms, drm_info},
+    props::{LINK_STATUS_BAD, LINK_STATUS_GOOD},
   },
   scanout::tests::FakeImporter,
 };
@@ -298,4 +299,48 @@ fn the_fixtures_refuse_what_i915_refuses() {
     request.set(cursor, property, value);
   }
   assert!(fake.commit(&request, CommitFlags::TEST_ONLY).is_err());
+}
+
+#[test]
+fn a_link_the_kernel_marked_bad_is_set_good_by_a_modeset() {
+  let (card, mut display) =
+    start(drm_info::meteor_lake(), OutputPolicy::default());
+  let before = card.borrow().commits.len();
+  display.hotplug();
+  assert_eq!(card.borrow().commits.len(), before, "nothing changed");
+  // DP link training failed on the dock's first monitor: i915 marks the
+  // link bad and sends a hotplug, and the monitor stays black until a
+  // modeset sets it good.
+  let monitor = ConnectorId(336);
+  card
+    .borrow_mut()
+    .set_value(monitor.0, "link-status", LINK_STATUS_BAD);
+  display.hotplug();
+  let commits = card.borrow().real_commits();
+  let (modeset, flags) = commits.last().expect("a modeset").clone();
+  assert!(flags.contains(CommitFlags::ALLOW_MODESET));
+  let object = Object::Connector(monitor);
+  assert_eq!(
+    set_in(&card, &modeset, object, "link-status"),
+    Some(LINK_STATUS_GOOD)
+  );
+  assert_eq!(card.borrow().value(monitor.0, "link-status"), 0);
+  assert_eq!(display.outputs(), vec!["eDP-1", "DP-6", "DP-7", "DP-8"]);
+  assert_eq!(display.size_of("DP-6"), Some((3840, 2160)));
+  // After a fallback to a slower link the kernel offers smaller modes
+  // only; the output gets one of them.
+  let mut fake = card.borrow_mut();
+  fake
+    .connector_mut(monitor)
+    .modes
+    .retain(|mode| mode.hdisplay < 3840);
+  fake.set_value(monitor.0, "link-status", LINK_STATUS_BAD);
+  drop(fake);
+  display.hotplug();
+  assert!(
+    display
+      .size_of("DP-6")
+      .is_some_and(|(width, _)| width < 3840)
+  );
+  assert_eq!(card.borrow().value(monitor.0, "link-status"), 0);
 }

@@ -11,7 +11,7 @@
 
 use super::{
   BlobId, FramebufferId, Object, PropertyId,
-  props::{ConnectorProps, CrtcProps, PlaneProps},
+  props::{ConnectorProps, CrtcProps, LINK_STATUS_GOOD, PlaneProps},
 };
 
 /// Properties to set in one atomic commit, in the order they were added.
@@ -183,6 +183,13 @@ fn set_output(
     output.connector.crtc_id,
     u64::from(output.crtc.id.0),
   );
+  // A link the kernel marked bad works again only after a modeset that
+  // sets it good, as wlroots' `atomic_connector_add` does.
+  if let Some(link_status) = output.connector.link_status
+    && state.active
+  {
+    request.set(connector, link_status, LINK_STATUS_GOOD);
+  }
   request.set(crtc, output.crtc.mode_id, u64::from(state.mode.0));
   request.set(crtc, output.crtc.active, u64::from(state.active));
   if let Some(vrr) = output.crtc.vrr_enabled {
@@ -302,6 +309,7 @@ pub(crate) mod tests {
       connector: ConnectorProps {
         id: ConnectorId(1),
         crtc_id: PropertyId(10),
+        link_status: None,
       },
       crtc: CrtcProps {
         id: CrtcId(2),
@@ -406,6 +414,22 @@ pub(crate) mod tests {
   }
 
   #[test]
+  fn a_modeset_sets_a_bad_link_good_while_the_output_is_on() {
+    let mut props = output_props(false);
+    props.connector.link_status = Some(PropertyId(11));
+    let connector = Object::Connector(ConnectorId(1));
+    let on = modeset(&props, &state(), &Teardown::default());
+    assert_eq!(on.get(connector, PropertyId(11)), Some(LINK_STATUS_GOOD));
+    let off = ModesetState {
+      active: false,
+      ..state()
+    };
+    let off = modeset(&props, &off, &Teardown::default());
+    assert_eq!(off.get(connector, PropertyId(11)), None);
+    assert!(flip(&props, FramebufferId(61)).entries().len() == 1);
+  }
+
+  #[test]
   fn a_modeset_turns_vrr_off_where_the_crtc_has_it() {
     let crtc = Object::Crtc(CrtcId(2));
     let request = modeset(&output_props(true), &state(), &Teardown::default());
@@ -425,6 +449,7 @@ pub(crate) mod tests {
       connectors: vec![ConnectorProps {
         id: ConnectorId(4),
         crtc_id: PropertyId(40),
+        link_status: None,
       }],
       crtcs: vec![CrtcProps {
         id: CrtcId(5),
@@ -473,6 +498,7 @@ pub(crate) mod tests {
       connector: ConnectorProps {
         id: ConnectorId(7),
         crtc_id: PropertyId(10),
+        link_status: None,
       },
       crtc: CrtcProps {
         id: CrtcId(8),

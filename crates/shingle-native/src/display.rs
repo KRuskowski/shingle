@@ -1973,6 +1973,29 @@ impl Display {
     dropped
   }
 
+  /// Whether a lit output's link is bad, as the kernel marks it after a
+  /// failed DP link training and then sends a hotplug: the monitor shows
+  /// nothing until a modeset sets the link good again, with the same
+  /// mode if the connector still offers it ([`Display::keep_lit`] drops
+  /// an output whose mode went), as wlroots handles it by disconnecting
+  /// and connecting the output again (backend/drm/drm.c,
+  /// `scan_drm_connectors`). Logs each one.
+  fn bad_links(&self) -> bool {
+    let bad: Vec<&str> = self
+      .lit
+      .iter()
+      .filter(|lit| self.card.link_bad(lit.output.connector.id))
+      .map(Lit::name)
+      .collect();
+    for name in &bad {
+      diagnostics::log(&format!(
+        "output {name}: the kernel marked its link bad; setting the mode \
+         again"
+      ));
+    }
+    !bad.is_empty()
+  }
+
   /// Lights the connected connectors that are not lit yet, as far as
   /// CRTCs allow. Returns whether any was lit.
   fn light_ranked(&mut self) -> bool {
@@ -2053,8 +2076,9 @@ impl Display {
       }
     };
     let dropped = self.keep_lit(&|_, _, _| true);
+    let bad = self.bad_links();
     let lit = self.light_ranked();
-    if dropped || lit {
+    if dropped || lit || bad {
       if let Err(error) = self.modeset() {
         diagnostics::log(&format!("the modeset failed: {error}"));
       }
