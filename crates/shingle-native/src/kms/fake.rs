@@ -20,6 +20,8 @@ use super::{
 };
 use crate::scanout::allocator::{AllocatedBuffer, BufferAllocator};
 
+pub(crate) mod drm_info;
+
 /// The fake card's GBM: it hands out memfds as buffers, with the first
 /// modifier it is offered, and counts the buffers alive.
 #[derive(Debug, Default)]
@@ -152,9 +154,21 @@ pub(crate) fn default_modes() -> Vec<Mode> {
 pub(crate) type Reject =
   Box<dyn FnMut(&AtomicRequest, CommitFlags) -> Option<i32>>;
 
+/// Rules of a real driver that the fake card enforces on top of the
+/// kernel's own, as a fixture of that driver's card sets them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DriverRules {
+  /// i915 (and xe, which shares its display code) of a display version:
+  /// 9 for Skylake to Comet Lake (UHD 620), 14 for Meteor Lake.
+  I915 { display_version: u32 },
+}
+
 /// The fake card.
 pub(crate) struct FakeKms {
   pub(crate) connector_id: ConnectorId,
+  /// What the first connector is, apart from its id, connection, modes
+  /// and CRTCs: its name, whether it is internal, its size.
+  pub(crate) first_info: ConnectorInfo,
   pub(crate) crtc_id: CrtcId,
   pub(crate) plane_id: PlaneId,
   /// Connectors beyond the first, in order.
@@ -211,6 +225,19 @@ pub(crate) struct FakeKms {
   pub(crate) framebuffers: BTreeMap<u32, PlanarFramebuffer>,
   /// Whether making a framebuffer of a GBM buffer fails.
   pub(crate) reject_framebuffers: bool,
+  /// Formats of planes other than the primary plane, where they differ
+  /// from the defaults.
+  pub(crate) plane_format_lists: HashMap<PlaneId, Vec<u32>>,
+  /// `IN_FORMATS` blobs of planes other than the primary plane.
+  pub(crate) plane_in_formats: HashMap<PlaneId, Vec<u8>>,
+  /// Property names of objects that have other properties than the
+  /// defaults, as a real card's objects do.
+  pub(crate) property_lists: HashMap<u32, Vec<String>>,
+  /// The range of a range property, by object and name; values outside
+  /// are refused as the kernel refuses them.
+  pub(crate) ranges: HashMap<(u32, String), (u64, u64)>,
+  /// The real driver's rules, if this is one's card.
+  pub(crate) rules: Option<DriverRules>,
 }
 
 impl FakeKms {
@@ -219,6 +246,7 @@ impl FakeKms {
   pub(crate) fn single_output() -> Self {
     Self {
       connector_id: ConnectorId(1),
+      first_info: connector_info(1, "HDMI-A-1"),
       crtc_id: CrtcId(2),
       plane_id: PlaneId(3),
       extra_connectors: Vec::new(),
@@ -251,6 +279,11 @@ impl FakeKms {
       no_gbm: false,
       framebuffers: BTreeMap::new(),
       reject_framebuffers: false,
+      plane_format_lists: HashMap::new(),
+      plane_in_formats: HashMap::new(),
+      property_lists: HashMap::new(),
+      ranges: HashMap::new(),
+      rules: None,
     }
   }
 
@@ -273,7 +306,7 @@ impl FakeKms {
 
   /// Plugs a display into or out of the connector `name`.
   pub(crate) fn set_connection(&mut self, name: &str, connection: Connection) {
-    if name == "HDMI-A-1" {
+    if name == self.first_info.name {
       self.connection = connection;
       return;
     }
@@ -287,7 +320,7 @@ impl FakeKms {
 
   /// The id of the connector `name`.
   pub(crate) fn connector_named(&self, name: &str) -> ConnectorId {
-    if name == "HDMI-A-1" {
+    if name == self.first_info.name {
       return self.connector_id;
     }
     self
@@ -317,6 +350,38 @@ impl FakeKms {
     self.value_mut(crtc.0, "ACTIVE", 1);
     self.value_mut(cursor.0, "CRTC_ID", u64::from(self.crtc_id.0));
     (connector, crtc, cursor)
+  }
+
+  /// Removes connector `id` from the card, as the kernel removes a DP-MST
+  /// connector when its dock is unplugged, and returns what it was. Its
+  /// properties stay known, so that a commit may still turn it off, as
+  /// the kernel allows for an unregistered connector that is still in
+  /// use (drm_atomic_helper.c, `update_connector_routing`).
+  pub(crate) fn unplug_connector(&mut self, id: ConnectorId) -> ConnectorInfo {
+    let index = self
+      .extra_connectors
+      .iter()
+      .position(|info| info.id == id)
+      .expect("a connector beyond the first");
+    self.extra_connectors.remove(index)
+  }
+
+  /// Adds `info` as a new connector shaped like connector `like`: its
+  /// property names and ranges, on no CRTC, as the kernel creates a new
+  /// DP-MST connector, with a new id, when a dock is plugged in again.
+  pub(crate) fn plug_connector(&mut self, info: ConnectorInfo, like: u32) {
+    if let Some(names) = self.property_lists.get(&like).cloned() {
+      self.property_lists.insert(info.id.0, names);
+    }
+    let ranges: Vec<_> = self
+      .ranges
+      .iter()
+      .filter(|((object, _), _)| *object == like)
+      .map(|((_, name), range)| ((info.id.0, name.clone()), *range))
+      .collect();
+    self.ranges.extend(ranges);
+    self.value_mut(info.id.0, "CRTC_ID", 0);
+    self.extra_connectors.push(info);
   }
 
   /// Rejects every commit whose primary plane is `width` pixels wide with
@@ -448,6 +513,128 @@ impl FakeKms {
     crtcs
   }
 
+  /// What the kernel, and the driver's rules if any, refuse in
+  /// `request`: a property the object does not have or a value outside
+  /// its range (`drm_atomic_set_property`), and in an async flip any
+  /// change but the primary plane's `FB_ID`, `IN_FENCE_FD` and
+  /// `FB_DAMAGE_CLIPS` (drm_atomic_uapi.c, `drm_atomic_set_property`).
+  fn refuse(
+    &self,
+    request: &AtomicRequest,
+    flags: CommitFlags,
+    names: &HashMap<PropertyId, String>,
+  ) -> Option<i32> {
+    let einval = Some(libc_einval());
+    let changes_allowed = |object: &Object, name: &str| {
+      matches!(object, Object::Plane(plane) if self.plane_type(*plane) == 1)
+        && matches!(name, "FB_ID" | "IN_FENCE_FD" | "FB_DAMAGE_CLIPS")
+    };
+    for (object, property, value) in request.entries() {
+      let Some(name) = names.get(property) else {
+        return einval;
+      };
+      if !self.property_names(*object).contains(name) {
+        return einval;
+      }
+      if let Some((min, max)) = self.ranges.get(&(object.id(), name.clone()))
+        && !(*min..=*max).contains(value)
+      {
+        return einval;
+      }
+      if flags.contains(CommitFlags::PAGE_FLIP_ASYNC)
+        && !changes_allowed(object, name)
+        && self.value(object.id(), name) != *value
+      {
+        return einval;
+      }
+    }
+    match self.rules {
+      Some(DriverRules::I915 { display_version }) => {
+        self.refuse_i915(request, flags, names, display_version)
+      }
+      None => None,
+    }
+  }
+
+  /// What i915 refuses beyond the kernel's rules: async flips of buffers
+  /// it cannot flip async (intel_display.c, `intel_async_flip_check_hw`:
+  /// `LINEAR` before display version 12, and every CCS modifier of these
+  /// generations), and a cursor plane of another size than 64, 128 or 256
+  /// pixels wide and 8 to that many lines high, scaled, or with a stride
+  /// other than its width in pixels (intel_cursor.c, `i9xx_check_cursor`).
+  fn refuse_i915(
+    &self,
+    request: &AtomicRequest,
+    flags: CommitFlags,
+    names: &HashMap<PropertyId, String>,
+    display_version: u32,
+  ) -> Option<i32> {
+    let einval = Some(libc_einval());
+    let set = |object: Object, name: &str| {
+      request
+        .entries()
+        .iter()
+        .find(|(o, p, _)| {
+          *o == object && names.get(p).is_some_and(|n| n == name)
+        })
+        .map(|(_, _, value)| *value)
+    };
+    let after = |object: Object, name: &str| {
+      set(object, name).unwrap_or_else(|| self.value(object.id(), name))
+    };
+    let planes: BTreeSet<PlaneId> = request
+      .entries()
+      .iter()
+      .filter_map(|(object, ..)| match object {
+        Object::Plane(plane) => Some(*plane),
+        _ => None,
+      })
+      .collect();
+    for plane in planes {
+      let object = Object::Plane(plane);
+      let framebuffer = after(object, "FB_ID") as u32;
+      if framebuffer == 0 {
+        continue;
+      }
+      let (modifier, stride) = match self.framebuffers.get(&framebuffer) {
+        Some(buffer) => (buffer.modifier, buffer.stride),
+        None => match self.buffers.get(&framebuffer) {
+          Some((buffer, _)) => (super::MODIFIER_LINEAR, buffer.stride),
+          None => continue,
+        },
+      };
+      if flags.contains(CommitFlags::PAGE_FLIP_ASYNC)
+        && set(object, "FB_ID").is_some()
+      {
+        let flippable = match modifier {
+          super::MODIFIER_LINEAR => display_version >= 12,
+          // X, Y, Yf and 4 tiling.
+          0x0100_0000_0000_0001..=0x0100_0000_0000_0003
+          | 0x0100_0000_0000_0009 => true,
+          _ => false,
+        };
+        if !flippable {
+          return einval;
+        }
+      }
+      if self.plane_type(plane) == 2 {
+        let width = after(object, "CRTC_W");
+        let height = after(object, "CRTC_H");
+        let scaled = after(object, "SRC_W") != width << 16
+          || after(object, "SRC_H") != height << 16;
+        if ![64, 128, 256].contains(&width)
+          || !(8..=width).contains(&height)
+          || scaled
+          || u64::from(stride) != width * 4
+          || !self.argb.contains(&framebuffer)
+        {
+          return einval;
+        }
+      }
+    }
+    None
+  }
+
   /// The commits that were not `TEST_ONLY`.
   pub(crate) fn real_commits(&self) -> Vec<(AtomicRequest, CommitFlags)> {
     self
@@ -482,8 +669,11 @@ impl FakeKms {
       .insert(name.to_owned(), value);
   }
 
-  fn property_names(&self, object: Object) -> Vec<&'static str> {
-    match object {
+  fn property_names(&self, object: Object) -> Vec<String> {
+    if let Some(names) = self.property_lists.get(&object.id()) {
+      return names.clone();
+    }
+    let names: Vec<&str> = match object {
       Object::Connector(_) => vec!["CRTC_ID", "DPMS", "EDID", "vrr_capable"],
       Object::Crtc(_) => {
         let mut names = vec!["MODE_ID", "ACTIVE", "GAMMA_LUT"];
@@ -507,7 +697,8 @@ impl FakeKms {
         "IN_FORMATS",
         "IN_FENCE_FD",
       ],
-    }
+    };
+    names.into_iter().map(str::to_owned).collect()
   }
 
   fn alloc(&mut self) -> u32 {
@@ -531,6 +722,9 @@ impl FakeKms {
 pub(crate) fn libc_einval() -> i32 {
   22
 }
+
+/// The blob ids of other planes' `IN_FORMATS` start here.
+const IN_FORMATS_BLOBS: u64 = 90_000;
 
 impl KmsDevice for FakeKms {
   fn enable_atomic(&mut self) -> io::Result<()> {
@@ -561,7 +755,8 @@ impl KmsDevice for FakeKms {
   fn connector(&mut self, id: ConnectorId) -> io::Result<ConnectorInfo> {
     if id == self.connector_id {
       let crtc = self.value(id.0, "CRTC_ID");
-      let mut info = connector_info(id.0, "HDMI-A-1");
+      let mut info = self.first_info.clone();
+      info.id = id;
       info.connection = self.connection;
       info.modes = if self.connection == Connection::Connected {
         self.modes.clone()
@@ -606,7 +801,9 @@ impl KmsDevice for FakeKms {
         .unwrap_or_default()
     };
     // Cursor planes scan out ARGB8888.
-    let formats = if self.plane_type(id) == 2 {
+    let formats = if let Some(formats) = self.plane_format_lists.get(&id) {
+      formats.clone()
+    } else if self.plane_type(id) == 2 {
       vec![FORMAT_ARGB8888]
     } else {
       self.plane_formats.clone()
@@ -623,22 +820,32 @@ impl KmsDevice for FakeKms {
     let id = object.id();
     let mut properties = Vec::new();
     for name in self.property_names(object) {
-      let value = match (object, name) {
+      let value = match (object, name.as_str()) {
         (Object::Plane(plane), "type") => self.plane_type(plane),
         (Object::Plane(plane), "IN_FORMATS") if plane == self.plane_id => {
           u64::from(self.in_formats.is_some()) * 77
+        }
+        (Object::Plane(plane), "IN_FORMATS")
+          if self.plane_in_formats.contains_key(&plane) =>
+        {
+          IN_FORMATS_BLOBS + u64::from(plane.0)
         }
         (Object::Connector(connector), "EDID")
           if self.edids.contains_key(&connector) =>
         {
           5000 + u64::from(connector.0)
         }
-        (Object::Connector(_), "vrr_capable") => u64::from(self.vrr_capable),
-        _ => self.value(id, name),
+        (Object::Connector(_), "vrr_capable")
+          if !self.property_lists.contains_key(&id) =>
+        {
+          u64::from(self.vrr_capable)
+        }
+        _ => self.value(id, &name),
       };
       properties.push(Property {
-        id: self.property_id(name),
-        name: name.to_owned(),
+        id: self.property_id(&name),
+        range: self.ranges.get(&(id, name.clone())).copied(),
+        name,
         value,
       });
     }
@@ -652,6 +859,13 @@ impl KmsDevice for FakeKms {
       .and_then(|connector| self.edids.get(&ConnectorId(connector)))
     {
       return Ok(edid.clone());
+    }
+    if let Some(blob) = id
+      .checked_sub(IN_FORMATS_BLOBS)
+      .and_then(|plane| u32::try_from(plane).ok())
+      .and_then(|plane| self.plane_in_formats.get(&PlaneId(plane)))
+    {
+      return Ok(blob.clone());
     }
     match (id, &self.in_formats) {
       (77, Some(blob)) => Ok(blob.clone()),
@@ -684,6 +898,9 @@ impl KmsDevice for FakeKms {
       .map(|(name, id)| (*id, name.clone()))
       .collect();
     let mut error = (self.reject)(request, flags);
+    if error.is_none() {
+      error = self.refuse(request, flags, &names);
+    }
     let touched = self.touched(request, &names);
     if error.is_none()
       && !touched.is_disjoint(&self.pending)

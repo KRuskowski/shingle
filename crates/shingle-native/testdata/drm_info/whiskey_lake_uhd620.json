@@ -1,0 +1,3393 @@
+{
+ "caps": {
+  "ADDFB2_MODIFIERS": 1,
+  "ASYNC_PAGE_FLIP": 1,
+  "ATOMIC_ASYNC_PAGE_FLIP": null,
+  "CURSOR_HEIGHT": 256,
+  "CURSOR_WIDTH": 256,
+  "TIMESTAMP_MONOTONIC": 1
+ },
+ "connectors": [
+  {
+   "encoders": [
+    94
+   ],
+   "id": 95,
+   "modes": [
+    {
+     "clock": 152840,
+     "flags": 10,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2060,
+     "hsync_start": 2000,
+     "htotal": 2250,
+     "name": "1920x1080",
+     "type": 72,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1094,
+     "vsync_start": 0,
+     "vtotal": 1132
+    }
+   ],
+   "name": "eDP-1",
+   "phy_size": [
+    310,
+    170
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 51
+    },
+    "Colorspace": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 0
+    },
+    "EDID": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    },
+    "panel orientation": {
+     "value": 0
+    },
+    "privacy-screen hw-state": {
+     "value": 0
+    },
+    "privacy-screen sw-state": {
+     "value": 0
+    },
+    "scaling mode": {
+     "value": 3
+    }
+   },
+   "status": 1,
+   "subpixel": 1,
+   "type": 14
+  },
+  {
+   "encoders": [
+    104
+   ],
+   "id": 105,
+   "modes": [
+    {
+     "clock": 533250,
+     "flags": 9,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 3920,
+     "hsync_start": 3888,
+     "htotal": 4000,
+     "name": "3840x2160",
+     "type": 72,
+     "vdisplay": 2160,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 2168,
+     "vsync_start": 0,
+     "vtotal": 2222
+    },
+    {
+     "clock": 262750,
+     "flags": 9,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 3920,
+     "hsync_start": 3888,
+     "htotal": 4000,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 30,
+     "vscan": 0,
+     "vsync_end": 2168,
+     "vsync_start": 0,
+     "vtotal": 2222
+    },
+    {
+     "clock": 241500,
+     "flags": 9,
+     "hdisplay": 2560,
+     "hskew": 0,
+     "hsync_end": 2640,
+     "hsync_start": 2608,
+     "htotal": 2720,
+     "name": "2560x1440",
+     "type": 64,
+     "vdisplay": 1440,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1448,
+     "vsync_start": 0,
+     "vtotal": 1481
+    },
+    {
+     "clock": 174250,
+     "flags": 9,
+     "hdisplay": 2048,
+     "hskew": 0,
+     "hsync_end": 2128,
+     "hsync_start": 2096,
+     "htotal": 2208,
+     "name": "2048x1280",
+     "type": 64,
+     "vdisplay": 1280,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1289,
+     "vsync_start": 0,
+     "vtotal": 1317
+    },
+    {
+     "clock": 162000,
+     "flags": 5,
+     "hdisplay": 2048,
+     "hskew": 0,
+     "hsync_end": 2154,
+     "hsync_start": 2074,
+     "htotal": 2250,
+     "name": "2048x1152",
+     "type": 64,
+     "vdisplay": 1152,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1156,
+     "vsync_start": 0,
+     "vtotal": 1200
+    },
+    {
+     "clock": 193250,
+     "flags": 6,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2256,
+     "hsync_start": 2056,
+     "htotal": 2592,
+     "name": "1920x1200",
+     "type": 64,
+     "vdisplay": 1200,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1209,
+     "vsync_start": 0,
+     "vtotal": 1245
+    },
+    {
+     "clock": 148500,
+     "flags": 10,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148500,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148352,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74250,
+     "flags": 1048597,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080i",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1094,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74176,
+     "flags": 1048597,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080i",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1094,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148500,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2492,
+     "hsync_start": 2448,
+     "htotal": 2640,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74250,
+     "flags": 1048597,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2492,
+     "hsync_start": 2448,
+     "htotal": 2640,
+     "name": "1920x1080i",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 1094,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2602,
+     "hsync_start": 2558,
+     "htotal": 2750,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 24,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74176,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2602,
+     "hsync_start": 2558,
+     "htotal": 2750,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 24,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 162000,
+     "flags": 5,
+     "hdisplay": 1600,
+     "hskew": 0,
+     "hsync_end": 1856,
+     "hsync_start": 1664,
+     "htotal": 2160,
+     "name": "1600x1200",
+     "type": 64,
+     "vdisplay": 1200,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1204,
+     "vsync_start": 0,
+     "vtotal": 1250
+    },
+    {
+     "clock": 146250,
+     "flags": 6,
+     "hdisplay": 1680,
+     "hskew": 0,
+     "hsync_end": 1960,
+     "hsync_start": 1784,
+     "htotal": 2240,
+     "name": "1680x1050",
+     "type": 64,
+     "vdisplay": 1050,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1059,
+     "vsync_start": 0,
+     "vtotal": 1089
+    },
+    {
+     "clock": 135000,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1440,
+     "hsync_start": 1296,
+     "htotal": 1688,
+     "name": "1280x1024",
+     "type": 64,
+     "vdisplay": 1024,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 1028,
+     "vsync_start": 0,
+     "vtotal": 1066
+    },
+    {
+     "clock": 108000,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1440,
+     "hsync_start": 1328,
+     "htotal": 1688,
+     "name": "1280x1024",
+     "type": 64,
+     "vdisplay": 1024,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1028,
+     "vsync_start": 0,
+     "vtotal": 1066
+    },
+    {
+     "clock": 83500,
+     "flags": 6,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1480,
+     "hsync_start": 1352,
+     "htotal": 1680,
+     "name": "1280x800",
+     "type": 64,
+     "vdisplay": 800,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 809,
+     "vsync_start": 0,
+     "vtotal": 831
+    },
+    {
+     "clock": 108000,
+     "flags": 5,
+     "hdisplay": 1152,
+     "hskew": 0,
+     "hsync_end": 1344,
+     "hsync_start": 1216,
+     "htotal": 1600,
+     "name": "1152x864",
+     "type": 64,
+     "vdisplay": 864,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 868,
+     "vsync_start": 0,
+     "vtotal": 900
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1430,
+     "hsync_start": 1390,
+     "htotal": 1650,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74176,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1430,
+     "hsync_start": 1390,
+     "htotal": 1650,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1760,
+     "hsync_start": 1720,
+     "htotal": 1980,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 78750,
+     "flags": 5,
+     "hdisplay": 1024,
+     "hskew": 0,
+     "hsync_end": 1136,
+     "hsync_start": 1040,
+     "htotal": 1312,
+     "name": "1024x768",
+     "type": 64,
+     "vdisplay": 768,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 772,
+     "vsync_start": 0,
+     "vtotal": 800
+    },
+    {
+     "clock": 65000,
+     "flags": 10,
+     "hdisplay": 1024,
+     "hskew": 0,
+     "hsync_end": 1184,
+     "hsync_start": 1048,
+     "htotal": 1344,
+     "name": "1024x768",
+     "type": 64,
+     "vdisplay": 768,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 777,
+     "vsync_start": 0,
+     "vtotal": 806
+    },
+    {
+     "clock": 49500,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 896,
+     "hsync_start": 816,
+     "htotal": 1056,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 604,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 40000,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 968,
+     "hsync_start": 840,
+     "htotal": 1056,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 605,
+     "vsync_start": 0,
+     "vtotal": 628
+    },
+    {
+     "clock": 27000,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 796,
+     "hsync_start": 732,
+     "htotal": 864,
+     "name": "720x576",
+     "type": 64,
+     "vdisplay": 576,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 586,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 27000,
+     "flags": 524298,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 796,
+     "hsync_start": 732,
+     "htotal": 864,
+     "name": "720x576",
+     "type": 64,
+     "vdisplay": 576,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 586,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 27027,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 27027,
+     "flags": 524298,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 27000,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 27000,
+     "flags": 524298,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 31500,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 720,
+     "hsync_start": 656,
+     "htotal": 840,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 484,
+     "vsync_start": 0,
+     "vtotal": 500
+    },
+    {
+     "clock": 25200,
+     "flags": 524298,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 25175,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 25175,
+     "flags": 524298,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 28320,
+     "flags": 6,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 846,
+     "hsync_start": 738,
+     "htotal": 900,
+     "name": "720x400",
+     "type": 64,
+     "vdisplay": 400,
+     "vrefresh": 70,
+     "vscan": 0,
+     "vsync_end": 414,
+     "vsync_start": 0,
+     "vtotal": 449
+    }
+   ],
+   "name": "DP-1",
+   "phy_size": [
+    600,
+    340
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 72
+    },
+    "Colorspace": {
+     "value": 0
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 0
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "HDR_OUTPUT_METADATA": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    },
+    "subconnector": {
+     "value": 15
+    }
+   },
+   "status": 1,
+   "subpixel": 1,
+   "type": 10
+  },
+  {
+   "encoders": [
+    104
+   ],
+   "id": 115,
+   "modes": [],
+   "name": "HDMI-A-1",
+   "phy_size": [
+    0,
+    0
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "Colorspace": {
+     "value": 0
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 3
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "aspect ratio": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "content type": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      8,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   },
+   "status": 2,
+   "subpixel": 1,
+   "type": 11
+  },
+  {
+   "encoders": [
+    120
+   ],
+   "id": 121,
+   "modes": [
+    {
+     "clock": 262750,
+     "flags": 9,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 3920,
+     "hsync_start": 3888,
+     "htotal": 4000,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 30,
+     "vscan": 0,
+     "vsync_end": 2168,
+     "vsync_start": 0,
+     "vtotal": 2222
+    },
+    {
+     "clock": 241500,
+     "flags": 9,
+     "hdisplay": 2560,
+     "hskew": 0,
+     "hsync_end": 2640,
+     "hsync_start": 2608,
+     "htotal": 2720,
+     "name": "2560x1440",
+     "type": 64,
+     "vdisplay": 1440,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1448,
+     "vsync_start": 0,
+     "vtotal": 1481
+    },
+    {
+     "clock": 174250,
+     "flags": 9,
+     "hdisplay": 2048,
+     "hskew": 0,
+     "hsync_end": 2128,
+     "hsync_start": 2096,
+     "htotal": 2208,
+     "name": "2048x1280",
+     "type": 64,
+     "vdisplay": 1280,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1289,
+     "vsync_start": 0,
+     "vtotal": 1317
+    },
+    {
+     "clock": 162000,
+     "flags": 5,
+     "hdisplay": 2048,
+     "hskew": 0,
+     "hsync_end": 2154,
+     "hsync_start": 2074,
+     "htotal": 2250,
+     "name": "2048x1152",
+     "type": 64,
+     "vdisplay": 1152,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1156,
+     "vsync_start": 0,
+     "vtotal": 1200
+    },
+    {
+     "clock": 193250,
+     "flags": 6,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2256,
+     "hsync_start": 2056,
+     "htotal": 2592,
+     "name": "1920x1200",
+     "type": 64,
+     "vdisplay": 1200,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1209,
+     "vsync_start": 0,
+     "vtotal": 1245
+    },
+    {
+     "clock": 148500,
+     "flags": 10,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148500,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148352,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74250,
+     "flags": 1048597,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080i",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1094,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74176,
+     "flags": 1048597,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080i",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1094,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148500,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2492,
+     "hsync_start": 2448,
+     "htotal": 2640,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74250,
+     "flags": 1048597,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2492,
+     "hsync_start": 2448,
+     "htotal": 2640,
+     "name": "1920x1080i",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 1094,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2602,
+     "hsync_start": 2558,
+     "htotal": 2750,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 24,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74176,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2602,
+     "hsync_start": 2558,
+     "htotal": 2750,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 24,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 162000,
+     "flags": 5,
+     "hdisplay": 1600,
+     "hskew": 0,
+     "hsync_end": 1856,
+     "hsync_start": 1664,
+     "htotal": 2160,
+     "name": "1600x1200",
+     "type": 64,
+     "vdisplay": 1200,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1204,
+     "vsync_start": 0,
+     "vtotal": 1250
+    },
+    {
+     "clock": 146250,
+     "flags": 6,
+     "hdisplay": 1680,
+     "hskew": 0,
+     "hsync_end": 1960,
+     "hsync_start": 1784,
+     "htotal": 2240,
+     "name": "1680x1050",
+     "type": 64,
+     "vdisplay": 1050,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1059,
+     "vsync_start": 0,
+     "vtotal": 1089
+    },
+    {
+     "clock": 135000,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1440,
+     "hsync_start": 1296,
+     "htotal": 1688,
+     "name": "1280x1024",
+     "type": 64,
+     "vdisplay": 1024,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 1028,
+     "vsync_start": 0,
+     "vtotal": 1066
+    },
+    {
+     "clock": 108000,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1440,
+     "hsync_start": 1328,
+     "htotal": 1688,
+     "name": "1280x1024",
+     "type": 64,
+     "vdisplay": 1024,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1028,
+     "vsync_start": 0,
+     "vtotal": 1066
+    },
+    {
+     "clock": 83500,
+     "flags": 6,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1480,
+     "hsync_start": 1352,
+     "htotal": 1680,
+     "name": "1280x800",
+     "type": 64,
+     "vdisplay": 800,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 809,
+     "vsync_start": 0,
+     "vtotal": 831
+    },
+    {
+     "clock": 108000,
+     "flags": 5,
+     "hdisplay": 1152,
+     "hskew": 0,
+     "hsync_end": 1344,
+     "hsync_start": 1216,
+     "htotal": 1600,
+     "name": "1152x864",
+     "type": 64,
+     "vdisplay": 864,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 868,
+     "vsync_start": 0,
+     "vtotal": 900
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1430,
+     "hsync_start": 1390,
+     "htotal": 1650,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74176,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1430,
+     "hsync_start": 1390,
+     "htotal": 1650,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1760,
+     "hsync_start": 1720,
+     "htotal": 1980,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 78750,
+     "flags": 5,
+     "hdisplay": 1024,
+     "hskew": 0,
+     "hsync_end": 1136,
+     "hsync_start": 1040,
+     "htotal": 1312,
+     "name": "1024x768",
+     "type": 64,
+     "vdisplay": 768,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 772,
+     "vsync_start": 0,
+     "vtotal": 800
+    },
+    {
+     "clock": 65000,
+     "flags": 10,
+     "hdisplay": 1024,
+     "hskew": 0,
+     "hsync_end": 1184,
+     "hsync_start": 1048,
+     "htotal": 1344,
+     "name": "1024x768",
+     "type": 64,
+     "vdisplay": 768,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 777,
+     "vsync_start": 0,
+     "vtotal": 806
+    },
+    {
+     "clock": 49500,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 896,
+     "hsync_start": 816,
+     "htotal": 1056,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 604,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 40000,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 968,
+     "hsync_start": 840,
+     "htotal": 1056,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 605,
+     "vsync_start": 0,
+     "vtotal": 628
+    },
+    {
+     "clock": 27000,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 796,
+     "hsync_start": 732,
+     "htotal": 864,
+     "name": "720x576",
+     "type": 64,
+     "vdisplay": 576,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 586,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 27000,
+     "flags": 524298,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 796,
+     "hsync_start": 732,
+     "htotal": 864,
+     "name": "720x576",
+     "type": 64,
+     "vdisplay": 576,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 586,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 27027,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 27027,
+     "flags": 524298,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 27000,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 27000,
+     "flags": 524298,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 31500,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 720,
+     "hsync_start": 656,
+     "htotal": 840,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 484,
+     "vsync_start": 0,
+     "vtotal": 500
+    },
+    {
+     "clock": 25200,
+     "flags": 524298,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 25175,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 25175,
+     "flags": 524298,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 28320,
+     "flags": 6,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 846,
+     "hsync_start": 738,
+     "htotal": 900,
+     "name": "720x400",
+     "type": 64,
+     "vdisplay": 400,
+     "vrefresh": 70,
+     "vscan": 0,
+     "vsync_end": 414,
+     "vsync_start": 0,
+     "vtotal": 449
+    }
+   ],
+   "name": "DP-2",
+   "phy_size": [
+    600,
+    340
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 93
+    },
+    "Colorspace": {
+     "value": 0
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 0
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "HDR_OUTPUT_METADATA": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    },
+    "subconnector": {
+     "value": 15
+    }
+   },
+   "status": 1,
+   "subpixel": 1,
+   "type": 10
+  }
+ ],
+ "crtcs": [
+  {
+   "id": 51,
+   "mode": {
+    "clock": 152840,
+    "flags": 10,
+    "hdisplay": 1920,
+    "hskew": 0,
+    "hsync_end": 2060,
+    "hsync_start": 2000,
+    "htotal": 2250,
+    "name": "1920x1080",
+    "type": 72,
+    "vdisplay": 1080,
+    "vrefresh": 60,
+    "vscan": 0,
+    "vsync_end": 1094,
+    "vsync_start": 0,
+    "vtotal": 1132
+   },
+   "properties": {
+    "ACTIVE": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 1
+    },
+    "CTM": {
+     "value": 0
+    },
+    "DEGAMMA_LUT": {
+     "value": 0
+    },
+    "DEGAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 1024
+    },
+    "GAMMA_LUT": {
+     "value": 0
+    },
+    "GAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 1024
+    },
+    "MODE_ID": {
+     "value": 0
+    },
+    "OUT_FENCE_PTR": {
+     "range": [
+      0,
+      18446744073709551615
+     ],
+     "value": 0
+    },
+    "VRR_ENABLED": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   }
+  },
+  {
+   "id": 72,
+   "mode": {
+    "clock": 533250,
+    "flags": 9,
+    "hdisplay": 3840,
+    "hskew": 0,
+    "hsync_end": 3920,
+    "hsync_start": 3888,
+    "htotal": 4000,
+    "name": "3840x2160",
+    "type": 72,
+    "vdisplay": 2160,
+    "vrefresh": 60,
+    "vscan": 0,
+    "vsync_end": 2168,
+    "vsync_start": 0,
+    "vtotal": 2222
+   },
+   "properties": {
+    "ACTIVE": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 1
+    },
+    "CTM": {
+     "value": 0
+    },
+    "DEGAMMA_LUT": {
+     "value": 0
+    },
+    "DEGAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 1024
+    },
+    "GAMMA_LUT": {
+     "value": 0
+    },
+    "GAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 1024
+    },
+    "MODE_ID": {
+     "value": 0
+    },
+    "OUT_FENCE_PTR": {
+     "range": [
+      0,
+      18446744073709551615
+     ],
+     "value": 0
+    },
+    "VRR_ENABLED": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   }
+  },
+  {
+   "id": 93,
+   "mode": {
+    "clock": 262750,
+    "flags": 9,
+    "hdisplay": 3840,
+    "hskew": 0,
+    "hsync_end": 3920,
+    "hsync_start": 3888,
+    "htotal": 4000,
+    "name": "3840x2160",
+    "type": 64,
+    "vdisplay": 2160,
+    "vrefresh": 30,
+    "vscan": 0,
+    "vsync_end": 2168,
+    "vsync_start": 0,
+    "vtotal": 2222
+   },
+   "properties": {
+    "ACTIVE": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 1
+    },
+    "CTM": {
+     "value": 0
+    },
+    "DEGAMMA_LUT": {
+     "value": 0
+    },
+    "DEGAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 1024
+    },
+    "GAMMA_LUT": {
+     "value": 0
+    },
+    "GAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 1024
+    },
+    "MODE_ID": {
+     "value": 0
+    },
+    "OUT_FENCE_PTR": {
+     "range": [
+      0,
+      18446744073709551615
+     ],
+     "value": 0
+    },
+    "VRR_ENABLED": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   }
+  }
+ ],
+ "driver": "i915",
+ "encoders": [
+  {
+   "id": 94,
+   "possible_crtcs": 7,
+   "type": 2
+  },
+  {
+   "id": 104,
+   "possible_crtcs": 7,
+   "type": 2
+  },
+  {
+   "id": 106,
+   "possible_crtcs": 7,
+   "type": 7
+  },
+  {
+   "id": 107,
+   "possible_crtcs": 7,
+   "type": 7
+  },
+  {
+   "id": 108,
+   "possible_crtcs": 7,
+   "type": 7
+  },
+  {
+   "id": 120,
+   "possible_crtcs": 7,
+   "type": 2
+  },
+  {
+   "id": 122,
+   "possible_crtcs": 7,
+   "type": 7
+  },
+  {
+   "id": 123,
+   "possible_crtcs": 7,
+   "type": 7
+  },
+  {
+   "id": 124,
+   "possible_crtcs": 7,
+   "type": 7
+  }
+ ],
+ "kernel": "6.0.9-300.fc37.x86_64",
+ "planes": [
+  {
+   "crtc_id": 51,
+   "fb_id": 127,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    1211388504,
+    1211384408,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    1448434008
+   ],
+   "id": 31,
+   "in_formats": [
+    [
+     72057594037927941,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993
+     ]
+    ],
+    [
+     72057594037927940,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993
+     ]
+    ],
+    [
+     72057594037927939,
+     [
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927938,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ]
+   ],
+   "possible_crtcs": 1,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 1080
+    },
+    "CRTC_ID": {
+     "value": 51
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 1920
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 127
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 70778880
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 125829120
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 1
+    },
+    "zpos": {
+     "range": [
+      0,
+      0
+     ],
+     "value": 0
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    1211388504,
+    1211384408,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    1448434008
+   ],
+   "id": 39,
+   "in_formats": [
+    [
+     72057594037927941,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993
+     ]
+    ],
+    [
+     72057594037927940,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993
+     ]
+    ],
+    [
+     72057594037927939,
+     [
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927938,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ]
+   ],
+   "possible_crtcs": 1,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      1,
+      1
+     ],
+     "value": 1
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    875713089
+   ],
+   "id": 47,
+   "in_formats": [
+    [
+     0,
+     [
+      875713089
+     ]
+    ]
+   ],
+   "possible_crtcs": 1,
+   "properties": {
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 256
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 256
+    },
+    "CRTC_X": {
+     "value": 1915
+    },
+    "CRTC_Y": {
+     "value": 6
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 16777216
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 16777216
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 2
+    },
+    "zpos": {
+     "range": [
+      2,
+      2
+     ],
+     "value": 2
+    }
+   }
+  },
+  {
+   "crtc_id": 72,
+   "fb_id": 144,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    1211388504,
+    1211384408,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    1448434008
+   ],
+   "id": 52,
+   "in_formats": [
+    [
+     72057594037927941,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993
+     ]
+    ],
+    [
+     72057594037927940,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993
+     ]
+    ],
+    [
+     72057594037927939,
+     [
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927938,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ]
+   ],
+   "possible_crtcs": 2,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 2160
+    },
+    "CRTC_ID": {
+     "value": 72
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 3840
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 144
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 141557760
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 251658240
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 1
+    },
+    "zpos": {
+     "range": [
+      0,
+      0
+     ],
+     "value": 0
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    1211388504,
+    1211384408,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    1448434008
+   ],
+   "id": 60,
+   "in_formats": [
+    [
+     72057594037927941,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993
+     ]
+    ],
+    [
+     72057594037927940,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993
+     ]
+    ],
+    [
+     72057594037927939,
+     [
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927938,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      1448434008
+     ]
+    ]
+   ],
+   "possible_crtcs": 2,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      1,
+      1
+     ],
+     "value": 1
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    875713089
+   ],
+   "id": 68,
+   "in_formats": [
+    [
+     0,
+     [
+      875713089
+     ]
+    ]
+   ],
+   "possible_crtcs": 2,
+   "properties": {
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 256
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 256
+    },
+    "CRTC_X": {
+     "value": 987
+    },
+    "CRTC_Y": {
+     "value": 1371
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 16777216
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 16777216
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 2
+    },
+    "zpos": {
+     "range": [
+      2,
+      2
+     ],
+     "value": 2
+    }
+   }
+  },
+  {
+   "crtc_id": 93,
+   "fb_id": 129,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    1211388504,
+    1211384408,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    1448434008
+   ],
+   "id": 73,
+   "in_formats": [
+    [
+     72057594037927939,
+     [
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927938,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ]
+   ],
+   "possible_crtcs": 4,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 2160
+    },
+    "CRTC_ID": {
+     "value": 93
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 3840
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 129
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 141557760
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 251658240
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 1
+    },
+    "zpos": {
+     "range": [
+      0,
+      0
+     ],
+     "value": 0
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    1211388504,
+    1211384408,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    1448434008
+   ],
+   "id": 81,
+   "in_formats": [
+    [
+     72057594037927939,
+     [
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927938,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      1211388504,
+      1211384408,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ]
+   ],
+   "possible_crtcs": 4,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      1,
+      1
+     ],
+     "value": 1
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    875713089
+   ],
+   "id": 89,
+   "in_formats": [
+    [
+     0,
+     [
+      875713089
+     ]
+    ]
+   ],
+   "possible_crtcs": 4,
+   "properties": {
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 256
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 256
+    },
+    "CRTC_X": {
+     "value": 1932
+    },
+    "CRTC_Y": {
+     "value": 1910
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 16777216
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 16777216
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 2
+    },
+    "zpos": {
+     "range": [
+      2,
+      2
+     ],
+     "value": 2
+    }
+   }
+  }
+ ],
+ "source": "drmdb.emersion.fr/snapshots/25f142a0dd2b: i915, 8086:3EA0 WhiskeyLake-U GT2 [UHD Graphics 620], Linux 6.0.9"
+}

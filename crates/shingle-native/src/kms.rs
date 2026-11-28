@@ -258,6 +258,9 @@ pub struct Property {
   pub name: String,
   /// Its current value.
   pub value: u64,
+  /// The smallest and largest value of a range property, such as
+  /// `max bpc`; `None` for other kinds.
+  pub range: Option<(u64, u64)>,
 }
 
 /// A linear XRGB8888 dumb buffer with its framebuffer.

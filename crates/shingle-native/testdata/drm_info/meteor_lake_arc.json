@@ -1,0 +1,9029 @@
+{
+ "caps": {
+  "ADDFB2_MODIFIERS": 1,
+  "ASYNC_PAGE_FLIP": 1,
+  "ATOMIC_ASYNC_PAGE_FLIP": 1,
+  "CURSOR_HEIGHT": 256,
+  "CURSOR_WIDTH": 256,
+  "TIMESTAMP_MONOTONIC": 1
+ },
+ "connectors": [
+  {
+   "encoders": [
+    261
+   ],
+   "id": 262,
+   "modes": [
+    {
+     "clock": 154760,
+     "flags": 9,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2000,
+     "hsync_start": 1968,
+     "htotal": 2080,
+     "name": "1920x1200",
+     "type": 72,
+     "vdisplay": 1200,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1209,
+     "vsync_start": 0,
+     "vtotal": 1240
+    }
+   ],
+   "name": "eDP-1",
+   "phy_size": [
+    310,
+    200
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "Colorspace": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 3
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDR_OUTPUT_METADATA": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    },
+    "panel orientation": {
+     "value": 0
+    },
+    "scaling mode": {
+     "value": 3
+    },
+    "vrr_capable": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 1
+    }
+   },
+   "status": 1,
+   "subpixel": 1,
+   "type": 14
+  },
+  {
+   "encoders": [
+    270
+   ],
+   "id": 271,
+   "modes": [],
+   "name": "HDMI-A-1",
+   "phy_size": [
+    0,
+    0
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "Colorspace": {
+     "value": 0
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 3
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "HDR_OUTPUT_METADATA": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "aspect ratio": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "content type": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      8,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   },
+   "status": 2,
+   "subpixel": 1,
+   "type": 11
+  },
+  {
+   "encoders": [
+    279
+   ],
+   "id": 280,
+   "modes": [],
+   "name": "DP-1",
+   "phy_size": [
+    0,
+    0
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "Colorspace": {
+     "value": 0
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 3
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "HDR_OUTPUT_METADATA": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    },
+    "subconnector": {
+     "value": 0
+    },
+    "vrr_capable": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   },
+   "status": 2,
+   "subpixel": 1,
+   "type": 10
+  },
+  {
+   "encoders": [
+    289
+   ],
+   "id": 290,
+   "modes": [],
+   "name": "DP-2",
+   "phy_size": [
+    0,
+    0
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "Colorspace": {
+     "value": 0
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 3
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "HDR_OUTPUT_METADATA": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    },
+    "subconnector": {
+     "value": 0
+    },
+    "vrr_capable": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   },
+   "status": 2,
+   "subpixel": 1,
+   "type": 10
+  },
+  {
+   "encoders": [
+    298
+   ],
+   "id": 299,
+   "modes": [],
+   "name": "DP-3",
+   "phy_size": [
+    0,
+    0
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "Colorspace": {
+     "value": 0
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 3
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "HDR_OUTPUT_METADATA": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    },
+    "subconnector": {
+     "value": 0
+    },
+    "vrr_capable": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   },
+   "status": 2,
+   "subpixel": 1,
+   "type": 10
+  },
+  {
+   "encoders": [
+    307
+   ],
+   "id": 308,
+   "modes": [],
+   "name": "DP-4",
+   "phy_size": [
+    0,
+    0
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "Colorspace": {
+     "value": 0
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 3
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "HDR_OUTPUT_METADATA": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    },
+    "subconnector": {
+     "value": 0
+    },
+    "vrr_capable": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   },
+   "status": 2,
+   "subpixel": 1,
+   "type": 10
+  },
+  {
+   "encoders": [
+    281,
+    282,
+    283,
+    284
+   ],
+   "id": 319,
+   "modes": [],
+   "name": "DP-5",
+   "phy_size": [
+    0,
+    0
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 3
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "PATH": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   },
+   "status": 2,
+   "subpixel": 1,
+   "type": 10
+  },
+  {
+   "encoders": [
+    281,
+    282,
+    283,
+    284
+   ],
+   "id": 336,
+   "modes": [
+    {
+     "clock": 533250,
+     "flags": 9,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 3920,
+     "hsync_start": 3888,
+     "htotal": 4000,
+     "name": "3840x2160",
+     "type": 72,
+     "vdisplay": 2160,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 2168,
+     "vsync_start": 0,
+     "vtotal": 2222
+    },
+    {
+     "clock": 1188000,
+     "flags": 1048581,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 4104,
+     "hsync_start": 4016,
+     "htotal": 4400,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 120,
+     "vscan": 0,
+     "vsync_end": 2178,
+     "vsync_start": 0,
+     "vtotal": 2250
+    },
+    {
+     "clock": 1186813,
+     "flags": 1048581,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 4104,
+     "hsync_start": 4016,
+     "htotal": 4400,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 120,
+     "vscan": 0,
+     "vsync_end": 2178,
+     "vsync_start": 0,
+     "vtotal": 2250
+    },
+    {
+     "clock": 1188000,
+     "flags": 1048581,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 4984,
+     "hsync_start": 4896,
+     "htotal": 5280,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 100,
+     "vscan": 0,
+     "vsync_end": 2178,
+     "vsync_start": 0,
+     "vtotal": 2250
+    },
+    {
+     "clock": 594000,
+     "flags": 1048581,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 4104,
+     "hsync_start": 4016,
+     "htotal": 4400,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 2178,
+     "vsync_start": 0,
+     "vtotal": 2250
+    },
+    {
+     "clock": 593407,
+     "flags": 1048581,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 4104,
+     "hsync_start": 4016,
+     "htotal": 4400,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 2178,
+     "vsync_start": 0,
+     "vtotal": 2250
+    },
+    {
+     "clock": 594000,
+     "flags": 1048581,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 4984,
+     "hsync_start": 4896,
+     "htotal": 5280,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 2178,
+     "vsync_start": 0,
+     "vtotal": 2250
+    },
+    {
+     "clock": 297000,
+     "flags": 1048581,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 4104,
+     "hsync_start": 4016,
+     "htotal": 4400,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 30,
+     "vscan": 0,
+     "vsync_end": 2178,
+     "vsync_start": 0,
+     "vtotal": 2250
+    },
+    {
+     "clock": 296703,
+     "flags": 1048581,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 4104,
+     "hsync_start": 4016,
+     "htotal": 4400,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 30,
+     "vscan": 0,
+     "vsync_end": 2178,
+     "vsync_start": 0,
+     "vtotal": 2250
+    },
+    {
+     "clock": 297000,
+     "flags": 1048581,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 4984,
+     "hsync_start": 4896,
+     "htotal": 5280,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 25,
+     "vscan": 0,
+     "vsync_end": 2178,
+     "vsync_start": 0,
+     "vtotal": 2250
+    },
+    {
+     "clock": 297000,
+     "flags": 1048581,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 5204,
+     "hsync_start": 5116,
+     "htotal": 5500,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 24,
+     "vscan": 0,
+     "vsync_end": 2178,
+     "vsync_start": 0,
+     "vtotal": 2250
+    },
+    {
+     "clock": 296703,
+     "flags": 1048581,
+     "hdisplay": 3840,
+     "hskew": 0,
+     "hsync_end": 5204,
+     "hsync_start": 5116,
+     "htotal": 5500,
+     "name": "3840x2160",
+     "type": 64,
+     "vdisplay": 2160,
+     "vrefresh": 24,
+     "vscan": 0,
+     "vsync_end": 2178,
+     "vsync_start": 0,
+     "vtotal": 2250
+    },
+    {
+     "clock": 1056750,
+     "flags": 9,
+     "hdisplay": 2560,
+     "hskew": 0,
+     "hsync_end": 2640,
+     "hsync_start": 2608,
+     "htotal": 2720,
+     "name": "2560x1440",
+     "type": 64,
+     "vdisplay": 1440,
+     "vrefresh": 240,
+     "vscan": 0,
+     "vsync_end": 1448,
+     "vsync_start": 0,
+     "vtotal": 1619
+    },
+    {
+     "clock": 497750,
+     "flags": 9,
+     "hdisplay": 2560,
+     "hskew": 0,
+     "hsync_end": 2640,
+     "hsync_start": 2608,
+     "htotal": 2720,
+     "name": "2560x1440",
+     "type": 64,
+     "vdisplay": 1440,
+     "vrefresh": 120,
+     "vscan": 0,
+     "vsync_end": 1448,
+     "vsync_start": 0,
+     "vtotal": 1525
+    },
+    {
+     "clock": 241500,
+     "flags": 9,
+     "hdisplay": 2560,
+     "hskew": 0,
+     "hsync_end": 2640,
+     "hsync_start": 2608,
+     "htotal": 2720,
+     "name": "2560x1440",
+     "type": 64,
+     "vdisplay": 1440,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1448,
+     "vsync_start": 0,
+     "vtotal": 1481
+    },
+    {
+     "clock": 606500,
+     "flags": 9,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2000,
+     "hsync_start": 1968,
+     "htotal": 2080,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 240,
+     "vscan": 0,
+     "vsync_end": 1088,
+     "vsync_start": 0,
+     "vtotal": 1215
+    },
+    {
+     "clock": 297000,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 120,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 296703,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 120,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 297000,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2492,
+     "hsync_start": 2448,
+     "htotal": 2640,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 100,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148500,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148352,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148500,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2492,
+     "hsync_start": 2448,
+     "htotal": 2640,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2602,
+     "hsync_start": 2558,
+     "htotal": 2750,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 24,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74176,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2602,
+     "hsync_start": 2558,
+     "htotal": 2750,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 24,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 119000,
+     "flags": 9,
+     "hdisplay": 1680,
+     "hskew": 0,
+     "hsync_end": 1760,
+     "hsync_start": 1728,
+     "htotal": 1840,
+     "name": "1680x1050",
+     "type": 64,
+     "vdisplay": 1050,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1059,
+     "vsync_start": 0,
+     "vtotal": 1080
+    },
+    {
+     "clock": 108000,
+     "flags": 5,
+     "hdisplay": 1600,
+     "hskew": 0,
+     "hsync_end": 1704,
+     "hsync_start": 1624,
+     "htotal": 1800,
+     "name": "1600x900",
+     "type": 64,
+     "vdisplay": 900,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 904,
+     "vsync_start": 0,
+     "vtotal": 1000
+    },
+    {
+     "clock": 135000,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1440,
+     "hsync_start": 1296,
+     "htotal": 1688,
+     "name": "1280x1024",
+     "type": 64,
+     "vdisplay": 1024,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 1028,
+     "vsync_start": 0,
+     "vtotal": 1066
+    },
+    {
+     "clock": 108000,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1440,
+     "hsync_start": 1328,
+     "htotal": 1688,
+     "name": "1280x1024",
+     "type": 64,
+     "vdisplay": 1024,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1028,
+     "vsync_start": 0,
+     "vtotal": 1066
+    },
+    {
+     "clock": 88750,
+     "flags": 9,
+     "hdisplay": 1440,
+     "hskew": 0,
+     "hsync_end": 1520,
+     "hsync_start": 1488,
+     "htotal": 1600,
+     "name": "1440x900",
+     "type": 64,
+     "vdisplay": 900,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 909,
+     "vsync_start": 0,
+     "vtotal": 926
+    },
+    {
+     "clock": 108000,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1488,
+     "hsync_start": 1376,
+     "htotal": 1800,
+     "name": "1280x960",
+     "type": 64,
+     "vdisplay": 960,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 964,
+     "vsync_start": 0,
+     "vtotal": 1000
+    },
+    {
+     "clock": 71000,
+     "flags": 9,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1360,
+     "hsync_start": 1328,
+     "htotal": 1440,
+     "name": "1280x800",
+     "type": 64,
+     "vdisplay": 800,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 809,
+     "vsync_start": 0,
+     "vtotal": 823
+    },
+    {
+     "clock": 108000,
+     "flags": 5,
+     "hdisplay": 1152,
+     "hskew": 0,
+     "hsync_end": 1344,
+     "hsync_start": 1216,
+     "htotal": 1600,
+     "name": "1152x864",
+     "type": 64,
+     "vdisplay": 864,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 868,
+     "vsync_start": 0,
+     "vtotal": 900
+    },
+    {
+     "clock": 148500,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1760,
+     "hsync_start": 1720,
+     "htotal": 1980,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 100,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74250,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1430,
+     "hsync_start": 1390,
+     "htotal": 1650,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1430,
+     "hsync_start": 1390,
+     "htotal": 1650,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74176,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1430,
+     "hsync_start": 1390,
+     "htotal": 1650,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1760,
+     "hsync_start": 1720,
+     "htotal": 1980,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 78750,
+     "flags": 5,
+     "hdisplay": 1024,
+     "hskew": 0,
+     "hsync_end": 1136,
+     "hsync_start": 1040,
+     "htotal": 1312,
+     "name": "1024x768",
+     "type": 64,
+     "vdisplay": 768,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 772,
+     "vsync_start": 0,
+     "vtotal": 800
+    },
+    {
+     "clock": 75000,
+     "flags": 10,
+     "hdisplay": 1024,
+     "hskew": 0,
+     "hsync_end": 1184,
+     "hsync_start": 1048,
+     "htotal": 1328,
+     "name": "1024x768",
+     "type": 64,
+     "vdisplay": 768,
+     "vrefresh": 70,
+     "vscan": 0,
+     "vsync_end": 777,
+     "vsync_start": 0,
+     "vtotal": 806
+    },
+    {
+     "clock": 65000,
+     "flags": 10,
+     "hdisplay": 1024,
+     "hskew": 0,
+     "hsync_end": 1184,
+     "hsync_start": 1048,
+     "htotal": 1344,
+     "name": "1024x768",
+     "type": 64,
+     "vdisplay": 768,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 777,
+     "vsync_start": 0,
+     "vtotal": 806
+    },
+    {
+     "clock": 54054,
+     "flags": 1048586,
+     "hdisplay": 1440,
+     "hskew": 0,
+     "hsync_end": 1596,
+     "hsync_start": 1472,
+     "htotal": 1716,
+     "name": "1440x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 54000,
+     "flags": 1048586,
+     "hdisplay": 1440,
+     "hskew": 0,
+     "hsync_end": 1596,
+     "hsync_start": 1472,
+     "htotal": 1716,
+     "name": "1440x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 57284,
+     "flags": 10,
+     "hdisplay": 832,
+     "hskew": 0,
+     "hsync_end": 928,
+     "hsync_start": 864,
+     "htotal": 1152,
+     "name": "832x624",
+     "type": 64,
+     "vdisplay": 624,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 628,
+     "vsync_start": 0,
+     "vtotal": 667
+    },
+    {
+     "clock": 49500,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 896,
+     "hsync_start": 816,
+     "htotal": 1056,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 604,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 50000,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 976,
+     "hsync_start": 856,
+     "htotal": 1040,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 72,
+     "vscan": 0,
+     "vsync_end": 643,
+     "vsync_start": 0,
+     "vtotal": 666
+    },
+    {
+     "clock": 40000,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 968,
+     "hsync_start": 840,
+     "htotal": 1056,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 605,
+     "vsync_start": 0,
+     "vtotal": 628
+    },
+    {
+     "clock": 36000,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 896,
+     "hsync_start": 824,
+     "htotal": 1024,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 56,
+     "vscan": 0,
+     "vsync_end": 603,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 27027,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 27000,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 31500,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 720,
+     "hsync_start": 656,
+     "htotal": 840,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 484,
+     "vsync_start": 0,
+     "vtotal": 500
+    },
+    {
+     "clock": 31500,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 704,
+     "hsync_start": 664,
+     "htotal": 832,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 73,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 520
+    },
+    {
+     "clock": 30240,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 768,
+     "hsync_start": 704,
+     "htotal": 864,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 67,
+     "vscan": 0,
+     "vsync_end": 486,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 25200,
+     "flags": 524298,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 25175,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 28320,
+     "flags": 6,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 846,
+     "hsync_start": 738,
+     "htotal": 900,
+     "name": "720x400",
+     "type": 64,
+     "vdisplay": 400,
+     "vrefresh": 70,
+     "vscan": 0,
+     "vsync_end": 414,
+     "vsync_start": 0,
+     "vtotal": 449
+    }
+   ],
+   "name": "DP-6",
+   "phy_size": [
+    700,
+    390
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 145
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 0
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "PATH": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   },
+   "status": 1,
+   "subpixel": 1,
+   "type": 10
+  },
+  {
+   "encoders": [
+    281,
+    282,
+    283,
+    284
+   ],
+   "id": 338,
+   "modes": [
+    {
+     "clock": 148500,
+     "flags": 5,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 72,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148500,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148352,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148500,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2492,
+     "hsync_start": 2448,
+     "htotal": 2640,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 119000,
+     "flags": 9,
+     "hdisplay": 1680,
+     "hskew": 0,
+     "hsync_end": 1760,
+     "hsync_start": 1728,
+     "htotal": 1840,
+     "name": "1680x1050",
+     "type": 64,
+     "vdisplay": 1050,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1059,
+     "vsync_start": 0,
+     "vtotal": 1080
+    },
+    {
+     "clock": 135000,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1440,
+     "hsync_start": 1296,
+     "htotal": 1688,
+     "name": "1280x1024",
+     "type": 64,
+     "vdisplay": 1024,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 1028,
+     "vsync_start": 0,
+     "vtotal": 1066
+    },
+    {
+     "clock": 108000,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1440,
+     "hsync_start": 1328,
+     "htotal": 1688,
+     "name": "1280x1024",
+     "type": 64,
+     "vdisplay": 1024,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1028,
+     "vsync_start": 0,
+     "vtotal": 1066
+    },
+    {
+     "clock": 88750,
+     "flags": 9,
+     "hdisplay": 1440,
+     "hskew": 0,
+     "hsync_end": 1520,
+     "hsync_start": 1488,
+     "htotal": 1600,
+     "name": "1440x900",
+     "type": 64,
+     "vdisplay": 900,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 909,
+     "vsync_start": 0,
+     "vtotal": 926
+    },
+    {
+     "clock": 108000,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1488,
+     "hsync_start": 1376,
+     "htotal": 1800,
+     "name": "1280x960",
+     "type": 64,
+     "vdisplay": 960,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 964,
+     "vsync_start": 0,
+     "vtotal": 1000
+    },
+    {
+     "clock": 74250,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1430,
+     "hsync_start": 1390,
+     "htotal": 1650,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1430,
+     "hsync_start": 1390,
+     "htotal": 1650,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74176,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1430,
+     "hsync_start": 1390,
+     "htotal": 1650,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1760,
+     "hsync_start": 1720,
+     "htotal": 1980,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 78750,
+     "flags": 5,
+     "hdisplay": 1024,
+     "hskew": 0,
+     "hsync_end": 1136,
+     "hsync_start": 1040,
+     "htotal": 1312,
+     "name": "1024x768",
+     "type": 64,
+     "vdisplay": 768,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 772,
+     "vsync_start": 0,
+     "vtotal": 800
+    },
+    {
+     "clock": 75000,
+     "flags": 10,
+     "hdisplay": 1024,
+     "hskew": 0,
+     "hsync_end": 1184,
+     "hsync_start": 1048,
+     "htotal": 1328,
+     "name": "1024x768",
+     "type": 64,
+     "vdisplay": 768,
+     "vrefresh": 70,
+     "vscan": 0,
+     "vsync_end": 777,
+     "vsync_start": 0,
+     "vtotal": 806
+    },
+    {
+     "clock": 65000,
+     "flags": 10,
+     "hdisplay": 1024,
+     "hskew": 0,
+     "hsync_end": 1184,
+     "hsync_start": 1048,
+     "htotal": 1344,
+     "name": "1024x768",
+     "type": 64,
+     "vdisplay": 768,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 777,
+     "vsync_start": 0,
+     "vtotal": 806
+    },
+    {
+     "clock": 57284,
+     "flags": 10,
+     "hdisplay": 832,
+     "hskew": 0,
+     "hsync_end": 928,
+     "hsync_start": 864,
+     "htotal": 1152,
+     "name": "832x624",
+     "type": 64,
+     "vdisplay": 624,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 628,
+     "vsync_start": 0,
+     "vtotal": 667
+    },
+    {
+     "clock": 49500,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 896,
+     "hsync_start": 816,
+     "htotal": 1056,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 604,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 50000,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 976,
+     "hsync_start": 856,
+     "htotal": 1040,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 72,
+     "vscan": 0,
+     "vsync_end": 643,
+     "vsync_start": 0,
+     "vtotal": 666
+    },
+    {
+     "clock": 40000,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 968,
+     "hsync_start": 840,
+     "htotal": 1056,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 605,
+     "vsync_start": 0,
+     "vtotal": 628
+    },
+    {
+     "clock": 36000,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 896,
+     "hsync_start": 824,
+     "htotal": 1024,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 56,
+     "vscan": 0,
+     "vsync_end": 603,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 27000,
+     "flags": 10,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 796,
+     "hsync_start": 732,
+     "htotal": 864,
+     "name": "720x576",
+     "type": 64,
+     "vdisplay": 576,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 586,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 27000,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 796,
+     "hsync_start": 732,
+     "htotal": 864,
+     "name": "720x576",
+     "type": 64,
+     "vdisplay": 576,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 586,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 27000,
+     "flags": 524298,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 796,
+     "hsync_start": 732,
+     "htotal": 864,
+     "name": "720x576",
+     "type": 64,
+     "vdisplay": 576,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 586,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 27027,
+     "flags": 524298,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 27027,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 27000,
+     "flags": 10,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 27000,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 27000,
+     "flags": 524298,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 31500,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 720,
+     "hsync_start": 656,
+     "htotal": 840,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 75,
+     "vscan": 0,
+     "vsync_end": 484,
+     "vsync_start": 0,
+     "vtotal": 500
+    },
+    {
+     "clock": 31500,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 704,
+     "hsync_start": 664,
+     "htotal": 832,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 73,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 520
+    },
+    {
+     "clock": 30240,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 768,
+     "hsync_start": 704,
+     "htotal": 864,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 67,
+     "vscan": 0,
+     "vsync_end": 486,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 25200,
+     "flags": 524298,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 25175,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 25175,
+     "flags": 524298,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 28320,
+     "flags": 6,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 846,
+     "hsync_start": 738,
+     "htotal": 900,
+     "name": "720x400",
+     "type": 64,
+     "vdisplay": 400,
+     "vrefresh": 70,
+     "vscan": 0,
+     "vsync_end": 414,
+     "vsync_start": 0,
+     "vtotal": 449
+    }
+   ],
+   "name": "DP-7",
+   "phy_size": [
+    600,
+    340
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 202
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 0
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "PATH": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   },
+   "status": 1,
+   "subpixel": 1,
+   "type": 10
+  },
+  {
+   "encoders": [
+    281,
+    282,
+    283,
+    284
+   ],
+   "id": 345,
+   "modes": [
+    {
+     "clock": 148500,
+     "flags": 5,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2492,
+     "hsync_start": 2448,
+     "htotal": 2640,
+     "name": "1920x1080",
+     "type": 72,
+     "vdisplay": 1080,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148500,
+     "flags": 5,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 148352,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 30,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74176,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2052,
+     "hsync_start": 2008,
+     "htotal": 2200,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 30,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2492,
+     "hsync_start": 2448,
+     "htotal": 2640,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 25,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2602,
+     "hsync_start": 2558,
+     "htotal": 2750,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 24,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 74176,
+     "flags": 1048581,
+     "hdisplay": 1920,
+     "hskew": 0,
+     "hsync_end": 2602,
+     "hsync_start": 2558,
+     "htotal": 2750,
+     "name": "1920x1080",
+     "type": 64,
+     "vdisplay": 1080,
+     "vrefresh": 24,
+     "vscan": 0,
+     "vsync_end": 1089,
+     "vsync_start": 0,
+     "vtotal": 1125
+    },
+    {
+     "clock": 108000,
+     "flags": 5,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1440,
+     "hsync_start": 1328,
+     "htotal": 1688,
+     "name": "1280x1024",
+     "type": 64,
+     "vdisplay": 1024,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 1028,
+     "vsync_start": 0,
+     "vtotal": 1066
+    },
+    {
+     "clock": 85500,
+     "flags": 5,
+     "hdisplay": 1366,
+     "hskew": 0,
+     "hsync_end": 1579,
+     "hsync_start": 1436,
+     "htotal": 1792,
+     "name": "1366x768",
+     "type": 64,
+     "vdisplay": 768,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 774,
+     "vsync_start": 0,
+     "vtotal": 798
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1430,
+     "hsync_start": 1390,
+     "htotal": 1650,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74176,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1430,
+     "hsync_start": 1390,
+     "htotal": 1650,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 74250,
+     "flags": 1048581,
+     "hdisplay": 1280,
+     "hskew": 0,
+     "hsync_end": 1760,
+     "hsync_start": 1720,
+     "htotal": 1980,
+     "name": "1280x720",
+     "type": 64,
+     "vdisplay": 720,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 730,
+     "vsync_start": 0,
+     "vtotal": 750
+    },
+    {
+     "clock": 65000,
+     "flags": 10,
+     "hdisplay": 1024,
+     "hskew": 0,
+     "hsync_end": 1184,
+     "hsync_start": 1048,
+     "htotal": 1344,
+     "name": "1024x768",
+     "type": 64,
+     "vdisplay": 768,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 777,
+     "vsync_start": 0,
+     "vtotal": 806
+    },
+    {
+     "clock": 40000,
+     "flags": 5,
+     "hdisplay": 800,
+     "hskew": 0,
+     "hsync_end": 968,
+     "hsync_start": 840,
+     "htotal": 1056,
+     "name": "800x600",
+     "type": 64,
+     "vdisplay": 600,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 605,
+     "vsync_start": 0,
+     "vtotal": 628
+    },
+    {
+     "clock": 27000,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 796,
+     "hsync_start": 732,
+     "htotal": 864,
+     "name": "720x576",
+     "type": 64,
+     "vdisplay": 576,
+     "vrefresh": 50,
+     "vscan": 0,
+     "vsync_end": 586,
+     "vsync_start": 0,
+     "vtotal": 625
+    },
+    {
+     "clock": 27027,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 27000,
+     "flags": 1048586,
+     "hdisplay": 720,
+     "hskew": 0,
+     "hsync_end": 798,
+     "hsync_start": 736,
+     "htotal": 858,
+     "name": "720x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 495,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 25200,
+     "flags": 524298,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    },
+    {
+     "clock": 25175,
+     "flags": 10,
+     "hdisplay": 640,
+     "hskew": 0,
+     "hsync_end": 752,
+     "hsync_start": 656,
+     "htotal": 800,
+     "name": "640x480",
+     "type": 64,
+     "vdisplay": 480,
+     "vrefresh": 60,
+     "vscan": 0,
+     "vsync_end": 492,
+     "vsync_start": 0,
+     "vtotal": 525
+    }
+   ],
+   "name": "DP-8",
+   "phy_size": [
+    1280,
+    720
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 259
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 0
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "PATH": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   },
+   "status": 1,
+   "subpixel": 1,
+   "type": 10
+  },
+  {
+   "encoders": [
+    281,
+    282,
+    283,
+    284
+   ],
+   "id": 347,
+   "modes": [],
+   "name": "DP-9",
+   "phy_size": [
+    0,
+    0
+   ],
+   "properties": {
+    "Broadcast RGB": {
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "Content Protection": {
+     "value": 0
+    },
+    "DPMS": {
+     "value": 3
+    },
+    "EDID": {
+     "value": 0
+    },
+    "HDCP Content Type": {
+     "value": 0
+    },
+    "PATH": {
+     "value": 0
+    },
+    "TILE": {
+     "value": 0
+    },
+    "audio": {
+     "value": 0
+    },
+    "link-status": {
+     "value": 0
+    },
+    "max bpc": {
+     "range": [
+      6,
+      12
+     ],
+     "value": 12
+    },
+    "non-desktop": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   },
+   "status": 2,
+   "subpixel": 1,
+   "type": 10
+  }
+ ],
+ "crtcs": [
+  {
+   "id": 88,
+   "mode": null,
+   "properties": {
+    "ACTIVE": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    },
+    "CTM": {
+     "value": 0
+    },
+    "DEGAMMA_LUT": {
+     "value": 0
+    },
+    "DEGAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 129
+    },
+    "GAMMA_LUT": {
+     "value": 0
+    },
+    "GAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 1024
+    },
+    "MODE_ID": {
+     "value": 0
+    },
+    "OUT_FENCE_PTR": {
+     "range": [
+      0,
+      18446744073709551615
+     ],
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "VRR_ENABLED": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   }
+  },
+  {
+   "id": 145,
+   "mode": {
+    "clock": 533250,
+    "flags": 9,
+    "hdisplay": 3840,
+    "hskew": 0,
+    "hsync_end": 3920,
+    "hsync_start": 3888,
+    "htotal": 4000,
+    "name": "3840x2160",
+    "type": 72,
+    "vdisplay": 2160,
+    "vrefresh": 60,
+    "vscan": 0,
+    "vsync_end": 2168,
+    "vsync_start": 0,
+    "vtotal": 2222
+   },
+   "properties": {
+    "ACTIVE": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 1
+    },
+    "CTM": {
+     "value": 0
+    },
+    "DEGAMMA_LUT": {
+     "value": 0
+    },
+    "DEGAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 129
+    },
+    "GAMMA_LUT": {
+     "value": 0
+    },
+    "GAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 1024
+    },
+    "MODE_ID": {
+     "value": 0
+    },
+    "OUT_FENCE_PTR": {
+     "range": [
+      0,
+      18446744073709551615
+     ],
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "VRR_ENABLED": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   }
+  },
+  {
+   "id": 202,
+   "mode": {
+    "clock": 148500,
+    "flags": 5,
+    "hdisplay": 1920,
+    "hskew": 0,
+    "hsync_end": 2052,
+    "hsync_start": 2008,
+    "htotal": 2200,
+    "name": "1920x1080",
+    "type": 72,
+    "vdisplay": 1080,
+    "vrefresh": 60,
+    "vscan": 0,
+    "vsync_end": 1089,
+    "vsync_start": 0,
+    "vtotal": 1125
+   },
+   "properties": {
+    "ACTIVE": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 1
+    },
+    "CTM": {
+     "value": 0
+    },
+    "DEGAMMA_LUT": {
+     "value": 0
+    },
+    "DEGAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 129
+    },
+    "GAMMA_LUT": {
+     "value": 0
+    },
+    "GAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 1024
+    },
+    "MODE_ID": {
+     "value": 0
+    },
+    "OUT_FENCE_PTR": {
+     "range": [
+      0,
+      18446744073709551615
+     ],
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "VRR_ENABLED": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   }
+  },
+  {
+   "id": 259,
+   "mode": {
+    "clock": 148500,
+    "flags": 5,
+    "hdisplay": 1920,
+    "hskew": 0,
+    "hsync_end": 2492,
+    "hsync_start": 2448,
+    "htotal": 2640,
+    "name": "1920x1080",
+    "type": 72,
+    "vdisplay": 1080,
+    "vrefresh": 50,
+    "vscan": 0,
+    "vsync_end": 1089,
+    "vsync_start": 0,
+    "vtotal": 1125
+   },
+   "properties": {
+    "ACTIVE": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 1
+    },
+    "CTM": {
+     "value": 0
+    },
+    "DEGAMMA_LUT": {
+     "value": 0
+    },
+    "DEGAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 129
+    },
+    "GAMMA_LUT": {
+     "value": 0
+    },
+    "GAMMA_LUT_SIZE": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 1024
+    },
+    "MODE_ID": {
+     "value": 0
+    },
+    "OUT_FENCE_PTR": {
+     "range": [
+      0,
+      18446744073709551615
+     ],
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "VRR_ENABLED": {
+     "range": [
+      0,
+      1
+     ],
+     "value": 0
+    }
+   }
+  }
+ ],
+ "driver": "i915",
+ "encoders": [
+  {
+   "id": 261,
+   "possible_crtcs": 15,
+   "type": 2
+  },
+  {
+   "id": 270,
+   "possible_crtcs": 15,
+   "type": 2
+  },
+  {
+   "id": 279,
+   "possible_crtcs": 15,
+   "type": 2
+  },
+  {
+   "id": 281,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 282,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 283,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 284,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 289,
+   "possible_crtcs": 15,
+   "type": 2
+  },
+  {
+   "id": 291,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 292,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 293,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 294,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 298,
+   "possible_crtcs": 15,
+   "type": 2
+  },
+  {
+   "id": 300,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 301,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 302,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 303,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 307,
+   "possible_crtcs": 15,
+   "type": 2
+  },
+  {
+   "id": 309,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 310,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 311,
+   "possible_crtcs": 15,
+   "type": 7
+  },
+  {
+   "id": 312,
+   "possible_crtcs": 15,
+   "type": 7
+  }
+ ],
+ "kernel": "6.18.6-arch1-1",
+ "planes": [
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1211388504,
+    1211384408,
+    1211388481,
+    1211384385,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    808530000,
+    842084432,
+    909193296,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808,
+    909334104,
+    942954072
+   ],
+   "id": 33,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ]
+   ],
+   "possible_crtcs": 1,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 1200
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 1920
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 78643200
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 125829120
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 1
+    },
+    "zpos": {
+     "range": [
+      0,
+      0
+     ],
+     "value": 0
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1211388504,
+    1211384408,
+    1211388481,
+    1211384385,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    808530000,
+    842084432,
+    909193296,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808,
+    909334104,
+    942954072
+   ],
+   "id": 43,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ]
+   ],
+   "possible_crtcs": 1,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      1,
+      1
+     ],
+     "value": 1
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1211388504,
+    1211384408,
+    1211388481,
+    1211384385,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    808530000,
+    842084432,
+    909193296,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808,
+    909334104,
+    942954072
+   ],
+   "id": 53,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ]
+   ],
+   "possible_crtcs": 1,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      2,
+      2
+     ],
+     "value": 2
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808
+   ],
+   "id": 63,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ]
+   ],
+   "possible_crtcs": 1,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      3,
+      3
+     ],
+     "value": 3
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808
+   ],
+   "id": 73,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ]
+   ],
+   "possible_crtcs": 1,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      4,
+      4
+     ],
+     "value": 4
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    875713089
+   ],
+   "id": 83,
+   "in_formats": [
+    [
+     0,
+     [
+      875713089
+     ]
+    ]
+   ],
+   "possible_crtcs": 1,
+   "properties": {
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SIZE_HINTS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 2
+    },
+    "zpos": {
+     "range": [
+      5,
+      5
+     ],
+     "value": 5
+    }
+   }
+  },
+  {
+   "crtc_id": 145,
+   "fb_id": 321,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1211388504,
+    1211384408,
+    1211388481,
+    1211384385,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    808530000,
+    842084432,
+    909193296,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808,
+    909334104,
+    942954072
+   ],
+   "id": 90,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ]
+   ],
+   "possible_crtcs": 2,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 2160
+    },
+    "CRTC_ID": {
+     "value": 145
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 3840
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 321
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 141557760
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 251658240
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 1
+    },
+    "zpos": {
+     "range": [
+      0,
+      0
+     ],
+     "value": 0
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1211388504,
+    1211384408,
+    1211388481,
+    1211384385,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    808530000,
+    842084432,
+    909193296,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808,
+    909334104,
+    942954072
+   ],
+   "id": 100,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ]
+   ],
+   "possible_crtcs": 2,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      1,
+      1
+     ],
+     "value": 1
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1211388504,
+    1211384408,
+    1211388481,
+    1211384385,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    808530000,
+    842084432,
+    909193296,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808,
+    909334104,
+    942954072
+   ],
+   "id": 110,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ]
+   ],
+   "possible_crtcs": 2,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      2,
+      2
+     ],
+     "value": 2
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808
+   ],
+   "id": 120,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ]
+   ],
+   "possible_crtcs": 2,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      3,
+      3
+     ],
+     "value": 3
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808
+   ],
+   "id": 130,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ]
+   ],
+   "possible_crtcs": 2,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      4,
+      4
+     ],
+     "value": 4
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    875713089
+   ],
+   "id": 140,
+   "in_formats": [
+    [
+     0,
+     [
+      875713089
+     ]
+    ]
+   ],
+   "possible_crtcs": 2,
+   "properties": {
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 64
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 64
+    },
+    "CRTC_X": {
+     "value": 2321
+    },
+    "CRTC_Y": {
+     "value": 1096
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SIZE_HINTS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 4194304
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 4194304
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 2
+    },
+    "zpos": {
+     "range": [
+      5,
+      5
+     ],
+     "value": 5
+    }
+   }
+  },
+  {
+   "crtc_id": 202,
+   "fb_id": 358,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1211388504,
+    1211384408,
+    1211388481,
+    1211384385,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    808530000,
+    842084432,
+    909193296,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808,
+    909334104,
+    942954072
+   ],
+   "id": 147,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ]
+   ],
+   "possible_crtcs": 4,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 1080
+    },
+    "CRTC_ID": {
+     "value": 202
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 1920
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 358
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 70778880
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 125829120
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 1
+    },
+    "zpos": {
+     "range": [
+      0,
+      0
+     ],
+     "value": 0
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1211388504,
+    1211384408,
+    1211388481,
+    1211384385,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    808530000,
+    842084432,
+    909193296,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808,
+    909334104,
+    942954072
+   ],
+   "id": 157,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ]
+   ],
+   "possible_crtcs": 4,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      1,
+      1
+     ],
+     "value": 1
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1211388504,
+    1211384408,
+    1211388481,
+    1211384385,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    808530000,
+    842084432,
+    909193296,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808,
+    909334104,
+    942954072
+   ],
+   "id": 167,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ]
+   ],
+   "possible_crtcs": 4,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      2,
+      2
+     ],
+     "value": 2
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808
+   ],
+   "id": 177,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ]
+   ],
+   "possible_crtcs": 4,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      3,
+      3
+     ],
+     "value": 3
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808
+   ],
+   "id": 187,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ]
+   ],
+   "possible_crtcs": 4,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      4,
+      4
+     ],
+     "value": 4
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    875713089
+   ],
+   "id": 197,
+   "in_formats": [
+    [
+     0,
+     [
+      875713089
+     ]
+    ]
+   ],
+   "possible_crtcs": 4,
+   "properties": {
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 64
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 64
+    },
+    "CRTC_X": {
+     "value": -30
+    },
+    "CRTC_Y": {
+     "value": 822
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SIZE_HINTS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 4194304
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 4194304
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 2
+    },
+    "zpos": {
+     "range": [
+      5,
+      5
+     ],
+     "value": 5
+    }
+   }
+  },
+  {
+   "crtc_id": 259,
+   "fb_id": 351,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1211388504,
+    1211384408,
+    1211388481,
+    1211384385,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    808530000,
+    842084432,
+    909193296,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808,
+    909334104,
+    942954072
+   ],
+   "id": 204,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ]
+   ],
+   "possible_crtcs": 8,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 1080
+    },
+    "CRTC_ID": {
+     "value": 259
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 1920
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 351
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 70778880
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 125829120
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 1
+    },
+    "zpos": {
+     "range": [
+      0,
+      0
+     ],
+     "value": 0
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1211388504,
+    1211384408,
+    1211388481,
+    1211384385,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    808530000,
+    842084432,
+    909193296,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808,
+    909334104,
+    942954072
+   ],
+   "id": 214,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ]
+   ],
+   "possible_crtcs": 8,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      1,
+      1
+     ],
+     "value": 1
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1211388504,
+    1211384408,
+    1211388481,
+    1211384385,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    842094158,
+    808530000,
+    842084432,
+    909193296,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808,
+    909334104,
+    942954072
+   ],
+   "id": 224,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1211388504,
+      1211384408,
+      1211388481,
+      1211384385,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      842094158,
+      808530000,
+      842084432,
+      909193296,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808,
+      909334104,
+      942954072
+     ]
+    ]
+   ],
+   "possible_crtcs": 8,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      2,
+      2
+     ],
+     "value": 2
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808
+   ],
+   "id": 234,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ]
+   ],
+   "possible_crtcs": 8,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      3,
+      3
+     ],
+     "value": 3
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    538982467,
+    909199186,
+    875713112,
+    875709016,
+    875713089,
+    875708993,
+    808669784,
+    808665688,
+    808669761,
+    808665665,
+    1448695129,
+    1431918169,
+    1498831189,
+    1498765654,
+    808530521,
+    842084953,
+    909193817,
+    1448434008,
+    808670808
+   ],
+   "id": 244,
+   "in_formats": [
+    [
+     72057594037927950,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      1448434008
+     ]
+    ],
+    [
+     72057594037927949,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927951,
+     [
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665
+     ]
+    ],
+    [
+     72057594037927945,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     72057594037927937,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ],
+    [
+     0,
+     [
+      538982467,
+      909199186,
+      875713112,
+      875709016,
+      875713089,
+      875708993,
+      808669784,
+      808665688,
+      808669761,
+      808665665,
+      1448695129,
+      1431918169,
+      1498831189,
+      1498765654,
+      808530521,
+      842084953,
+      909193817,
+      1448434008,
+      808670808
+     ]
+    ]
+   ],
+   "possible_crtcs": 8,
+   "properties": {
+    "COLOR_ENCODING": {
+     "value": 1
+    },
+    "COLOR_RANGE": {
+     "value": 0
+    },
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 0
+    },
+    "CRTC_X": {
+     "value": 0
+    },
+    "CRTC_Y": {
+     "value": 0
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "IN_FORMATS_ASYNC": {
+     "value": 0
+    },
+    "SCALING_FILTER": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "alpha": {
+     "range": [
+      0,
+      65535
+     ],
+     "value": 65535
+    },
+    "pixel blend mode": {
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 0
+    },
+    "zpos": {
+     "range": [
+      4,
+      4
+     ],
+     "value": 4
+    }
+   }
+  },
+  {
+   "crtc_id": 0,
+   "fb_id": 0,
+   "formats": [
+    875713089
+   ],
+   "id": 254,
+   "in_formats": [
+    [
+     0,
+     [
+      875713089
+     ]
+    ]
+   ],
+   "possible_crtcs": 8,
+   "properties": {
+    "CRTC_H": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 64
+    },
+    "CRTC_ID": {
+     "value": 0
+    },
+    "CRTC_W": {
+     "range": [
+      0,
+      2147483647
+     ],
+     "value": 64
+    },
+    "CRTC_X": {
+     "value": -18
+    },
+    "CRTC_Y": {
+     "value": 1001
+    },
+    "FB_DAMAGE_CLIPS": {
+     "value": 0
+    },
+    "FB_ID": {
+     "value": 0
+    },
+    "IN_FENCE_FD": {
+     "value": -1
+    },
+    "IN_FORMATS": {
+     "value": 0
+    },
+    "SIZE_HINTS": {
+     "value": 0
+    },
+    "SRC_H": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 4194304
+    },
+    "SRC_W": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 4194304
+    },
+    "SRC_X": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "SRC_Y": {
+     "range": [
+      0,
+      4294967295
+     ],
+     "value": 0
+    },
+    "rotation": {
+     "value": 1
+    },
+    "type": {
+     "value": 2
+    },
+    "zpos": {
+     "range": [
+      5,
+      5
+     ],
+     "value": 5
+    }
+   }
+  }
+ ],
+ "source": "drmdb.emersion.fr/snapshots/9ca19e791f9d: i915, 8086:7D55 Meteor Lake-P [Intel Arc Graphics], Linux 6.18.6, eDP panel and a DP-MST dock"
+}

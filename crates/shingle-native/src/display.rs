@@ -2515,6 +2515,8 @@ fn monotonic_now() -> std::time::Duration {
 }
 
 #[cfg(test)]
+mod intel_tests;
+#[cfg(test)]
 mod lock_tests;
 #[cfg(test)]
 mod planes_tests;

@@ -35,8 +35,8 @@ pub struct DrmDevice {
   fd: OwnedFd,
   /// The dumb buffer behind each framebuffer handed out.
   buffers: HashMap<u32, DumbBuffer>,
-  /// Property names by id, read once.
-  names: HashMap<u32, String>,
+  /// Property names, and ranges of range properties, by id, read once.
+  names: HashMap<u32, (String, Option<(u64, u64)>)>,
 }
 
 impl AsFd for DrmDevice {
@@ -128,15 +128,23 @@ impl DrmDevice {
     })
   }
 
-  fn property_name(&mut self, id: property::Handle) -> io::Result<String> {
+  /// The name of property `id` and, for a range property, its range.
+  fn property_name(
+    &mut self,
+    id: property::Handle,
+  ) -> io::Result<(String, Option<(u64, u64)>)> {
     let raw = u32::from(id);
-    if let Some(name) = self.names.get(&raw) {
-      return Ok(name.clone());
+    if let Some(known) = self.names.get(&raw) {
+      return Ok(known.clone());
     }
     let info = self.get_property(id)?;
     let name = info.name().to_string_lossy().into_owned();
-    self.names.insert(raw, name.clone());
-    Ok(name)
+    let range = match info.value_type() {
+      property::ValueType::UnsignedRange(min, max) => Some((*min, *max)),
+      _ => None,
+    };
+    self.names.insert(raw, (name.clone(), range));
+    Ok((name, range))
   }
 
   fn crtc_list(
@@ -260,10 +268,12 @@ impl KmsDevice for DrmDevice {
     let (ids, values) = set.as_props_and_values();
     let mut properties = Vec::with_capacity(ids.len());
     for (id, value) in ids.iter().zip(values) {
+      let (name, range) = self.property_name(*id)?;
       properties.push(Property {
         id: PropertyId((*id).into()),
-        name: self.property_name(*id)?,
+        name,
         value: *value,
+        range,
       });
     }
     Ok(properties)
