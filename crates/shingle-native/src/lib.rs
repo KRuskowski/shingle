@@ -54,7 +54,7 @@ use shingle_config::ShingleConfig;
 use shingle_frontend::Frontend;
 
 pub use display::{Fatal, StartError};
-pub use session::{NoSeat, preflight};
+pub use session::{NoSeat, preflight, seat_backend_override};
 
 use crate::{
   features::PlaneFeatures,

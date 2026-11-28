@@ -268,7 +268,7 @@ Use `libseat` 0.2.4 in a `session.rs` wrapper behind a `Session` trait, with `op
 
 - `Seat::open` is called with a callback that only pushes `SeatEvent` into an `Rc<RefCell<VecDeque<_>>>`. The seat fd (`get_fd`) is a calloop `Generic` source whose handler calls `dispatch(0)`.
 - Shingle waits up to 5 s for the first `Enable` before opening any device.
-- The backend is chosen by libseat (seatd, then logind, then builtin), and can be forced with `LIBSEAT_BACKEND`.
+- The backend is chosen by libseat (seatd, then logind, then builtin), and can be forced with `LIBSEAT_BACKEND`. Inside a logind session (`XDG_SESSION_ID` set) without `LIBSEAT_BACKEND`, Shingle sets it to `logind` before opening the seat (crates/shingle-native/src/session.rs, `seat_backend_override`): SDDM waits for its logind session to take the seat, and with seatd installed libseat took it through seatd, so SDDM ended the session after a minute (first native sessions on the Latitude 5450, 2026-11-28).
 - Started from an SSH shell or another context without a seat, `Seat::open` fails or never enables. Shingle then exits with a message naming the cause; see [6](#6-failure-handling).
 
 **VT switching.**

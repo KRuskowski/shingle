@@ -154,6 +154,24 @@ pub fn preflight(env: impl Fn(&str) -> Option<OsString>) -> Result<(), NoSeat> {
   }
 }
 
+/// The libseat backend to force when `LIBSEAT_BACKEND` is unset: `logind`
+/// inside a logind session (`XDG_SESSION_ID` set), else `None`.
+///
+/// libseat tries seatd before logind. A display manager such as SDDM
+/// starts the session through logind and waits for that session to take
+/// the seat; with seatd also installed, libseat took the seat through
+/// seatd, SDDM saw no start ("Session started false") and ended the
+/// session after a minute, killing Shingle (Latitude 5450, 2026-11-28).
+/// A VT login through pam_systemd is a logind session too, and logind is
+/// what it should use. `env` looks up variables by name; empty values
+/// count as unset, and an explicit `LIBSEAT_BACKEND` always wins.
+pub fn seat_backend_override(
+  env: impl Fn(&str) -> Option<OsString>,
+) -> Option<&'static str> {
+  let set = |name: &str| env(name).is_some_and(|value| !value.is_empty());
+  (!set("LIBSEAT_BACKEND") && set("XDG_SESSION_ID")).then_some("logind")
+}
+
 /// Waits until `session` reports [`SeatEvent::Enable`], for at most
 /// `timeout` by `now`.
 ///
@@ -503,6 +521,33 @@ pub(crate) mod tests {
     assert_eq!(wait_for_enable(&mut session, ENABLE_TIMEOUT, &now), Ok(()));
     assert_eq!(session.dispatches, 3);
     assert_eq!(session.acknowledged, 1, "an early disable is acknowledged");
+  }
+
+  #[test]
+  fn a_logind_session_opens_the_seat_through_logind() {
+    let env = |vars: &'static [(&'static str, &'static str)]| {
+      move |name: &str| {
+        vars
+          .iter()
+          .find(|(key, _)| *key == name)
+          .map(|(_, value)| OsString::from(value))
+      }
+    };
+    assert_eq!(
+      seat_backend_override(env(&[("XDG_SESSION_ID", "2183")])),
+      Some("logind")
+    );
+    // An explicit choice wins, as in step 1 of native-testing.md.
+    assert_eq!(
+      seat_backend_override(env(&[
+        ("XDG_SESSION_ID", "2183"),
+        ("LIBSEAT_BACKEND", "seatd"),
+      ])),
+      None
+    );
+    // Without a logind session libseat keeps its own order.
+    assert_eq!(seat_backend_override(env(&[])), None);
+    assert_eq!(seat_backend_override(env(&[("XDG_SESSION_ID", "")])), None);
   }
 
   #[test]

@@ -204,6 +204,18 @@ fn main() -> ExitCode {
         "shingle: using the {} backend ({})",
         selection.backend, selection.reason
       );
+      if selection.backend == Backend::Native
+        && let Some(backend) =
+          shingle_native::seat_backend_override(|name| std::env::var_os(name))
+      {
+        eprintln!(
+          "shingle: opening the seat through {backend}, the session's \
+           manager (set LIBSEAT_BACKEND to choose another)"
+        );
+        // SAFETY: main has started no thread yet, so nothing else reads
+        // or writes the environment while it changes.
+        unsafe { std::env::set_var("LIBSEAT_BACKEND", backend) };
+      }
       match start(&selection, options) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
